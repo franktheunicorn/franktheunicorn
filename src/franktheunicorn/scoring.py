@@ -16,9 +16,9 @@ Signals:
 from __future__ import annotations
 
 import datetime
-import fnmatch
 import logging
 import re
+from pathlib import Path
 
 from franktheunicorn.config import OperatorConfig, ProjectConfig
 
@@ -50,7 +50,7 @@ def _paths_overlap(changed_files: list[str], watched_paths: list[str]) -> bool:
     """Return True if any changed file matches a watched path glob."""
     for pattern in watched_paths:
         for filepath in changed_files:
-            if fnmatch.fnmatch(filepath, pattern) or filepath.startswith(pattern.rstrip("*/")):
+            if Path(filepath).match(pattern):
                 return True
     return False
 

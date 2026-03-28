@@ -113,13 +113,9 @@
           {% if pr.likely_ai %}<span class="badge badge-ai">ai?</span>{% endif %}
         </td>
         <td>
-          {% if pr.labels %}
-            {% for label in pr.labels.split(',') %}
-              {% if label.strip() %}
-                <span class="badge" style="background:#e8e8e8;color:#333">{{ label.strip() }}</span>
-              {% endif %}
-            {% endfor %}
-          {% endif %}
+          {% for label in pr.labels %}
+            <span class="badge" style="background:#e8e8e8;color:#333">{{ label }}</span>
+          {% endfor %}
         </td>
       </tr>
       {% endfor %}

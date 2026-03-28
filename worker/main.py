@@ -29,9 +29,10 @@ def _get_poll_interval() -> int:
     """Return the shortest poll interval across all configured projects."""
     settings = get_settings()
     projects = load_project_configs()
-    if not projects:
+    enabled = [p for p in projects if p.enabled]
+    if not enabled:
         return settings.default_poll_interval_seconds
-    return min(p.poll_interval_seconds for p in projects if p.enabled)
+    return min(p.poll_interval_seconds for p in enabled)
 
 
 def run_once() -> None:

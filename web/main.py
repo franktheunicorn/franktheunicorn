@@ -74,7 +74,7 @@ def dashboard(request: Request) -> HTMLResponse:
                     "author": pr.author_login,
                     "score": round(pr.interest_score, 2),
                     "url": pr.html_url,
-                    "labels": pr.labels,
+                    "labels": [lbl for lbl in pr.labels.split(",") if lbl.strip()],
                     "operator_is_author": pr.operator_is_author,
                     "operator_mentioned": pr.operator_mentioned,
                     "new_contributor": pr.new_contributor,
