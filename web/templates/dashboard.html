@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>franktheunicorn – PR Dashboard</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #f6f8fa;
+      color: #24292f;
+      margin: 0;
+      padding: 1rem 2rem;
+    }
+    h1 { font-size: 1.5rem; margin-bottom: 0.25rem; }
+    .subtitle { color: #57606a; font-size: 0.9rem; margin-bottom: 1.5rem; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: #fff;
+      border-radius: 6px;
+      overflow: hidden;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    th {
+      background: #f6f8fa;
+      border-bottom: 1px solid #d0d7de;
+      padding: 0.6rem 0.75rem;
+      text-align: left;
+      font-size: 0.8rem;
+      color: #57606a;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    td {
+      padding: 0.6rem 0.75rem;
+      border-bottom: 1px solid #f0f0f0;
+      font-size: 0.9rem;
+      vertical-align: middle;
+    }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: #f6f8fa; }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .score {
+      font-weight: 600;
+      font-size: 0.95rem;
+    }
+    .score-high { color: #1a7f37; }
+    .score-mid  { color: #9a6700; }
+    .score-low  { color: #57606a; }
+    .badge {
+      display: inline-block;
+      padding: 0.1rem 0.4rem;
+      border-radius: 10px;
+      font-size: 0.7rem;
+      font-weight: 600;
+      margin-right: 0.2rem;
+    }
+    .badge-author   { background: #ddf4ff; color: #0969da; }
+    .badge-mention  { background: #fff8c5; color: #9a6700; }
+    .badge-new      { background: #dafbe1; color: #1a7f37; }
+    .badge-ai       { background: #ffd8d3; color: #cf222e; }
+    .empty { text-align: center; padding: 3rem; color: #57606a; }
+    .project-tag {
+      font-size: 0.75rem;
+      color: #57606a;
+      background: #f0f0f0;
+      border-radius: 4px;
+      padding: 0.1rem 0.35rem;
+    }
+  </style>
+</head>
+<body>
+  <h1>🦄 franktheunicorn</h1>
+  <p class="subtitle">Local-first PR review assistant &nbsp;·&nbsp; {{ total }} open pull requests</p>
+
+  {% if prs %}
+  <table>
+    <thead>
+      <tr>
+        <th>Score</th>
+        <th>Project</th>
+        <th>PR</th>
+        <th>Author</th>
+        <th>Flags</th>
+        <th>Labels</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for pr in prs %}
+      <tr>
+        <td>
+          <span class="score
+            {% if pr.score >= 1.0 %}score-high
+            {% elif pr.score >= 0.5 %}score-mid
+            {% else %}score-low{% endif %}">
+            {{ pr.score }}
+          </span>
+        </td>
+        <td><span class="project-tag">{{ pr.project }}</span></td>
+        <td>
+          <a href="{{ pr.url }}" target="_blank" rel="noopener">
+            #{{ pr.number }} {{ pr.title }}
+          </a>
+        </td>
+        <td>{{ pr.author }}</td>
+        <td>
+          {% if pr.operator_is_author %}<span class="badge badge-author">author</span>{% endif %}
+          {% if pr.operator_mentioned %}<span class="badge badge-mention">mentioned</span>{% endif %}
+          {% if pr.new_contributor %}<span class="badge badge-new">new</span>{% endif %}
+          {% if pr.likely_ai %}<span class="badge badge-ai">ai?</span>{% endif %}
+        </td>
+        <td>
+          {% if pr.labels %}
+            {% for label in pr.labels.split(',') %}
+              {% if label.strip() %}
+                <span class="badge" style="background:#e8e8e8;color:#333">{{ label.strip() }}</span>
+              {% endif %}
+            {% endfor %}
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">
+    <p>No open pull requests yet.</p>
+    <p>Run the worker to ingest PRs: <code>docker compose up worker</code></p>
+  </div>
+  {% endif %}
+</body>
+</html>

@@ -1,0 +1,53 @@
+# franktheunicorn – local-first AI code review assistant
+#
+# Usage:
+#   cp configs/examples/operator.yaml configs/operator.yaml
+#   cp configs/examples/project-spark.yaml configs/projects/spark.yaml
+#   # Edit the yaml files for your setup.
+#   export FRANK_GITHUB_TOKEN=ghp_...
+#   docker compose up
+#
+# The SQLite database lives in ./data/ and is mounted into both services.
+# Local state, local files – no cloud required.
+
+name: franktheunicorn
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./configs:/app/configs:ro
+    environment:
+      FRANK_DATABASE_URL: "sqlite:////app/data/franktheunicorn.db"
+      FRANK_GITHUB_TOKEN: "${FRANK_GITHUB_TOKEN:-}"
+      FRANK_OPERATOR_CONFIG_PATH: "/app/configs/operator.yaml"
+      FRANK_PROJECTS_CONFIG_DIR: "/app/configs/projects"
+      FRANK_LOG_LEVEL: "${FRANK_LOG_LEVEL:-INFO}"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    volumes:
+      - ./data:/app/data
+      - ./configs:/app/configs:ro
+    environment:
+      FRANK_DATABASE_URL: "sqlite:////app/data/franktheunicorn.db"
+      FRANK_GITHUB_TOKEN: "${FRANK_GITHUB_TOKEN:-}"
+      FRANK_OPERATOR_CONFIG_PATH: "/app/configs/operator.yaml"
+      FRANK_PROJECTS_CONFIG_DIR: "/app/configs/projects"
+      FRANK_LOG_LEVEL: "${FRANK_LOG_LEVEL:-INFO}"
+    restart: unless-stopped
+    depends_on:
+      - web

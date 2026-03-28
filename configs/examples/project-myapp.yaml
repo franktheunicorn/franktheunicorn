@@ -1,0 +1,21 @@
+# Per-project configuration – example for a personal Django app
+#
+# Copy to configs/projects/myapp.yaml and edit.
+
+slug: myapp
+repo: franktheunicorn/myapp
+
+review_context: |
+  Small personal Django app.  Pragmatic review style – correctness and
+  security over style purity.  No formal governance, just common sense.
+
+watched_paths:
+  - "myapp/**"
+  - "requirements*.txt"
+  - ".github/**"
+
+frequent_contributors: []
+asf_project: false
+poll_interval_seconds: 300
+max_prs_per_poll: 20
+enabled: true

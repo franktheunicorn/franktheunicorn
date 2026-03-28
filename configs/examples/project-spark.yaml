@@ -1,0 +1,31 @@
+# Per-project configuration for Apache Spark
+#
+# Copy to configs/projects/spark.yaml and edit.
+
+slug: spark
+repo: apache/spark
+
+review_context: |
+  This is the Apache Spark project.  Apply ASF governance norms:
+  - Respect the contributor covenant and ASF code of conduct.
+  - Prefer non-breaking API changes unless the change is in a major release.
+  - Tests are mandatory for non-trivial changes.
+  - JIRA issue link expected in PR title (SPARK-XXXXX).
+  - Be technically direct but not dismissive of first-time contributors.
+
+# File paths that, when touched by a PR, increase its interest score.
+watched_paths:
+  - "core/src/main/scala/org/apache/spark/**"
+  - "sql/core/src/**"
+  - "python/pyspark/**"
+  - "resource-managers/kubernetes/**"
+
+# Logins of frequent/known contributors (scoring boost).
+frequent_contributors:
+  - contributor1
+  - contributor2
+
+asf_project: true
+poll_interval_seconds: 600
+max_prs_per_poll: 100
+enabled: true

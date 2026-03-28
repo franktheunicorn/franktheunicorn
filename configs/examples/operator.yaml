@@ -1,0 +1,15 @@
+# Operator configuration for franktheunicorn
+#
+# This file identifies who is running the assistant.
+# Copy to configs/operator.yaml and edit.
+
+github_login: franktheunicorn         # your GitHub username
+email: frank@example.com              # used for digest emails (future)
+
+# These logins get a scoring boost across all projects.
+trusted_collaborators:
+  - alice
+  - bob
+
+# PRs older than this many days get a small score penalty.
+stale_pr_days: 30

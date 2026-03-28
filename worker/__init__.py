@@ -1,0 +1,1 @@
+"""Worker service entrypoint."""
