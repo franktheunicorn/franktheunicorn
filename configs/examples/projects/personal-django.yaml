@@ -1,0 +1,21 @@
+# Project config: personal Django app
+# Side-project context — pragmatic, lighter review
+
+owner: "holdenk"
+repo: "my-django-app"
+review_context: "personal side project — pragmatic review"
+governance: "personal"
+
+watched_paths:
+  - "app/"
+  - "templates/"
+
+ignore_paths:
+  - "static/vendor/"
+
+tone: "friendly and brief"
+test_expectations: "tests nice to have but not blocking"
+
+frequent_contributors: []
+
+enabled: true

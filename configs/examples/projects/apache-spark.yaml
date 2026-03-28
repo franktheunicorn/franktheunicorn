@@ -1,0 +1,30 @@
+# Project config: Apache Spark
+# ASF governance context — stricter review norms
+
+owner: "apache"
+repo: "spark"
+review_context: "ASF governance — formal review required for all changes"
+governance: "asf"
+
+# Paths you care about most as a committer
+watched_paths:
+  - "sql/catalyst/"
+  - "python/pyspark/"
+  - "core/src/main/"
+
+# Paths to skip (generated code, vendored deps, etc.)
+ignore_paths:
+  - "docs/"
+  - "resource-managers/"
+
+tone: "constructive and thorough"
+test_expectations: "tests required for all new features and bug fixes"
+
+# People whose PRs you typically review or collaborate with
+frequent_contributors:
+  - "cloud-fan"
+  - "dongjoon-hyun"
+  - "HyukjinKwon"
+  - "viirya"
+
+enabled: true

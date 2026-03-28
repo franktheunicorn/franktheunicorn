@@ -1,0 +1,18 @@
+# franktheunicorn operator config
+# This is the top-level config for the person running this tool.
+
+# Your GitHub username — used for "operator is author" scoring and review attribution
+github_username: "holdenk"
+
+# Default review style/tone for draft comments
+review_style: "direct but kind"
+
+# Whether to auto-post draft comments to GitHub (default: false, always off in v0)
+auto_post: false
+
+# How often the worker polls GitHub for new PRs (in seconds)
+poll_interval_seconds: 300
+
+# Email for daily digest (stub — not yet implemented)
+digest_email: ""
+digest_enabled: false

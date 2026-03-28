@@ -1,0 +1,49 @@
+{% extends "dashboard/base.html" %}
+{% block title %}PR #{{ pr.number }} — franktheunicorn{% endblock %}
+{% block content %}
+<a href="{% url 'dashboard:index' %}" class="back-link">← Back to list</a>
+
+<h2>{{ pr.project }} #{{ pr.number }}: {{ pr.title }}</h2>
+
+<div class="pr-meta" style="margin-top: 0.5rem;">
+    by <strong>{{ pr.author }}</strong>
+    · {{ pr.additions }}+ / {{ pr.deletions }}-
+    · Score: <span class="score-badge">{{ pr.interest_score|floatformat:2 }}</span>
+    {% if pr.is_draft %}· 📝 Draft{% endif %}
+    · <a href="{{ pr.url }}" target="_blank">View on GitHub ↗</a>
+</div>
+
+{% if pr.body %}
+<div style="margin-top: 1rem; padding: 0.75rem; background: #f5f5f5; border-radius: 4px; font-size: 0.9rem;">
+    {{ pr.body|linebreaksbr }}
+</div>
+{% endif %}
+
+{% if pr.score_breakdown %}
+<h3 style="margin-top: 1.5rem;">Score Breakdown</h3>
+<dl class="breakdown">
+    {% for signal, value in pr.score_breakdown.items %}
+    <dt>{{ signal }}:</dt>
+    <dd>{{ value|floatformat:3 }}</dd>
+    {% endfor %}
+</dl>
+{% endif %}
+
+<h3 style="margin-top: 1.5rem;">Draft Reviews</h3>
+{% if drafts %}
+<div class="draft-list">
+    {% for draft in drafts %}
+    <div class="draft-item">
+        <strong>{{ draft.file_path }}{% if draft.line_number %}:{{ draft.line_number }}{% endif %}</strong>
+        <span style="font-size: 0.75rem; color: #999;">(confidence: {{ draft.confidence|floatformat:1 }}, {{ draft.status }})</span>
+        <p style="margin-top: 0.25rem;">{{ draft.comment_body }}</p>
+        {% if draft.suggestion %}
+        <pre style="background: #f0f0f0; padding: 0.5rem; margin-top: 0.25rem; font-size: 0.8rem;">{{ draft.suggestion }}</pre>
+        {% endif %}
+    </div>
+    {% endfor %}
+</div>
+{% else %}
+<p class="empty-state">No draft reviews yet.</p>
+{% endif %}
+{% endblock %}
