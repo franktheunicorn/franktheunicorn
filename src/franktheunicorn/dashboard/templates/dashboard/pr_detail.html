@@ -10,7 +10,7 @@
     · {{ pr.additions }}+ / {{ pr.deletions }}-
     · Score: <span class="score-badge">{{ pr.interest_score|floatformat:2 }}</span>
     {% if pr.is_draft %}· 📝 Draft{% endif %}
-    · <a href="{{ pr.url }}" target="_blank">View on GitHub ↗</a>
+    · <a href="{{ pr.url }}" target="_blank" rel="noopener noreferrer">View on GitHub ↗</a>
 </div>
 
 {% if pr.body %}
