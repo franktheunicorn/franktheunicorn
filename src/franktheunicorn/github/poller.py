@@ -44,7 +44,7 @@ def poll_project(
 
     Returns the list of PullRequest objects that were created or updated.
     """
-    project, _created = Project.objects.get_or_create(
+    project, _created = Project.objects.update_or_create(
         owner=project_config.owner,
         repo=project_config.repo,
         defaults={"review_context": project_config.review_context},
