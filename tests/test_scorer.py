@@ -30,6 +30,8 @@ class TestScoring:
         _score, breakdown = score_pull_request(pr, spark_project_config, "holdenk")
         assert "operator_is_author" in breakdown
         assert _score > 0
+        # Operator should NOT get new_contributor bump
+        assert "new_contributor" not in breakdown
 
     def test_review_requested(
         self, db_project: Project, spark_project_config: ProjectConfig
@@ -91,6 +93,33 @@ class TestScoring:
         )
         _score, breakdown = score_pull_request(pr, spark_project_config, "holdenk")
         assert "new_contributor" in breakdown
+
+    def test_returning_contributor_not_new(
+        self, db_project: Project, spark_project_config: ProjectConfig
+    ) -> None:
+        """Author with prior PRs in the project should NOT get new_contributor bump."""
+        # Create an older PR from the same author
+        PullRequest.objects.create(
+            project=db_project,
+            github_id=2010,
+            number=110,
+            title="Previous contribution",
+            author="returning-person",
+            url="https://example.com",
+            changed_files=["README.md"],
+        )
+        # New PR from the same author
+        pr = PullRequest.objects.create(
+            project=db_project,
+            github_id=2011,
+            number=111,
+            title="Second contribution",
+            author="returning-person",
+            url="https://example.com",
+            changed_files=["README.md"],
+        )
+        _score, breakdown = score_pull_request(pr, spark_project_config, "holdenk")
+        assert "new_contributor" not in breakdown
 
     def test_bot_penalty(self, db_project: Project, spark_project_config: ProjectConfig) -> None:
         pr = PullRequest.objects.create(

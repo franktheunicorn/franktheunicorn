@@ -75,10 +75,12 @@ def score_pull_request(
     if pr.author.lower() in [c.lower() for c in project_config.frequent_contributors]:
         breakdown["frequent_contributor"] = WEIGHTS["frequent_contributor"]
 
-    # 5. New contributor bump (not a known contributor, not a bot)
+    # 5. New contributor bump (not operator, not known, not bot, not in project history)
     is_bot = _is_likely_bot(pr.author)
     is_known = pr.author.lower() in [c.lower() for c in project_config.frequent_contributors]
-    if not is_bot and not is_known:
+    is_operator = pr.author.lower() == operator_username.lower()
+    has_prior_prs = _has_prior_prs(pr)
+    if not is_bot and not is_known and not is_operator and not has_prior_prs:
         breakdown["new_contributor"] = WEIGHTS["new_contributor"]
 
     # 6. AI-generated / bot penalty
@@ -104,6 +106,16 @@ def _path_overlap_score(changed_files: list[str], watched_paths: list[str]) -> f
         return 0.0
     matches = sum(1 for f in changed_files if any(f.startswith(wp) for wp in watched_paths))
     return matches / len(changed_files)
+
+
+def _has_prior_prs(pr: PullRequest) -> bool:
+    """Check if the author has other PRs in this project (proxy for git log presence)."""
+    from franktheunicorn.core.models import PullRequest as PRModel
+
+    return PRModel.objects.filter(
+        project=pr.project,
+        author__iexact=pr.author,
+    ).exclude(pk=pr.pk).exists()
 
 
 def _is_likely_bot(author: str) -> bool:
