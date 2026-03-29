@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from django.db import IntegrityError
 
 from franktheunicorn.core.models import (
     AntiPattern,
@@ -23,7 +24,7 @@ class TestProjectModel:
 
     def test_unique_constraint(self) -> None:
         Project.objects.create(owner="apache", repo="spark")
-        with pytest.raises(Exception, match="UNIQUE constraint failed"):
+        with pytest.raises(IntegrityError):
             Project.objects.create(owner="apache", repo="spark")
 
 
