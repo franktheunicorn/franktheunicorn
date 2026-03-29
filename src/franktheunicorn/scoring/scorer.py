@@ -112,10 +112,14 @@ def _has_prior_prs(pr: PullRequest) -> bool:
     """Check if the author has other PRs in this project (proxy for git log presence)."""
     from franktheunicorn.core.models import PullRequest as PRModel
 
-    return PRModel.objects.filter(
-        project=pr.project,
-        author__iexact=pr.author,
-    ).exclude(pk=pr.pk).exists()
+    return (
+        PRModel.objects.filter(
+            project=pr.project,
+            author__iexact=pr.author,
+        )
+        .exclude(pk=pr.pk)
+        .exists()
+    )
 
 
 def _is_likely_bot(author: str) -> bool:
