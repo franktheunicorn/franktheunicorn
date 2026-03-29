@@ -11,7 +11,7 @@ class OperatorConfig(BaseModel):
     github_username: str = ""
     review_style: str = "direct but kind"
     auto_post: bool = False
-    poll_interval_seconds: int = 300
+    poll_interval_seconds: int | None = None
     digest_email: str = ""
     digest_enabled: bool = False
 

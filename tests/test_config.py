@@ -13,7 +13,7 @@ class TestOperatorConfig:
         config = OperatorConfig()
         assert config.github_username == ""
         assert config.auto_post is False
-        assert config.poll_interval_seconds == 300
+        assert config.poll_interval_seconds is None
 
     def test_from_values(self) -> None:
         config = OperatorConfig(

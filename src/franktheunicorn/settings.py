@@ -21,7 +21,9 @@ SECRET_KEY = os.environ.get(
 
 DEBUG = os.environ.get("DJANGO_DEBUG", "true").lower() in ("true", "1", "yes")
 
-ALLOWED_HOSTS: list[str] = os.environ.get("DJANGO_ALLOWED_HOSTS", "*").split(",")
+ALLOWED_HOSTS: list[str] = [
+    h.lstrip() for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "*").split(",") if h.lstrip()
+]
 
 INSTALLED_APPS = [
     "django.contrib.contenttypes",
