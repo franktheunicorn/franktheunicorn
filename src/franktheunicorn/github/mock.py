@@ -15,10 +15,11 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-def _load_json_fixture(path: Path) -> Any:
+def _load_json_fixture(path: Path) -> list[dict[str, Any]]:
     """Load and parse a JSON fixture file."""
     with path.open() as f:
-        return json.load(f)
+        result: list[dict[str, Any]] = json.load(f)
+        return result
 
 
 class MockGitHubClient:
