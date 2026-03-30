@@ -55,6 +55,7 @@ def draft_review(
             ),
             confidence=0.7,
             status="pending",
+            source="agent",
         )
         drafts.append(dep_draft)
 

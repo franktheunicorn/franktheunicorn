@@ -145,10 +145,7 @@ class TestSetupPyParser:
         self, setup_py_parser: SetupPyParser
     ) -> None:
         """Package names with underscores get normalized to hyphens."""
-        patch = (
-            '-_minimum_my_package_version = "1.0.0"\n'
-            '+_minimum_my_package_version = "2.0.0"\n'
-        )
+        patch = '-_minimum_my_package_version = "1.0.0"\n+_minimum_my_package_version = "2.0.0"\n'
         transitions = setup_py_parser.parse(patch, "setup.py")
         assert len(transitions) == 1
         assert transitions[0].package_name == "my-package"

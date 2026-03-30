@@ -94,6 +94,9 @@ def _run_cycle(
     if isinstance(operator_config, OperatorConfig) and operator_config.coderabbit.enabled:
         cr_config = operator_config.coderabbit
 
+    all_prs: list[object] = []
+    pr_to_config: dict[int, object] = {}
+
     for pc in project_configs:
         if not isinstance(pc, ProjectConfig) or not pc.enabled:
             continue
@@ -105,6 +108,9 @@ def _run_cycle(
                 operator_username=operator_username,
             )
             for pr in prs:
+                all_prs.append(pr)
+                pr_to_config[pr.pk] = pc
+
                 # Only draft reviews for PRs without existing drafts
                 if not pr.review_drafts.exists():
                     drafts = draft_review(pr, pc)
@@ -118,11 +124,11 @@ def _run_cycle(
                     # Run CodeRabbit if enabled and no CR drafts exist yet.
                     if cr_config is not None:
                         _run_coderabbit_for_pr(pr, cr_config)
-
-                # Fetch dependency changelogs if PR touches dependency files
-                _fetch_dependency_changelogs(pr, pc)
         except Exception:
             logger.exception("Error polling %s/%s", pc.owner, pc.repo)
+
+    # Fetch dependency changelogs in a single batch (shared HTTP client).
+    _fetch_dependency_changelogs_for_cycle(all_prs, pr_to_config)
 
 
 def _run_coderabbit_for_pr(
@@ -194,25 +200,34 @@ def _resolve_base_ref(repo_path: Path, pr: PullRequest) -> str | None:
     return None
 
 
-def _fetch_dependency_changelogs(pr: object, pc: object) -> None:
-    """Fetch dependency changelogs if the PR touches dependency files.
+def _fetch_dependency_changelogs_for_cycle(
+    prs: list[object],
+    project_configs_by_pr: dict[int, object],
+) -> None:
+    """Fetch dependency changelogs for all PRs in a cycle that touch dependency files.
 
-    Gated by a cheap filename check to avoid fetching diffs unnecessarily.
-    Silently skips if no dependency files are changed.
+    Uses a single httpx.Client for the entire batch to avoid per-PR TCP overhead.
     """
     from franktheunicorn.config.models import ProjectConfig
     from franktheunicorn.core.models import PullRequest as PullRequestModel
     from franktheunicorn.data_access.dependencies.registry import is_dependency_file
 
-    if not isinstance(pr, PullRequestModel) or not isinstance(pc, ProjectConfig):
-        return
+    # Filter to PRs that need changelog fetching
+    eligible: list[tuple[PullRequestModel, ProjectConfig]] = []
+    for pr in prs:
+        if not isinstance(pr, PullRequestModel):
+            continue
+        pc = project_configs_by_pr.get(pr.pk)
+        if not isinstance(pc, ProjectConfig):
+            continue
+        changed_files: list[str] = pr.changed_files or []
+        if not any(is_dependency_file(f) for f in changed_files):
+            continue
+        if pr.dependency_changes.exists():
+            continue
+        eligible.append((pr, pc))
 
-    changed_files: list[str] = pr.changed_files or []
-    if not any(is_dependency_file(f) for f in changed_files):
-        return
-
-    # Skip if we already have dependency changes for this PR
-    if pr.dependency_changes.exists():
+    if not eligible:
         return
 
     try:
@@ -225,13 +240,17 @@ def _fetch_dependency_changelogs(pr: object, pc: object) -> None:
 
         with httpx.Client() as http_client:
             diff_fetcher = DiffFetcher(client=http_client)
-            diff = diff_fetcher.fetch(pc.owner, pc.repo, pr.number)
-            detect_and_fetch_changelogs(pr, diff, http_client)
+            for pr, pc in eligible:
+                try:
+                    diff = diff_fetcher.fetch(pc.owner, pc.repo, pr.number)
+                    detect_and_fetch_changelogs(pr, diff, http_client)
+                except Exception:
+                    logger.exception(
+                        "Error fetching dependency changelogs for PR #%d",
+                        pr.number,
+                    )
     except Exception:
-        logger.exception(
-            "Error fetching dependency changelogs for PR #%d",
-            pr.number,
-        )
+        logger.exception("Error initializing dependency changelog client")
 
 
 if __name__ == "__main__":

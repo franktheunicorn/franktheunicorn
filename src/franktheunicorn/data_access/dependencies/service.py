@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 import httpx
 
 from franktheunicorn.data_access.dependencies.changelog_fetcher import (
+    ChangelogFetcher,
     PythonChangelogFetcher,
 )
 from franktheunicorn.data_access.dependencies.registry import parse_dependency_changes
@@ -33,7 +34,7 @@ def _get_changelog_fetcher(
     ecosystem: Ecosystem,
     client: httpx.Client,
     rate_limiter: GitHubRateLimiter | None = None,
-) -> PythonChangelogFetcher | None:
+) -> ChangelogFetcher | None:
     """Return the appropriate changelog fetcher for the ecosystem."""
     if ecosystem == Ecosystem.PYTHON:
         return PythonChangelogFetcher(client=client, rate_limiter=rate_limiter)

@@ -5,9 +5,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
+import httpx
+import pytest
 from pytest_httpx import HTTPXMock
 
-from franktheunicorn.data_access.base import FetchMethod
+from franktheunicorn.data_access.base import FetchMethod, NotFoundError
 from franktheunicorn.data_access.dependencies.changelog_fetcher import (
     PythonChangelogFetcher,
 )
@@ -52,19 +54,19 @@ class TestPythonChangelogFetcherAPI:
         assert result.deprecations_detected is True  # "deprecated" in release notes
         assert result.fetch_error == ""
 
-    def test_handles_pypi_error(
+    def test_pypi_error_raises(
         self,
         httpx_mock: HTTPXMock,
         changelog_fetcher: PythonChangelogFetcher,
         requests_transition: VersionTransition,
     ) -> None:
+        """API path now raises on PyPI errors so DataFetcher.fetch() can fall back."""
         httpx_mock.add_response(
             url="https://pypi.org/pypi/requests/json",
             status_code=500,
         )
-        result = changelog_fetcher.fetch_via_api(requests_transition)
-        assert result.fetch_error != ""
-        assert result.package_name == "requests"
+        with pytest.raises(httpx.HTTPStatusError):
+            changelog_fetcher.fetch_via_api(requests_transition)
 
     def test_handles_no_github_release(
         self,
@@ -92,7 +94,6 @@ class TestPythonChangelogFetcherAPI:
         self,
         httpx_mock: HTTPXMock,
         changelog_fetcher: PythonChangelogFetcher,
-        pypi_requests_api_json: dict[str, Any],
         github_release_numpy_json: dict[str, Any],
     ) -> None:
         transition = VersionTransition(
@@ -155,39 +156,53 @@ class TestPythonChangelogFetcherScrape:
         assert result.release_date == "2023-05-22T18:30:00Z"
         assert result.deprecations_detected is True
 
-    def test_handles_pypi_404(
+    def test_pypi_404_raises_not_found(
         self,
         httpx_mock: HTTPXMock,
         changelog_fetcher: PythonChangelogFetcher,
         requests_transition: VersionTransition,
     ) -> None:
+        """Scrape path raises NotFoundError on 404 so DataFetcher.fetch() can fall back."""
         httpx_mock.add_response(
             url="https://pypi.org/project/requests/",
             status_code=404,
         )
-        result = changelog_fetcher.fetch_via_scrape(requests_transition)
-        assert "not found" in result.fetch_error.lower()
+        with pytest.raises(NotFoundError):
+            changelog_fetcher.fetch_via_scrape(requests_transition)
 
 
 class TestPythonChangelogFetcherFallback:
-    """Tests for the unified fetch() method."""
+    """Tests for the unified fetch() method with DataFetcher auto-fallback."""
 
-    def test_api_returns_result_with_error_on_pypi_failure(
+    def test_falls_back_to_scrape_on_api_500(
         self,
         httpx_mock: HTTPXMock,
         changelog_fetcher: PythonChangelogFetcher,
         requests_transition: VersionTransition,
+        pypi_requests_page_html: str,
+        github_release_requests_html: str,
     ) -> None:
-        """API path catches PyPI errors internally and returns a result with fetch_error."""
+        """API raises on 500 -> DataFetcher.fetch() falls back to scrape."""
+        # API path: PyPI returns 500
         httpx_mock.add_response(
             url="https://pypi.org/pypi/requests/json",
             status_code=500,
         )
-        # fetch() calls fetch_via_api, which catches the error internally
-        # and returns a ChangelogEntry with fetch_error set
+        # Scrape path: both succeed
+        httpx_mock.add_response(
+            url="https://pypi.org/project/requests/",
+            text=pypi_requests_page_html,
+        )
+        httpx_mock.add_response(
+            url="https://github.com/psf/requests/releases/tag/v2.31.0",
+            text=github_release_requests_html,
+        )
+
         result = changelog_fetcher.fetch(requests_transition)
+        assert result.fetched_via == FetchMethod.SCRAPE
         assert result.package_name == "requests"
-        assert result.fetch_error != ""
+        assert result.release_notes != ""
+        assert result.fetch_error == ""
 
     def test_api_path_returns_successfully(
         self,
@@ -207,6 +222,7 @@ class TestPythonChangelogFetcherFallback:
             json=github_release_requests_json,
         )
         result = changelog_fetcher.fetch(requests_transition)
+        assert result.fetched_via == FetchMethod.API
         assert result.package_name == "requests"
         assert result.fetch_error == ""
         assert result.release_notes != ""

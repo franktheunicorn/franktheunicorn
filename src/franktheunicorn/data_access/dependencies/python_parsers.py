@@ -6,7 +6,7 @@ Parses version transitions from unified diff patches (the +/- lines).
 
 from __future__ import annotations
 
-import logging
+import posixpath
 import re
 from fnmatch import fnmatch
 
@@ -15,7 +15,11 @@ from packaging.requirements import InvalidRequirement, Requirement
 from franktheunicorn.data_access.dependencies.parser_base import DependencyDiffParser
 from franktheunicorn.data_access.dependencies.types import Ecosystem, VersionTransition
 
-logger = logging.getLogger(__name__)
+
+def _basename(filename: str) -> str:
+    """Extract the basename from a path (e.g. 'python/setup.py' -> 'setup.py')."""
+    return posixpath.basename(filename)
+
 
 # Regex for version specifier extraction: captures the first version number
 # from a specifier like ">=1.21.0", "==2.28.0", "~=3.0", ">=1.4,<2.0"
@@ -98,13 +102,15 @@ def _pair_transitions(
         if pkg in removed and pkg not in added and old is None:
             continue
 
-        transitions.append(VersionTransition(
-            package_name=pkg,
-            old_version=old if pkg in removed else None,
-            new_version=new if pkg in added else None,
-            ecosystem=ecosystem,
-            source_file=source_file,
-        ))
+        transitions.append(
+            VersionTransition(
+                package_name=pkg,
+                old_version=old if pkg in removed else None,
+                new_version=new if pkg in added else None,
+                ecosystem=ecosystem,
+                source_file=source_file,
+            )
+        )
 
     return tuple(transitions)
 
@@ -117,7 +123,7 @@ class RequirementsTxtParser(DependencyDiffParser):
     _FILE_PATTERNS = ("requirements*.txt", "constraints*.txt")
 
     def matches_file(self, filename: str) -> bool:
-        basename = filename.rsplit("/", 1)[-1] if "/" in filename else filename
+        basename = _basename(filename)
         return any(fnmatch(basename, pat) for pat in self._FILE_PATTERNS)
 
     def parse(self, patch: str, filename: str) -> tuple[VersionTransition, ...]:
@@ -148,7 +154,7 @@ class PyprojectTomlParser(DependencyDiffParser):
     ecosystem = Ecosystem.PYTHON
 
     def matches_file(self, filename: str) -> bool:
-        basename = filename.rsplit("/", 1)[-1] if "/" in filename else filename
+        basename = _basename(filename)
         return basename == "pyproject.toml"
 
     def parse(self, patch: str, filename: str) -> tuple[VersionTransition, ...]:
@@ -186,7 +192,7 @@ class SetupPyParser(DependencyDiffParser):
     _FILE_NAMES = ("setup.py", "setup.cfg")
 
     def matches_file(self, filename: str) -> bool:
-        basename = filename.rsplit("/", 1)[-1] if "/" in filename else filename
+        basename = _basename(filename)
         return basename in self._FILE_NAMES
 
     def parse(self, patch: str, filename: str) -> tuple[VersionTransition, ...]:

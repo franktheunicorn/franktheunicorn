@@ -112,11 +112,12 @@ class TestVersionToTagCandidates:
 class TestDetectBreakingChanges:
     def test_detects_breaking(self) -> None:
         assert detect_breaking_changes("This is a breaking change.")
-        assert detect_breaking_changes("Removed old API endpoint.")
         assert detect_breaking_changes("No longer supported.")
+        assert detect_breaking_changes("This is backward incompatible.")
 
     def test_no_false_positives(self) -> None:
         assert not detect_breaking_changes("Added new feature. Fixed bug.")
+        assert not detect_breaking_changes("Removed unused import.")
 
 
 class TestDetectDeprecations:

@@ -71,21 +71,17 @@ _CHANGELOG_URL_KEYS: tuple[str, ...] = (
 )
 
 # Keywords that suggest breaking changes in release notes.
+# Note: "removed" alone is too broad (false positives on "Removed unused import").
 _BREAKING_KEYWORDS: tuple[str, ...] = (
     "breaking",
     "backward incompatible",
     "backwards incompatible",
-    "breaking change",
-    "removed",
     "no longer supported",
 )
 
 # Keywords that suggest deprecations in release notes.
-_DEPRECATION_KEYWORDS: tuple[str, ...] = (
-    "deprecat",
-    "deprecated",
-    "deprecation",
-)
+# "deprecat" matches "deprecated", "deprecation", "deprecating" via substring.
+_DEPRECATION_KEYWORDS: tuple[str, ...] = ("deprecat",)
 
 
 def detect_breaking_changes(text: str) -> bool:
@@ -173,24 +169,17 @@ def version_to_tag_candidates(
         f"rel_{version.replace('.', '_')}",  # sqlalchemy
     ]
     if package_name:
-        candidates.extend([
-            f"{package_name}-v{version}",  # monorepo (azure-sdk)
-            f"{package_name}-{version}",
-        ])
+        candidates.extend(
+            [
+                f"{package_name}-v{version}",  # monorepo (azure-sdk)
+                f"{package_name}-{version}",
+            ]
+        )
     if repo_name and repo_name != package_name:
-        candidates.extend([
-            f"{repo_name}-{version}",  # pyarrow → apache-arrow-1.0.0
-            f"{repo_name}-v{version}",
-        ])
-    return _dedupe_preserve_order(candidates)
-
-
-def _dedupe_preserve_order(items: list[str]) -> list[str]:
-    """Remove duplicates while preserving insertion order."""
-    seen: set[str] = set()
-    result: list[str] = []
-    for item in items:
-        if item not in seen:
-            seen.add(item)
-            result.append(item)
-    return result
+        candidates.extend(
+            [
+                f"{repo_name}-{version}",  # pyarrow → apache-arrow-1.0.0
+                f"{repo_name}-v{version}",
+            ]
+        )
+    return list(dict.fromkeys(candidates))
