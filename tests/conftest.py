@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 from franktheunicorn.config.models import OperatorConfig, ProjectConfig
-from franktheunicorn.core.models import Project, PullRequest
+from franktheunicorn.core.models import Project, PullRequest, ReviewDraft
 
 
 @pytest.fixture
@@ -92,6 +92,42 @@ def db_pr(db: Any, db_project: Project) -> PullRequest:
         additions=15,
         deletions=3,
     )
+
+
+@pytest.fixture
+def review_draft(db_pr: PullRequest) -> ReviewDraft:
+    return ReviewDraft.objects.create(
+        pull_request=db_pr,
+        file_path="test.py",
+        line_number=5,
+        comment_body="Consider adding a test.",
+        confidence=0.7,
+    )
+
+
+@pytest.fixture
+def make_pr(db_project: Project):
+    """Factory fixture for creating test PRs with sensible defaults."""
+    _counter = iter(range(2000, 3000))
+
+    def _make(number: int | None = None, author: str = "someone", **kwargs: Any) -> PullRequest:
+        if number is None:
+            number = next(_counter)
+        defaults: dict[str, Any] = {
+            "github_id": number,
+            "title": f"Test PR #{number}",
+            "url": f"https://example.com/pr/{number}",
+            "changed_files": ["README.md"],
+        }
+        defaults.update(kwargs)
+        return PullRequest.objects.create(
+            project=db_project,
+            number=number,
+            author=author,
+            **defaults,
+        )
+
+    return _make
 
 
 @pytest.fixture

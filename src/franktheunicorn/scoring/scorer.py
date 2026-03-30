@@ -55,14 +55,17 @@ def score_pull_request(
     Score is clamped to [0.0, 1.0].
     """
     breakdown: dict[str, float] = {}
+    author = pr.author.lower()
+    operator = operator_username.lower()
+    known_contributors = [c.lower() for c in project_config.frequent_contributors]
 
     # 1. Operator is author — you always care about your own PRs
-    if pr.author.lower() == operator_username.lower():
+    if author == operator:
         breakdown["operator_is_author"] = WEIGHTS["operator_is_author"]
 
     # 2. Operator is requested reviewer
     reviewers = [r.lower() for r in pr.requested_reviewers] if pr.requested_reviewers else []
-    if operator_username.lower() in reviewers:
+    if operator in reviewers:
         breakdown["review_requested"] = WEIGHTS["review_requested"]
 
     # 3. Path overlap with watched paths
@@ -72,13 +75,13 @@ def score_pull_request(
             breakdown["path_overlap"] = round(WEIGHTS["path_overlap"] * overlap, 4)
 
     # 4. Frequent contributor
-    if pr.author.lower() in [c.lower() for c in project_config.frequent_contributors]:
+    if author in known_contributors:
         breakdown["frequent_contributor"] = WEIGHTS["frequent_contributor"]
 
     # 5. New contributor bump (not operator, not known, not bot, not in project history)
     is_bot = _is_likely_bot(pr.author)
-    is_known = pr.author.lower() in [c.lower() for c in project_config.frequent_contributors]
-    is_operator = pr.author.lower() == operator_username.lower()
+    is_known = author in known_contributors
+    is_operator = author == operator
     has_prior_prs = _has_prior_prs(pr)
     if not is_bot and not is_known and not is_operator and not has_prior_prs:
         breakdown["new_contributor"] = WEIGHTS["new_contributor"]

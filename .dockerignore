@@ -1,0 +1,43 @@
+# Git
+.git/
+.github/
+.gitignore
+
+# Python
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Testing & tooling
+tests/
+htmlcov/
+coverage.xml
+.coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime data (mounted as volume)
+data/
+
+# Dev files
+scripts/
+# docker/ is excluded because Dockerfiles are passed via -f, not COPY'd.
+# If adding files under docker/ that need to be COPY'd, remove this line.
+docker/
+docs/
+*.md
+!README.md
+.env
+.env.*
+Makefile
+
+# IDE
+.vscode/
+.idea/

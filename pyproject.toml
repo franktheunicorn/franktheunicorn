@@ -42,7 +42,7 @@ markers = [
 
 [tool.ruff]
 src = ["src", "tests"]
-line-length = 99
+line-length = 100
 target-version = "py312"
 extend-exclude = ["*/migrations/*"]
 
@@ -89,7 +89,7 @@ omit = [
 ]
 
 [tool.coverage.report]
-fail_under = 80
+fail_under = 90
 show_missing = true
 exclude_lines = [
     "pragma: no cover",
