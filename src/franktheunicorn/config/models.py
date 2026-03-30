@@ -68,6 +68,20 @@ class ProjectConfig(BaseModel):
     ai_agents: list[str] = Field(default_factory=list)
     enabled: bool = True
 
+    # Copy-pasta detection
+    copypasta_enabled: bool = False
+    copypasta_min_lines: int = 4
+    copypasta_scan_extensions: list[str] = Field(default_factory=lambda: [".py"])
+    copypasta_llm_enabled: bool = False
+
+    @field_validator("copypasta_min_lines")
+    @classmethod
+    def copypasta_min_lines_valid(cls, v: int) -> int:
+        if v < 2:
+            msg = "copypasta_min_lines must be at least 2"
+            raise ValueError(msg)
+        return v
+
     @field_validator("owner", "repo")
     @classmethod
     def name_must_be_valid(cls, v: str) -> str:

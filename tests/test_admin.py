@@ -7,7 +7,6 @@ from typing import Any
 import pytest
 from django.contrib import admin
 from django.contrib.admin.sites import AdminSite
-from tests.factories import AntiPatternFactory
 
 from franktheunicorn.core.admin import (
     AntiPatternAdmin,
@@ -23,6 +22,7 @@ from franktheunicorn.core.models import (
     PullRequest,
     ReviewDraft,
 )
+from tests.factories import AntiPatternFactory
 
 ALL_MODELS = [Project, PullRequest, ReviewDraft, AntiPattern, OperatorAction]
 

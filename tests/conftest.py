@@ -6,10 +6,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.factories import ProjectFactory, PullRequestFactory, ReviewDraftFactory
 
 from franktheunicorn.config.models import OperatorConfig, ProjectConfig
 from franktheunicorn.core.models import Project, PullRequest, ReviewDraft
+from tests.factories import ProjectFactory, PullRequestFactory, ReviewDraftFactory
 
 
 @pytest.fixture

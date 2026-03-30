@@ -23,6 +23,8 @@ from typing import TYPE_CHECKING
 import django
 
 if TYPE_CHECKING:
+    import httpx
+
     from franktheunicorn.config.models import CodeRabbitConfig
     from franktheunicorn.core.models import PullRequest
 
@@ -85,14 +87,23 @@ def _run_cycle(
     operator_config: object | None = None,
 ) -> None:
     """Run one polling cycle across all configured projects."""
+    import httpx
+    from django.conf import settings
+
     from franktheunicorn.config.models import OperatorConfig, ProjectConfig
+    from franktheunicorn.data_access.github.diff_fetcher import DiffFetcher
     from franktheunicorn.github.poller import poll_project
+    from franktheunicorn.review.copypasta import check_copypasta
     from franktheunicorn.review.drafter import draft_review
 
     # Resolve CodeRabbit config from operator config.
     cr_config: CodeRabbitConfig | None = None
     if isinstance(operator_config, OperatorConfig) and operator_config.coderabbit.enabled:
         cr_config = operator_config.coderabbit
+
+    # Shared HTTP client for diff fetching (copypasta + dependency changelogs).
+    diff_http = httpx.Client()
+    diff_fetcher = DiffFetcher(client=diff_http)
 
     all_prs: list[object] = []
     pr_to_config: dict[int, object] = {}
@@ -124,11 +135,33 @@ def _run_cycle(
                     # Run CodeRabbit if enabled and no CR drafts exist yet.
                     if cr_config is not None:
                         _run_coderabbit_for_pr(pr, cr_config)
+
+                # Copy-pasta detection (runs even if drafts already exist)
+                if pc.copypasta_enabled:
+                    repo_path = Path(settings.FRANK_REPOS_DIR) / pc.owner / pc.repo
+                    if repo_path.is_dir():
+                        try:
+                            diff = diff_fetcher.fetch(pc.owner, pc.repo, pr.number)
+                            cp_drafts = check_copypasta(pr, diff, pc, repo_path)
+                            if cp_drafts:
+                                logger.info(
+                                    "  PR #%d: %d copy-pasta findings",
+                                    pr.number,
+                                    len(cp_drafts),
+                                )
+                        except Exception:
+                            logger.exception("Error in copy-pasta check for PR #%d", pr.number)
+                    else:
+                        logger.debug(
+                            "Repo clone not found at %s, skipping copy-pasta check",
+                            repo_path,
+                        )
         except Exception:
             logger.exception("Error polling %s/%s", pc.owner, pc.repo)
 
-    # Fetch dependency changelogs in a single batch (shared HTTP client).
-    _fetch_dependency_changelogs_for_cycle(all_prs, pr_to_config)
+    # Fetch dependency changelogs reusing the same HTTP client.
+    _fetch_dependency_changelogs_for_cycle(all_prs, pr_to_config, diff_fetcher, diff_http)
+    diff_http.close()
 
 
 def _run_coderabbit_for_pr(
@@ -203,11 +236,10 @@ def _resolve_base_ref(repo_path: Path, pr: PullRequest) -> str | None:
 def _fetch_dependency_changelogs_for_cycle(
     prs: list[object],
     project_configs_by_pr: dict[int, object],
+    diff_fetcher: object,
+    http_client: httpx.Client,
 ) -> None:
-    """Fetch dependency changelogs for all PRs in a cycle that touch dependency files.
-
-    Uses a single httpx.Client for the entire batch to avoid per-PR TCP overhead.
-    """
+    """Fetch dependency changelogs for all PRs in a cycle that touch dependency files."""
     from franktheunicorn.config.models import ProjectConfig
     from franktheunicorn.core.models import PullRequest as PullRequestModel
     from franktheunicorn.data_access.dependencies.registry import is_dependency_file
@@ -231,26 +263,21 @@ def _fetch_dependency_changelogs_for_cycle(
         return
 
     try:
-        import httpx
-
         from franktheunicorn.data_access.dependencies.service import (
             detect_and_fetch_changelogs,
         )
-        from franktheunicorn.data_access.github.diff_fetcher import DiffFetcher
 
-        with httpx.Client() as http_client:
-            diff_fetcher = DiffFetcher(client=http_client)
-            for pr, pc in eligible:
-                try:
-                    diff = diff_fetcher.fetch(pc.owner, pc.repo, pr.number)
-                    detect_and_fetch_changelogs(pr, diff, http_client)
-                except Exception:
-                    logger.exception(
-                        "Error fetching dependency changelogs for PR #%d",
-                        pr.number,
-                    )
+        for pr, pc in eligible:
+            try:
+                diff = diff_fetcher.fetch(pc.owner, pc.repo, pr.number)  # type: ignore[attr-defined]
+                detect_and_fetch_changelogs(pr, diff, http_client)
+            except Exception:
+                logger.exception(
+                    "Error fetching dependency changelogs for PR #%d",
+                    pr.number,
+                )
     except Exception:
-        logger.exception("Error initializing dependency changelog client")
+        logger.exception("Error in dependency changelog processing")
 
 
 if __name__ == "__main__":

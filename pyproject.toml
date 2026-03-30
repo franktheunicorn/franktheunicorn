@@ -17,6 +17,8 @@ dependencies = [
     "pyrate-limiter>=3.0,<4.0",
     "beautifulsoup4>=4.12,<5.0",
     "simpleeval>=1.0,<2.0",
+    "copydetect>=0.5,<1.0",
+    "unidiff>=0.7,<1.0",
 ]
 
 [project.optional-dependencies]
