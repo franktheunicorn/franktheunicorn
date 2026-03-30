@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.factories import ProjectFactory, PullRequestFactory
+from tests.factories import ProjectFactory, PullRequestFactory, ReviewDraftFactory
 
 from franktheunicorn.config.models import OperatorConfig, ProjectConfig
 from franktheunicorn.core.models import Project, PullRequest, ReviewDraft
@@ -93,7 +93,7 @@ def db_pr(db: Any, db_project: Project) -> PullRequest:
 
 @pytest.fixture
 def review_draft(db_pr: PullRequest) -> ReviewDraft:
-    return ReviewDraft.objects.create(
+    return ReviewDraftFactory(
         pull_request=db_pr,
         file_path="test.py",
         line_number=5,

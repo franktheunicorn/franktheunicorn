@@ -87,23 +87,16 @@ class TestHelpers:
         assert _is_likely_bot("renovate") is True
         assert _is_likely_bot("alice-dev") is False
 
-    def test_path_overlap_score(self) -> None:
-        assert (
-            _path_overlap_score(
-                ["sql/catalyst/a.scala", "core/b.scala"],
-                ["sql/catalyst/"],
-            )
-            == 0.5
-        )
-
-    def test_path_overlap_score_empty(self) -> None:
-        assert _path_overlap_score([], ["sql/"]) == 0.0
-
-    def test_path_overlap_score_full_match(self) -> None:
-        assert (
-            _path_overlap_score(
-                ["src/a.py", "src/b.py"],
-                ["src/"],
-            )
-            == 1.0
-        )
+    @pytest.mark.parametrize(
+        ("files", "watched", "expected"),
+        [
+            (["sql/catalyst/a.scala", "core/b.scala"], ["sql/catalyst/"], 0.5),
+            ([], ["sql/"], 0.0),
+            (["src/a.py", "src/b.py"], ["src/"], 1.0),
+        ],
+        ids=["partial_match", "empty_files", "full_match"],
+    )
+    def test_path_overlap_score(
+        self, files: list[str], watched: list[str], expected: float
+    ) -> None:
+        assert _path_overlap_score(files, watched) == expected

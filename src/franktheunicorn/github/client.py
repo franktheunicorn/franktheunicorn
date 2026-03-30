@@ -13,9 +13,9 @@ from typing import Any
 
 import httpx
 
-logger = logging.getLogger(__name__)
+from franktheunicorn.data_access.base import GITHUB_API_BASE
 
-GITHUB_API_BASE = "https://api.github.com"
+logger = logging.getLogger(__name__)
 
 
 class GitHubClient:

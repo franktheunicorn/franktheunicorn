@@ -70,9 +70,7 @@ ADMIN_CONFIG = [
 class TestAdminConfig:
     """Verify admin classes have expected configuration."""
 
-    def test_list_display(
-        self, admin_cls: type, model_cls: type, expected: dict[str, Any]
-    ) -> None:
+    def test_list_display(self, admin_cls: type, model_cls: type, expected: dict[str, Any]) -> None:
         instance = admin_cls(model_cls, AdminSite())
         for field in expected.get("list_display", ()):
             assert field in instance.list_display

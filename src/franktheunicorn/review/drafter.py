@@ -22,7 +22,8 @@ _TEMPLATES = [
     "This looks good overall. One minor suggestion: could the variable name be more descriptive?",
     "Nice improvement! Have you considered the edge case where the input is empty?",
     "The logic here could be simplified. Would you be open to a small refactor?",
-    "This change touches a critical path — might be worth adding a comment explaining the reasoning.",
+    "This change touches a critical path — might be worth adding a comment explaining"
+    " the reasoning.",
 ]
 
 
@@ -38,10 +39,7 @@ def draft_review(
     so output is reproducible for the same input.
     """
     drafts: list[ReviewDraft] = []
-    changed_files: list[str] = pr.changed_files or []
-
-    if not changed_files:
-        changed_files = ["unknown_file.py"]
+    changed_files: list[str] = pr.changed_files or ["unknown_file.py"]
 
     for i, file_path in enumerate(changed_files[:2]):
         # Deterministic selection based on PR number + file path

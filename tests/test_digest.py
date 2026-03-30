@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import pytest
+from tests.factories import ReviewDraftFactory
 
-from franktheunicorn.core.models import PullRequest, ReviewDraft
+from franktheunicorn.core.models import PullRequest
 from franktheunicorn.digest.service import DailyDigest, build_daily_digest
 
 
@@ -22,7 +23,7 @@ class TestDigestService:
         assert digest.entries[0].pr_number == 42
 
     def test_digest_counts_pending_drafts(self, db_pr: PullRequest) -> None:
-        ReviewDraft.objects.create(
+        ReviewDraftFactory(
             pull_request=db_pr,
             comment_body="Test draft",
             status="pending",

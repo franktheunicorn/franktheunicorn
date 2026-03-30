@@ -69,9 +69,7 @@ class DataFetcher(ABC, Generic[T]):  # noqa: UP046
     fallback from API to scrape on rate-limit or server errors.
     """
 
-    def __init__(
-        self, client: httpx.Client, rate_limiter: GitHubRateLimiter | None = None
-    ) -> None:
+    def __init__(self, client: httpx.Client, rate_limiter: GitHubRateLimiter | None = None) -> None:
         self._client = client
         self._rate_limiter = rate_limiter
 

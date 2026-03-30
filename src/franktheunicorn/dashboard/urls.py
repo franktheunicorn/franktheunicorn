@@ -1,3 +1,5 @@
+"""URL routing for the dashboard app."""
+
 from django.urls import path
 
 from franktheunicorn.dashboard import views

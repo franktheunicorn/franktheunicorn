@@ -55,13 +55,10 @@ class TestProjectConfig:
 
 
 class TestOperatorConfigValidation:
-    def test_negative_poll_interval_rejected(self) -> None:
+    @pytest.mark.parametrize("value", [-1, 0], ids=["negative", "zero"])
+    def test_non_positive_poll_interval_rejected(self, value: int) -> None:
         with pytest.raises(ValidationError, match="poll_interval_seconds must be positive"):
-            OperatorConfig(poll_interval_seconds=-1)
-
-    def test_zero_poll_interval_rejected(self) -> None:
-        with pytest.raises(ValidationError, match="poll_interval_seconds must be positive"):
-            OperatorConfig(poll_interval_seconds=0)
+            OperatorConfig(poll_interval_seconds=value)
 
     def test_positive_poll_interval_accepted(self) -> None:
         config = OperatorConfig(poll_interval_seconds=60)
