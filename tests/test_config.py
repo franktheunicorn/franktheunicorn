@@ -33,6 +33,41 @@ class TestOperatorConfig:
         assert config.github_username == "holdenk"
         assert config.review_style == "direct but kind"
 
+    def test_empty_llm_backends_default(self) -> None:
+        config = OperatorConfig()
+        assert config.llm_backends == []
+
+    def test_multiple_llm_backends(self) -> None:
+        from franktheunicorn.config.models import LLMBackendConfig
+
+        config = OperatorConfig(
+            llm_backends=[
+                LLMBackendConfig(provider="claude", model="claude-sonnet-4-20250514"),
+                LLMBackendConfig(provider="ollama", model="qwen2.5-coder:14b"),
+            ],
+        )
+        assert len(config.llm_backends) == 2
+        assert config.llm_backends[0].provider == "claude"
+        assert config.llm_backends[1].provider == "ollama"
+
+    def test_legacy_llm_field_promoted_to_backends(self) -> None:
+        from franktheunicorn.config.models import LLMBackendConfig
+
+        config = OperatorConfig(llm=LLMBackendConfig(provider="openai"))
+        assert len(config.llm_backends) == 1
+        assert config.llm_backends[0].provider == "openai"
+
+    def test_legacy_llm_ignored_when_backends_set(self) -> None:
+        from franktheunicorn.config.models import LLMBackendConfig
+
+        config = OperatorConfig(
+            llm=LLMBackendConfig(provider="openai"),
+            llm_backends=[LLMBackendConfig(provider="claude")],
+        )
+        # llm_backends takes precedence; legacy field not promoted.
+        assert len(config.llm_backends) == 1
+        assert config.llm_backends[0].provider == "claude"
+
 
 class TestProjectConfig:
     def test_defaults(self) -> None:

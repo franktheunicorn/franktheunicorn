@@ -19,6 +19,11 @@ dependencies = [
     "simpleeval>=1.0,<2.0",
     "copydetect>=0.5,<1.0",
     "unidiff>=0.7,<1.0",
+    "anthropic>=0.42,<1.0",
+    "openai>=1.60,<2.0",
+    "google-genai>=1.0,<2.0",
+    "ollama>=0.4,<1.0",
+    "psutil>=5.9,<7.0",
 ]
 
 [project.optional-dependencies]
@@ -35,6 +40,7 @@ dev = [
     "django-stubs>=5.0,<6.0",
     "types-PyYAML>=6.0,<7.0",
     "types-beautifulsoup4>=4.12,<5.0",
+    "types-psutil>=5.9,<7.0",
 ]
 
 [tool.setuptools.packages.find]

@@ -9,6 +9,7 @@ import pytest
 
 from franktheunicorn.config.models import OperatorConfig, ProjectConfig
 from franktheunicorn.core.models import Project, PullRequest, ReviewDraft
+from franktheunicorn.review.backends.base import PRContext
 from tests.factories import ProjectFactory, PullRequestFactory, ReviewDraftFactory
 
 
@@ -152,3 +153,22 @@ def tmp_config_dir(tmp_path: Path) -> Path:
     )
 
     return tmp_path
+
+
+def make_pr_context(**overrides: Any) -> PRContext:
+    """Build a PRContext with sensible defaults for testing."""
+    defaults: dict[str, Any] = {
+        "pr_title": "Fix flaky test",
+        "pr_body": "Fixes race condition",
+        "pr_author": "alice",
+        "pr_number": 42,
+        "project_name": "apache/spark",
+        "review_context": "ASF governance",
+        "review_style": "direct but kind",
+        "tone": "constructive",
+        "test_expectations": "tests required",
+        "governance": "asf",
+        "anti_patterns": [],
+    }
+    defaults.update(overrides)
+    return PRContext(**defaults)

@@ -19,6 +19,48 @@ class CodeRabbitConfig(BaseModel):
     extra_args: list[str] = Field(default_factory=list)
 
 
+KNOWN_LLM_PROVIDERS: frozenset[str] = frozenset({"stub", "claude", "openai", "gemini", "ollama"})
+
+
+class LLMBackendConfig(BaseModel):
+    """Config for which LLM backend to use for review generation."""
+
+    provider: str = "stub"
+    model: str = ""
+    api_key_env: str = ""
+    base_url: str = ""
+    temperature: float = 0.3
+    max_tokens: int = 4096
+
+    @field_validator("provider")
+    @classmethod
+    def provider_must_be_known(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in KNOWN_LLM_PROVIDERS:
+            logger.warning(
+                "Unknown LLM provider '%s'; known values: %s",
+                v,
+                ", ".join(sorted(KNOWN_LLM_PROVIDERS)),
+            )
+        return v
+
+    @field_validator("temperature")
+    @classmethod
+    def temperature_in_range(cls, v: float) -> float:
+        if not 0.0 <= v <= 2.0:
+            msg = "temperature must be between 0.0 and 2.0"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("max_tokens")
+    @classmethod
+    def max_tokens_positive(cls, v: int) -> int:
+        if v <= 0:
+            msg = "max_tokens must be positive"
+            raise ValueError(msg)
+        return v
+
+
 class OperatorConfig(BaseModel):
     """Top-level operator config loaded from operator.yaml."""
 
@@ -29,6 +71,21 @@ class OperatorConfig(BaseModel):
     digest_email: str = ""
     digest_enabled: bool = False
     coderabbit: CodeRabbitConfig = Field(default_factory=CodeRabbitConfig)
+    # Multiple LLM backends can run in parallel. Each produces findings
+    # independently; results are combined and deduped via anti-patterns.
+    llm_backends: list[LLMBackendConfig] = Field(default_factory=list)
+
+    # Legacy single-backend field — still accepted for backwards compat.
+    # If set and llm_backends is empty, it is promoted into llm_backends.
+    llm: LLMBackendConfig | None = Field(default=None, exclude=True)
+
+    @model_validator(mode="after")
+    def migrate_legacy_llm(self) -> OperatorConfig:
+        """Promote legacy ``llm:`` config into ``llm_backends`` list."""
+        if self.llm is not None and not self.llm_backends:
+            self.llm_backends = [self.llm]
+            self.llm = None
+        return self
 
     @field_validator("poll_interval_seconds")
     @classmethod

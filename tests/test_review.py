@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from franktheunicorn.config.models import ProjectConfig
+from franktheunicorn.config.models import OperatorConfig, ProjectConfig
 from franktheunicorn.core.models import AntiPattern, Project, PullRequest, ReviewDraft
 from franktheunicorn.review.antipattern import check_against_anti_patterns, record_anti_pattern
 from franktheunicorn.review.drafter import draft_review
@@ -13,26 +13,37 @@ from franktheunicorn.review.drafter import draft_review
 @pytest.mark.django_db
 class TestDraftReview:
     def test_generates_drafts(
-        self, db_pr: PullRequest, spark_project_config: ProjectConfig
+        self,
+        db_pr: PullRequest,
+        spark_project_config: ProjectConfig,
+        operator_config: OperatorConfig,
     ) -> None:
-        drafts = draft_review(db_pr, spark_project_config)
+        drafts = draft_review(db_pr, spark_project_config, operator_config)
         assert len(drafts) > 0
         assert all(isinstance(d, ReviewDraft) for d in drafts)
 
     def test_drafts_are_deterministic(
-        self, db_pr: PullRequest, spark_project_config: ProjectConfig
+        self,
+        db_pr: PullRequest,
+        spark_project_config: ProjectConfig,
+        operator_config: OperatorConfig,
     ) -> None:
         """Same input should produce same output."""
-        drafts1 = draft_review(db_pr, spark_project_config)
+        drafts1 = draft_review(db_pr, spark_project_config, operator_config)
         # Clear drafts and regenerate
         ReviewDraft.objects.filter(pull_request=db_pr).delete()
-        drafts2 = draft_review(db_pr, spark_project_config)
+        drafts2 = draft_review(db_pr, spark_project_config, operator_config)
         assert len(drafts1) == len(drafts2)
         assert drafts1[0].comment_body == drafts2[0].comment_body
         assert drafts1[0].file_path == drafts2[0].file_path
 
-    def test_draft_fields(self, db_pr: PullRequest, spark_project_config: ProjectConfig) -> None:
-        drafts = draft_review(db_pr, spark_project_config)
+    def test_draft_fields(
+        self,
+        db_pr: PullRequest,
+        spark_project_config: ProjectConfig,
+        operator_config: OperatorConfig,
+    ) -> None:
+        drafts = draft_review(db_pr, spark_project_config, operator_config)
         for d in drafts:
             assert d.file_path != ""
             assert d.line_number is not None and d.line_number > 0
@@ -40,6 +51,45 @@ class TestDraftReview:
             assert d.status == "pending"
             assert 0.0 <= d.confidence <= 1.0
             assert d.source == "agent"
+
+    def test_backwards_compatible_without_operator_config(
+        self,
+        db_pr: PullRequest,
+        spark_project_config: ProjectConfig,
+    ) -> None:
+        """draft_review should work without operator_config for backwards compatibility."""
+        drafts = draft_review(db_pr, spark_project_config)
+        assert len(drafts) > 0
+        assert all(d.source == "agent" for d in drafts)
+
+    def test_multiple_backends_combine_findings(
+        self,
+        db_pr: PullRequest,
+        spark_project_config: ProjectConfig,
+    ) -> None:
+        """Multiple backends should each contribute findings."""
+        from franktheunicorn.config.models import LLMBackendConfig
+
+        # Two stub backends — each produces findings independently.
+        multi_config = OperatorConfig(
+            llm_backends=[LLMBackendConfig(), LLMBackendConfig()],
+        )
+        drafts = draft_review(db_pr, spark_project_config, multi_config)
+        # Two stub backends, each producing up to 2 findings from 2 changed_files.
+        assert len(drafts) >= 2
+
+    def test_legacy_single_llm_config_still_works(
+        self,
+        db_pr: PullRequest,
+        spark_project_config: ProjectConfig,
+    ) -> None:
+        """Legacy ``llm:`` field is promoted to ``llm_backends``."""
+        from franktheunicorn.config.models import LLMBackendConfig
+
+        legacy_config = OperatorConfig(llm=LLMBackendConfig(provider="stub"))
+        assert len(legacy_config.llm_backends) == 1
+        drafts = draft_review(db_pr, spark_project_config, legacy_config)
+        assert len(drafts) > 0
 
 
 @pytest.mark.django_db
