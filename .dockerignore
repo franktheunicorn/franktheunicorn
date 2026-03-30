@@ -33,6 +33,7 @@ scripts/
 docker/
 docs/
 *.md
+!README.md
 .env
 .env.*
 Makefile
