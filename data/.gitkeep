@@ -1,0 +1,3 @@
+# Placeholder for local state (SQLite DB, etc.)
+# This directory is mounted as a volume in Docker.
+# Contents are gitignored except this file.

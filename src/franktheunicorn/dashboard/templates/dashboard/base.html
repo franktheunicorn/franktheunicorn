@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}franktheunicorn{% endblock %}</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 960px;
+            margin: 0 auto;
+            padding: 1rem;
+            background: #fafafa;
+        }
+        header {
+            border-bottom: 2px solid #e0e0e0;
+            padding-bottom: 0.5rem;
+            margin-bottom: 1.5rem;
+        }
+        header h1 { font-size: 1.4rem; }
+        header h1 a { color: #333; text-decoration: none; }
+        header p { color: #666; font-size: 0.85rem; }
+        .pr-list { list-style: none; }
+        .pr-item {
+            background: #fff;
+            border: 1px solid #e0e0e0;
+            border-radius: 4px;
+            padding: 0.75rem 1rem;
+            margin-bottom: 0.5rem;
+        }
+        .pr-item:hover { border-color: #999; }
+        .pr-title { font-weight: 600; }
+        .pr-title a { color: #0366d6; text-decoration: none; }
+        .pr-meta { font-size: 0.8rem; color: #666; margin-top: 0.25rem; }
+        .score-badge {
+            display: inline-block;
+            background: #e8f5e9;
+            color: #2e7d32;
+            padding: 0.1rem 0.4rem;
+            border-radius: 3px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+        .score-badge.low { background: #fff3e0; color: #e65100; }
+        .score-badge.mid { background: #e3f2fd; color: #1565c0; }
+        .draft-list { margin-top: 1rem; }
+        .draft-item {
+            background: #fffde7;
+            border-left: 3px solid #fdd835;
+            padding: 0.5rem 0.75rem;
+            margin-bottom: 0.5rem;
+            font-size: 0.9rem;
+        }
+        .breakdown { font-size: 0.8rem; color: #555; }
+        .breakdown dt { font-weight: 600; display: inline; }
+        .breakdown dd { display: inline; margin-right: 1rem; }
+        .empty-state { color: #999; padding: 2rem; text-align: center; }
+        a.back-link { font-size: 0.85rem; color: #666; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1><a href="/">🦄 franktheunicorn</a></h1>
+        <p>Local-first AI code review assistant</p>
+    </header>
+    <main>
+        {% block content %}{% endblock %}
+    </main>
+</body>
+</html>

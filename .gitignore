@@ -191,6 +191,10 @@ cython_debug/
 # Ruff stuff:
 .ruff_cache/
 
+# franktheunicorn local state
+data/*.sqlite3
+data/*.sqlite3-journal
+
 # PyPI configuration file
 .pypirc
 

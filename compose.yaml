@@ -1,0 +1,54 @@
+# franktheunicorn local development compose file
+#
+# Usage:
+#   docker compose up
+#
+# This starts:
+#   - web: Django dev server on http://localhost:8000
+#   - worker: Polling worker that ingests PRs on an interval
+#
+# Both services share the same SQLite database via a mounted volume.
+# By default, mock mode is enabled so no GitHub token is needed.
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.web
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./configs:/app/configs
+    environment:
+      - FRANK_DATA_DIR=/app/data
+      - FRANK_MOCK_MODE=${FRANK_MOCK_MODE:-true}
+      - FRANK_GITHUB_TOKEN=${FRANK_GITHUB_TOKEN:-}
+      - FRANK_OPERATOR_CONFIG=/app/configs/examples/operator.yaml
+      - FRANK_PROJECTS_DIR=/app/configs/examples/projects
+      - DJANGO_DEBUG=true
+    # Run migrations before starting the server
+    command: >
+      sh -c "python manage.py migrate --run-syncdb &&
+             python manage.py runserver 0.0.0.0:8000"
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.worker
+    volumes:
+      - ./data:/app/data
+      - ./configs:/app/configs
+    environment:
+      - FRANK_DATA_DIR=/app/data
+      - FRANK_MOCK_MODE=${FRANK_MOCK_MODE:-true}
+      - FRANK_GITHUB_TOKEN=${FRANK_GITHUB_TOKEN:-}
+      - FRANK_OPERATOR_CONFIG=/app/configs/examples/operator.yaml
+      - FRANK_PROJECTS_DIR=/app/configs/examples/projects
+      - FRANK_POLL_INTERVAL=${FRANK_POLL_INTERVAL:-300}
+    # Run migrations before starting the worker
+    command: >
+      sh -c "python manage.py migrate --run-syncdb &&
+             python -m franktheunicorn.worker.runner"
+    depends_on:
+      - web
