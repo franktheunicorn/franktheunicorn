@@ -32,7 +32,7 @@ def _get_list(d: dict[str, object], key: str) -> list[str]:
         return []
     if isinstance(val, str):
         return [val]
-    if isinstance(val, list):
+    if isinstance(val, (list, tuple)):
         return [str(x) for x in val]
     return []
 
