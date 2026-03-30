@@ -101,6 +101,13 @@ class TestPureFunctionOrchestrator:
     def test_custom_expression(self) -> None:
         _, bd = score_pull_request(_ALICE_PR, {}, "holdenk", custom_expressions=["0.5"])
         assert "custom_0" in bd
+        assert bd["custom_0"] == 15.0  # 0.5 * default max_boost 30
+
+    def test_custom_expression_max_boost(self) -> None:
+        _, bd = score_pull_request(
+            _ALICE_PR, {"custom_scoring_max_boost": 10}, "holdenk", custom_expressions=["0.5"]
+        )
+        assert bd["custom_0"] == 5.0  # 0.5 * configured max_boost 10
 
     def test_weight_override(self) -> None:
         pr = {**_ALICE_PR, "requested_reviewers": ["holdenk"]}

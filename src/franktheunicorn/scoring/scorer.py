@@ -143,8 +143,8 @@ def score_pull_request(
         for i, expr in enumerate(custom_expressions):
             result = evaluate_custom_score(expr, pr_dict, project_config_dict)
             if result is not None:
-                # Custom expressions return 0.0-1.0, scale to points
-                _add(f"custom_{i}", round(result * 30))
+                max_boost = int(project_config_dict.get("custom_scoring_max_boost", 30) or 30)
+                _add(f"custom_{i}", round(result * max_boost))
 
     raw = sum(breakdown.values())
     score = round(max(0.0, min(1.0, raw / MAX_SCORE)), 4)
@@ -185,6 +185,7 @@ def score_pull_request_from_model(
         "watch_keywords": project_config.watch_keywords,
         "ai_agents": project_config.ai_agents,
         "scoring_weights": project_config.scoring_weights,
+        "custom_scoring_max_boost": project_config.custom_scoring_max_boost,
     }
 
     if known_authors is None:
