@@ -7,6 +7,7 @@ These models track ingested PRs, draft reviews, anti-patterns, and operator acti
 
 from __future__ import annotations
 
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.utils import timezone
 
@@ -22,11 +23,13 @@ class Project(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        unique_together = [("owner", "repo")]
+        constraints = [
+            models.UniqueConstraint(fields=["owner", "repo"], name="unique_project_owner_repo"),
+        ]
         ordering = ["owner", "repo"]
 
     def __str__(self) -> str:
-        return f"{self.owner}/{self.repo}"
+        return self.full_name
 
     @property
     def full_name(self) -> str:
@@ -36,24 +39,30 @@ class Project(models.Model):
 class PullRequest(models.Model):
     """A pull request ingested from GitHub."""
 
+    STATE_CHOICES = [
+        ("open", "Open"),
+        ("closed", "Closed"),
+        ("merged", "Merged"),
+    ]
+
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="pull_requests")
     github_id = models.IntegerField()
     number = models.IntegerField()
     title = models.CharField(max_length=1000)
     author = models.CharField(max_length=255)
-    state = models.CharField(max_length=50, default="open")
+    state = models.CharField(max_length=50, choices=STATE_CHOICES, default="open")
     url = models.URLField(max_length=1000)
     diff_url = models.URLField(max_length=1000, blank=True, default="")
     body = models.TextField(blank=True, default="")
-    labels = models.JSONField(default=list)
-    requested_reviewers = models.JSONField(default=list)
-    changed_files = models.JSONField(default=list)
+    labels = models.JSONField(default=list, blank=True)
+    requested_reviewers = models.JSONField(default=list, blank=True)
+    changed_files = models.JSONField(default=list, blank=True)
     additions = models.IntegerField(default=0)
     deletions = models.IntegerField(default=0)
 
     # Scoring
     interest_score = models.FloatField(default=0.0)
-    score_breakdown = models.JSONField(default=dict)
+    score_breakdown = models.JSONField(default=dict, blank=True)
 
     # Flags
     is_draft = models.BooleanField(default=False)
@@ -65,7 +74,9 @@ class PullRequest(models.Model):
     github_updated_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
-        unique_together = [("project", "number")]
+        constraints = [
+            models.UniqueConstraint(fields=["project", "number"], name="unique_pr_project_number"),
+        ]
         ordering = ["-interest_score", "-github_updated_at"]
 
     def __str__(self) -> str:
@@ -82,7 +93,9 @@ class ReviewDraft(models.Model):
     line_number = models.IntegerField(null=True, blank=True)
     comment_body = models.TextField()
     suggestion = models.TextField(blank=True, default="")
-    confidence = models.FloatField(default=0.5)
+    confidence = models.FloatField(
+        default=0.5, validators=[MinValueValidator(0.0), MaxValueValidator(1.0)]
+    )
 
     # Operator disposition
     STATUS_CHOICES = [
@@ -114,7 +127,7 @@ class AntiPattern(models.Model):
 
     pattern_text = models.TextField()
     description = models.TextField(blank=True, default="")
-    weight = models.FloatField(default=1.0)
+    weight = models.FloatField(default=1.0, validators=[MinValueValidator(0.0)])
     times_triggered = models.IntegerField(default=0)
     project = models.ForeignKey(
         Project, on_delete=models.CASCADE, related_name="anti_patterns", null=True, blank=True

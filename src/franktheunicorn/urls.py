@@ -1,5 +1,9 @@
+"""Root URL configuration for franktheunicorn."""
+
+from django.contrib import admin
 from django.urls import include, path
 
 urlpatterns = [
+    path("admin/", admin.site.urls),
     path("", include("franktheunicorn.dashboard.urls")),
 ]
