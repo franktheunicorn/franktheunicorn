@@ -75,9 +75,7 @@ class PullRequest(models.Model):
 
     class Meta:
         constraints = [
-            models.UniqueConstraint(
-                fields=["project", "number"], name="unique_pr_project_number"
-            ),
+            models.UniqueConstraint(fields=["project", "number"], name="unique_pr_project_number"),
         ]
         ordering = ["-interest_score", "-github_updated_at"]
 

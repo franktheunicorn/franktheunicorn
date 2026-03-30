@@ -37,24 +37,27 @@ class TestAdminRegistration:
 
 ADMIN_CONFIG = [
     (
-        ProjectAdmin, Project,
-        {"list_display": ("owner", "repo", "enabled"),
-         "search_fields": ("owner", "repo")},
+        ProjectAdmin,
+        Project,
+        {"list_display": ("owner", "repo", "enabled"), "search_fields": ("owner", "repo")},
     ),
     (
-        PullRequestAdmin, PullRequest,
-        {"list_display": ("number", "title", "interest_score"),
-         "list_filter": ("state", "is_draft")},
+        PullRequestAdmin,
+        PullRequest,
+        {
+            "list_display": ("number", "title", "interest_score"),
+            "list_filter": ("state", "is_draft"),
+        },
     ),
     (
-        ReviewDraftAdmin, ReviewDraft,
-        {"list_display": ("pull_request", "file_path", "status"),
-         "list_filter": ("status",)},
+        ReviewDraftAdmin,
+        ReviewDraft,
+        {"list_display": ("pull_request", "file_path", "status"), "list_filter": ("status",)},
     ),
     (
-        OperatorActionAdmin, OperatorAction,
-        {"list_display": ("action_type", "pull_request"),
-         "list_filter": ("action_type",)},
+        OperatorActionAdmin,
+        OperatorAction,
+        {"list_display": ("action_type", "pull_request"), "list_filter": ("action_type",)},
     ),
 ]
 
@@ -74,9 +77,7 @@ class TestAdminConfig:
         for field in expected.get("list_display", ()):
             assert field in instance.list_display
 
-    def test_list_filter(
-        self, admin_cls: type, model_cls: type, expected: dict[str, Any]
-    ) -> None:
+    def test_list_filter(self, admin_cls: type, model_cls: type, expected: dict[str, Any]) -> None:
         instance = admin_cls(model_cls, AdminSite())
         for field in expected.get("list_filter", ()):
             assert field in instance.list_filter

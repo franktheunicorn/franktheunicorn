@@ -18,6 +18,7 @@ class ProjectAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
     list_display = ("owner", "repo", "enabled", "review_context", "created_at")
     list_filter = ("enabled",)
     search_fields = ("owner", "repo")
+    readonly_fields = ("created_at", "updated_at")
 
 
 @admin.register(PullRequest)
@@ -56,6 +57,7 @@ class AntiPatternAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
     list_display = ("pattern_text_short", "project", "weight", "times_triggered", "created_at")
     list_filter = ("project",)
     search_fields = ("pattern_text", "description")
+    readonly_fields = ("created_at", "updated_at")
 
     @admin.display(description="Pattern")
     def pattern_text_short(self, obj: AntiPattern) -> str:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError
@@ -97,12 +99,12 @@ class TestPullRequestModel:
         assert pr.deletions == 0
 
     def test_json_default_independence(self) -> None:
-        """Default list/dict fields should be independent instances."""
+        """Default list/dict fields should be independent instances in memory."""
         pr1 = PullRequestFactory()
         pr2 = PullRequestFactory()
+        assert pr1.labels is not pr2.labels
         pr1.labels.append("bug")
-        pr1.save()
-        pr2.refresh_from_db()
+        assert pr1.labels == ["bug"]
         assert pr2.labels == []
 
     def test_ordering(self, db_project: Project) -> None:
@@ -118,9 +120,7 @@ class TestPullRequestModel:
 
     def test_json_roundtrip_nested(self, db_project: Project) -> None:
         breakdown = {"path_overlap": 0.8, "reviewer_requested": True, "details": {"sub": [1, 2]}}
-        pr = PullRequestFactory(
-            project=db_project, number=50, score_breakdown=breakdown
-        )
+        pr = PullRequestFactory(project=db_project, number=50, score_breakdown=breakdown)
         pr.refresh_from_db()
         assert pr.score_breakdown == breakdown
 
@@ -165,8 +165,9 @@ class TestReviewDraftModel:
         assert draft.suggestion == ""
 
     def test_ordering(self, db_pr: PullRequest) -> None:
-        d1 = ReviewDraftFactory(pull_request=db_pr)
-        d2 = ReviewDraftFactory(pull_request=db_pr)
+        now = timezone.now()
+        d1 = ReviewDraftFactory(pull_request=db_pr, created_at=now - timedelta(minutes=1))
+        d2 = ReviewDraftFactory(pull_request=db_pr, created_at=now)
         results = list(ReviewDraft.objects.filter(pull_request=db_pr))
         assert results[0] == d2
         assert results[1] == d1
@@ -256,14 +257,15 @@ class TestOperatorActionModel:
         assert "dismiss_pr" in str(action)
 
     def test_defaults(self) -> None:
-        action = OperatorActionFactory()
-        assert action.action_type == "accept_draft"
+        action = OperatorActionFactory(action_type="accept_draft")
         assert action.review_draft is None
         assert action.notes == ""
+        assert action.created_at is not None
 
     def test_ordering(self) -> None:
-        a1 = OperatorActionFactory()
-        a2 = OperatorActionFactory()
+        now = timezone.now()
+        a1 = OperatorActionFactory(created_at=now - timedelta(minutes=1))
+        a2 = OperatorActionFactory(created_at=now)
         results = list(OperatorAction.objects.all())
         assert results[0] == a2
         assert results[1] == a1
