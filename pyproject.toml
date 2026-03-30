@@ -8,12 +8,14 @@ version = "0.1.0"
 description = "Local-first AI code review assistant for open-source maintainers"
 readme = "README.md"
 license = "Apache-2.0"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 dependencies = [
     "django>=5.1,<5.3",
     "httpx>=0.27,<1.0",
     "pydantic>=2.7,<3.0",
     "pyyaml>=6.0,<7.0",
+    "pyrate-limiter>=3.0,<4.0",
+    "beautifulsoup4>=4.12,<5.0",
 ]
 
 [project.optional-dependencies]
@@ -26,6 +28,8 @@ dev = [
     "mypy>=1.10,<2.0",
     "django-stubs>=5.0,<6.0",
     "types-PyYAML>=6.0,<7.0",
+    "factory-boy>=3.3,<4.0",
+    "types-beautifulsoup4>=4.12,<5.0",
 ]
 
 [tool.setuptools.packages.find]

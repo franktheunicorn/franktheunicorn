@@ -1,0 +1,16 @@
+[
+  {
+    "id": 5001,
+    "user": {"login": "holdenk"},
+    "state": "CHANGES_REQUESTED",
+    "body": "Good direction, but needs a few changes.",
+    "submitted_at": "2026-03-25T12:00:00Z"
+  },
+  {
+    "id": 5002,
+    "user": {"login": "cloud-fan"},
+    "state": "APPROVED",
+    "body": "LGTM after addressing Holden's comments.",
+    "submitted_at": "2026-03-26T09:00:00Z"
+  }
+]

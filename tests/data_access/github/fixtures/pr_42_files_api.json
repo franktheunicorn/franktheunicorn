@@ -1,0 +1,16 @@
+[
+  {
+    "filename": "core/src/test/scala/SchedulerSuite.scala",
+    "status": "modified",
+    "additions": 12,
+    "deletions": 3,
+    "patch": "@@ -100,5 +100,14 @@\n-    assert(result == expected)\n+    eventually(timeout(10.seconds)) {\n+      assert(result == expected)\n+    }"
+  },
+  {
+    "filename": "docs/TESTING.md",
+    "status": "modified",
+    "additions": 3,
+    "deletions": 0,
+    "patch": "@@ -50,0 +51,3 @@\n+## Flaky Test Guidelines\n+\n+Use `eventually` for async assertions."
+  }
+]
