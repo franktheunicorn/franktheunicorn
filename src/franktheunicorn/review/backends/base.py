@@ -86,7 +86,7 @@ class BaseLLMBackend:
                 __import__(self._sdk_module)
             except ImportError:
                 logger.error(
-                    "%s package not installed. Run: pip install 'franktheunicorn[llm]'",
+                    "%s package not installed. Run: pip install franktheunicorn",
                     self._sdk_module,
                 )
                 return []
