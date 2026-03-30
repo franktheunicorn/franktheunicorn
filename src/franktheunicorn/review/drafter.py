@@ -1,8 +1,9 @@
 """
-Review drafter — dispatches to the configured LLM backend.
+Review drafter — dispatches to configured LLM backends.
 
-Generates ReviewFinding objects via the selected backend, gates them
+Runs all enabled backends, collects findings from each, gates them
 through anti-pattern checks, and persists as ReviewDraft rows.
+Multiple backends can run in parallel; their findings are combined.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from franktheunicorn.review.backends import get_backend
 from franktheunicorn.review.backends.base import PRContext, ReviewFinding
 
 if TYPE_CHECKING:
-    from franktheunicorn.config.models import OperatorConfig, ProjectConfig
+    from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig, ProjectConfig
     from franktheunicorn.core.models import Project, PullRequest
 
 logger = logging.getLogger(__name__)
@@ -107,15 +108,39 @@ def create_drafts_from_findings(
     return drafts
 
 
+def _run_single_backend(
+    backend_config: LLMBackendConfig,
+    diff: str,
+    pr_context: PRContext,
+) -> tuple[str, list[ReviewFinding]]:
+    """Run one backend and return (source_name, findings)."""
+    backend = get_backend(backend_config)
+    source = backend_config.provider
+    if source == "stub":
+        source = "agent"
+
+    try:
+        findings = backend.generate_findings(diff, pr_context)
+    except Exception:
+        logger.exception("LLM backend '%s' failed.", backend_config.provider)
+        findings = []
+
+    return source, findings
+
+
 def draft_review(
     pr: PullRequest,
     project_config: ProjectConfig,
     operator_config: OperatorConfig | None = None,
 ) -> list[ReviewDraft]:
-    """Generate review drafts for a PR using the configured LLM backend.
+    """Generate review drafts for a PR using all configured LLM backends.
 
-    When ``operator_config`` is None, falls back to the stub backend
-    for backwards compatibility with existing callers.
+    Each backend in ``operator_config.llm_backends`` runs independently.
+    Findings from all backends are combined, gated through anti-patterns,
+    and stored as ReviewDraft rows with the backend's provider as the source.
+
+    When ``operator_config`` is None or has no backends configured, falls
+    back to the stub backend for backwards compatibility.
     """
     if operator_config is None:
         from franktheunicorn.config.models import (
@@ -124,21 +149,22 @@ def draft_review(
 
         operator_config = DefaultOperatorConfig()
 
-    backend = get_backend(operator_config.llm)
     pr_context = build_pr_context(pr, project_config, operator_config)
     diff = _get_pr_diff(pr)
 
-    try:
-        findings = backend.generate_findings(diff, pr_context)
-    except Exception:
-        logger.exception("LLM backend '%s' failed.", operator_config.llm.provider)
-        findings = []
+    # Resolve which backends to run.
+    backend_configs = operator_config.llm_backends
+    if not backend_configs:
+        # No backends configured — use stub for demo/test mode.
+        from franktheunicorn.config.models import LLMBackendConfig
 
-    if not findings:
-        return []
+        backend_configs = [LLMBackendConfig()]
 
-    source = operator_config.llm.provider
-    if source == "stub":
-        source = "agent"  # Keep backwards-compatible source name.
+    all_drafts: list[ReviewDraft] = []
+    for backend_config in backend_configs:
+        source, findings = _run_single_backend(backend_config, diff, pr_context)
+        if findings:
+            drafts = create_drafts_from_findings(pr, findings, source=source, project=pr.project)
+            all_drafts.extend(drafts)
 
-    return create_drafts_from_findings(pr, findings, source=source, project=pr.project)
+    return all_drafts

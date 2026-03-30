@@ -62,6 +62,35 @@ class TestDraftReview:
         assert len(drafts) > 0
         assert all(d.source == "agent" for d in drafts)
 
+    def test_multiple_backends_combine_findings(
+        self,
+        db_pr: PullRequest,
+        spark_project_config: ProjectConfig,
+    ) -> None:
+        """Multiple backends should each contribute findings."""
+        from franktheunicorn.config.models import LLMBackendConfig
+
+        # Two stub backends — each produces findings independently.
+        multi_config = OperatorConfig(
+            llm_backends=[LLMBackendConfig(), LLMBackendConfig()],
+        )
+        drafts = draft_review(db_pr, spark_project_config, multi_config)
+        # Two stub backends, each producing up to 2 findings from 2 changed_files.
+        assert len(drafts) >= 2
+
+    def test_legacy_single_llm_config_still_works(
+        self,
+        db_pr: PullRequest,
+        spark_project_config: ProjectConfig,
+    ) -> None:
+        """Legacy ``llm:`` field is promoted to ``llm_backends``."""
+        from franktheunicorn.config.models import LLMBackendConfig
+
+        legacy_config = OperatorConfig(llm=LLMBackendConfig(provider="stub"))
+        assert len(legacy_config.llm_backends) == 1
+        drafts = draft_review(db_pr, spark_project_config, legacy_config)
+        assert len(drafts) > 0
+
 
 @pytest.mark.django_db
 class TestAntiPattern:

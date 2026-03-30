@@ -71,7 +71,21 @@ class OperatorConfig(BaseModel):
     digest_email: str = ""
     digest_enabled: bool = False
     coderabbit: CodeRabbitConfig = Field(default_factory=CodeRabbitConfig)
-    llm: LLMBackendConfig = Field(default_factory=LLMBackendConfig)
+    # Multiple LLM backends can run in parallel. Each produces findings
+    # independently; results are combined and deduped via anti-patterns.
+    llm_backends: list[LLMBackendConfig] = Field(default_factory=list)
+
+    # Legacy single-backend field — still accepted for backwards compat.
+    # If set and llm_backends is empty, it is promoted into llm_backends.
+    llm: LLMBackendConfig | None = Field(default=None, exclude=True)
+
+    @model_validator(mode="after")
+    def migrate_legacy_llm(self) -> OperatorConfig:
+        """Promote legacy ``llm:`` config into ``llm_backends`` list."""
+        if self.llm is not None and not self.llm_backends:
+            self.llm_backends = [self.llm]
+            self.llm = None
+        return self
 
     @field_validator("poll_interval_seconds")
     @classmethod

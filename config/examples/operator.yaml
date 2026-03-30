@@ -19,43 +19,45 @@ digest_email: ""
 digest_enabled: false
 
 # --- LLM Backend Configuration ---
-# Uncomment ONE provider block below, or run: python manage.py setup_llm
+# Multiple backends can run simultaneously. Each produces findings
+# independently; results are combined and deduped via anti-patterns.
+# Run `python manage.py setup_llm` for interactive configuration.
 #
-# Option 1: Anthropic Claude (recommended for quality)
+# Example: single backend (Claude)
+# llm_backends:
+#   - provider: "claude"
+#     model: "claude-sonnet-4-20250514"
+#     api_key_env: "ANTHROPIC_API_KEY"
+#     temperature: 0.3
+#     max_tokens: 4096
+#
+# Example: multiple backends (Claude for quality + local for speed)
+# llm_backends:
+#   - provider: "claude"
+#     model: "claude-sonnet-4-20250514"
+#     api_key_env: "ANTHROPIC_API_KEY"
+#   - provider: "ollama"
+#     model: "qwen2.5-coder:14b"
+#     base_url: "http://localhost:11434"
+#
+# Available providers:
+#   claude  — Anthropic (models: claude-sonnet-4-20250514, claude-opus-4-20250514)
+#   openai  — OpenAI (models: gpt-4o, gpt-4o-mini)
+#   gemini  — Google (models: gemini-2.5-flash, gemini-2.5-pro)
+#   ollama  — Local via Ollama (models: qwen2.5-coder:3b/7b/14b/32b)
+#
+# Local models via Ollama (no API key needed):
+#   Install Ollama: https://ollama.com/download
+#   Pull a model:   ollama pull qwen2.5-coder:14b
+#   Model sizes:    3b (CPU), 7b (8GB), 14b (12GB), 32b (24GB)
+#
+# Legacy single-backend format (still works):
 # llm:
 #   provider: "claude"
-#   model: "claude-sonnet-4-20250514"        # or claude-opus-4-20250514 for deeper review
+#   model: "claude-sonnet-4-20250514"
 #   api_key_env: "ANTHROPIC_API_KEY"
-#   temperature: 0.3
-#   max_tokens: 4096
-#
-# Option 2: OpenAI
-# llm:
-#   provider: "openai"
-#   model: "gpt-4o"                          # or gpt-4o-mini for faster/cheaper
-#   api_key_env: "OPENAI_API_KEY"
-#   temperature: 0.3
-#   max_tokens: 4096
-#
-# Option 3: Google Gemini
-# llm:
-#   provider: "gemini"
-#   model: "gemini-2.5-flash"                # or gemini-2.5-pro for deeper review
-#   api_key_env: "GOOGLE_API_KEY"
-#   temperature: 0.3
-#   max_tokens: 4096
-#
-# Option 4: Local model via Ollama (no API key needed, runs on your hardware)
-# Install Ollama: https://ollama.com/download
-# Pull a model:   ollama pull qwen2.5-coder:14b
-# llm:
-#   provider: "ollama"
-#   model: "qwen2.5-coder:14b"              # Model sizes: 3b (CPU), 7b (8GB), 14b (12GB), 32b (24GB)
-#   base_url: "http://localhost:11434"       # Default Ollama server URL
-#   temperature: 0.3
-#   max_tokens: 4096
 
-# CodeRabbit CLI integration (optional, runs alongside LLM backend)
+# CodeRabbit CLI integration (optional, runs alongside LLM backends)
 # Install: npm install -g coderabbitai (or see https://docs.coderabbit.ai/cli)
 # Findings are attributed as [CodeRabbit] in the dashboard and still
 # pass through anti-pattern filtering.

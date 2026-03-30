@@ -27,14 +27,14 @@ class TestSetupLLMCommand:
         config = yaml.safe_load(output_path.read_text())
         assert config["github_username"] == "testuser"
         assert config["review_style"] == "direct"
-        assert "llm" not in config  # stub doesn't write llm block
+        assert "llm_backends" not in config  # stub doesn't write backends
 
-    def test_claude_provider_generates_config(self, tmp_path: Path) -> None:
+    def test_single_cloud_provider(self, tmp_path: Path) -> None:
         output_path = tmp_path / "operator.yaml"
         inputs = [
             "holdenk",  # github_username
             "direct but kind",  # review_style
-            "1",  # provider: claude
+            "1",  # provider: claude only
             "claude-sonnet-4-20250514",  # model
             "0.3",  # temperature
             "n",  # coderabbit: no
@@ -46,9 +46,39 @@ class TestSetupLLMCommand:
             call_command("setup_llm", output=str(output_path))
 
         config = yaml.safe_load(output_path.read_text())
-        assert config["llm"]["provider"] == "claude"
-        assert config["llm"]["model"] == "claude-sonnet-4-20250514"
-        assert config["llm"]["api_key_env"] == "ANTHROPIC_API_KEY"
+        assert isinstance(config["llm_backends"], list)
+        assert len(config["llm_backends"]) == 1
+        assert config["llm_backends"][0]["provider"] == "claude"
+        assert config["llm_backends"][0]["model"] == "claude-sonnet-4-20250514"
+
+    def test_multiple_providers(self, tmp_path: Path) -> None:
+        output_path = tmp_path / "operator.yaml"
+        inputs = [
+            "holdenk",  # github_username
+            "direct but kind",  # review_style
+            "1,4",  # providers: claude + ollama
+            "claude-sonnet-4-20250514",  # claude model
+            "0.3",  # claude temperature
+            "qwen2.5-coder:14b",  # ollama model
+            "http://localhost:11434",  # ollama base_url
+            "n",  # coderabbit: no
+        ]
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch.dict("os.environ", {"ANTHROPIC_API_KEY": "sk-test"}),
+            patch("shutil.which", return_value="/usr/bin/ollama"),
+            patch(
+                "franktheunicorn.review.backends.ollama_backend.recommend_local_model",
+                return_value=("qwen2.5-coder:14b", "12GB VRAM available"),
+            ),
+        ):
+            call_command("setup_llm", output=str(output_path))
+
+        config = yaml.safe_load(output_path.read_text())
+        assert isinstance(config["llm_backends"], list)
+        assert len(config["llm_backends"]) == 2
+        assert config["llm_backends"][0]["provider"] == "claude"
+        assert config["llm_backends"][1]["provider"] == "ollama"
 
     def test_ollama_provider_with_gpu_detection(self, tmp_path: Path) -> None:
         output_path = tmp_path / "operator.yaml"
@@ -71,8 +101,8 @@ class TestSetupLLMCommand:
             call_command("setup_llm", output=str(output_path))
 
         config = yaml.safe_load(output_path.read_text())
-        assert config["llm"]["provider"] == "ollama"
-        assert config["llm"]["model"] == "qwen2.5-coder:14b"
+        assert config["llm_backends"][0]["provider"] == "ollama"
+        assert config["llm_backends"][0]["model"] == "qwen2.5-coder:14b"
 
     def test_coderabbit_enabled(self, tmp_path: Path) -> None:
         output_path = tmp_path / "operator.yaml"

@@ -22,7 +22,6 @@ _PROVIDERS = {
     "2": ("openai", "OpenAI"),
     "3": ("gemini", "Google Gemini"),
     "4": ("ollama", "Local model (Ollama)"),
-    "5": ("stub", "Skip — use stub/demo mode"),
 }
 
 _DEFAULT_MODELS: dict[str, str] = {
@@ -30,7 +29,6 @@ _DEFAULT_MODELS: dict[str, str] = {
     "openai": "gpt-4o",
     "gemini": "gemini-2.5-flash",
     "ollama": "qwen2.5-coder:14b",
-    "stub": "",
 }
 
 _API_KEY_ENVS: dict[str, str] = {
@@ -67,24 +65,42 @@ class Command(BaseCommand):
             default="direct but kind",
         )
 
-        # --- LLM provider ---
-        self.stdout.write("\nChoose an LLM provider for code review:\n")
+        # --- LLM providers (multiple) ---
+        self.stdout.write("\nSelect LLM providers for code review (you can enable multiple):\n")
         for key, (_, label) in _PROVIDERS.items():
             self.stdout.write(f"  {key}. {label}\n")
+        self.stdout.write("  5. Skip — use stub/demo mode\n")
 
-        choice = self._ask("Enter choice [1-5]: ", default="5")
-        provider, provider_label = _PROVIDERS.get(choice, ("stub", "Stub"))
-        self.stdout.write(f"\n  Selected: {provider_label}\n")
+        choices_raw = self._ask(
+            "Enter choices (comma-separated, e.g. '1,4' for Claude + Ollama): ",
+            default="5",
+        )
+        chosen_keys = [c.strip() for c in choices_raw.split(",")]
 
-        llm_config: dict[str, object] = {"provider": provider}
+        llm_backends: list[dict[str, object]] = []
+        env_vars_needed: list[str] = []
 
-        if provider in _API_KEY_ENVS:
-            llm_config = self._configure_cloud_provider(provider, llm_config)
-        elif provider == "ollama":
-            llm_config = self._configure_ollama(llm_config)
+        for key in chosen_keys:
+            if key == "5":
+                continue
+            if key not in _PROVIDERS:
+                self.stdout.write(self.style.WARNING(f"  Skipping unknown choice '{key}'\n"))
+                continue
+            provider, provider_label = _PROVIDERS[key]
+            self.stdout.write(f"\n--- Configuring {provider_label} ---\n")
 
-        if provider != "stub":
-            config["llm"] = llm_config
+            llm_config: dict[str, object] = {"provider": provider}
+
+            if provider in _API_KEY_ENVS:
+                llm_config = self._configure_cloud_provider(provider, llm_config)
+                env_vars_needed.append(_API_KEY_ENVS[provider])
+            elif provider == "ollama":
+                llm_config = self._configure_ollama(llm_config)
+
+            llm_backends.append(llm_config)
+
+        if llm_backends:
+            config["llm_backends"] = llm_backends
 
         # --- CodeRabbit ---
         cr_config = self._configure_coderabbit()
@@ -107,8 +123,7 @@ class Command(BaseCommand):
         self.stdout.write("\nTo use this config, set:\n")
         self.stdout.write(f"  export FRANK_OPERATOR_CONFIG={output_path_obj}\n")
 
-        if provider != "stub" and provider in _API_KEY_ENVS:
-            env_var = _API_KEY_ENVS[provider]
+        for env_var in env_vars_needed:
             self.stdout.write(f"  export {env_var}=<your-api-key>\n")
 
         self.stdout.write(
