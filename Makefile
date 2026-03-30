@@ -9,8 +9,8 @@ help: ## Show this help
 setup: ## One-time local development setup
 	scripts/dev_setup.sh
 
-test: ## Run tests with coverage
-	pytest --cov=franktheunicorn --cov-report=term-missing
+test: ## Run tests with coverage (90% minimum)
+	pytest --cov=franktheunicorn --cov-report=term-missing --cov-fail-under=90
 
 lint: ## Check linting and formatting
 	ruff check src/ tests/

@@ -7,8 +7,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python deps (copy pyproject.toml first for layer caching)
-COPY pyproject.toml .
+# Install Python deps (copy pyproject.toml + README first for layer caching)
+COPY pyproject.toml README.md ./
 RUN mkdir -p src/franktheunicorn && \
     touch src/franktheunicorn/__init__.py && \
     pip install --no-cache-dir . && \
