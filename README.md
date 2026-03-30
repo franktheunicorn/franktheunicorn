@@ -1,50 +1,62 @@
+** THIS IS NOT READY YET **
+
 # 🦄 franktheunicorn
 
-Local-first, cloneable AI code review assistant for open-source maintainers.
+A local-first AI code review assistant for open-source maintainers.
 
-Monitors PRs across multiple projects, triages by relevance, drafts review comments in your voice, learns from your feedback, and surfaces what needs attention via a lightweight dashboard.
+franktheunicorn monitors PRs across your projects, triages them by relevance, drafts review comments in your voice, and learns from your corrections. You clone it, configure it for your repos, and run it on your own machine.
 
-**This is NOT a hosted service.** Clone it, configure it for your repos, run it on your own machine. State lives in SQLite and local files.
+Want to play with it? Clone it, configure it for your repos, run it on your own machine. State lives in SQLite and local files.
+
+
+This is (roughly) my 3rd attempt at building something like this (now that LLMs work it's a whole new world): of a line of review tooling: [holdensmagicalunicorn](https://github.com/holdenk/holdensmagicalunicorn) (2012) → [predict-pr-comments](https://github.com/franktheunicorn/predict-pr-comments) (2018, [FOSDEM talk](https://archive.fosdem.org/2019/schedule/event/ml_on_code_code_review_mailing_list/)) → this.
 
 ## Quick Start
 
-### Docker (recommended)
-
 ```bash
-git clone https://github.com/franktheunicorn/openunicorn.git
-cd openunicorn
+git clone https://github.com/franktheunicorn/franktheunicorn.git
+cd franktheunicorn
+cp .env.example .env
+# Edit .env: set GITHUB_TOKEN and ANTHROPIC_API_KEY
+
 docker compose up
+# Dashboard: http://localhost:8000
 ```
 
-Dashboard at [http://localhost:8000](http://localhost:8000). Mock mode is on by default — no GitHub token needed to try it out.
+Two env vars. One command. Working dashboard.
 
-### Local Development
+## What It Does
 
-```bash
-git clone https://github.com/franktheunicorn/openunicorn.git
-cd openunicorn
-python3.12 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-python manage.py migrate
-python manage.py runserver          # Dashboard
-python -m franktheunicorn.worker.runner  # Worker (in another terminal)
-```
+- **Triages PRs** across multiple repos with configurable interest scoring (path overlap, git blame, collaborator detection, custom LLM-generated scoring functions)
+- **Drafts review comments** using multi-backend LLM review (Sonnet for substance, Haiku for nits, Opus for architecture)
+- **Learns from your corrections** via an anti-pattern list that improves with every rejection and edit
+- **Runs differential tests** to verify new tests actually fail without the PR's changes
+- **Routes PRs to queues** — AI-generated, new contributors, low-context drive-bys, consider-closing
+- **Respects project cultures** — ASF governance norms are different from your Django side project
+- **Works on your phone** — responsive dashboard over Tailscale for conference triage
 
-### With Real GitHub Data
+## What It Doesn't Do
 
-```bash
-export FRANK_GITHUB_TOKEN=ghp_your_token_here
-export FRANK_MOCK_MODE=false
-docker compose up
-```
+- Post comments without your approval (draft-only in v1)
+- Require a cloud account, SaaS subscription, or uptime
+- Replace your judgment — it assists, you decide
 
-## Configuration
+## Core Principles
 
-- **Operator config**: `configs/examples/operator.yaml` — your GitHub username, review style, polling interval
-- **Project configs**: `configs/examples/projects/*.yaml` — one file per repo with watched paths, tone, frequent contributors
+1. **Local-first.** SQLite + files. Backup with `tar`. No cloud dependency.
+2. **Clone and run.** Five-minute start. Every feature beyond PR ingestion is opt-in.
+3. **Operator-in-the-loop.** The agent drafts; you post.
+4. **Project-aware.** Each repo has its own review norms, tone, and expectations.
+5. **Learns from corrections.** Anti-patterns → rejection predictor → fine-tuned model (three tiers, each optional).
 
-## Architecture
+## Documentation
+
+- **[Master Design Document](docs/franktheunicorn-master-design.md)** — the full architecture, all decisions, implementation phases
+- **[CLAUDE.md](CLAUDE.md)** — instructions for Claude Code working on this repo
+- **[AGENTS.md](AGENTS.md)** — instructions for any AI agent contributing
+- **[REVIEWER.md](REVIEWER.md)** — instructions for franktheunicorn reviewing its own PRs
+
+## Code layout
 
 ```
 src/franktheunicorn/
@@ -58,24 +70,37 @@ src/franktheunicorn/
 └── worker/       # Polling loop
 ```
 
-## Testing
 
-```bash
-pytest                                    # Run all tests
-pytest --cov=franktheunicorn              # With coverage
-pytest -m integration                     # Integration tests only
-ruff check src/ tests/                    # Linting
-mypy src/franktheunicorn/                 # Type checking
+
+## Version Roadmap
+
+| Version | What | Status |
+|---------|------|--------|
+| **v1** | Triage + draft reviews + anti-pattern learning + dashboard + digest | 🚧 Building |
+| v1.25 | Direct feedback to Claude Code / Codex sessions | Designed |
+| v1.5 | Community context, JIRA, CodeRabbit, auto-posting | Designed |
+| v1.75 | Rejection predictor (sklearn) | Designed |
+| v2 | Fine-tuned personal model (Axolotl), merge queue, shepherding | Designed |
+
+## Project Structure
+
 ```
-
-## Core Principles
-
-1. **Local-first.** SQLite + local files. Back it up, rsync it, check it into git.
-2. **Clone and run.** Working dashboard in five minutes.
-3. **Operator-in-the-loop.** The agent drafts; you post.
-4. **Project-aware.** Each repo has its own review norms and context.
-5. **Learns from corrections.** Rejected/edited comments improve future drafts.
+src/franktheunicorn/
+  core/           # Models, config, shared types
+  scoring/        # Interest scoring, blame, collaborators, custom scoring
+  review/         # LLM pipeline, findings, tone guard, anti-patterns
+  data_access/    # Dual-path fetchers (API + scrape) for GitHub, JIRA, etc.
+  worker/         # Background polling + review pipeline
+  dashboard/      # Django views + htmx templates
+  digest/         # Email digest
+  config/         # YAML schema + loaders
+tests/            # Parallel structure, 90%+ coverage enforced
+```
 
 ## License
 
-Apache License 2.0
+Apache 2.0
+
+## Contributing
+
+PRs welcome. Read [AGENTS.md](AGENTS.md) if you're an AI agent, or just follow the patterns in the existing code. All PRs need tests. All data access needs dual-path (API + scrape). Dashboard must work on mobile.

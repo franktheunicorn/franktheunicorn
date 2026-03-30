@@ -74,13 +74,13 @@ STATIC_URL = "static/"
 # Path to operator config YAML
 FRANK_OPERATOR_CONFIG = os.environ.get(
     "FRANK_OPERATOR_CONFIG",
-    str(BASE_DIR / "configs" / "examples" / "operator.yaml"),
+    str(BASE_DIR / "config" / "examples" / "operator.yaml"),
 )
 
 # Directory containing per-project YAML configs
 FRANK_PROJECTS_DIR = os.environ.get(
     "FRANK_PROJECTS_DIR",
-    str(BASE_DIR / "configs" / "examples" / "projects"),
+    str(BASE_DIR / "config" / "examples" / "projects"),
 )
 
 # GitHub API token (optional — mock mode works without it)
@@ -92,7 +92,7 @@ FRANK_MOCK_MODE = os.environ.get("FRANK_MOCK_MODE", "true").lower() in ("true", 
 # Directory containing fixture JSON for mock mode
 FRANK_FIXTURES_DIR = os.environ.get(
     "FRANK_FIXTURES_DIR",
-    str(BASE_DIR / "configs" / "fixtures"),
+    str(BASE_DIR / "config" / "fixtures"),
 )
 
 # Worker polling interval in seconds
