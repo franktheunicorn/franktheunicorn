@@ -24,7 +24,7 @@ jobs:
         run: pip install -e ".[dev]"
 
       - name: Run tests with coverage
-        run: pytest --cov=franktheunicorn --cov-report=xml --cov-report=term-missing --cov-fail-under=80
+        run: pytest --cov=franktheunicorn --cov-report=xml --cov-report=term-missing --cov-fail-under=90
 
       - name: Upload coverage report
         if: always()
@@ -67,3 +67,14 @@ jobs:
 
       - name: Run mypy
         run: mypy src/franktheunicorn/
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build web image
+        run: docker build -f docker/Dockerfile.web .
+
+      - name: Build worker image
+        run: docker build -f docker/Dockerfile.worker .

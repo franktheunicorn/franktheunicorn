@@ -19,13 +19,13 @@ services:
       - "8000:8000"
     volumes:
       - ./data:/app/data
-      - ./configs:/app/configs
+      - ./config:/app/config
     environment:
       - FRANK_DATA_DIR=/app/data
       - FRANK_MOCK_MODE=${FRANK_MOCK_MODE:-true}
       - FRANK_GITHUB_TOKEN=${FRANK_GITHUB_TOKEN:-}
-      - FRANK_OPERATOR_CONFIG=/app/configs/examples/operator.yaml
-      - FRANK_PROJECTS_DIR=/app/configs/examples/projects
+      - FRANK_OPERATOR_CONFIG=/app/config/examples/operator.yaml
+      - FRANK_PROJECTS_DIR=/app/config/examples/projects
       - DJANGO_DEBUG=true
     # Run migrations before starting the server
     command: >
@@ -38,13 +38,13 @@ services:
       dockerfile: docker/Dockerfile.worker
     volumes:
       - ./data:/app/data
-      - ./configs:/app/configs
+      - ./config:/app/config
     environment:
       - FRANK_DATA_DIR=/app/data
       - FRANK_MOCK_MODE=${FRANK_MOCK_MODE:-true}
       - FRANK_GITHUB_TOKEN=${FRANK_GITHUB_TOKEN:-}
-      - FRANK_OPERATOR_CONFIG=/app/configs/examples/operator.yaml
-      - FRANK_PROJECTS_DIR=/app/configs/examples/projects
+      - FRANK_OPERATOR_CONFIG=/app/config/examples/operator.yaml
+      - FRANK_PROJECTS_DIR=/app/config/examples/projects
       - FRANK_POLL_INTERVAL=${FRANK_POLL_INTERVAL:-300}
     # Run migrations before starting the worker
     command: >

@@ -1,0 +1,40 @@
+# Git
+.git/
+.github/
+.gitignore
+
+# Python
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Testing & tooling
+tests/
+htmlcov/
+coverage.xml
+.coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime data (mounted as volume)
+data/
+
+# Dev files
+scripts/
+docker/
+docs/
+*.md
+.env
+.env.*
+Makefile
+
+# IDE
+.vscode/
+.idea/

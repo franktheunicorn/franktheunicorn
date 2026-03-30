@@ -15,7 +15,7 @@ COPY manage.py .
 RUN pip install --no-cache-dir .
 
 # Copy configs (can be overridden by volume mounts)
-COPY configs/ configs/
+COPY config/ config/
 
 # Ensure data dir exists
 RUN mkdir -p /app/data
