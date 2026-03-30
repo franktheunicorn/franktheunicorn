@@ -29,14 +29,9 @@ class TestDashboardViews:
         assert b"Fix flaky test" in response.content
         assert b"Score Breakdown" in response.content
 
-    def test_pr_detail_with_drafts(self, client: Client, db_pr: PullRequest) -> None:
-        ReviewDraft.objects.create(
-            pull_request=db_pr,
-            file_path="test.py",
-            line_number=5,
-            comment_body="Consider adding a test.",
-            confidence=0.7,
-        )
+    def test_pr_detail_with_drafts(
+        self, client: Client, db_pr: PullRequest, review_draft: ReviewDraft
+    ) -> None:
         response = client.get(f"/pr/{db_pr.pk}/")
         assert response.status_code == 200
         assert b"Consider adding a test" in response.content
