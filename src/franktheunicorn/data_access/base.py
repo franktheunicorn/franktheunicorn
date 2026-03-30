@@ -7,7 +7,7 @@ import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Generic, TypeVar
+from typing import Any, Generic, TypeVar
 
 import httpx
 
@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 GITHUB_API_BASE = "https://api.github.com"
 GITHUB_WEB_BASE = "https://github.com"
+_GITHUB_JSON_ACCEPT = {"Accept": "application/vnd.github+json"}
 
 
 class FetchMethod(enum.StrEnum):
@@ -51,11 +52,13 @@ class NotFoundError(FetchError):
     """Raised when the requested resource does not exist."""
 
 
-class ParseError(FetchError):
-    """Raised when response parsing fails."""
-
-
 T = TypeVar("T", bound=FetchResult)
+
+
+def get_login(obj: dict[str, Any]) -> str:
+    """Extract ``user.login`` from a GitHub API JSON object."""
+    user = obj.get("user", {})
+    return user.get("login", "") if isinstance(user, dict) else str(user)
 
 
 class DataFetcher(ABC, Generic[T]):  # noqa: UP046
@@ -103,11 +106,7 @@ class DataFetcher(ABC, Generic[T]):  # noqa: UP046
         """GET for scrape path with 404 handling."""
         response = self._client.get(url)
         if response.status_code == 404:
-            raise NotFoundError(
-                f"Not found: {url}",
-                method=FetchMethod.SCRAPE,
-                status_code=404,
-            )
+            raise NotFoundError(f"Not found: {url}", method=FetchMethod.SCRAPE, status_code=404)
         response.raise_for_status()
         return response
 
@@ -124,11 +123,7 @@ class DataFetcher(ABC, Generic[T]):  # noqa: UP046
             self._rate_limiter.update_from_headers(response.headers)
 
         if response.status_code == 404:
-            raise NotFoundError(
-                f"Not found: {url}",
-                method=FetchMethod.API,
-                status_code=404,
-            )
+            raise NotFoundError(f"Not found: {url}", method=FetchMethod.API, status_code=404)
         if response.status_code in (403, 429):
             raise RateLimitError(
                 f"Rate limited ({response.status_code})",
@@ -137,3 +132,7 @@ class DataFetcher(ABC, Generic[T]):  # noqa: UP046
             )
         response.raise_for_status()
         return response
+
+    def _api_get_json(self, url: str, **params: object) -> httpx.Response:
+        """GET JSON from GitHub API (sets Accept header, passes params)."""
+        return self._api_get(url, headers=_GITHUB_JSON_ACCEPT, params=params)

@@ -11,6 +11,7 @@ from franktheunicorn.data_access.base import (
     GITHUB_WEB_BASE,
     DataFetcher,
     FetchMethod,
+    get_login,
 )
 from franktheunicorn.data_access.github.types import PRReview, ReviewComment, SingleReview
 
@@ -21,30 +22,31 @@ class ReviewFetcher(DataFetcher[PRReview]):
     def fetch_via_api(  # type: ignore[override]
         self, owner: str, repo: str, pr_number: int
     ) -> PRReview:
-        reviews_url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls/{pr_number}/reviews"
-        reviews_resp = self._api_get(
-            reviews_url, headers={"Accept": "application/vnd.github+json"}
-        )
-        reviews_json: list[dict[str, Any]] = reviews_resp.json()
+        base = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls/{pr_number}"
+        reviews_json: list[dict[str, Any]] = self._api_get_json(f"{base}/reviews").json()
+        comments_json: list[dict[str, Any]] = self._api_get_json(
+            f"{base}/comments", per_page=100
+        ).json()
 
-        comments_url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls/{pr_number}/comments"
-        comments_resp = self._api_get(
-            comments_url,
-            headers={"Accept": "application/vnd.github+json"},
-            params={"per_page": 100},
-        )
-        comments_json: list[dict[str, Any]] = comments_resp.json()
-
-        # Group comments by review id
+        # Group inline comments by review id
         comments_by_review: dict[int, list[ReviewComment]] = {}
         for c in comments_json:
             review_id = c.get("pull_request_review_id", 0)
-            comments_by_review.setdefault(review_id, []).append(_parse_api_comment(c))
+            comments_by_review.setdefault(review_id, []).append(
+                ReviewComment(
+                    id=c.get("id", 0),
+                    author=get_login(c),
+                    body=c.get("body", "") or "",
+                    path=c.get("path", ""),
+                    line=c.get("line") or c.get("original_line"),
+                    created_at=c.get("created_at", ""),
+                )
+            )
 
         reviews = tuple(
             SingleReview(
                 id=r.get("id", 0),
-                author=_get_login(r),
+                author=get_login(r),
                 state=r.get("state", ""),
                 body=r.get("body", "") or "",
                 submitted_at=r.get("submitted_at", ""),
@@ -52,16 +54,13 @@ class ReviewFetcher(DataFetcher[PRReview]):
             )
             for r in reviews_json
         )
-
         return PRReview(fetched_via=FetchMethod.API, pr_number=pr_number, reviews=reviews)
 
     def fetch_via_scrape(  # type: ignore[override]
         self, owner: str, repo: str, pr_number: int
     ) -> PRReview:
         url = f"{GITHUB_WEB_BASE}/{owner}/{repo}/pull/{pr_number}"
-        response = self._scrape_get(url)
-
-        soup = BeautifulSoup(response.text, "html.parser")
+        soup = BeautifulSoup(self._scrape_get(url).text, "html.parser")
         review_els = soup.select("[id^='pullrequestreview-']") or soup.select(
             ".js-timeline-item .review-comment"
         )
@@ -95,19 +94,3 @@ class ReviewFetcher(DataFetcher[PRReview]):
         return PRReview(
             fetched_via=FetchMethod.SCRAPE, pr_number=pr_number, reviews=tuple(reviews)
         )
-
-
-def _get_login(obj: dict[str, Any]) -> str:
-    user = obj.get("user", {})
-    return user.get("login", "") if isinstance(user, dict) else str(user)
-
-
-def _parse_api_comment(c: dict[str, Any]) -> ReviewComment:
-    return ReviewComment(
-        id=c.get("id", 0),
-        author=_get_login(c),
-        body=c.get("body", "") or "",
-        path=c.get("path", ""),
-        line=c.get("line") or c.get("original_line"),
-        created_at=c.get("created_at", ""),
-    )

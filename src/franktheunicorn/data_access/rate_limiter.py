@@ -52,7 +52,7 @@ class GitHubRateLimiter:
 
         Raises ``BucketFullException`` if the wait would exceed max_delay.
         """
-        if self._is_header_limited():
+        if self.is_rate_limited():
             wait = self._seconds_until_reset()
             if wait > 0:
                 logger.info("Rate-limited by GitHub headers, waiting %.1fs", wait)
@@ -82,9 +82,6 @@ class GitHubRateLimiter:
 
     def is_rate_limited(self) -> bool:
         """Return True if we know the API limit is exhausted."""
-        return self._is_header_limited()
-
-    def _is_header_limited(self) -> bool:
         if self._remaining is not None and self._remaining <= 0:
             return self._seconds_until_reset() > 0
         return False
