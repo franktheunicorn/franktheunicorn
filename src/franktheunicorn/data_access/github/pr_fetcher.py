@@ -11,7 +11,6 @@ from franktheunicorn.data_access.base import (
     GITHUB_WEB_BASE,
     DataFetcher,
     FetchMethod,
-    NotFoundError,
 )
 from franktheunicorn.data_access.github.types import PRFileChange, PRSummary
 
@@ -40,14 +39,7 @@ class PRFetcher(DataFetcher[PRSummary]):
         self, owner: str, repo: str, pr_number: int
     ) -> PRSummary:
         url = f"{GITHUB_WEB_BASE}/{owner}/{repo}/pull/{pr_number}"
-        response = self._client.get(url)
-        if response.status_code == 404:
-            raise NotFoundError(
-                f"PR #{pr_number} page not found",
-                method=FetchMethod.SCRAPE,
-                status_code=404,
-            )
-        response.raise_for_status()
+        response = self._scrape_get(url)
 
         soup = BeautifulSoup(response.text, "html.parser")
 

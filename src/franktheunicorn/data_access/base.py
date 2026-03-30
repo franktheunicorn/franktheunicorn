@@ -75,7 +75,7 @@ class DataFetcher(ABC, Generic[T]):  # noqa: UP046
     def fetch(self, *args: object, **kwargs: object) -> T:
         """Try API path first; fall back to scrape on rate-limit/server errors."""
         try:
-            return self.fetch_via_api(*args, **kwargs)  # type: ignore[arg-type]
+            return self.fetch_via_api(*args, **kwargs)
         except RateLimitError:
             logger.info("%s: API rate-limited, falling back to scrape", type(self).__name__)
         except httpx.HTTPStatusError as exc:
@@ -87,7 +87,7 @@ class DataFetcher(ABC, Generic[T]):  # noqa: UP046
                 )
             else:
                 raise
-        return self.fetch_via_scrape(*args, **kwargs)  # type: ignore[arg-type]
+        return self.fetch_via_scrape(*args, **kwargs)
 
     @abstractmethod
     def fetch_via_api(self, *args: object, **kwargs: object) -> T:
@@ -98,6 +98,18 @@ class DataFetcher(ABC, Generic[T]):  # noqa: UP046
         """Fetch data by scraping the HTML page."""
 
     # -- Shared helpers for subclasses --
+
+    def _scrape_get(self, url: str) -> httpx.Response:
+        """GET for scrape path with 404 handling."""
+        response = self._client.get(url)
+        if response.status_code == 404:
+            raise NotFoundError(
+                f"Not found: {url}",
+                method=FetchMethod.SCRAPE,
+                status_code=404,
+            )
+        response.raise_for_status()
+        return response
 
     def _api_get(self, url: str, **kwargs: object) -> httpx.Response:
         """GET with rate-limiter acquire/update and standard error handling."""

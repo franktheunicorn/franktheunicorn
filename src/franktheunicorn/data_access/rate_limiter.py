@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 import httpx
-from pyrate_limiter import Duration, Limiter, Rate, SQLiteBucket
+from pyrate_limiter import Duration, Limiter, Rate, SQLiteBucket  # type: ignore[attr-defined]
 
 logger = logging.getLogger(__name__)
 
