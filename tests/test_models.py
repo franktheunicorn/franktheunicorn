@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from django.core.exceptions import ValidationError
 from django.db import IntegrityError
 from django.utils import timezone
 from tests.factories import (
@@ -29,6 +30,10 @@ class TestProjectModel:
         assert str(project) == "apache/spark"
         assert project.full_name == "apache/spark"
         assert project.enabled is True
+
+    def test_str_delegates_to_full_name(self) -> None:
+        project = ProjectFactory(owner="org", repo="repo")
+        assert str(project) == project.full_name
 
     def test_unique_constraint(self) -> None:
         ProjectFactory(owner="apache", repo="spark")
@@ -125,6 +130,19 @@ class TestPullRequestModel:
         PullRequestFactory(project=db_project, number=3)
         assert db_project.pull_requests.count() == 3
 
+    def test_state_choices_valid(self, db_project: Project) -> None:
+        for state_val, _ in PullRequest.STATE_CHOICES:
+            pr = PullRequestFactory(project=db_project, state=state_val)
+            pr.full_clean()
+
+    def test_same_number_different_projects(self) -> None:
+        """Same PR number on different projects should not conflict."""
+        p1 = ProjectFactory(owner="org-a", repo="repo-a")
+        p2 = ProjectFactory(owner="org-b", repo="repo-b")
+        PullRequestFactory(project=p1, number=1)
+        PullRequestFactory(project=p2, number=1)
+        assert PullRequest.objects.count() == 2
+
 
 @pytest.mark.django_db
 class TestReviewDraftModel:
@@ -150,7 +168,6 @@ class TestReviewDraftModel:
         d1 = ReviewDraftFactory(pull_request=db_pr)
         d2 = ReviewDraftFactory(pull_request=db_pr)
         results = list(ReviewDraft.objects.filter(pull_request=db_pr))
-        # Ordered by -created_at, so most recent first
         assert results[0] == d2
         assert results[1] == d1
 
@@ -160,6 +177,26 @@ class TestReviewDraftModel:
         ReviewDraftFactory(pull_request=db_pr, status="rejected")
         assert db_pr.review_drafts.filter(status="pending").count() == 1
         assert db_pr.review_drafts.filter(status="accepted").count() == 1
+
+    def test_confidence_validation_too_high(self) -> None:
+        draft = ReviewDraftFactory.build(confidence=1.5)
+        with pytest.raises(ValidationError):
+            draft.full_clean()
+
+    def test_confidence_validation_negative(self) -> None:
+        draft = ReviewDraftFactory.build(confidence=-0.1)
+        with pytest.raises(ValidationError):
+            draft.full_clean()
+
+    def test_confidence_at_bounds(self) -> None:
+        for val in (0.0, 1.0):
+            draft = ReviewDraftFactory(confidence=val)
+            draft.full_clean()
+
+    def test_status_choices_valid(self) -> None:
+        for status_val, _ in ReviewDraft.STATUS_CHOICES:
+            draft = ReviewDraftFactory(status=status_val)
+            draft.full_clean()
 
 
 @pytest.mark.django_db
@@ -198,6 +235,15 @@ class TestAntiPatternModel:
         assert results[0] == ap_high
         assert results[1] == ap_low
 
+    def test_weight_validation_negative(self) -> None:
+        ap = AntiPatternFactory.build(weight=-0.5)
+        with pytest.raises(ValidationError):
+            ap.full_clean()
+
+    def test_weight_at_zero(self) -> None:
+        ap = AntiPatternFactory(weight=0.0)
+        ap.full_clean()
+
 
 @pytest.mark.django_db
 class TestOperatorActionModel:
@@ -221,6 +267,11 @@ class TestOperatorActionModel:
         results = list(OperatorAction.objects.all())
         assert results[0] == a2
         assert results[1] == a1
+
+    def test_action_choices_valid(self) -> None:
+        for action_val, _ in OperatorAction.ACTION_CHOICES:
+            action = OperatorActionFactory(action_type=action_val)
+            action.full_clean()
 
 
 @pytest.mark.django_db

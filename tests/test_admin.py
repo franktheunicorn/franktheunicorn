@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
+from django.contrib import admin
 from django.contrib.admin.sites import AdminSite
 from tests.factories import AntiPatternFactory
 
@@ -21,76 +24,84 @@ from franktheunicorn.core.models import (
     ReviewDraft,
 )
 
+ALL_MODELS = [Project, PullRequest, ReviewDraft, AntiPattern, OperatorAction]
 
+
+@pytest.mark.parametrize("model_class", ALL_MODELS, ids=lambda m: m.__name__)
 class TestAdminRegistration:
     """Verify all models are registered with the admin site."""
 
-    def test_project_registered(self) -> None:
-        from django.contrib import admin
-
-        assert Project in admin.site._registry
-
-    def test_pull_request_registered(self) -> None:
-        from django.contrib import admin
-
-        assert PullRequest in admin.site._registry
-
-    def test_review_draft_registered(self) -> None:
-        from django.contrib import admin
-
-        assert ReviewDraft in admin.site._registry
-
-    def test_anti_pattern_registered(self) -> None:
-        from django.contrib import admin
-
-        assert AntiPattern in admin.site._registry
-
-    def test_operator_action_registered(self) -> None:
-        from django.contrib import admin
-
-        assert OperatorAction in admin.site._registry
+    def test_model_registered(self, model_class: type) -> None:
+        assert model_class in admin.site._registry
 
 
+ADMIN_CONFIG = [
+    (
+        ProjectAdmin, Project,
+        {"list_display": ("owner", "repo", "enabled"),
+         "search_fields": ("owner", "repo")},
+    ),
+    (
+        PullRequestAdmin, PullRequest,
+        {"list_display": ("number", "title", "interest_score"),
+         "list_filter": ("state", "is_draft")},
+    ),
+    (
+        ReviewDraftAdmin, ReviewDraft,
+        {"list_display": ("pull_request", "file_path", "status"),
+         "list_filter": ("status",)},
+    ),
+    (
+        OperatorActionAdmin, OperatorAction,
+        {"list_display": ("action_type", "pull_request"),
+         "list_filter": ("action_type",)},
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("admin_cls", "model_cls", "expected"),
+    ADMIN_CONFIG,
+    ids=lambda x: x.__name__ if isinstance(x, type) else "",
+)
 class TestAdminConfig:
     """Verify admin classes have expected configuration."""
 
-    def test_project_admin_list_display(self) -> None:
-        admin = ProjectAdmin(Project, AdminSite())
-        assert "owner" in admin.list_display
-        assert "repo" in admin.list_display
-        assert "enabled" in admin.list_display
+    def test_list_display(
+        self, admin_cls: type, model_cls: type, expected: dict[str, Any]
+    ) -> None:
+        instance = admin_cls(model_cls, AdminSite())
+        for field in expected.get("list_display", ()):
+            assert field in instance.list_display
 
-    def test_project_admin_search_fields(self) -> None:
-        admin = ProjectAdmin(Project, AdminSite())
-        assert "owner" in admin.search_fields
-        assert "repo" in admin.search_fields
+    def test_list_filter(
+        self, admin_cls: type, model_cls: type, expected: dict[str, Any]
+    ) -> None:
+        instance = admin_cls(model_cls, AdminSite())
+        for field in expected.get("list_filter", ()):
+            assert field in instance.list_filter
 
-    def test_pull_request_admin_list_display(self) -> None:
-        admin = PullRequestAdmin(PullRequest, AdminSite())
-        assert "number" in admin.list_display
-        assert "title" in admin.list_display
-        assert "interest_score" in admin.list_display
+    def test_search_fields(
+        self, admin_cls: type, model_cls: type, expected: dict[str, Any]
+    ) -> None:
+        instance = admin_cls(model_cls, AdminSite())
+        for field in expected.get("search_fields", ()):
+            assert field in instance.search_fields
 
-    def test_pull_request_admin_list_filter(self) -> None:
-        admin = PullRequestAdmin(PullRequest, AdminSite())
-        assert "state" in admin.list_filter
-        assert "is_draft" in admin.list_filter
 
-    def test_review_draft_admin_list_filter(self) -> None:
-        admin = ReviewDraftAdmin(ReviewDraft, AdminSite())
-        assert "status" in admin.list_filter
-
-    def test_operator_action_admin_list_filter(self) -> None:
-        admin = OperatorActionAdmin(OperatorAction, AdminSite())
-        assert "action_type" in admin.list_filter
+class TestAntiPatternAdminDisplay:
+    """Test custom display methods on AntiPatternAdmin."""
 
     @pytest.mark.django_db
-    def test_anti_pattern_short_text(self) -> None:
-        admin = AntiPatternAdmin(AntiPattern, AdminSite())
-        short = AntiPatternFactory(pattern_text="short text")
-        assert admin.pattern_text_short(short) == "short text"
-        long_text = "x" * 100
-        long_ap = AntiPatternFactory(pattern_text=long_text)
-        result = admin.pattern_text_short(long_ap)
+    def test_short_text_not_truncated(self) -> None:
+        ap_admin = AntiPatternAdmin(AntiPattern, AdminSite())
+        ap = AntiPatternFactory(pattern_text="short text")
+        assert ap_admin.pattern_text_short(ap) == "short text"
+
+    @pytest.mark.django_db
+    def test_long_text_truncated(self) -> None:
+        ap_admin = AntiPatternAdmin(AntiPattern, AdminSite())
+        long_ap = AntiPatternFactory(pattern_text="x" * 100)
+        result = ap_admin.pattern_text_short(long_ap)
         assert result.endswith("...")
-        assert len(result) == 63  # 60 chars + "..."
+        assert len(result) == 63
