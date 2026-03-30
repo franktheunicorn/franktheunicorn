@@ -54,7 +54,6 @@ class TestProjectConfig:
         assert config.governance == "asf"
 
 
-
 class TestOperatorConfigValidation:
     def test_negative_poll_interval_rejected(self) -> None:
         with pytest.raises(ValidationError, match="poll_interval_seconds must be positive"):
@@ -98,7 +97,9 @@ class TestProjectConfigValidation:
         with pytest.raises(ValidationError, match="invalid characters"):
             ProjectConfig(owner="has spaces", repo="spark")
 
-    def test_unknown_governance_accepted_with_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+    def test_unknown_governance_accepted_with_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
         with caplog.at_level(logging.WARNING):
             config = ProjectConfig(owner="x", repo="y", governance="Unknown")
         assert config.governance == "unknown"  # lowercased
@@ -131,7 +132,6 @@ class TestProjectConfigValidation:
         assert "watched_paths and ignore_paths" not in caplog.text
 
 
-
 class TestConfigLoader:
     def test_load_operator_config_from_file(self, tmp_config_dir: Path) -> None:
         config = load_operator_config(tmp_config_dir / "operator.yaml")
@@ -152,7 +152,6 @@ class TestConfigLoader:
     def test_load_project_configs_missing_dir(self, tmp_path: Path) -> None:
         configs = load_project_configs(tmp_path / "nonexistent")
         assert configs == []
-
 
 
 class TestYAMLErrorHandling:
@@ -197,7 +196,6 @@ class TestYAMLErrorHandling:
         assert configs[0].owner == "apache"
 
 
-
 class TestConvenienceFunctions:
     def test_get_operator_config(self, tmp_config_dir: Path, settings: object) -> None:
         settings.FRANK_OPERATOR_CONFIG = str(tmp_config_dir / "operator.yaml")  # type: ignore[attr-defined]
@@ -220,7 +218,6 @@ class TestConvenienceFunctions:
         settings.FRANK_PROJECTS_DIR = str(tmp_config_dir / "projects")  # type: ignore[attr-defined]
         config = get_project_config("nonexistent")
         assert config is None
-
 
 
 class TestValidateYamlFile:

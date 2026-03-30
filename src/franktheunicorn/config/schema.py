@@ -13,9 +13,7 @@ from pydantic import ValidationError
 # Must start and end with alphanumeric.
 GITHUB_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?$")
 
-KNOWN_GOVERNANCE_VALUES: frozenset[str] = frozenset(
-    {"standard", "asf", "personal", "corporate"}
-)
+KNOWN_GOVERNANCE_VALUES: frozenset[str] = frozenset({"standard", "asf", "personal", "corporate"})
 
 
 def validate_yaml_file(
