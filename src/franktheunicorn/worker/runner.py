@@ -118,6 +118,9 @@ def _run_cycle(
                     # Run CodeRabbit if enabled and no CR drafts exist yet.
                     if cr_config is not None:
                         _run_coderabbit_for_pr(pr, cr_config)
+
+                # Fetch dependency changelogs if PR touches dependency files
+                _fetch_dependency_changelogs(pr, pc)
         except Exception:
             logger.exception("Error polling %s/%s", pc.owner, pc.repo)
 
@@ -189,6 +192,46 @@ def _resolve_base_ref(repo_path: Path, pr: PullRequest) -> str | None:
         repo_path,
     )
     return None
+
+
+def _fetch_dependency_changelogs(pr: object, pc: object) -> None:
+    """Fetch dependency changelogs if the PR touches dependency files.
+
+    Gated by a cheap filename check to avoid fetching diffs unnecessarily.
+    Silently skips if no dependency files are changed.
+    """
+    from franktheunicorn.config.models import ProjectConfig
+    from franktheunicorn.core.models import PullRequest as PullRequestModel
+    from franktheunicorn.data_access.dependencies.registry import is_dependency_file
+
+    if not isinstance(pr, PullRequestModel) or not isinstance(pc, ProjectConfig):
+        return
+
+    changed_files: list[str] = pr.changed_files or []
+    if not any(is_dependency_file(f) for f in changed_files):
+        return
+
+    # Skip if we already have dependency changes for this PR
+    if pr.dependency_changes.exists():
+        return
+
+    try:
+        import httpx
+
+        from franktheunicorn.data_access.dependencies.service import (
+            detect_and_fetch_changelogs,
+        )
+        from franktheunicorn.data_access.github.diff_fetcher import DiffFetcher
+
+        with httpx.Client() as http_client:
+            diff_fetcher = DiffFetcher(client=http_client)
+            diff = diff_fetcher.fetch(pc.owner, pc.repo, pr.number)
+            detect_and_fetch_changelogs(pr, diff, http_client)
+    except Exception:
+        logger.exception(
+            "Error fetching dependency changelogs for PR #%d",
+            pr.number,
+        )
 
 
 if __name__ == "__main__":

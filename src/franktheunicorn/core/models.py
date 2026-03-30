@@ -143,6 +143,39 @@ class AntiPattern(models.Model):
         return f"AntiPattern: {self.pattern_text[:60]}"
 
 
+class DependencyChange(models.Model):
+    """A dependency version change detected in a PR, with optional changelog data.
+
+    Created when a PR modifies dependency files (requirements.txt, pyproject.toml, etc.).
+    Changelog data is fetched from PyPI + GitHub and stored for review context.
+    """
+
+    pull_request = models.ForeignKey(
+        PullRequest, on_delete=models.CASCADE, related_name="dependency_changes"
+    )
+    package_name = models.CharField(max_length=255)
+    ecosystem = models.CharField(max_length=50)  # "python", "java", "rust"
+    old_version = models.CharField(max_length=100, blank=True, default="")
+    new_version = models.CharField(max_length=100, blank=True, default="")
+    source_file = models.CharField(max_length=500)
+    changelog_url = models.URLField(max_length=1000, blank=True, default="")
+    changelog_text = models.TextField(blank=True, default="")
+    repository_url = models.URLField(max_length=1000, blank=True, default="")
+    breaking_changes_detected = models.BooleanField(default=False)
+    deprecations_detected = models.BooleanField(default=False)
+    changelog_fetch_error = models.CharField(max_length=500, blank=True, default="")
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        unique_together = [("pull_request", "package_name", "source_file")]
+        ordering = ["package_name"]
+
+    def __str__(self) -> str:
+        old = self.old_version or "new"
+        new = self.new_version or "removed"
+        return f"{self.package_name}: {old} → {new}"
+
+
 class OperatorAction(models.Model):
     """
     Log of operator actions (accept/reject/edit a draft, dismiss a PR, etc.).

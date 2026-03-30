@@ -29,6 +29,55 @@
 </dl>
 {% endif %}
 
+{% if dep_changes %}
+<h3 style="margin-top: 1.5rem;">Dependency Changes</h3>
+<table class="dep-changes-table" style="width: 100%; border-collapse: collapse; font-size: 0.9rem; margin-top: 0.5rem;">
+    <thead>
+        <tr style="border-bottom: 2px solid #ddd; text-align: left;">
+            <th style="padding: 0.5rem;">Package</th>
+            <th style="padding: 0.5rem;">Old</th>
+            <th style="padding: 0.5rem;">New</th>
+            <th style="padding: 0.5rem;">Source</th>
+            <th style="padding: 0.5rem;">Changelog</th>
+            <th style="padding: 0.5rem;">Flags</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for dep in dep_changes %}
+        <tr style="border-bottom: 1px solid #eee;">
+            <td style="padding: 0.5rem;"><strong>{{ dep.package_name }}</strong></td>
+            <td style="padding: 0.5rem;">{{ dep.old_version|default:"—" }}</td>
+            <td style="padding: 0.5rem;">{{ dep.new_version|default:"—" }}</td>
+            <td style="padding: 0.5rem; font-size: 0.8rem;">{{ dep.source_file }}</td>
+            <td style="padding: 0.5rem;">
+                {% if dep.changelog_url %}
+                <a href="{{ dep.changelog_url }}" target="_blank" rel="noopener noreferrer">View ↗</a>
+                {% elif dep.changelog_fetch_error %}
+                <span style="color: #999; font-size: 0.8rem;">{{ dep.changelog_fetch_error }}</span>
+                {% else %}
+                —
+                {% endif %}
+            </td>
+            <td style="padding: 0.5rem;">
+                {% if dep.breaking_changes_detected %}<span style="background: #fee; color: #c00; padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.75rem;">breaking</span>{% endif %}
+                {% if dep.deprecations_detected %}<span style="background: #fff3e0; color: #e65100; padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.75rem;">deprecations</span>{% endif %}
+            </td>
+        </tr>
+        {% if dep.changelog_text %}
+        <tr>
+            <td colspan="6" style="padding: 0.5rem;">
+                <details>
+                    <summary style="cursor: pointer; font-size: 0.8rem; color: #666;">Show release notes</summary>
+                    <div style="margin-top: 0.5rem; padding: 0.75rem; background: #f9f9f9; border-radius: 4px; font-size: 0.85rem; white-space: pre-wrap;">{{ dep.changelog_text|truncatewords:500 }}</div>
+                </details>
+            </td>
+        </tr>
+        {% endif %}
+        {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+
 <h3 style="margin-top: 1.5rem;">Draft Reviews</h3>
 {% if drafts %}
 <div class="draft-list">

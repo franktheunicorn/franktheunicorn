@@ -1,0 +1,14 @@
+{
+  "info": {
+    "name": "pyarrow",
+    "version": "1.0.0",
+    "summary": "Python library for Apache Arrow",
+    "home_page": null,
+    "project_urls": {
+      "Documentation": "https://arrow.apache.org/docs/python",
+      "Homepage": "https://arrow.apache.org/",
+      "Issues": "https://github.com/apache/arrow/issues",
+      "Repository": "https://github.com/apache/arrow"
+    }
+  }
+}

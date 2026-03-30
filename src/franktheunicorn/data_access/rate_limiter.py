@@ -30,6 +30,7 @@ class GitHubRateLimiter:
         self,
         db_path: str | Path,
         requests_per_hour: int = _DEFAULT_REQUESTS_PER_HOUR,
+        table_name: str = "github_rate_limit",
     ) -> None:
         self._db_path = Path(db_path)
         if self._db_path.suffix != ".sqlite":
@@ -41,7 +42,7 @@ class GitHubRateLimiter:
         rate = Rate(requests_per_hour, Duration.HOUR)
         bucket = SQLiteBucket.init_from_file(
             rates=[rate],
-            table="github_rate_limit",
+            table=table_name,
             db_path=str(self._db_path),
             create_new_table=True,
         )
