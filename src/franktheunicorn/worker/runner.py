@@ -18,8 +18,13 @@ import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import django
+
+if TYPE_CHECKING:
+    from franktheunicorn.config.models import CodeRabbitConfig
+    from franktheunicorn.core.models import PullRequest
 
 logger = logging.getLogger(__name__)
 
@@ -64,9 +69,7 @@ def run_worker() -> None:
 
     try:
         while True:
-            _run_cycle(
-                client, project_configs, operator_config.github_username, operator_config
-            )
+            _run_cycle(client, project_configs, operator_config.github_username, operator_config)
             logger.info("Sleeping %ds until next poll...", poll_interval)
             time.sleep(poll_interval)
     except KeyboardInterrupt:
@@ -82,7 +85,7 @@ def _run_cycle(
     operator_config: object | None = None,
 ) -> None:
     """Run one polling cycle across all configured projects."""
-    from franktheunicorn.config.models import CodeRabbitConfig, OperatorConfig, ProjectConfig
+    from franktheunicorn.config.models import OperatorConfig, ProjectConfig
     from franktheunicorn.github.poller import poll_project
     from franktheunicorn.review.drafter import draft_review
 
@@ -120,19 +123,14 @@ def _run_cycle(
 
 
 def _run_coderabbit_for_pr(
-    pr: object,
-    cr_config: object,
+    pr: PullRequest,
+    cr_config: CodeRabbitConfig,
 ) -> None:
     """Run CodeRabbit CLI review for a single PR. Never raises."""
-    from franktheunicorn.config.models import CodeRabbitConfig
-    from franktheunicorn.core.models import PullRequest
     from franktheunicorn.review.coderabbit import (
         create_drafts_from_coderabbit,
         run_coderabbit_review,
     )
-
-    if not isinstance(pr, PullRequest) or not isinstance(cr_config, CodeRabbitConfig):
-        return
 
     try:
         # Derive repo clone path from the project. The worker is expected
@@ -146,10 +144,15 @@ def _run_coderabbit_for_pr(
             )
             return
 
-        # Use the diff_url's base info or fall back to "HEAD~1".
-        base_commit = "HEAD~1"
+        # TODO(v1.5): Determine proper merge base from PR metadata once we
+        # have local checkout support. For now, require the repo clone to be
+        # checked out to the PR branch with a meaningful base available.
+        # We skip rather than guess with HEAD~1, which would produce garbage.
+        base_ref = _resolve_base_ref(repo_path, pr)
+        if base_ref is None:
+            return
 
-        findings = run_coderabbit_review(repo_path, base_commit, cr_config)
+        findings = run_coderabbit_review(repo_path, base_ref, cr_config)
         if findings:
             drafts = create_drafts_from_coderabbit(pr, findings, pr.project)
             logger.info(
@@ -160,6 +163,32 @@ def _run_coderabbit_for_pr(
             )
     except Exception:
         logger.exception("CodeRabbit failed for PR #%d; continuing.", pr.number)
+
+
+def _resolve_base_ref(repo_path: Path, pr: PullRequest) -> str | None:
+    """
+    Try to determine the base ref for CodeRabbit diffing.
+
+    Returns ``None`` (and logs) when we can't determine a sensible base.
+    """
+    import subprocess
+
+    for candidate in ("origin/main", "origin/master"):
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", candidate],
+            capture_output=True,
+            text=True,
+            cwd=str(repo_path),
+        )
+        if result.returncode == 0:
+            return candidate
+
+    logger.debug(
+        "Could not determine base ref for PR #%d in %s; skipping CodeRabbit.",
+        pr.number,
+        repo_path,
+    )
+    return None
 
 
 if __name__ == "__main__":

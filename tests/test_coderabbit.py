@@ -62,6 +62,20 @@ class TestParsePromptOnlyOutput:
         assert findings[0].severity == "medium"
         assert findings[0].suggestion == "Delete line 10."
 
+    def test_unparseable_block_captured_as_fallback(self) -> None:
+        """Substantial blocks that don't match the header pattern are still captured."""
+        output = (
+            "This block has no standard header format but contains\n"
+            "useful review feedback that should not be silently dropped\n"
+            "because the parser couldn't match the regex."
+        )
+        findings = parse_prompt_only_output(output)
+        assert len(findings) == 1
+        assert findings[0].file_path == ""
+        assert findings[0].line_number is None
+        assert findings[0].severity == "medium"
+        assert "useful review feedback" in findings[0].body
+
 
 # ---------------------------------------------------------------------------
 # CLI runner tests (mocked subprocess)
@@ -126,7 +140,10 @@ class TestCreateDraftsFromCodeRabbit:
         drafts = create_drafts_from_coderabbit(db_pr, findings)
         assert len(drafts) == 1
         assert drafts[0].source == "coderabbit"
-        assert drafts[0].comment_body.startswith("[CodeRabbit] ")
+        assert "Bug found" in drafts[0].comment_body
+        assert (
+            "[CodeRabbit]" not in drafts[0].comment_body
+        )  # attribution via source field, not prefix
         assert drafts[0].suggestion == "Fix it."
         assert drafts[0].status == "pending"
 
@@ -142,9 +159,7 @@ class TestCreateDraftsFromCodeRabbit:
         confidences = [d.confidence for d in drafts]
         assert confidences == [0.9, 0.8, 0.6, 0.3, 0.5]
 
-    def test_anti_pattern_suppression(
-        self, db_pr: PullRequest, db_project: Project
-    ) -> None:
+    def test_anti_pattern_suppression(self, db_pr: PullRequest, db_project: Project) -> None:
         AntiPattern.objects.create(
             pattern_text="nit:",
             project=db_project,
@@ -176,3 +191,42 @@ class TestCreateDraftsFromCodeRabbit:
     def test_empty_findings(self, db_pr: PullRequest) -> None:
         drafts = create_drafts_from_coderabbit(db_pr, [])
         assert drafts == []
+
+
+# ---------------------------------------------------------------------------
+# Worker integration test
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestWorkerCodeRabbitIntegration:
+    @patch("franktheunicorn.worker.runner._resolve_base_ref", return_value="origin/main")
+    @patch("franktheunicorn.review.coderabbit.subprocess.run")
+    def test_run_coderabbit_for_pr_creates_drafts(
+        self,
+        mock_subprocess: Any,
+        mock_resolve: Any,
+        db_pr: PullRequest,
+        tmp_path: Path,
+    ) -> None:
+        from franktheunicorn.core.models import ReviewDraft
+        from franktheunicorn.worker.runner import _run_coderabbit_for_pr
+
+        # Set up the repo path so it exists.
+        repo_path = tmp_path / ".review-agent" / "repos" / db_pr.project.full_name
+        repo_path.mkdir(parents=True)
+
+        mock_subprocess.return_value = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=(FIXTURES_DIR / "coderabbit_output.txt").read_text(),
+            stderr="",
+        )
+
+        config = CodeRabbitConfig(enabled=True, cli_path="coderabbit")
+
+        with patch("franktheunicorn.worker.runner.Path.home", return_value=tmp_path):
+            _run_coderabbit_for_pr(db_pr, config)
+
+        cr_drafts = ReviewDraft.objects.filter(pull_request=db_pr, source="coderabbit")
+        assert cr_drafts.count() == 3

@@ -26,8 +26,12 @@ OUTPUT=""
 
 echo "Running pre-push checks (ruff, mypy, pytest)..." >&2
 
+# Use python -m to ensure tools run in the project's Python environment
+# (bare mypy/pytest may resolve to uv-managed isolated installs that
+# lack django-stubs and project deps).
+
 # 1. Ruff lint
-RESULT=$(ruff check src/ tests/ 2>&1) || {
+RESULT=$(python -m ruff check src/ tests/ 2>&1) || {
     FAILED=1
     OUTPUT+="=== ruff check FAILED ===
 $RESULT
@@ -36,7 +40,7 @@ $RESULT
 }
 
 # 2. Ruff format
-RESULT=$(ruff format --check src/ tests/ 2>&1) || {
+RESULT=$(python -m ruff format --check src/ tests/ 2>&1) || {
     FAILED=1
     OUTPUT+="=== ruff format --check FAILED ===
 $RESULT
@@ -45,7 +49,7 @@ $RESULT
 }
 
 # 3. mypy
-RESULT=$(mypy src/franktheunicorn/ 2>&1) || {
+RESULT=$(python -m mypy src/franktheunicorn/ 2>&1) || {
     FAILED=1
     OUTPUT+="=== mypy FAILED ===
 $RESULT
@@ -54,7 +58,7 @@ $RESULT
 }
 
 # 4. pytest (no coverage gating — that's CI's job)
-RESULT=$(pytest -x --tb=short 2>&1) || {
+RESULT=$(python -m pytest -x --tb=short 2>&1) || {
     FAILED=1
     OUTPUT+="=== pytest FAILED ===
 $RESULT

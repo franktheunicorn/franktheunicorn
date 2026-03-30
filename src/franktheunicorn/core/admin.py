@@ -44,8 +44,8 @@ class PullRequestAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
 class ReviewDraftAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
     """Admin for LLM-generated review drafts."""
 
-    list_display = ("pull_request", "file_path", "status", "confidence", "created_at")
-    list_filter = ("status",)
+    list_display = ("pull_request", "file_path", "source", "status", "confidence", "created_at")
+    list_filter = ("status", "source")
     search_fields = ("file_path", "comment_body")
     readonly_fields = ("created_at", "updated_at")
 

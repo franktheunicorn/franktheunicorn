@@ -87,9 +87,7 @@ def run_coderabbit_review(
             timeout=_CLI_TIMEOUT_SECONDS,
         )
     except FileNotFoundError:
-        logger.warning(
-            "CodeRabbit CLI not found at '%s'; skipping review.", config.cli_path
-        )
+        logger.warning("CodeRabbit CLI not found at '%s'; skipping review.", config.cli_path)
         return []
     except subprocess.TimeoutExpired:
         logger.warning(
@@ -141,8 +139,18 @@ def _parse_single_block(block: str) -> CodeRabbitFinding | None:
 
     match = _HEADER_PATTERN.match(header_line)
     if not match:
-        # Not a finding block (e.g. "Review completed" summary).
-        return None
+        # Short blocks are likely summary lines ("Review completed").
+        if len(block) < 40:
+            return None
+        # Unparseable but substantial block — capture rather than drop.
+        logger.debug("Could not parse CodeRabbit header: %s", header_line[:80])
+        return CodeRabbitFinding(
+            file_path="",
+            line_number=None,
+            severity="medium",
+            title=header_line[:120],
+            body=block,
+        )
 
     file_path = match.group("file_path")
     line_number = int(match.group("line"))
@@ -153,9 +161,7 @@ def _parse_single_block(block: str) -> CodeRabbitFinding | None:
 
     # Split suggestion out of the body if present.
     suggestion = ""
-    suggestion_match = re.split(
-        r"\*\*Suggestion:\*\*\s*", body_text, maxsplit=1
-    )
+    suggestion_match = re.split(r"\*\*Suggestion:\*\*\s*", body_text, maxsplit=1)
     if len(suggestion_match) == 2:
         body_text = suggestion_match[0].strip()
         suggestion = suggestion_match[1].strip()
@@ -200,7 +206,7 @@ def create_drafts_from_coderabbit(
             pull_request=pr,
             file_path=finding.file_path,
             line_number=finding.line_number,
-            comment_body=f"[CodeRabbit] {finding.body}",
+            comment_body=finding.body,
             suggestion=finding.suggestion,
             confidence=confidence,
             status="pending",
