@@ -5,33 +5,15 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
+from tests.conftest import make_pr_context
+
 from franktheunicorn.config.models import LLMBackendConfig
 from franktheunicorn.review.backends import get_backend
 from franktheunicorn.review.backends.base import (
-    PRContext,
     ReviewFinding,
     parse_llm_response,
 )
 from franktheunicorn.review.backends.stub_backend import StubBackend
-
-
-def _make_pr_context(**overrides: object) -> PRContext:
-    defaults = {
-        "pr_title": "Fix flaky test",
-        "pr_body": "Fixes race condition",
-        "pr_author": "alice",
-        "pr_number": 42,
-        "project_name": "apache/spark",
-        "review_context": "ASF governance",
-        "review_style": "direct but kind",
-        "tone": "constructive",
-        "test_expectations": "tests required",
-        "governance": "asf",
-        "anti_patterns": [],
-    }
-    defaults.update(overrides)
-    return PRContext(**defaults)  # type: ignore[arg-type]
-
 
 _SAMPLE_DIFF = """\
 diff --git a/src/main.py b/src/main.py
@@ -151,7 +133,7 @@ class TestStubBackend:
     def test_generates_findings(self) -> None:
         config = LLMBackendConfig(provider="stub")
         backend = StubBackend(config)
-        ctx = _make_pr_context()
+        ctx = make_pr_context()
         findings = backend.generate_findings(_SAMPLE_DIFF, ctx)
         assert len(findings) > 0
         assert all(isinstance(f, ReviewFinding) for f in findings)
@@ -159,7 +141,7 @@ class TestStubBackend:
     def test_deterministic(self) -> None:
         config = LLMBackendConfig(provider="stub")
         backend = StubBackend(config)
-        ctx = _make_pr_context()
+        ctx = make_pr_context()
         f1 = backend.generate_findings(_SAMPLE_DIFF, ctx)
         f2 = backend.generate_findings(_SAMPLE_DIFF, ctx)
         assert len(f1) == len(f2)
@@ -168,7 +150,7 @@ class TestStubBackend:
     def test_extracts_file_paths_from_diff(self) -> None:
         config = LLMBackendConfig(provider="stub")
         backend = StubBackend(config)
-        ctx = _make_pr_context()
+        ctx = make_pr_context()
         findings = backend.generate_findings(_SAMPLE_DIFF, ctx)
         assert findings[0].file_path == "src/main.py"
 
@@ -179,7 +161,7 @@ class TestClaudeBackend:
         from franktheunicorn.review.backends.claude_backend import ClaudeBackend
 
         backend = ClaudeBackend(config)
-        ctx = _make_pr_context()
+        ctx = make_pr_context()
         findings = backend.generate_findings(_SAMPLE_DIFF, ctx)
         assert findings == []
 
@@ -189,7 +171,7 @@ class TestClaudeBackend:
         from franktheunicorn.review.backends.claude_backend import ClaudeBackend
 
         backend = ClaudeBackend(config)
-        ctx = _make_pr_context()
+        ctx = make_pr_context()
 
         mock_response = MagicMock()
         mock_response.content = [
@@ -224,7 +206,7 @@ class TestOpenAIBackend:
         from franktheunicorn.review.backends.openai_backend import OpenAIBackend
 
         backend = OpenAIBackend(config)
-        ctx = _make_pr_context()
+        ctx = make_pr_context()
         findings = backend.generate_findings(_SAMPLE_DIFF, ctx)
         assert findings == []
 
@@ -234,7 +216,7 @@ class TestOpenAIBackend:
         from franktheunicorn.review.backends.openai_backend import OpenAIBackend
 
         backend = OpenAIBackend(config)
-        ctx = _make_pr_context()
+        ctx = make_pr_context()
 
         mock_choice = MagicMock()
         mock_choice.message.content = json.dumps(
@@ -264,7 +246,7 @@ class TestGeminiBackend:
             from franktheunicorn.review.backends.gemini_backend import GeminiBackend
 
             backend = GeminiBackend(config)
-            ctx = _make_pr_context()
+            ctx = make_pr_context()
             findings = backend.generate_findings(_SAMPLE_DIFF, ctx)
             assert findings == []
 
@@ -276,7 +258,7 @@ class TestOllamaBackend:
         from franktheunicorn.review.backends.ollama_backend import OllamaBackend
 
         backend = OllamaBackend(config)
-        ctx = _make_pr_context()
+        ctx = make_pr_context()
 
         mock_response = MagicMock()
         mock_response.message.content = json.dumps(
