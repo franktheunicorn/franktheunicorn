@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+import logging
+
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from franktheunicorn.config.schema import GITHUB_NAME_PATTERN, KNOWN_GOVERNANCE_VALUES
+
+logger = logging.getLogger(__name__)
 
 
 class OperatorConfig(BaseModel):
@@ -14,6 +20,23 @@ class OperatorConfig(BaseModel):
     poll_interval_seconds: int | None = None
     digest_email: str = ""
     digest_enabled: bool = False
+
+    @field_validator("poll_interval_seconds")
+    @classmethod
+    def poll_interval_must_be_positive(cls, v: int | None) -> int | None:
+        if v is not None and v <= 0:
+            msg = "poll_interval_seconds must be positive"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("github_username")
+    @classmethod
+    def github_username_valid(cls, v: str) -> str:
+        v = v.strip()
+        if v and not GITHUB_NAME_PATTERN.match(v):
+            msg = "github_username contains invalid characters"
+            raise ValueError(msg)
+        return v
 
 
 class ProjectConfig(BaseModel):
@@ -29,6 +52,41 @@ class ProjectConfig(BaseModel):
     frequent_contributors: list[str] = Field(default_factory=list)
     governance: str = "standard"
     enabled: bool = True
+
+    @field_validator("owner", "repo")
+    @classmethod
+    def name_must_be_valid(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            msg = "must not be empty"
+            raise ValueError(msg)
+        if not GITHUB_NAME_PATTERN.match(v):
+            msg = "contains invalid characters"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("governance")
+    @classmethod
+    def governance_normalize(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in KNOWN_GOVERNANCE_VALUES:
+            logger.warning(
+                "Unknown governance value '%s'; known values: %s",
+                v,
+                ", ".join(sorted(KNOWN_GOVERNANCE_VALUES)),
+            )
+        return v
+
+    @model_validator(mode="after")
+    def warn_overlapping_paths(self) -> ProjectConfig:
+        overlap = set(self.watched_paths) & set(self.ignore_paths)
+        if overlap:
+            logger.warning(
+                "Project %s has paths in both watched_paths and ignore_paths: %s",
+                self.full_name,
+                ", ".join(sorted(overlap)),
+            )
+        return self
 
     @property
     def full_name(self) -> str:
