@@ -10,45 +10,48 @@
 # Both services share the same SQLite database via a mounted volume.
 # By default, mock mode is enabled so no GitHub token is needed.
 
+x-common: &common
+  volumes:
+    - ./data:/app/data
+    - ./config:/app/config
+  environment: &common-env
+    FRANK_DATA_DIR: /app/data
+    FRANK_MOCK_MODE: ${FRANK_MOCK_MODE:-true}
+    FRANK_GITHUB_TOKEN: ${FRANK_GITHUB_TOKEN:-}
+    FRANK_OPERATOR_CONFIG: /app/config/examples/operator.yaml
+    FRANK_PROJECTS_DIR: /app/config/examples/projects
+    DJANGO_DEBUG: "true"
+
 services:
   web:
+    <<: *common
     build:
       context: .
-      dockerfile: docker/Dockerfile.web
+      dockerfile: docker/Dockerfile
+      target: web
     ports:
       - "8000:8000"
-    volumes:
-      - ./data:/app/data
-      - ./config:/app/config
-    environment:
-      - FRANK_DATA_DIR=/app/data
-      - FRANK_MOCK_MODE=${FRANK_MOCK_MODE:-true}
-      - FRANK_GITHUB_TOKEN=${FRANK_GITHUB_TOKEN:-}
-      - FRANK_OPERATOR_CONFIG=/app/config/examples/operator.yaml
-      - FRANK_PROJECTS_DIR=/app/config/examples/projects
-      - DJANGO_DEBUG=true
-    # Run migrations before starting the server
+    # Web runs migrations; worker waits for web to be healthy before starting.
     command: >
       sh -c "python manage.py migrate --run-syncdb &&
              python manage.py runserver 0.0.0.0:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
 
   worker:
+    <<: *common
     build:
       context: .
-      dockerfile: docker/Dockerfile.worker
-    volumes:
-      - ./data:/app/data
-      - ./config:/app/config
+      dockerfile: docker/Dockerfile
+      target: worker
     environment:
-      - FRANK_DATA_DIR=/app/data
-      - FRANK_MOCK_MODE=${FRANK_MOCK_MODE:-true}
-      - FRANK_GITHUB_TOKEN=${FRANK_GITHUB_TOKEN:-}
-      - FRANK_OPERATOR_CONFIG=/app/config/examples/operator.yaml
-      - FRANK_PROJECTS_DIR=/app/config/examples/projects
-      - FRANK_POLL_INTERVAL=${FRANK_POLL_INTERVAL:-300}
-    # Run migrations before starting the worker
-    command: >
-      sh -c "python manage.py migrate --run-syncdb &&
-             python -m franktheunicorn.worker.runner"
+      <<: *common-env
+      FRANK_POLL_INTERVAL: ${FRANK_POLL_INTERVAL:-300}
+    command: python -m franktheunicorn.worker.runner
     depends_on:
-      - web
+      web:
+        condition: service_healthy

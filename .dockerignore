@@ -28,6 +28,8 @@ data/
 
 # Dev files
 scripts/
+# docker/ is excluded because Dockerfiles are passed via -f, not COPY'd.
+# If adding files under docker/ that need to be COPY'd, remove this line.
 docker/
 docs/
 *.md
