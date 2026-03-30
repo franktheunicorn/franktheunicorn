@@ -22,7 +22,8 @@ _TEMPLATES = [
     "This looks good overall. One minor suggestion: could the variable name be more descriptive?",
     "Nice improvement! Have you considered the edge case where the input is empty?",
     "The logic here could be simplified. Would you be open to a small refactor?",
-    "This change touches a critical path — might be worth adding a comment explaining the reasoning.",
+    "This change touches a critical path — might be worth adding a comment explaining"
+    " the reasoning.",
 ]
 
 

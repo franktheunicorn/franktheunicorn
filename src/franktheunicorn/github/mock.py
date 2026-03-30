@@ -85,7 +85,10 @@ def _builtin_demo_pulls(owner: str, repo: str) -> list[dict[str, Any]]:
             "state": "open",
             "html_url": f"https://github.com/{owner}/{repo}/pull/43",
             "diff_url": f"https://github.com/{owner}/{repo}/pull/43.diff",
-            "body": "Adds a new connector for reading from Parquet files.\n\nThis is my first contribution!",
+            "body": (
+                "Adds a new connector for reading from Parquet files."
+                "\n\nThis is my first contribution!"
+            ),
             "labels": [{"name": "feature"}, {"name": "new-contributor"}],
             "requested_reviewers": [],
             "draft": False,

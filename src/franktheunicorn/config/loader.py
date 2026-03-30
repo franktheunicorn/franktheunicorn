@@ -17,7 +17,7 @@ def load_operator_config(path: str | Path) -> OperatorConfig:
     """Load operator config from a YAML file. Returns defaults if file doesn't exist."""
     p = Path(path)
     try:
-        with p.open() as f:
+        with p.open(encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
         return OperatorConfig(**data)
     except FileNotFoundError:
@@ -39,7 +39,7 @@ def load_project_configs(directory: str | Path) -> list[ProjectConfig]:
     configs: list[ProjectConfig] = []
     for yaml_file in sorted(f for f in d.iterdir() if f.suffix in {".yaml", ".yml"}):
         try:
-            with yaml_file.open() as f:
+            with yaml_file.open(encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
             configs.append(ProjectConfig(**data))
         except yaml.YAMLError:
@@ -68,6 +68,6 @@ def get_project_config(name: str) -> ProjectConfig | None:
 
     configs = load_project_configs(settings.FRANK_PROJECTS_DIR)
     for config in configs:
-        if f"{config.owner}-{config.repo}" == name or config.full_name == name:
+        if name in (f"{config.owner}-{config.repo}", config.full_name):
             return config
     return None

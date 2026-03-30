@@ -91,6 +91,4 @@ class ReviewFetcher(DataFetcher[PRReview]):
                 )
             )
 
-        return PRReview(
-            fetched_via=FetchMethod.SCRAPE, pr_number=pr_number, reviews=tuple(reviews)
-        )
+        return PRReview(fetched_via=FetchMethod.SCRAPE, pr_number=pr_number, reviews=tuple(reviews))

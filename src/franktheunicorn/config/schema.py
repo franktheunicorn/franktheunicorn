@@ -28,7 +28,7 @@ def validate_yaml_file(
 
     p = Path(path)
     try:
-        with p.open() as f:
+        with p.open(encoding="utf-8") as f:
             data = yaml.safe_load(f)
     except FileNotFoundError:
         return [f"File not found: {p}"]
