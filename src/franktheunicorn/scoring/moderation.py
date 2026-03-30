@@ -10,7 +10,7 @@ Pure functions — no Django imports.
 
 from __future__ import annotations
 
-from franktheunicorn.scoring.signals import LARGE_PR_THRESHOLD, is_likely_bot
+from franktheunicorn.scoring.signals import LARGE_PR_THRESHOLD, _lowered_set, is_likely_bot
 
 # Minimum body length to avoid "low_context" flag.
 _MIN_BODY_LENGTH: int = 50
@@ -75,7 +75,7 @@ def compute_moderation_flags(
 
     # new_contributor
     if known_authors is not None and author:
-        is_known = author.lower() in [a.lower() for a in known_authors]
+        is_known = author.lower() in _lowered_set(known_authors)
         if not is_known and not is_likely_bot(author):
             flags.append("new_contributor")
 

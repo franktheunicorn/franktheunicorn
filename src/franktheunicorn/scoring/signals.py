@@ -42,6 +42,11 @@ LARGE_PR_THRESHOLD: int = 500  # additions + deletions
 # ---------------------------------------------------------------------------
 
 
+def _lowered_set(items: list[str]) -> set[str]:
+    """Build a lowercase set for case-insensitive membership checks."""
+    return {s.lower() for s in items}
+
+
 def is_likely_bot(author: str) -> bool:
     """Check if an author looks like a bot account."""
     lowered = author.lower()
@@ -79,8 +84,7 @@ def score_review_requested(
     operator_username: str,
 ) -> float | None:
     """Operator was explicitly requested as a reviewer."""
-    reviewers = [r.lower() for r in requested_reviewers] if requested_reviewers else []
-    if operator_username.lower() in reviewers:
+    if operator_username.lower() in _lowered_set(requested_reviewers or []):
         return WEIGHTS["review_requested"]
     return None
 
@@ -103,7 +107,7 @@ def score_frequent_contributor(
     frequent_contributors: list[str],
 ) -> float | None:
     """Author is on the project's frequent-contributors list."""
-    if author.lower() in [c.lower() for c in frequent_contributors]:
+    if author.lower() in _lowered_set(frequent_contributors):
         return WEIGHTS["frequent_contributor"]
     return None
 
@@ -120,13 +124,14 @@ def score_new_contributor(
     *not* the operator, and has no prior PRs in the project
     (represented by ``known_authors``).
     """
+    author_lower = author.lower()
     if is_likely_bot(author):
         return None
-    if author.lower() in [c.lower() for c in frequent_contributors]:
+    if author_lower in _lowered_set(frequent_contributors):
         return None
-    if author.lower() == operator_username.lower():
+    if author_lower == operator_username.lower():
         return None
-    if author.lower() in [a.lower() for a in known_authors]:
+    if author_lower in _lowered_set(known_authors):
         return None
     return WEIGHTS["new_contributor"]
 
