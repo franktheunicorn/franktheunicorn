@@ -1,5 +1,6 @@
 # franktheunicorn operator config
 # This is the top-level config for the person running this tool.
+# Run `python manage.py setup_llm` for interactive setup.
 
 # Your GitHub username — used for "operator is author" scoring and review attribution
 github_username: "holdenk"
@@ -17,7 +18,44 @@ poll_interval_seconds: 300
 digest_email: ""
 digest_enabled: false
 
-# CodeRabbit CLI integration (v1.5)
+# --- LLM Backend Configuration ---
+# Uncomment ONE provider block below, or run: python manage.py setup_llm
+#
+# Option 1: Anthropic Claude (recommended for quality)
+# llm:
+#   provider: "claude"
+#   model: "claude-sonnet-4-20250514"        # or claude-opus-4-20250514 for deeper review
+#   api_key_env: "ANTHROPIC_API_KEY"
+#   temperature: 0.3
+#   max_tokens: 4096
+#
+# Option 2: OpenAI
+# llm:
+#   provider: "openai"
+#   model: "gpt-4o"                          # or gpt-4o-mini for faster/cheaper
+#   api_key_env: "OPENAI_API_KEY"
+#   temperature: 0.3
+#   max_tokens: 4096
+#
+# Option 3: Google Gemini
+# llm:
+#   provider: "gemini"
+#   model: "gemini-2.5-flash"                # or gemini-2.5-pro for deeper review
+#   api_key_env: "GOOGLE_API_KEY"
+#   temperature: 0.3
+#   max_tokens: 4096
+#
+# Option 4: Local model via Ollama (no API key needed, runs on your hardware)
+# Install Ollama: https://ollama.com/download
+# Pull a model:   ollama pull qwen2.5-coder:14b
+# llm:
+#   provider: "ollama"
+#   model: "qwen2.5-coder:14b"              # Model sizes: 3b (CPU), 7b (8GB), 14b (12GB), 32b (24GB)
+#   base_url: "http://localhost:11434"       # Default Ollama server URL
+#   temperature: 0.3
+#   max_tokens: 4096
+
+# CodeRabbit CLI integration (optional, runs alongside LLM backend)
 # Install: npm install -g coderabbitai (or see https://docs.coderabbit.ai/cli)
 # Findings are attributed as [CodeRabbit] in the dashboard and still
 # pass through anti-pattern filtering.

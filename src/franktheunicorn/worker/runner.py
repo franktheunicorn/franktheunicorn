@@ -124,7 +124,10 @@ def _run_cycle(
 
                 # Only draft reviews for PRs without existing drafts
                 if not pr.review_drafts.exists():
-                    drafts = draft_review(pr, pc)
+                    op_cfg = (
+                        operator_config if isinstance(operator_config, OperatorConfig) else None
+                    )
+                    drafts = draft_review(pr, pc, operator_config=op_cfg)
                     logger.info(
                         "  PR #%d: score=%.2f, %d drafts generated",
                         pr.number,

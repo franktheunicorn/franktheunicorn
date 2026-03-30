@@ -1,82 +1,151 @@
 """
-Stub review drafter.
+Review drafter — dispatches to the configured LLM backend.
 
-Returns deterministic fake draft comments so the system is testable
-without an LLM. Designed to be swapped out later for real LLM providers.
+Generates ReviewFinding objects via the selected backend, gates them
+through anti-pattern checks, and persists as ReviewDraft rows.
 """
 
 from __future__ import annotations
 
-import hashlib
+import logging
 from typing import TYPE_CHECKING
 
 from franktheunicorn.core.models import ReviewDraft
+from franktheunicorn.review.antipattern import check_against_anti_patterns
+from franktheunicorn.review.backends import get_backend
+from franktheunicorn.review.backends.base import PRContext, ReviewFinding
 
 if TYPE_CHECKING:
-    from franktheunicorn.config.models import ProjectConfig
-    from franktheunicorn.core.models import PullRequest
+    from franktheunicorn.config.models import OperatorConfig, ProjectConfig
+    from franktheunicorn.core.models import Project, PullRequest
 
-# Deterministic comment templates keyed by hash bucket
-_TEMPLATES = [
-    "Consider adding a test for this change.",
-    "This looks good overall. One minor suggestion: could the variable name be more descriptive?",
-    "Nice improvement! Have you considered the edge case where the input is empty?",
-    "The logic here could be simplified. Would you be open to a small refactor?",
-    "This change touches a critical path — might be worth adding a comment explaining"
-    " the reasoning.",
-]
+logger = logging.getLogger(__name__)
+
+
+def build_pr_context(
+    pr: PullRequest,
+    project_config: ProjectConfig,
+    operator_config: OperatorConfig,
+) -> PRContext:
+    """Bundle PR + config data into a PRContext for the LLM."""
+    anti_patterns: list[str] = []
+    try:
+        from franktheunicorn.core.models import AntiPattern
+
+        aps = AntiPattern.objects.filter(project__in=[pr.project, None])
+        anti_patterns = [ap.pattern_text for ap in aps]
+    except Exception:
+        logger.debug("Could not load anti-patterns for prompt context.")
+
+    return PRContext(
+        pr_title=pr.title,
+        pr_body=pr.body or "",
+        pr_author=pr.author,
+        pr_number=pr.number,
+        project_name=pr.project.full_name,
+        review_context=project_config.review_context,
+        review_style=operator_config.review_style,
+        tone=project_config.tone,
+        test_expectations=project_config.test_expectations,
+        governance=project_config.governance,
+        anti_patterns=anti_patterns,
+    )
+
+
+def _get_pr_diff(pr: PullRequest) -> str:
+    """Retrieve the diff for a PR.
+
+    Uses the stored changed_files list to build a minimal placeholder diff
+    when a real diff is not available (e.g. in mock mode). In production,
+    the worker should fetch the actual diff via the GitHub client and pass
+    it through.
+    """
+    # If the PR has a diff_url, try fetching it.
+    if pr.diff_url:
+        try:
+            import httpx
+
+            resp = httpx.get(pr.diff_url, timeout=30, follow_redirects=True)
+            if resp.status_code == 200:
+                return resp.text
+        except Exception:
+            logger.debug("Could not fetch diff from %s", pr.diff_url)
+
+    # Fallback: build a stub diff from changed_files metadata.
+    files = pr.changed_files or []
+    if not files:
+        return "+++ b/unknown_file.py\n"
+    return "\n".join(f"+++ b/{f}" for f in files) + "\n"
+
+
+def create_drafts_from_findings(
+    pr: PullRequest,
+    findings: list[ReviewFinding],
+    source: str,
+    project: Project | None = None,
+) -> list[ReviewDraft]:
+    """Convert ReviewFinding objects into ReviewDraft rows with anti-pattern gating."""
+    drafts: list[ReviewDraft] = []
+
+    for finding in findings:
+        # Anti-pattern gate.
+        matches = check_against_anti_patterns(finding.body, project)
+        if matches:
+            logger.info(
+                "Suppressed %s finding '%s' — matched anti-pattern(s): %s",
+                source,
+                finding.title[:40],
+                ", ".join(ap.pattern_text[:40] for ap in matches),
+            )
+            continue
+
+        draft = ReviewDraft.objects.create(
+            pull_request=pr,
+            file_path=finding.file_path,
+            line_number=finding.line_number,
+            comment_body=finding.body,
+            suggestion=finding.suggestion,
+            confidence=finding.confidence,
+            status="pending",
+            source=source,
+        )
+        drafts.append(draft)
+
+    return drafts
 
 
 def draft_review(
     pr: PullRequest,
     project_config: ProjectConfig,
+    operator_config: OperatorConfig | None = None,
 ) -> list[ReviewDraft]:
+    """Generate review drafts for a PR using the configured LLM backend.
+
+    When ``operator_config`` is None, falls back to the stub backend
+    for backwards compatibility with existing callers.
     """
-    Generate deterministic stub review comments for a PR.
-
-    This is a fake implementation. Real LLM-based review comes later.
-    The stub generates 1-2 comments per PR based on a hash of the PR data
-    so output is reproducible for the same input.
-    """
-    drafts: list[ReviewDraft] = []
-    changed_files: list[str] = pr.changed_files or ["unknown_file.py"]
-
-    # Add a dependency-aware stub comment if PR updates dependency files
-    dep_count = pr.dependency_changes.count() if hasattr(pr, "dependency_changes") else 0
-    if dep_count > 0:
-        dep_draft = ReviewDraft.objects.create(
-            pull_request=pr,
-            file_path=changed_files[0],
-            line_number=1,
-            comment_body=(
-                f"This PR updates {dep_count} "
-                f"{'dependency' if dep_count == 1 else 'dependencies'}. "
-                "Review the changelog summaries for breaking changes or deprecations."
-            ),
-            confidence=0.7,
-            status="pending",
-            source="agent",
+    if operator_config is None:
+        from franktheunicorn.config.models import (
+            OperatorConfig as DefaultOperatorConfig,
         )
-        drafts.append(dep_draft)
 
-    for i, file_path in enumerate(changed_files[:2]):
-        # Deterministic selection based on PR number + file path
-        seed = f"{pr.number}:{file_path}"
-        bucket = int(hashlib.sha256(seed.encode()).hexdigest(), 16) % len(_TEMPLATES)
-        comment_body = _TEMPLATES[bucket]
+        operator_config = DefaultOperatorConfig()
 
-        # Deterministic line number
-        line_number = ((pr.number * 7 + i * 13) % 50) + 1
+    backend = get_backend(operator_config.llm)
+    pr_context = build_pr_context(pr, project_config, operator_config)
+    diff = _get_pr_diff(pr)
 
-        draft = ReviewDraft.objects.create(
-            pull_request=pr,
-            file_path=file_path,
-            line_number=line_number,
-            comment_body=comment_body,
-            confidence=0.5 + (bucket * 0.1),
-            status="pending",
-            source="agent",
-        )
-        drafts.append(draft)
+    try:
+        findings = backend.generate_findings(diff, pr_context)
+    except Exception:
+        logger.exception("LLM backend '%s' failed.", operator_config.llm.provider)
+        findings = []
 
-    return drafts
+    if not findings:
+        return []
+
+    source = operator_config.llm.provider
+    if source == "stub":
+        source = "agent"  # Keep backwards-compatible source name.
+
+    return create_drafts_from_findings(pr, findings, source=source, project=pr.project)
