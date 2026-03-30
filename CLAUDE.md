@@ -126,6 +126,17 @@ docker compose up                   # dashboard + worker
 docker compose up web               # dashboard only
 ```
 
+## Pre-Push Checks (Claude Code Hook)
+
+Claude Code agents automatically run lint, type-check, and test checks before any `git push`. Configured in `.claude/settings.json`, the hook runs the same checks as CI:
+
+- `ruff check src/ tests/` — linting
+- `ruff format --check src/ tests/` — formatting
+- `mypy src/franktheunicorn/` — type checking
+- `pytest -x --tb=short` — tests (fails fast, no coverage gating)
+
+If any check fails, the push is blocked and the agent must fix the issues first. The hook script lives at `.claude/hooks/pre-push-lint.sh`.
+
 ## Version Roadmap Context
 
 When working on features, know which version they belong to:
