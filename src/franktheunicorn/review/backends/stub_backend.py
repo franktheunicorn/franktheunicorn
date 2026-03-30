@@ -56,7 +56,7 @@ class StubBackend:
                     line_number=line_number,
                     title=_TEMPLATES[bucket][:60],
                     body=_TEMPLATES[bucket],
-                    confidence=0.5 + (bucket * 0.1),
+                    confidence=min(0.5 + (bucket * 0.1), 1.0),
                     severity="medium",
                 )
             )

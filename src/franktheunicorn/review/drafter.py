@@ -30,9 +30,11 @@ def build_pr_context(
     """Bundle PR + config data into a PRContext for the LLM."""
     anti_patterns: list[str] = []
     try:
+        from django.db.models import Q
+
         from franktheunicorn.core.models import AntiPattern
 
-        aps = AntiPattern.objects.filter(project__in=[pr.project, None])
+        aps = AntiPattern.objects.filter(Q(project=pr.project) | Q(project__isnull=True))
         anti_patterns = [ap.pattern_text for ap in aps]
     except Exception:
         logger.debug("Could not load anti-patterns for prompt context.")
@@ -52,24 +54,15 @@ def build_pr_context(
     )
 
 
-def _get_pr_diff(pr: PullRequest) -> str:
-    """Retrieve the diff for a PR.
+def _get_pr_diff(pr: PullRequest, diff: str = "") -> str:
+    """Return the diff for a PR.
 
-    Uses the stored changed_files list to build a minimal placeholder diff
-    when a real diff is not available (e.g. in mock mode). In production,
-    the worker should fetch the actual diff via the GitHub client and pass
-    it through.
+    If ``diff`` is provided (e.g. pre-fetched by the worker via an
+    authenticated GitHub client), it is used directly.  Otherwise falls
+    back to a minimal placeholder built from ``changed_files`` metadata.
     """
-    # If the PR has a diff_url, try fetching it.
-    if pr.diff_url:
-        try:
-            import httpx
-
-            resp = httpx.get(pr.diff_url, timeout=30, follow_redirects=True)
-            if resp.status_code == 200:
-                return resp.text
-        except Exception:
-            logger.debug("Could not fetch diff from %s", pr.diff_url)
+    if diff:
+        return diff
 
     # Fallback: build a stub diff from changed_files metadata.
     files = pr.changed_files or []

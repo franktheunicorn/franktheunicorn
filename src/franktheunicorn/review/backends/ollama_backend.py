@@ -2,19 +2,11 @@
 
 from __future__ import annotations
 
-import logging
 import platform
 import shutil
 import subprocess
-from typing import TYPE_CHECKING
 
-from franktheunicorn.review.backends.base import PRContext, ReviewFinding, parse_llm_response
-from franktheunicorn.review.prompt import build_system_prompt, build_user_message
-
-if TYPE_CHECKING:
-    from franktheunicorn.config.models import LLMBackendConfig
-
-logger = logging.getLogger(__name__)
+from franktheunicorn.review.backends.base import BaseLLMBackend
 
 _DEFAULT_MODEL = "qwen2.5-coder:14b"
 
@@ -93,45 +85,28 @@ def recommend_local_model() -> tuple[str, str]:
     return ("qwen2.5-coder:3b", f"No GPU detected, {ram_gb:.0f}GB RAM (small CPU model)")
 
 
-class OllamaBackend:
+class OllamaBackend(BaseLLMBackend):
     """Review backend using the Ollama Python SDK for local model inference."""
 
-    def __init__(self, config: LLMBackendConfig) -> None:
-        self._config = config
-        self._model = config.model or _DEFAULT_MODEL
+    _sdk_module = "ollama"
+    _default_key_env = ""  # No API key needed for local models.
+    _default_model = _DEFAULT_MODEL
 
-    def generate_findings(
-        self,
-        diff: str,
-        pr_context: PRContext,
-    ) -> list[ReviewFinding]:
-        try:
-            import ollama
-        except ImportError:
-            logger.error("ollama package not installed. Run: pip install 'franktheunicorn[llm]'")
-            return []
-
-        system_prompt = build_system_prompt(pr_context)
-        user_message = build_user_message(diff, pr_context)
+    def _call_api(self, system_prompt: str, user_message: str, api_key: str) -> str:
+        import ollama
 
         if self._config.base_url:
             client = ollama.Client(host=self._config.base_url)
         else:
             client = ollama.Client()
 
-        try:
-            response = client.chat(
-                model=self._model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message},
-                ],
-                format="json",
-                options={"temperature": self._config.temperature},
-            )
-        except Exception:
-            logger.exception("Ollama API call failed.")
-            return []
-
-        raw_text = response.message.content or ""
-        return parse_llm_response(raw_text)
+        response = client.chat(
+            model=self._model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ],
+            format="json",
+            options={"temperature": self._config.temperature},
+        )
+        return response.message.content or ""
