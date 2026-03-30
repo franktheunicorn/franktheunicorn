@@ -1,0 +1,17 @@
+diff --git a/core/src/test/scala/SchedulerSuite.scala b/core/src/test/scala/SchedulerSuite.scala
+index abc1234..def5678 100644
+--- a/core/src/test/scala/SchedulerSuite.scala
++++ b/core/src/test/scala/SchedulerSuite.scala
+@@ -100,5 +100,14 @@
+-    assert(result == expected)
++    eventually(timeout(10.seconds)) {
++      assert(result == expected)
++    }
+diff --git a/docs/TESTING.md b/docs/TESTING.md
+index 1111111..2222222 100644
+--- a/docs/TESTING.md
++++ b/docs/TESTING.md
+@@ -50,0 +51,3 @@
++## Flaky Test Guidelines
++
++Use `eventually` for async assertions.

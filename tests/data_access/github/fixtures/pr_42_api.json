@@ -1,0 +1,17 @@
+{
+  "id": 1001,
+  "number": 42,
+  "title": "Fix flaky test in scheduler module",
+  "user": {"login": "alice-dev"},
+  "state": "open",
+  "html_url": "https://github.com/apache/spark/pull/42",
+  "diff_url": "https://github.com/apache/spark/pull/42.diff",
+  "body": "This PR fixes a race condition in the scheduler tests.",
+  "labels": [{"name": "bug"}, {"name": "tests"}],
+  "requested_reviewers": [{"login": "holdenk"}],
+  "draft": false,
+  "created_at": "2026-03-20T10:00:00Z",
+  "updated_at": "2026-03-27T14:30:00Z",
+  "additions": 15,
+  "deletions": 3
+}
