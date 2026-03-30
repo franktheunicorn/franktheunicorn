@@ -109,9 +109,7 @@ def _upsert_pull_request(
         "diff_url": pr_data.get("diff_url", ""),
         "body": pr_data.get("body", "") or "",
         "labels": [lbl.get("name", "") for lbl in pr_data.get("labels", [])],
-        "requested_reviewers": [
-            r.get("login", "") for r in pr_data.get("requested_reviewers", [])
-        ],
+        "requested_reviewers": [r.get("login", "") for r in pr_data.get("requested_reviewers", [])],
         "changed_files": changed_files,
         "additions": pr_data.get("additions", 0),
         "deletions": pr_data.get("deletions", 0),

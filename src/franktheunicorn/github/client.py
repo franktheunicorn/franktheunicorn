@@ -44,9 +44,7 @@ class GitHubClient:
         result: list[dict[str, Any]] = response.json()
         return result
 
-    def get_pull_request_files(
-        self, owner: str, repo: str, pr_number: int
-    ) -> list[dict[str, Any]]:
+    def get_pull_request_files(self, owner: str, repo: str, pr_number: int) -> list[dict[str, Any]]:
         """Fetch the list of files changed in a PR."""
         url = f"/repos/{owner}/{repo}/pulls/{pr_number}/files"
         response = self._client.get(url, params={"per_page": 100})

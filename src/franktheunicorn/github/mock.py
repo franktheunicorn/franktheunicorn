@@ -34,9 +34,7 @@ class MockGitHubClient:
         logger.info("No fixture found at %s, using built-in demo data", fixture_path)
         return _builtin_demo_pulls(owner, repo)
 
-    def get_pull_request_files(
-        self, owner: str, repo: str, pr_number: int
-    ) -> list[dict[str, Any]]:
+    def get_pull_request_files(self, owner: str, repo: str, pr_number: int) -> list[dict[str, Any]]:
         """Load PR files from fixture or return demo files."""
         fixture_path = self._fixtures_dir / f"{owner}_{repo}_pr{pr_number}_files.json"
         if fixture_path.exists():
