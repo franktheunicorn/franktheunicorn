@@ -56,6 +56,7 @@ class PullRequest(models.Model):
     body = models.TextField(blank=True, default="")
     labels = models.JSONField(default=list, blank=True)
     requested_reviewers = models.JSONField(default=list, blank=True)
+    assignees = models.JSONField(default=list, blank=True)
     changed_files = models.JSONField(default=list, blank=True)
     additions = models.IntegerField(default=0)
     deletions = models.IntegerField(default=0)

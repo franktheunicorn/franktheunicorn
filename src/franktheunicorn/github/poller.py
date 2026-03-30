@@ -110,6 +110,7 @@ def _upsert_pull_request(
         "body": pr_data.get("body", "") or "",
         "labels": [lbl.get("name", "") for lbl in pr_data.get("labels", [])],
         "requested_reviewers": [r.get("login", "") for r in pr_data.get("requested_reviewers", [])],
+        "assignees": [a.get("login", "") for a in pr_data.get("assignees", [])],
         "changed_files": changed_files,
         "additions": pr_data.get("additions", 0),
         "deletions": pr_data.get("deletions", 0),

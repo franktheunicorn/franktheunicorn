@@ -1,65 +1,53 @@
-"""Tests for collaborator detection."""
+"""Tests for scored collaborator detection (§2.4)."""
 
 from __future__ import annotations
 
-from franktheunicorn.scoring.collaborators import detect_collaborator, score_collaborator
+from franktheunicorn.scoring.collaborators import compute_collaborator_score
 from franktheunicorn.scoring.signals import WEIGHTS
+
+W = WEIGHTS["collaborator"]
 
 
 def _h(author: str, reviewer: str) -> dict[str, str]:
-    """Shorthand for a review history entry."""
     return {"author": author, "reviewer": reviewer}
 
 
-class TestDetectCollaborator:
-    def test_empty(self) -> None:
-        assert detect_collaborator("alice", "holdenk", []) is False
+class TestComputeCollaboratorScore:
+    def test_manual_entry_null_score(self) -> None:
+        result = compute_collaborator_score("alice", "holdenk", [], [], {"alice": None})
+        assert result == W
 
-    def test_below_threshold(self) -> None:
-        assert (
-            detect_collaborator("alice", "holdenk", [_h("alice", "holdenk")] * 2, threshold=3)
-            is False
-        )
+    def test_manual_entry_numeric(self) -> None:
+        result = compute_collaborator_score("alice", "holdenk", [], [], {"alice": 50.0})
+        assert result == round(W * 0.5)
 
-    def test_at_threshold(self) -> None:
-        history = [_h("alice", "holdenk"), _h("alice", "holdenk"), _h("holdenk", "alice")]
-        assert detect_collaborator("alice", "holdenk", history, threshold=3) is True
+    def test_manual_entry_full(self) -> None:
+        result = compute_collaborator_score("alice", "holdenk", [], [], {"alice": 100.0})
+        assert result == W
 
-    def test_above_threshold(self) -> None:
-        assert (
-            detect_collaborator("alice", "holdenk", [_h("alice", "holdenk")] * 4, threshold=3)
-            is True
-        )
+    def test_frequent_contributor(self) -> None:
+        assert compute_collaborator_score("cloud-fan", "holdenk", [], ["cloud-fan"]) == W
 
-    def test_unrelated_ignored(self) -> None:
-        history = [_h("bob", "carol"), _h("alice", "holdenk"), _h("bob", "holdenk")]
-        assert detect_collaborator("alice", "holdenk", history, threshold=2) is False
+    def test_frequent_contributor_case(self) -> None:
+        assert compute_collaborator_score("Cloud-Fan", "holdenk", [], ["cloud-fan"]) == W
 
-    def test_case_insensitive(self) -> None:
-        history = [_h("Alice", "HoldenK"), _h("alice", "holdenk"), _h("ALICE", "HOLDENK")]
-        assert detect_collaborator("alice", "holdenk", history, threshold=3) is True
+    def test_from_history(self) -> None:
+        history = [_h("alice", "holdenk")] * 3
+        result = compute_collaborator_score("alice", "holdenk", history, [])
+        assert result == round((60 / 100) * W)
 
-    def test_bidirectional(self) -> None:
-        assert (
-            detect_collaborator(
-                "alice", "holdenk", [_h("alice", "holdenk"), _h("holdenk", "alice")], threshold=2
-            )
-            is True
-        )
+    def test_from_history_bidirectional(self) -> None:
+        history = [_h("alice", "holdenk"), _h("holdenk", "alice")]
+        result = compute_collaborator_score("alice", "holdenk", history, [])
+        assert result == round((40 / 100) * W)
 
+    def test_from_history_capped(self) -> None:
+        history = [_h("alice", "holdenk")] * 10
+        assert compute_collaborator_score("alice", "holdenk", history, []) == W
 
-class TestScoreCollaborator:
-    def test_collaborator(self) -> None:
-        assert (
-            score_collaborator("alice", "holdenk", [_h("alice", "holdenk")] * 3)
-            == WEIGHTS["collaborator"]
-        )
+    def test_no_match(self) -> None:
+        assert compute_collaborator_score("stranger", "holdenk", [], []) is None
 
-    def test_non_collaborator(self) -> None:
-        assert score_collaborator("alice", "holdenk", []) is None
-
-    def test_custom_threshold(self) -> None:
-        assert (
-            score_collaborator("alice", "holdenk", [_h("alice", "holdenk")], threshold=1)
-            == WEIGHTS["collaborator"]
-        )
+    def test_priority_order(self) -> None:
+        result = compute_collaborator_score("alice", "holdenk", [], ["alice"], {"alice": 50.0})
+        assert result == round(W * 0.5)

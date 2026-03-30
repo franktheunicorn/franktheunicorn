@@ -1,38 +1,46 @@
-"""Collaborator detection from review history. Pure functions."""
+"""Scored collaborator detection (§2.4). Pure functions.
+
+Collaborators are scored 0-100, not binary. Boost is proportional to score.
+"""
 
 from __future__ import annotations
 
-from franktheunicorn.scoring.signals import WEIGHTS
-
-DEFAULT_THRESHOLD: int = 3
+from franktheunicorn.scoring.signals import WEIGHTS, _lowered
 
 
-def detect_collaborator(
+def compute_collaborator_score(
     author: str,
     operator_username: str,
     review_history: list[dict[str, str]],
-    threshold: int = DEFAULT_THRESHOLD,
-) -> bool:
-    """True if author and operator have reviewed each other >= *threshold* times."""
+    frequent_contributors: list[str],
+    collaborator_scores: dict[str, float | None] | None = None,
+) -> int | None:
+    """Scored collaborator boost (0 to WEIGHTS['collaborator'] points).
+
+    Priority: pre-computed scores > frequent_contributors > review history.
+    Manual entries (score=None) get full weight.
+    """
+    author_lower = author.lower()
+    weight = WEIGHTS["collaborator"]
+
+    if collaborator_scores:
+        for name, score in collaborator_scores.items():
+            if name.lower() == author_lower:
+                return weight if score is None else round((score / 100) * weight)
+
+    if author_lower in _lowered(frequent_contributors):
+        return weight
+
     if not review_history:
-        return False
-    a, o = author.lower(), operator_username.lower()
-    interactions = sum(
+        return None
+    op = operator_username.lower()
+    mutual = sum(
         1
         for e in review_history
-        if (e.get("author", "").lower() == a and e.get("reviewer", "").lower() == o)
-        or (e.get("author", "").lower() == o and e.get("reviewer", "").lower() == a)
+        if (e.get("author", "").lower() == author_lower and e.get("reviewer", "").lower() == op)
+        or (e.get("author", "").lower() == op and e.get("reviewer", "").lower() == author_lower)
     )
-    return interactions >= threshold
-
-
-def score_collaborator(
-    author: str,
-    operator_username: str,
-    review_history: list[dict[str, str]],
-    threshold: int = DEFAULT_THRESHOLD,
-) -> float | None:
-    """Score boost when the PR author is a detected collaborator."""
-    if detect_collaborator(author, operator_username, review_history, threshold):
-        return WEIGHTS["collaborator"]
-    return None
+    if mutual <= 0:
+        return None
+    crude_score = min(mutual * 20, 100)
+    return round((crude_score / 100) * weight)

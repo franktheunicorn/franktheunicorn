@@ -50,8 +50,7 @@ class TestEvaluateCustomScore:
 
     def test_security_rejected(self) -> None:
         assert (
-            evaluate_custom_score("__import__('os').system('echo pwned')", pr={}, config={})
-            is None
+            evaluate_custom_score("__import__('os').system('echo pwned')", pr={}, config={}) is None
         )
         assert evaluate_custom_score("pr.__class__.__bases__", pr={}, config={}) is None
 
