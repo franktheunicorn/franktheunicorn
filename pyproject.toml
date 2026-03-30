@@ -23,6 +23,8 @@ dev = [
     "pytest-cov>=5.0,<6.0",
     "pytest-httpx>=0.30,<1.0",
     "factory-boy>=3.3,<4.0",
+    "pylint>=3.0,<5.0",
+    "pylint-django>=2.6,<3.0",
     "ruff>=0.5,<1.0",
     "mypy>=1.10,<2.0",
     "django-stubs>=5.0,<6.0",
@@ -96,4 +98,20 @@ exclude_lines = [
     "pragma: no cover",
     "if TYPE_CHECKING:",
     "if __name__ ==",
+]
+
+[tool.pylint.main]
+load-plugins = ["pylint_django"]
+django-settings-module = "franktheunicorn.settings"
+init-hook = "import sys; sys.path.insert(0, 'src'); sys.path.insert(0, '.')"
+
+[tool.pylint."messages control"]
+disable = [
+    "too-few-public-methods",    # Django Meta classes, factory Meta classes
+    "missing-class-docstring",   # Django Meta inner classes, test classes named descriptively
+    "missing-function-docstring", # Test methods are self-documenting via names
+    "import-outside-toplevel",   # Used intentionally in tests
+    "protected-access",          # Needed for admin._registry checks in tests
+    "unused-argument",           # pytest fixtures appear unused
+    "redefined-outer-name",      # pytest fixture pattern
 ]

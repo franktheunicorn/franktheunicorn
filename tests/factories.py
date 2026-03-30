@@ -14,6 +14,8 @@ from franktheunicorn.core.models import (
 
 
 class ProjectFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
+    """Factory for Project model instances."""
+
     class Meta:
         model = Project
 
@@ -24,6 +26,8 @@ class ProjectFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
 
 
 class PullRequestFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
+    """Factory for PullRequest model instances."""
+
     class Meta:
         model = PullRequest
 
@@ -50,6 +54,8 @@ class PullRequestFactory(factory.django.DjangoModelFactory):  # type: ignore[mis
 
 
 class ReviewDraftFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
+    """Factory for ReviewDraft model instances."""
+
     class Meta:
         model = ReviewDraft
 
@@ -64,6 +70,8 @@ class ReviewDraftFactory(factory.django.DjangoModelFactory):  # type: ignore[mis
 
 
 class AntiPatternFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
+    """Factory for AntiPattern model instances."""
+
     class Meta:
         model = AntiPattern
 
@@ -75,6 +83,8 @@ class AntiPatternFactory(factory.django.DjangoModelFactory):  # type: ignore[mis
 
 
 class OperatorActionFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
+    """Factory for OperatorAction model instances."""
+
     class Meta:
         model = OperatorAction
 

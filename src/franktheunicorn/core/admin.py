@@ -13,6 +13,8 @@ from franktheunicorn.core.models import (
 
 @admin.register(Project)
 class ProjectAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
+    """Admin for monitored GitHub projects."""
+
     list_display = ("owner", "repo", "enabled", "review_context", "created_at")
     list_filter = ("enabled",)
     search_fields = ("owner", "repo")
@@ -20,6 +22,8 @@ class ProjectAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
 
 @admin.register(PullRequest)
 class PullRequestAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
+    """Admin for ingested pull requests."""
+
     list_display = (
         "number",
         "title",
@@ -37,6 +41,8 @@ class PullRequestAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
 
 @admin.register(ReviewDraft)
 class ReviewDraftAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
+    """Admin for LLM-generated review drafts."""
+
     list_display = ("pull_request", "file_path", "status", "confidence", "created_at")
     list_filter = ("status",)
     search_fields = ("file_path", "comment_body")
@@ -45,6 +51,8 @@ class ReviewDraftAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
 
 @admin.register(AntiPattern)
 class AntiPatternAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
+    """Admin for anti-pattern feedback entries."""
+
     list_display = ("pattern_text_short", "project", "weight", "times_triggered", "created_at")
     list_filter = ("project",)
     search_fields = ("pattern_text", "description")
@@ -56,6 +64,8 @@ class AntiPatternAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
 
 @admin.register(OperatorAction)
 class OperatorActionAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
+    """Admin for operator action audit log."""
+
     list_display = ("action_type", "pull_request", "review_draft", "created_at")
     list_filter = ("action_type",)
     search_fields = ("notes",)
