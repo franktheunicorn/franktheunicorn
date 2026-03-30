@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import pytest
-from tests.factories import ReviewDraftFactory
 
 from franktheunicorn.core.models import PullRequest
 from franktheunicorn.digest.service import DailyDigest, build_daily_digest
+from tests.factories import ReviewDraftFactory
 
 
 @pytest.mark.django_db

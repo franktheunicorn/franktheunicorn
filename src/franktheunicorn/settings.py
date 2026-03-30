@@ -113,6 +113,9 @@ FRANK_FIXTURES_DIR = os.environ.get(
     str(BASE_DIR / "config" / "fixtures"),
 )
 
+# Directory containing local clones of monitored repos (for copy-pasta scanning)
+FRANK_REPOS_DIR = Path(os.environ.get("FRANK_REPOS_DIR", str(DATA_DIR / "repos")))
+
 # Worker polling interval in seconds
 FRANK_POLL_INTERVAL = int(os.environ.get("FRANK_POLL_INTERVAL", "300"))
 

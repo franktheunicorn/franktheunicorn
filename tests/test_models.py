@@ -8,13 +8,6 @@ import pytest
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError
 from django.utils import timezone
-from tests.factories import (
-    AntiPatternFactory,
-    OperatorActionFactory,
-    ProjectFactory,
-    PullRequestFactory,
-    ReviewDraftFactory,
-)
 
 from franktheunicorn.core.models import (
     AntiPattern,
@@ -22,6 +15,13 @@ from franktheunicorn.core.models import (
     Project,
     PullRequest,
     ReviewDraft,
+)
+from tests.factories import (
+    AntiPatternFactory,
+    OperatorActionFactory,
+    ProjectFactory,
+    PullRequestFactory,
+    ReviewDraftFactory,
 )
 
 
