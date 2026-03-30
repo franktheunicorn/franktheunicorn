@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from tests.factories import ProjectFactory, PullRequestFactory
 
 from franktheunicorn.config.models import OperatorConfig, ProjectConfig
 from franktheunicorn.core.models import Project, PullRequest
@@ -46,11 +47,7 @@ def personal_project_config() -> ProjectConfig:
 
 @pytest.fixture
 def db_project(db: Any) -> Project:
-    return Project.objects.create(
-        owner="apache",
-        repo="spark",
-        review_context="ASF governance",
-    )
+    return ProjectFactory(owner="apache", repo="spark", review_context="ASF governance")
 
 
 @pytest.fixture
@@ -77,7 +74,7 @@ def sample_pr_data() -> dict[str, Any]:
 
 @pytest.fixture
 def db_pr(db: Any, db_project: Project) -> PullRequest:
-    return PullRequest.objects.create(
+    return PullRequestFactory(
         project=db_project,
         github_id=1001,
         number=42,
