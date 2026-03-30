@@ -32,7 +32,9 @@ def _get_list(d: dict[str, object], key: str) -> list[str]:
         return []
     if isinstance(val, str):
         return [val]
-    return list(val)  # type: ignore[arg-type]
+    if isinstance(val, list):
+        return [str(x) for x in val]
+    return []
 
 
 def score_pull_request(
@@ -123,7 +125,8 @@ def score_pull_request(
         for i, expr in enumerate(custom_expressions):
             result = evaluate_custom_score(expr, pr_dict, project_config_dict)
             if result is not None:
-                max_boost = int(project_config_dict.get("custom_scoring_max_boost", 30) or 30)
+                raw_boost = project_config_dict.get("custom_scoring_max_boost", 30)
+                max_boost = int(raw_boost) if isinstance(raw_boost, (int, float)) else 30
                 _add(f"custom_{i}", round(result * max_boost))
 
     raw = sum(breakdown.values())

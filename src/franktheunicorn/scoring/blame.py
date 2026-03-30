@@ -9,6 +9,13 @@ from __future__ import annotations
 from franktheunicorn.scoring.signals import WEIGHTS
 
 
+def _str_set(val: object) -> set[str]:
+    """Safely extract a set of lowered strings from a dict value."""
+    if isinstance(val, list):
+        return {str(x).lower() for x in val}
+    return set()
+
+
 def score_touches_operator_code(
     blame_data: list[dict[str, object]],
     operator_username: str,
@@ -25,8 +32,8 @@ def score_touches_operator_code(
     op = operator_username.lower()
     total_credit = 0.0
     for entry in blame_data:
-        authors = {a.lower() for a in entry.get("authors", [])}  # type: ignore[union-attr]
-        near = {a.lower() for a in entry.get("near_authors", [])}  # type: ignore[union-attr]
+        authors = _str_set(entry.get("authors"))
+        near = _str_set(entry.get("near_authors"))
         if op in authors:
             total_credit += 1.0
         elif op in near:

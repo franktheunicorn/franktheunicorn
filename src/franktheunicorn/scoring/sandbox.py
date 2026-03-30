@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from simpleeval import EvalWithCompoundTypes, InvalidExpression
+from simpleeval import EvalWithCompoundTypes, InvalidExpression  # type: ignore[import-untyped]
 
 logger = logging.getLogger(__name__)
 

@@ -10,6 +10,18 @@ _TEST_INDICATORS: tuple[str, ...] = ("test", "spec")
 _DEFAULT_UNOWNED_DAYS: int = 14
 
 
+def _int_field(pr: dict[str, object], key: str, default: int = 0) -> int:
+    val = pr.get(key, default)
+    return int(val) if isinstance(val, (int, float)) else default
+
+
+def _str_list(pr: dict[str, object], key: str) -> list[str]:
+    val = pr.get(key)
+    if isinstance(val, list):
+        return [str(x) for x in val]
+    return []
+
+
 def compute_moderation_flags(
     pr: dict[str, object],
     operator_username: str,
@@ -29,13 +41,11 @@ def compute_moderation_flags(
     if author and is_likely_bot(author):
         flags.append("bot")
 
-    additions = int(pr.get("additions", 0) or 0)
-    deletions = int(pr.get("deletions", 0) or 0)
-    if (additions + deletions) > LARGE_PR_THRESHOLD:
+    if (_int_field(pr, "additions") + _int_field(pr, "deletions")) > LARGE_PR_THRESHOLD:
         flags.append("large_pr")
 
     body = str(pr.get("body", "") or "")
-    labels: list[object] = list(pr.get("labels", []) or [])
+    labels = _str_list(pr, "labels")
     if len(body.strip()) < _MIN_BODY_LENGTH and not labels:
         flags.append("low_context")
 
@@ -47,20 +57,15 @@ def compute_moderation_flags(
     ):
         flags.append("new_contributor")
 
-    changed: list[str] = list(pr.get("changed_files", []) or [])  # type: ignore[arg-type]
+    changed = _str_list(pr, "changed_files")
     has_source = any(f.startswith(_SOURCE_PREFIXES) for f in changed)
     has_tests = any(any(ind in f.lower() for ind in _TEST_INDICATORS) for f in changed)
     if has_source and not has_tests:
         flags.append("needs_tests")
 
-    pr_age_days = pr.get("pr_age_days")
-    reviewers = pr.get("requested_reviewers") or []
-    if (
-        pr_age_days is not None
-        and int(pr_age_days) > _DEFAULT_UNOWNED_DAYS  # type: ignore[arg-type]
-        and not reviewers
-        and "draft" not in flags
-    ):
+    pr_age_days = _int_field(pr, "pr_age_days", -1)
+    reviewers = _str_list(pr, "requested_reviewers")
+    if pr_age_days > _DEFAULT_UNOWNED_DAYS and not reviewers and "draft" not in flags:
         flags.append("likely_unowned")
 
     return flags
