@@ -15,6 +15,12 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def _load_json_fixture(path: Path) -> Any:
+    """Load and parse a JSON fixture file."""
+    with path.open() as f:
+        return json.load(f)
+
+
 class MockGitHubClient:
     """Returns fixture data from local JSON files instead of calling GitHub."""
 
@@ -27,9 +33,7 @@ class MockGitHubClient:
         """Load PRs from fixture file, falling back to built-in demo data."""
         fixture_path = self._fixtures_dir / f"{owner}_{repo}_pulls.json"
         if fixture_path.exists():
-            with fixture_path.open() as f:
-                result: list[dict[str, Any]] = json.load(f)
-                return result
+            return _load_json_fixture(fixture_path)
 
         logger.info("No fixture found at %s, using built-in demo data", fixture_path)
         return _builtin_demo_pulls(owner, repo)
@@ -38,9 +42,7 @@ class MockGitHubClient:
         """Load PR files from fixture or return demo files."""
         fixture_path = self._fixtures_dir / f"{owner}_{repo}_pr{pr_number}_files.json"
         if fixture_path.exists():
-            with fixture_path.open() as f:
-                result: list[dict[str, Any]] = json.load(f)
-                return result
+            return _load_json_fixture(fixture_path)
         return [
             {"filename": "README.md", "additions": 5, "deletions": 2, "status": "modified"},
             {"filename": "src/main.py", "additions": 20, "deletions": 3, "status": "modified"},

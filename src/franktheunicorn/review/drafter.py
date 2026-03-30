@@ -39,10 +39,7 @@ def draft_review(
     so output is reproducible for the same input.
     """
     drafts: list[ReviewDraft] = []
-    changed_files: list[str] = pr.changed_files or []
-
-    if not changed_files:
-        changed_files = ["unknown_file.py"]
+    changed_files: list[str] = pr.changed_files or ["unknown_file.py"]
 
     for i, file_path in enumerate(changed_files[:2]):
         # Deterministic selection based on PR number + file path

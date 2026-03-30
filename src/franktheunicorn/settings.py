@@ -8,6 +8,12 @@ All persistent state lives under DATA_DIR, which defaults to ./data/.
 import os
 from pathlib import Path
 
+
+def _env_bool(key: str, default: str = "true") -> bool:
+    """Parse a boolean from an environment variable."""
+    return os.environ.get(key, default).lower() in ("true", "1", "yes")
+
+
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 # Local state directory — mounted as a volume in Docker.
@@ -19,7 +25,7 @@ SECRET_KEY = os.environ.get(
     "dev-insecure-key-change-me-in-production",
 )
 
-DEBUG = os.environ.get("DJANGO_DEBUG", "true").lower() in ("true", "1", "yes")
+DEBUG = _env_bool("DJANGO_DEBUG")
 
 ALLOWED_HOSTS: list[str] = [
     stripped  # pylint: disable=used-before-assignment
@@ -99,7 +105,7 @@ FRANK_PROJECTS_DIR = os.environ.get(
 FRANK_GITHUB_TOKEN = os.environ.get("FRANK_GITHUB_TOKEN", "")
 
 # Enable mock/demo mode with fixture data instead of real GitHub API
-FRANK_MOCK_MODE = os.environ.get("FRANK_MOCK_MODE", "true").lower() in ("true", "1", "yes")
+FRANK_MOCK_MODE = _env_bool("FRANK_MOCK_MODE")
 
 # Directory containing fixture JSON for mock mode
 FRANK_FIXTURES_DIR = os.environ.get(
