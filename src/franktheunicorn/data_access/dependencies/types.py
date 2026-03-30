@@ -101,36 +101,43 @@ def extract_github_owner_repo(url: str) -> tuple[str, str] | None:
 
     Returns (owner, repo) or None if the URL isn't a GitHub repo URL.
     """
-    if "github.com" not in url:
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    if "github.com" not in (parsed.hostname or ""):
         return None
-    # Strip protocol and domain
-    path = url.split("github.com", 1)[1].lstrip("/")
-    parts = path.strip("/").split("/")
+    parts = parsed.path.strip("/").split("/")
     if len(parts) < 2:
         return None
-    owner = parts[0]
-    repo = parts[1]
-    # Strip .git suffix if present
-    if repo.endswith(".git"):
-        repo = repo[:-4]
-    return (owner, repo)
+    repo = parts[1].removesuffix(".git")
+    return (parts[0], repo)
+
+
+def _find_url_by_keys(
+    project_urls: dict[str, str] | None,
+    keys: tuple[str, ...],
+    *,
+    require_github: bool = False,
+) -> str:
+    """Search project_urls case-insensitively by priority keys."""
+    if not project_urls:
+        return ""
+    lowered = {k.lower(): v for k, v in project_urls.items()}
+    for key in keys:
+        url = lowered.get(key, "")
+        if url and (not require_github or "github.com" in url):
+            return url
+    return ""
 
 
 def find_source_url(
     project_urls: dict[str, str] | None,
     home_page: str | None = None,
 ) -> str:
-    """Find the source repository URL from PyPI project metadata.
-
-    Searches project_urls keys case-insensitively in priority order,
-    then falls back to home_page. Returns empty string if nothing found.
-    """
-    if project_urls:
-        lowered = {k.lower(): v for k, v in project_urls.items()}
-        for key in _SOURCE_URL_KEYS:
-            url = lowered.get(key, "")
-            if url and "github.com" in url:
-                return url
+    """Find the source repository URL from PyPI project metadata."""
+    url = _find_url_by_keys(project_urls, _SOURCE_URL_KEYS, require_github=True)
+    if url:
+        return url
     if home_page and "github.com" in home_page:
         return home_page
     return ""
@@ -138,14 +145,7 @@ def find_source_url(
 
 def find_changelog_url(project_urls: dict[str, str] | None) -> str:
     """Find a direct changelog URL from PyPI project metadata."""
-    if not project_urls:
-        return ""
-    lowered = {k.lower(): v for k, v in project_urls.items()}
-    for key in _CHANGELOG_URL_KEYS:
-        url = lowered.get(key, "")
-        if url:
-            return url
-    return ""
+    return _find_url_by_keys(project_urls, _CHANGELOG_URL_KEYS)
 
 
 def version_to_tag_candidates(

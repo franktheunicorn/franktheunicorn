@@ -10,7 +10,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
-from franktheunicorn.core.models import PullRequest, ReviewDraft
+from django.db.models import Count, Q
+
+from franktheunicorn.core.models import PullRequest
 
 
 @dataclass
@@ -45,28 +47,24 @@ def build_daily_digest(hours: int = 24) -> DailyDigest:
     recent_prs = (
         PullRequest.objects.filter(updated_at__gte=cutoff, state="open")
         .select_related("project")
+        .annotate(_pending=Count("review_drafts", filter=Q(review_drafts__status="pending")))
         .order_by("-interest_score")
     )
 
-    entries: list[DigestEntry] = []
-    total_drafts = 0
-
-    for pr in recent_prs:
-        pending = ReviewDraft.objects.filter(pull_request=pr, status="pending").count()
-        total_drafts += pending
-        entries.append(
-            DigestEntry(
-                pr_number=pr.number,
-                pr_title=pr.title,
-                project_name=pr.project.full_name,
-                interest_score=pr.interest_score,
-                pending_drafts=pending,
-                url=pr.url,
-            )
+    entries = [
+        DigestEntry(
+            pr_number=pr.number,
+            pr_title=pr.title,
+            project_name=pr.project.full_name,
+            interest_score=pr.interest_score,
+            pending_drafts=pr._pending,
+            url=pr.url,
         )
+        for pr in recent_prs
+    ]
 
     return DailyDigest(
         entries=entries,
         total_prs_reviewed=len(entries),
-        total_drafts_pending=total_drafts,
+        total_drafts_pending=sum(e.pending_drafts for e in entries),
     )
