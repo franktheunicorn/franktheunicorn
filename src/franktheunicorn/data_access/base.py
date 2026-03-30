@@ -11,7 +11,12 @@ from typing import Generic, TypeVar
 
 import httpx
 
+from franktheunicorn.data_access.rate_limiter import GitHubRateLimiter
+
 logger = logging.getLogger(__name__)
+
+GITHUB_API_BASE = "https://api.github.com"
+GITHUB_WEB_BASE = "https://github.com"
 
 
 class FetchMethod(enum.StrEnum):
@@ -61,7 +66,9 @@ class DataFetcher(ABC, Generic[T]):  # noqa: UP046
     fallback from API to scrape on rate-limit or server errors.
     """
 
-    def __init__(self, client: httpx.Client, rate_limiter: object | None = None) -> None:
+    def __init__(
+        self, client: httpx.Client, rate_limiter: GitHubRateLimiter | None = None
+    ) -> None:
         self._client = client
         self._rate_limiter = rate_limiter
 
@@ -89,3 +96,32 @@ class DataFetcher(ABC, Generic[T]):  # noqa: UP046
     @abstractmethod
     def fetch_via_scrape(self, *args: object, **kwargs: object) -> T:
         """Fetch data by scraping the HTML page."""
+
+    # -- Shared helpers for subclasses --
+
+    def _api_get(self, url: str, **kwargs: object) -> httpx.Response:
+        """GET with rate-limiter acquire/update and standard error handling."""
+        if self._rate_limiter is not None:
+            if self._rate_limiter.is_rate_limited():
+                raise RateLimitError("GitHub API rate limited", method=FetchMethod.API)
+            self._rate_limiter.acquire()
+
+        response = self._client.get(url, **kwargs)  # type: ignore[arg-type]
+
+        if self._rate_limiter is not None:
+            self._rate_limiter.update_from_headers(response.headers)
+
+        if response.status_code == 404:
+            raise NotFoundError(
+                f"Not found: {url}",
+                method=FetchMethod.API,
+                status_code=404,
+            )
+        if response.status_code in (403, 429):
+            raise RateLimitError(
+                f"Rate limited ({response.status_code})",
+                method=FetchMethod.API,
+                status_code=response.status_code,
+            )
+        response.raise_for_status()
+        return response
