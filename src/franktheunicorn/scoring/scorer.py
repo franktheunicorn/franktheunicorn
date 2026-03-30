@@ -63,7 +63,7 @@ def score_pull_request(
     weights = dict(WEIGHTS)
     overrides = project_config_dict.get("scoring_weights")
     if overrides and isinstance(overrides, dict):
-        weights.update({k: int(v) for k, v in overrides.items()})
+        weights.update({k: round(float(v)) for k, v in overrides.items()})
 
     def _add(name: str, value: int | float | None) -> None:
         if value is None:
