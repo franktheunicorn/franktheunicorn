@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html>
+<head><title>Release v2.31.0 · psf/requests</title></head>
+<body>
+<div class="release-header">
+  <h1>v2.31.0</h1>
+  <relative-time datetime="2023-05-22T18:30:00Z">May 22, 2023</relative-time>
+</div>
+<div class="markdown-body">
+<h2>2.31.0 (2023-05-22)</h2>
+<p><strong>Added</strong></p>
+<ul>
+<li>Added support for <code>requests.post(json=...)</code> accepting bytes.</li>
+</ul>
+<p><strong>Changed</strong></p>
+<ul>
+<li>Updated urllib3 to &gt;=1.21.1,&lt;3.</li>
+<li>Deprecated <code>requests.compat.JSONDecodeError</code>.</li>
+</ul>
+<p><strong>Fixed</strong></p>
+<ul>
+<li>Fixed bug where setting <code>verify=False</code> still loaded system CA certificates.</li>
+</ul>
+<p><strong>Deprecations</strong></p>
+<ul>
+<li><code>requests.packages</code> shim is deprecated and will be removed in 3.0.</li>
+</ul>
+</div>
+</body>
+</html>

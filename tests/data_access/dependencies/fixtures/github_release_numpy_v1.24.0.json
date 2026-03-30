@@ -1,0 +1,8 @@
+{
+  "tag_name": "v1.24.0",
+  "name": "NumPy 1.24.0",
+  "body": "## NumPy 1.24.0\n\nNumPy 1.24.0 release.\n\n### Deprecations\n\n- Deprecated `np.bool`, `np.int`, `np.float` aliases. Use `np.bool_`, `np.int_`, etc.\n- The `numpy.distutils` module is deprecated.\n\n### Breaking Changes\n\n- `np.string_` and `np.unicode_` are no longer available.\n- Removed previously deprecated `numpy.core.defchararray` aliases.\n",
+  "published_at": "2022-12-18T12:00:00Z",
+  "prerelease": false,
+  "draft": false
+}

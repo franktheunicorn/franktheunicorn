@@ -41,6 +41,24 @@ def draft_review(
     drafts: list[ReviewDraft] = []
     changed_files: list[str] = pr.changed_files or ["unknown_file.py"]
 
+    # Add a dependency-aware stub comment if PR updates dependency files
+    dep_count = pr.dependency_changes.count() if hasattr(pr, "dependency_changes") else 0
+    if dep_count > 0:
+        dep_draft = ReviewDraft.objects.create(
+            pull_request=pr,
+            file_path=changed_files[0],
+            line_number=1,
+            comment_body=(
+                f"This PR updates {dep_count} "
+                f"{'dependency' if dep_count == 1 else 'dependencies'}. "
+                "Review the changelog summaries for breaking changes or deprecations."
+            ),
+            confidence=0.7,
+            status="pending",
+            source="agent",
+        )
+        drafts.append(dep_draft)
+
     for i, file_path in enumerate(changed_files[:2]):
         # Deterministic selection based on PR number + file path
         seed = f"{pr.number}:{file_path}"

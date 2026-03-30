@@ -1,0 +1,12 @@
+{
+  "info": {
+    "name": "requests",
+    "version": "2.31.0",
+    "summary": "Python HTTP for Humans.",
+    "home_page": null,
+    "project_urls": {
+      "Documentation": "https://requests.readthedocs.io",
+      "Source": "https://github.com/psf/requests"
+    }
+  }
+}

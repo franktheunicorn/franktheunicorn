@@ -10,7 +10,7 @@ from __future__ import annotations
 from django.http import HttpRequest, HttpResponse
 from django.shortcuts import get_object_or_404, render
 
-from franktheunicorn.core.models import PullRequest, ReviewDraft
+from franktheunicorn.core.models import DependencyChange, PullRequest, ReviewDraft
 
 
 def index(request: HttpRequest) -> HttpResponse:
@@ -27,4 +27,9 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
     """Detail view for a single PR showing drafts and score breakdown."""
     pr = get_object_or_404(PullRequest.objects.select_related("project"), pk=pr_id)
     drafts = ReviewDraft.objects.filter(pull_request=pr).order_by("-created_at")
-    return render(request, "dashboard/pr_detail.html", {"pr": pr, "drafts": drafts})
+    dep_changes = DependencyChange.objects.filter(pull_request=pr).order_by("package_name")
+    return render(
+        request,
+        "dashboard/pr_detail.html",
+        {"pr": pr, "drafts": drafts, "dep_changes": dep_changes},
+    )
