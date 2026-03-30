@@ -97,37 +97,17 @@ def score_pull_request(
     _add("ai_generated", score_ai_generated(author, ai_agents or None))
     _add("llm_interest", score_llm_interest(pr_dict.get("llm_interest")))  # type: ignore[arg-type]
 
-    # Review-history-based signals
+    # Collaborator + review history signals
+    _add(
+        "collaborator",
+        compute_collaborator_score(
+            author, operator_username, review_history or [], contributors, collaborator_scores
+        ),
+    )
     if review_history is not None:
         _add(
             "prior_review_history",
-            score_prior_review_history(
-                author,
-                operator_username,
-                review_history,
-            ),
-        )
-        _add(
-            "collaborator",
-            compute_collaborator_score(
-                author,
-                operator_username,
-                review_history,
-                contributors,
-                collaborator_scores,
-            ),
-        )
-    else:
-        # Still check frequent_contributors / collaborator_scores without history
-        _add(
-            "collaborator",
-            compute_collaborator_score(
-                author,
-                operator_username,
-                [],
-                contributors,
-                collaborator_scores,
-            ),
+            score_prior_review_history(author, operator_username, review_history),
         )
 
     if blame_data is not None:
@@ -199,7 +179,7 @@ def score_pull_request_from_model(
         )
 
     if collaborator_scores is None:
-        collaborator_scores = getattr(project_config, "collaborator_scores", None)
+        collaborator_scores = project_config.collaborator_scores or None
 
     return score_pull_request(
         pr_dict,
