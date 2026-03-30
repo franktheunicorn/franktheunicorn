@@ -60,6 +60,12 @@ class ProjectConfig(BaseModel):
     test_expectations: str = "tests expected for new features"
     frequent_contributors: list[str] = Field(default_factory=list)
     governance: str = "standard"
+    scoring_weights: dict[str, float] = Field(default_factory=dict)
+    custom_scoring_expressions: list[str] = Field(default_factory=list)
+    custom_scoring_max_boost: int = 30
+    watch_keywords: list[str] = Field(default_factory=list)
+    collaborator_scores: dict[str, float | None] = Field(default_factory=dict)
+    ai_agents: list[str] = Field(default_factory=list)
     enabled: bool = True
 
     @field_validator("owner", "repo")

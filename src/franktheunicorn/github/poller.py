@@ -15,7 +15,7 @@ from django.db import transaction
 
 from franktheunicorn.config.models import ProjectConfig
 from franktheunicorn.core.models import Project, PullRequest
-from franktheunicorn.scoring.scorer import score_pull_request
+from franktheunicorn.scoring.scorer import score_pull_request_from_model
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +69,7 @@ def poll_project(
         pr_obj = _upsert_pull_request(project, pr_data, changed_files)
 
         # Score the PR
-        score, breakdown = score_pull_request(
+        score, breakdown = score_pull_request_from_model(
             pr=pr_obj,
             project_config=project_config,
             operator_username=operator_username,
@@ -110,6 +110,7 @@ def _upsert_pull_request(
         "body": pr_data.get("body", "") or "",
         "labels": [lbl.get("name", "") for lbl in pr_data.get("labels", [])],
         "requested_reviewers": [r.get("login", "") for r in pr_data.get("requested_reviewers", [])],
+        "assignees": [a.get("login", "") for a in pr_data.get("assignees", [])],
         "changed_files": changed_files,
         "additions": pr_data.get("additions", 0),
         "deletions": pr_data.get("deletions", 0),
