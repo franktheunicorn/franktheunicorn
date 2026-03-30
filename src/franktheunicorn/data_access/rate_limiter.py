@@ -92,4 +92,6 @@ class GitHubRateLimiter:
         return max(0.0, self._reset_at - time.time())
 
     def close(self) -> None:
-        """Clean up resources."""
+        """No-op. The SQLiteBucket's background leaker thread holds a reference
+        to the connection; closing it here causes a segfault. The connection is
+        cleaned up when the process exits."""

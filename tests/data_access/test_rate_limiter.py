@@ -64,7 +64,7 @@ class TestGitHubRateLimiter:
         limiter1.close()
 
         limiter2 = GitHubRateLimiter(db_path=db_path, requests_per_hour=5)
-        limiter2.acquire()  # table exists, bucket refilled
+        limiter2.acquire()  # reuse existing DB; verify state persists across instances
         limiter2.close()
 
     def test_creates_parent_directory(self, tmp_path: Path) -> None:

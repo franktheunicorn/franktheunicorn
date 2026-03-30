@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
@@ -49,19 +50,29 @@ def pr_scrape_html() -> str:
     return (FIXTURES_DIR / "pr_42_scrape.html").read_text()
 
 
-# -- Fetcher instances (bound to a fresh httpx.Client) --
+# -- Shared httpx client with teardown --
 
 
 @pytest.fixture
-def diff_fetcher() -> DiffFetcher:
-    return DiffFetcher(client=httpx.Client())
+def http_client() -> Generator[httpx.Client, None, None]:
+    client = httpx.Client()
+    yield client
+    client.close()
+
+
+# -- Fetcher instances --
 
 
 @pytest.fixture
-def pr_fetcher() -> PRFetcher:
-    return PRFetcher(client=httpx.Client())
+def diff_fetcher(http_client: httpx.Client) -> DiffFetcher:
+    return DiffFetcher(client=http_client)
 
 
 @pytest.fixture
-def review_fetcher() -> ReviewFetcher:
-    return ReviewFetcher(client=httpx.Client())
+def pr_fetcher(http_client: httpx.Client) -> PRFetcher:
+    return PRFetcher(client=http_client)
+
+
+@pytest.fixture
+def review_fetcher(http_client: httpx.Client) -> ReviewFetcher:
+    return ReviewFetcher(client=http_client)
