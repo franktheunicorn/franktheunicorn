@@ -28,7 +28,11 @@ if TYPE_CHECKING:
 
 def _get_list(d: dict[str, object], key: str) -> list[str]:
     val = d.get(key)
-    return list(val) if val else []  # type: ignore[arg-type]
+    if not val:
+        return []
+    if isinstance(val, str):
+        return [val]
+    return list(val)  # type: ignore[arg-type]
 
 
 def score_pull_request(
@@ -169,7 +173,7 @@ def score_pull_request_from_model(
         "is_draft": pr.is_draft,
         "title": pr.title,
         "body": pr.body,
-        "assignees": getattr(pr, "assignees", []),
+        "assignees": pr.assignees,
     }
     if pr.github_created_at:
         age = (datetime.now(tz=UTC) - pr.github_created_at).days
@@ -178,8 +182,8 @@ def score_pull_request_from_model(
     config_dict: dict[str, object] = {
         "watched_paths": project_config.watched_paths,
         "frequent_contributors": project_config.frequent_contributors,
-        "watch_keywords": getattr(project_config, "watch_keywords", []),
-        "ai_agents": getattr(project_config, "ai_agents", []),
+        "watch_keywords": project_config.watch_keywords,
+        "ai_agents": project_config.ai_agents,
         "scoring_weights": project_config.scoring_weights,
     }
 
