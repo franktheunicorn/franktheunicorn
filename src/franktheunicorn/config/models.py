@@ -11,6 +11,14 @@ from franktheunicorn.config.schema import GITHUB_NAME_PATTERN, KNOWN_GOVERNANCE_
 logger = logging.getLogger(__name__)
 
 
+class CodeRabbitConfig(BaseModel):
+    """Config for CodeRabbit CLI integration."""
+
+    enabled: bool = False
+    cli_path: str = "coderabbit"
+    extra_args: list[str] = Field(default_factory=list)
+
+
 class OperatorConfig(BaseModel):
     """Top-level operator config loaded from operator.yaml."""
 
@@ -20,6 +28,7 @@ class OperatorConfig(BaseModel):
     poll_interval_seconds: int | None = None
     digest_email: str = ""
     digest_enabled: bool = False
+    coderabbit: CodeRabbitConfig = Field(default_factory=CodeRabbitConfig)
 
     @field_validator("poll_interval_seconds")
     @classmethod

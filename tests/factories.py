@@ -65,6 +65,7 @@ class ReviewDraftFactory(factory.django.DjangoModelFactory):  # type: ignore[mis
     comment_body = factory.Faker("paragraph")
     suggestion = ""
     confidence = 0.5
+    source = "agent"
     status = "pending"
     edited_body = ""
 

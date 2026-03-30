@@ -16,3 +16,12 @@ poll_interval_seconds: 300
 # Email for daily digest (stub — not yet implemented)
 digest_email: ""
 digest_enabled: false
+
+# CodeRabbit CLI integration (v1.5)
+# Install: npm install -g coderabbitai (or see https://docs.coderabbit.ai/cli)
+# Findings are attributed as [CodeRabbit] in the dashboard and still
+# pass through anti-pattern filtering.
+# coderabbit:
+#   enabled: true
+#   cli_path: "coderabbit"
+#   extra_args: []

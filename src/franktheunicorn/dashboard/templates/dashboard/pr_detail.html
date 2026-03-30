@@ -35,6 +35,11 @@
     {% for draft in drafts %}
     <div class="draft-item">
         <strong>{{ draft.file_path }}{% if draft.line_number %}:{{ draft.line_number }}{% endif %}</strong>
+        {% if draft.source == "coderabbit" %}
+        <span class="source-badge source-coderabbit">CodeRabbit</span>
+        {% else %}
+        <span class="source-badge source-agent">Agent</span>
+        {% endif %}
         <span style="font-size: 0.75rem; color: #999;">(confidence: {{ draft.confidence|floatformat:1 }}, {{ draft.status }})</span>
         <p style="margin-top: 0.25rem;">{{ draft.comment_body }}</p>
         {% if draft.suggestion %}

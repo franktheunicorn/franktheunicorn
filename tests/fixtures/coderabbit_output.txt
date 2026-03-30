@@ -1,0 +1,24 @@
+src/main.py:42 - [Critical] Race condition detected
+
+This function accesses shared state without proper locking. The `counter`
+variable is modified by multiple threads without synchronization.
+
+**Suggestion:** Use a `threading.Lock` to protect access to the shared counter,
+or switch to `threading.local()` for thread-local storage.
+
+=============
+
+src/utils/parser.py:118 - [High] Potential SQL injection
+
+The query uses string concatenation to build SQL. This is vulnerable to
+SQL injection attacks if any user input reaches this code path.
+
+**Suggestion:** Switch to parameterized queries using `cursor.execute(sql, params)`.
+
+=============
+
+README.md:15 - [Nit] Typo in documentation
+
+"recieve" should be "receive".
+
+**Suggestion:** Fix the typo.
