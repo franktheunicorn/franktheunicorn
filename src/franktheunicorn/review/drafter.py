@@ -56,20 +56,11 @@ def build_pr_context(
 
 
 def _get_pr_diff(pr: PullRequest, diff: str = "") -> str:
-    """Return the diff for a PR.
-
-    If ``diff`` is provided (e.g. pre-fetched by the worker via an
-    authenticated GitHub client), it is used directly.  Otherwise falls
-    back to a minimal placeholder built from ``changed_files`` metadata.
-    """
+    """Return pre-fetched diff, or a placeholder from changed_files metadata."""
     if diff:
         return diff
-
-    # Fallback: build a stub diff from changed_files metadata.
-    files = pr.changed_files or []
-    if not files:
-        return "+++ b/unknown_file.py\n"
-    return "\n".join(f"+++ b/{f}" for f in files) + "\n"
+    files: list[str] = pr.changed_files or []
+    return "\n".join(f"+++ b/{f}" for f in files) + "\n" if files else "+++ b/unknown_file.py\n"
 
 
 def create_drafts_from_findings(

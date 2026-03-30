@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
-from tests.conftest import make_pr_context
-
 from franktheunicorn.config.models import LLMBackendConfig
 from franktheunicorn.review.backends import get_backend
 from franktheunicorn.review.backends.base import (
@@ -14,6 +12,7 @@ from franktheunicorn.review.backends.base import (
     parse_llm_response,
 )
 from franktheunicorn.review.backends.stub_backend import StubBackend
+from tests.conftest import make_pr_context
 
 _SAMPLE_DIFF = """\
 diff --git a/src/main.py b/src/main.py

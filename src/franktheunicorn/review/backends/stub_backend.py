@@ -33,17 +33,11 @@ class StubBackend:
         diff: str,
         pr_context: PRContext,
     ) -> list[ReviewFinding]:
-        """Generate deterministic stub findings based on PR number."""
-        findings: list[ReviewFinding] = []
-
-        # Extract file paths from diff headers.
-        file_paths: list[str] = []
-        for line in diff.split("\n"):
-            if line.startswith("+++ b/"):
-                file_paths.append(line[6:])
+        file_paths = [line[6:] for line in diff.split("\n") if line.startswith("+++ b/")]
         if not file_paths:
             file_paths = ["unknown_file.py"]
 
+        findings: list[ReviewFinding] = []
         for i, file_path in enumerate(file_paths[:2]):
             seed = f"{pr_context.pr_number}:{file_path}"
             bucket = int(hashlib.sha256(seed.encode()).hexdigest(), 16) % len(_TEMPLATES)

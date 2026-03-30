@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
@@ -109,13 +110,8 @@ class BaseLLMBackend:
         return parse_llm_response(raw_text)
 
     def _resolve_api_key(self) -> str:
-        """Look up the API key from the configured env var."""
-        import os
-
         key_env = self._config.api_key_env or self._default_key_env
-        if not key_env:
-            return ""
-        return os.environ.get(key_env, "")
+        return os.environ.get(key_env, "") if key_env else ""
 
     def _call_api(self, system_prompt: str, user_message: str, api_key: str) -> str:
         """Make the actual SDK call. Must be overridden by subclasses."""

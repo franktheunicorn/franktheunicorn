@@ -6,9 +6,24 @@ import platform
 import shutil
 import subprocess
 
+import psutil
+
 from franktheunicorn.review.backends.base import BaseLLMBackend
 
 _DEFAULT_MODEL = "qwen2.5-coder:14b"
+
+# (min_gb, model) — checked in order, first match wins.
+_VRAM_TIERS: list[tuple[float, str]] = [
+    (24, "qwen2.5-coder:32b"),
+    (12, "qwen2.5-coder:14b"),
+    (6, "qwen2.5-coder:7b"),
+]
+
+_RAM_TIERS: list[tuple[float, str]] = [
+    (32, "qwen2.5-coder:32b"),
+    (16, "qwen2.5-coder:14b"),
+    (8, "qwen2.5-coder:7b"),
+]
 
 
 def _get_nvidia_vram_gb() -> float:
@@ -23,7 +38,6 @@ def _get_nvidia_vram_gb() -> float:
             timeout=10,
         )
         if result.returncode == 0 and result.stdout.strip():
-            # Sum across GPUs, nvidia-smi reports in MiB.
             total_mib = sum(
                 float(line.strip()) for line in result.stdout.strip().split("\n") if line.strip()
             )
@@ -33,28 +47,16 @@ def _get_nvidia_vram_gb() -> float:
     return 0.0
 
 
-def _is_apple_silicon() -> bool:
-    """Check if running on Apple Silicon (arm64 macOS)."""
-    return platform.system() == "Darwin" and platform.machine() == "arm64"
-
-
 def _get_total_ram_gb() -> float:
-    """Get total system RAM in GB."""
-    try:
-        import psutil
+    return float(psutil.virtual_memory().total) / (1024**3)
 
-        return float(psutil.virtual_memory().total) / (1024**3)
-    except ImportError:
-        # Fallback: read /proc/meminfo on Linux.
-        try:
-            with open("/proc/meminfo") as f:
-                for line in f:
-                    if line.startswith("MemTotal:"):
-                        kb = int(line.split()[1])
-                        return kb / (1024**2)
-        except Exception:
-            pass
-    return 0.0
+
+def _pick_model(tiers: list[tuple[float, str]], available_gb: float) -> str | None:
+    """Return the largest model that fits in ``available_gb``, or None."""
+    for min_gb, model in tiers:
+        if available_gb >= min_gb:
+            return model
+    return None
 
 
 def recommend_local_model() -> tuple[str, str]:
@@ -62,44 +64,34 @@ def recommend_local_model() -> tuple[str, str]:
 
     Returns ``(model_name, reason)`` tuple.
     """
-    if _is_apple_silicon():
+    is_apple = platform.system() == "Darwin" and platform.machine() == "arm64"
+
+    if is_apple:
         ram_gb = _get_total_ram_gb()
-        if ram_gb >= 32:
-            return ("qwen2.5-coder:32b", f"Apple Silicon with {ram_gb:.0f}GB unified memory")
-        if ram_gb >= 16:
-            return ("qwen2.5-coder:14b", f"Apple Silicon with {ram_gb:.0f}GB unified memory")
-        return ("qwen2.5-coder:7b", f"Apple Silicon with {ram_gb:.0f}GB unified memory")
+        model = _pick_model(_RAM_TIERS, ram_gb) or "qwen2.5-coder:7b"
+        return (model, f"Apple Silicon with {ram_gb:.0f}GB unified memory")
 
     nvidia_vram = _get_nvidia_vram_gb()
-    if nvidia_vram >= 24:
-        return ("qwen2.5-coder:32b", f"{nvidia_vram:.0f}GB VRAM available")
-    if nvidia_vram >= 12:
-        return ("qwen2.5-coder:14b", f"{nvidia_vram:.0f}GB VRAM available")
     if nvidia_vram >= 6:
-        return ("qwen2.5-coder:7b", f"{nvidia_vram:.0f}GB VRAM available")
+        model = _pick_model(_VRAM_TIERS, nvidia_vram) or "qwen2.5-coder:7b"
+        return (model, f"{nvidia_vram:.0f}GB VRAM available")
 
-    # CPU fallback — check RAM for quantised models.
     ram_gb = _get_total_ram_gb()
-    if ram_gb >= 16:
-        return ("qwen2.5-coder:7b", f"No GPU detected, {ram_gb:.0f}GB RAM (CPU inference)")
-    return ("qwen2.5-coder:3b", f"No GPU detected, {ram_gb:.0f}GB RAM (small CPU model)")
+    model = _pick_model([(16, "qwen2.5-coder:7b")], ram_gb) or "qwen2.5-coder:3b"
+    return (model, f"No GPU detected, {ram_gb:.0f}GB RAM (CPU inference)")
 
 
 class OllamaBackend(BaseLLMBackend):
-    """Review backend using the Ollama Python SDK for local model inference."""
+    """Ollama Python SDK backend for local model inference."""
 
     _sdk_module = "ollama"
-    _default_key_env = ""  # No API key needed for local models.
+    _default_key_env = ""
     _default_model = _DEFAULT_MODEL
 
     def _call_api(self, system_prompt: str, user_message: str, api_key: str) -> str:
         import ollama
 
-        if self._config.base_url:
-            client = ollama.Client(host=self._config.base_url)
-        else:
-            client = ollama.Client()
-
+        client = ollama.Client(host=self._config.base_url or None)
         response = client.chat(
             model=self._model,
             messages=[

@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from tests.conftest import make_pr_context
-
 from franktheunicorn.review.prompt import build_system_prompt, build_user_message
+from tests.conftest import make_pr_context
 
 
 class TestBuildSystemPrompt:

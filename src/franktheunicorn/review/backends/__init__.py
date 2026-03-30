@@ -12,40 +12,33 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Lazy-import map: provider name → (module_path, class_name)
+_BACKENDS: dict[str, tuple[str, str]] = {
+    "claude": ("franktheunicorn.review.backends.claude_backend", "ClaudeBackend"),
+    "openai": ("franktheunicorn.review.backends.openai_backend", "OpenAIBackend"),
+    "gemini": ("franktheunicorn.review.backends.gemini_backend", "GeminiBackend"),
+    "ollama": ("franktheunicorn.review.backends.ollama_backend", "OllamaBackend"),
+    "stub": ("franktheunicorn.review.backends.stub_backend", "StubBackend"),
+}
+
 
 def get_backend(config: LLMBackendConfig) -> LLMBackend:
     """Return the appropriate LLM backend for the given config.
 
-    Falls back to the stub backend if the provider is unknown or its
-    SDK is not installed.
+    Falls back to the stub backend if the provider is unknown.
     """
+    import importlib
+
     provider = config.provider.lower()
-
-    if provider == "claude":
-        from franktheunicorn.review.backends.claude_backend import ClaudeBackend
-
-        return ClaudeBackend(config)
-
-    if provider == "openai":
-        from franktheunicorn.review.backends.openai_backend import OpenAIBackend
-
-        return OpenAIBackend(config)
-
-    if provider == "gemini":
-        from franktheunicorn.review.backends.gemini_backend import GeminiBackend
-
-        return GeminiBackend(config)
-
-    if provider == "ollama":
-        from franktheunicorn.review.backends.ollama_backend import OllamaBackend
-
-        return OllamaBackend(config)
-
-    from franktheunicorn.review.backends.stub_backend import StubBackend
-
-    if provider != "stub":
+    entry = _BACKENDS.get(provider)
+    if entry is None:
         logger.warning("Unknown LLM provider '%s'; falling back to stub.", provider)
-    return StubBackend(config)
+        entry = _BACKENDS["stub"]
+
+    module_path, class_name = entry
+    module = importlib.import_module(module_path)
+    backend_cls = getattr(module, class_name)
+    return backend_cls(config)  # type: ignore[no-any-return]
 
 
 __all__ = ["LLMBackend", "get_backend"]
