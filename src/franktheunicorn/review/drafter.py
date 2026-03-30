@@ -57,6 +57,7 @@ def draft_review(
             comment_body=comment_body,
             confidence=0.5 + (bucket * 0.1),
             status="pending",
+            source="agent",
         )
         drafts.append(draft)
 

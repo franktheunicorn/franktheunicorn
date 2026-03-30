@@ -96,6 +96,7 @@ class ReviewDraft(models.Model):
     confidence = models.FloatField(
         default=0.5, validators=[MinValueValidator(0.0), MaxValueValidator(1.0)]
     )
+    source = models.CharField(max_length=50, default="agent")
 
     # Operator disposition
     STATUS_CHOICES = [

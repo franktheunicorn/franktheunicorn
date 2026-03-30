@@ -17,6 +17,7 @@ import os
 import sys
 import time
 from collections.abc import Sequence
+from pathlib import Path
 
 import django
 
@@ -63,7 +64,9 @@ def run_worker() -> None:
 
     try:
         while True:
-            _run_cycle(client, project_configs, operator_config.github_username)
+            _run_cycle(
+                client, project_configs, operator_config.github_username, operator_config
+            )
             logger.info("Sleeping %ds until next poll...", poll_interval)
             time.sleep(poll_interval)
     except KeyboardInterrupt:
@@ -76,11 +79,17 @@ def _run_cycle(
     client: object,
     project_configs: Sequence[object],
     operator_username: str,
+    operator_config: object | None = None,
 ) -> None:
     """Run one polling cycle across all configured projects."""
-    from franktheunicorn.config.models import ProjectConfig
+    from franktheunicorn.config.models import CodeRabbitConfig, OperatorConfig, ProjectConfig
     from franktheunicorn.github.poller import poll_project
     from franktheunicorn.review.drafter import draft_review
+
+    # Resolve CodeRabbit config from operator config.
+    cr_config: CodeRabbitConfig | None = None
+    if isinstance(operator_config, OperatorConfig) and operator_config.coderabbit.enabled:
+        cr_config = operator_config.coderabbit
 
     for pc in project_configs:
         if not isinstance(pc, ProjectConfig) or not pc.enabled:
@@ -102,8 +111,55 @@ def _run_cycle(
                         pr.interest_score,
                         len(drafts),
                     )
+
+                    # Run CodeRabbit if enabled and no CR drafts exist yet.
+                    if cr_config is not None:
+                        _run_coderabbit_for_pr(pr, cr_config)
         except Exception:
             logger.exception("Error polling %s/%s", pc.owner, pc.repo)
+
+
+def _run_coderabbit_for_pr(
+    pr: object,
+    cr_config: object,
+) -> None:
+    """Run CodeRabbit CLI review for a single PR. Never raises."""
+    from franktheunicorn.config.models import CodeRabbitConfig
+    from franktheunicorn.core.models import PullRequest
+    from franktheunicorn.review.coderabbit import (
+        create_drafts_from_coderabbit,
+        run_coderabbit_review,
+    )
+
+    if not isinstance(pr, PullRequest) or not isinstance(cr_config, CodeRabbitConfig):
+        return
+
+    try:
+        # Derive repo clone path from the project. The worker is expected
+        # to operate inside a local clone or have access to one.
+        repo_path = Path.home() / ".review-agent" / "repos" / pr.project.full_name
+        if not repo_path.exists():
+            logger.debug(
+                "Repo clone not found at %s; skipping CodeRabbit for PR #%d",
+                repo_path,
+                pr.number,
+            )
+            return
+
+        # Use the diff_url's base info or fall back to "HEAD~1".
+        base_commit = "HEAD~1"
+
+        findings = run_coderabbit_review(repo_path, base_commit, cr_config)
+        if findings:
+            drafts = create_drafts_from_coderabbit(pr, findings, pr.project)
+            logger.info(
+                "  PR #%d: %d CodeRabbit findings → %d drafts",
+                pr.number,
+                len(findings),
+                len(drafts),
+            )
+    except Exception:
+        logger.exception("CodeRabbit failed for PR #%d; continuing.", pr.number)
 
 
 if __name__ == "__main__":

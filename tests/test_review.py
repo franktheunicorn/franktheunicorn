@@ -39,6 +39,7 @@ class TestDraftReview:
             assert d.comment_body != ""
             assert d.status == "pending"
             assert 0.0 <= d.confidence <= 1.0
+            assert d.source == "agent"
 
 
 @pytest.mark.django_db
