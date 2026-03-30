@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 
 import yaml
+from django.conf import settings
 from pydantic import ValidationError
 
 from franktheunicorn.config.models import OperatorConfig, ProjectConfig
@@ -51,8 +52,6 @@ def load_project_configs(directory: str | Path) -> list[ProjectConfig]:
 
 def get_operator_config() -> OperatorConfig:
     """Load operator config from the path configured in Django settings."""
-    from django.conf import settings
-
     return load_operator_config(settings.FRANK_OPERATOR_CONFIG)
 
 
@@ -64,8 +63,6 @@ def get_project_config(name: str) -> ProjectConfig | None:
 
     Returns None if no matching config is found.
     """
-    from django.conf import settings
-
     configs = load_project_configs(settings.FRANK_PROJECTS_DIR)
     for config in configs:
         if name in (f"{config.owner}-{config.repo}", config.full_name):

@@ -6,6 +6,7 @@ import pytest
 from django.test import Client
 
 from franktheunicorn.core.models import PullRequest, ReviewDraft
+from tests.factories import PullRequestFactory
 
 
 @pytest.mark.django_db
@@ -39,3 +40,18 @@ class TestDashboardViews:
     def test_pr_detail_404(self, client: Client) -> None:
         response = client.get("/pr/99999/")
         assert response.status_code == 404
+
+    def test_index_orders_by_interest_score(self, client: Client, db_pr: PullRequest) -> None:
+        PullRequestFactory(
+            project=db_pr.project,
+            number=db_pr.number + 1,
+            github_id=db_pr.github_id + 1,
+            title="Higher score PR",
+            author="bob-dev",
+            interest_score=db_pr.interest_score + 0.5,
+        )
+        response = client.get("/")
+        assert response.status_code == 200
+        assert response.content.index(b"Higher score PR") < response.content.index(
+            db_pr.title.encode()
+        )

@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from franktheunicorn.review.prompt import build_system_prompt, build_user_message
 
@@ -173,7 +173,7 @@ def parse_llm_response(raw_text: str) -> list[ReviewFinding]:
                 finding.confidence = SEVERITY_CONFIDENCE[finding.severity.lower()]
             finding.severity = finding.severity.lower()
             findings.append(finding)
-        except Exception:
+        except ValidationError:
             logger.debug("Skipping invalid finding item: %s", item)
             continue
 

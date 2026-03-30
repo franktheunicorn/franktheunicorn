@@ -123,3 +123,15 @@ class TestPureFunctionOrchestrator:
     def test_graceful_no_data(self) -> None:
         score, _ = score_pull_request(_ALICE_PR, {}, "holdenk")
         assert 0.0 <= score <= 1.0
+
+    def test_tuple_inputs_are_coerced(self) -> None:
+        tuple_pr = {**_ALICE_PR, "requested_reviewers": ("holdenk",), "assignees": ("holdenk",)}
+        tuple_score, tuple_bd = score_pull_request(
+            tuple_pr, {"watched_paths": ("src/",)}, "holdenk"
+        )
+
+        list_pr = {**_ALICE_PR, "requested_reviewers": ["holdenk"], "assignees": ["holdenk"]}
+        list_score, list_bd = score_pull_request(list_pr, {"watched_paths": ["src/"]}, "holdenk")
+
+        assert tuple_bd == list_bd
+        assert tuple_score == list_score
