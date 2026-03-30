@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import logging
 import re
 from pathlib import Path
 from typing import Literal
 
 import yaml
 from pydantic import ValidationError
-
-logger = logging.getLogger(__name__)
 
 # Valid GitHub owner/repo: alphanumeric, hyphens, dots, underscores.
 # Must start and end with alphanumeric.
@@ -19,18 +16,6 @@ GITHUB_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?$")
 KNOWN_GOVERNANCE_VALUES: frozenset[str] = frozenset(
     {"standard", "asf", "personal", "corporate"}
 )
-
-# Scoring weight defaults — extend when adding new scoring signals.
-# See CLAUDE.md § "Adding a new scoring signal".
-DEFAULT_SCORING_WEIGHTS: dict[str, float] = {
-    "author_is_operator": 2.0,
-    "mentioned_or_requested": 3.0,
-    "path_overlap": 1.0,
-    "frequent_contributor": 0.5,
-    "new_contributor": 1.5,
-    "ai_generated_penalty": -1.0,
-    "staleness": 0.5,
-}
 
 
 def validate_yaml_file(
@@ -44,12 +29,11 @@ def validate_yaml_file(
     from franktheunicorn.config.models import OperatorConfig, ProjectConfig
 
     p = Path(path)
-    if not p.exists():
-        return [f"File not found: {p}"]
-
     try:
         with p.open() as f:
             data = yaml.safe_load(f)
+    except FileNotFoundError:
+        return [f"File not found: {p}"]
     except yaml.YAMLError as exc:
         return [f"Invalid YAML: {exc}"]
 

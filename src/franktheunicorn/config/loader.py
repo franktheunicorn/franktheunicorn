@@ -16,13 +16,13 @@ logger = logging.getLogger(__name__)
 def load_operator_config(path: str | Path) -> OperatorConfig:
     """Load operator config from a YAML file. Returns defaults if file doesn't exist."""
     p = Path(path)
-    if not p.exists():
-        logger.debug("Operator config not found at %s, using defaults", p)
-        return OperatorConfig()
     try:
         with p.open() as f:
             data = yaml.safe_load(f) or {}
         return OperatorConfig(**data)
+    except FileNotFoundError:
+        logger.debug("Operator config not found at %s, using defaults", p)
+        return OperatorConfig()
     except yaml.YAMLError:
         logger.exception("Invalid YAML in operator config: %s", p)
         return OperatorConfig()
@@ -34,11 +34,10 @@ def load_operator_config(path: str | Path) -> OperatorConfig:
 def load_project_configs(directory: str | Path) -> list[ProjectConfig]:
     """Load all project configs from YAML files in a directory."""
     d = Path(directory)
-    if not d.exists():
+    if not d.is_dir():
         return []
     configs: list[ProjectConfig] = []
-    yaml_files = sorted(d.glob("*.yaml")) + sorted(d.glob("*.yml"))
-    for yaml_file in yaml_files:
+    for yaml_file in sorted(f for f in d.iterdir() if f.suffix in {".yaml", ".yml"}):
         try:
             with yaml_file.open() as f:
                 data = yaml.safe_load(f) or {}

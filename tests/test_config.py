@@ -17,10 +17,6 @@ from franktheunicorn.config.loader import (
 from franktheunicorn.config.models import OperatorConfig, ProjectConfig
 from franktheunicorn.config.schema import validate_yaml_file
 
-# ---------------------------------------------------------------------------
-# Model defaults
-# ---------------------------------------------------------------------------
-
 
 class TestOperatorConfig:
     def test_defaults(self) -> None:
@@ -57,10 +53,6 @@ class TestProjectConfig:
         assert "sql/catalyst/" in config.watched_paths
         assert config.governance == "asf"
 
-
-# ---------------------------------------------------------------------------
-# Validation
-# ---------------------------------------------------------------------------
 
 
 class TestOperatorConfigValidation:
@@ -139,10 +131,6 @@ class TestProjectConfigValidation:
         assert "watched_paths and ignore_paths" not in caplog.text
 
 
-# ---------------------------------------------------------------------------
-# Config loader
-# ---------------------------------------------------------------------------
-
 
 class TestConfigLoader:
     def test_load_operator_config_from_file(self, tmp_config_dir: Path) -> None:
@@ -165,10 +153,6 @@ class TestConfigLoader:
         configs = load_project_configs(tmp_path / "nonexistent")
         assert configs == []
 
-
-# ---------------------------------------------------------------------------
-# YAML error handling
-# ---------------------------------------------------------------------------
 
 
 class TestYAMLErrorHandling:
@@ -213,10 +197,6 @@ class TestYAMLErrorHandling:
         assert configs[0].owner == "apache"
 
 
-# ---------------------------------------------------------------------------
-# Convenience functions
-# ---------------------------------------------------------------------------
-
 
 class TestConvenienceFunctions:
     def test_get_operator_config(self, tmp_config_dir: Path, settings: object) -> None:
@@ -241,10 +221,6 @@ class TestConvenienceFunctions:
         config = get_project_config("nonexistent")
         assert config is None
 
-
-# ---------------------------------------------------------------------------
-# Standalone YAML validation
-# ---------------------------------------------------------------------------
 
 
 class TestValidateYamlFile:
