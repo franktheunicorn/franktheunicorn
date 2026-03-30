@@ -17,24 +17,12 @@ from django.core.management.base import BaseCommand
 
 from franktheunicorn.review.backends.ollama_backend import recommend_local_model
 
-_PROVIDERS = {
-    "1": ("claude", "Anthropic Claude"),
-    "2": ("openai", "OpenAI"),
-    "3": ("gemini", "Google Gemini"),
-    "4": ("ollama", "Local model (Ollama)"),
-}
-
-_DEFAULT_MODELS: dict[str, str] = {
-    "claude": "claude-sonnet-4-20250514",
-    "openai": "gpt-4o",
-    "gemini": "gemini-2.5-flash",
-    "ollama": "qwen2.5-coder:14b",
-}
-
-_API_KEY_ENVS: dict[str, str] = {
-    "claude": "ANTHROPIC_API_KEY",
-    "openai": "OPENAI_API_KEY",
-    "gemini": "GOOGLE_API_KEY",
+# (provider_id, label, default_model, api_key_env)
+_PROVIDERS: dict[str, tuple[str, str, str, str]] = {
+    "1": ("claude", "Anthropic Claude", "claude-sonnet-4-20250514", "ANTHROPIC_API_KEY"),
+    "2": ("openai", "OpenAI", "gpt-4o", "OPENAI_API_KEY"),
+    "3": ("gemini", "Google Gemini", "gemini-2.5-flash", "GOOGLE_API_KEY"),
+    "4": ("ollama", "Local model (Ollama)", "qwen2.5-coder:14b", ""),
 }
 
 
@@ -67,7 +55,7 @@ class Command(BaseCommand):
 
         # --- LLM providers (multiple) ---
         self.stdout.write("\nSelect LLM providers for code review (you can enable multiple):\n")
-        for key, (_, label) in _PROVIDERS.items():
+        for key, (_, label, _, _) in _PROVIDERS.items():
             self.stdout.write(f"  {key}. {label}\n")
         self.stdout.write("  5. Skip — use stub/demo mode\n")
 
@@ -86,14 +74,14 @@ class Command(BaseCommand):
             if key not in _PROVIDERS:
                 self.stdout.write(self.style.WARNING(f"  Skipping unknown choice '{key}'\n"))
                 continue
-            provider, provider_label = _PROVIDERS[key]
+            provider, provider_label, _default_model, api_key_env = _PROVIDERS[key]
             self.stdout.write(f"\n--- Configuring {provider_label} ---\n")
 
             llm_config: dict[str, object] = {"provider": provider}
 
-            if provider in _API_KEY_ENVS:
+            if api_key_env:
                 llm_config = self._configure_cloud_provider(provider, llm_config)
-                env_vars_needed.append(_API_KEY_ENVS[provider])
+                env_vars_needed.append(api_key_env)
             elif provider == "ollama":
                 llm_config = self._configure_ollama(llm_config)
 
@@ -149,8 +137,10 @@ class Command(BaseCommand):
         llm_config: dict[str, object],
     ) -> dict[str, object]:
         """Configure a cloud LLM provider (Claude/OpenAI/Gemini)."""
-        env_var = _API_KEY_ENVS[provider]
-        default_model = _DEFAULT_MODELS[provider]
+        # Look up provider info from the consolidated dict.
+        _prov = next(p for p in _PROVIDERS.values() if p[0] == provider)
+        env_var = _prov[3]
+        default_model = _prov[2]
 
         # Check if key is already in environment.
         existing_key = os.environ.get(env_var, "")

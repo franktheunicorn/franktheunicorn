@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import re
+from unidiff import PatchSet  # type: ignore[import-untyped]
 
 from franktheunicorn.data_access.base import (
     GITHUB_API_BASE,
@@ -12,52 +12,34 @@ from franktheunicorn.data_access.base import (
 )
 from franktheunicorn.data_access.github.types import PRDiff, PRFileChange
 
-# Matches "diff --git a/path b/path" headers in unified diffs
-_DIFF_HEADER_RE = re.compile(r"^diff --git a/(.+?) b/(.+?)$", re.MULTILINE)
+
+def _detect_status(pf: object) -> str:
+    """Map unidiff's patched-file flags to our status string."""
+    if getattr(pf, "is_added_file", False):
+        return "added"
+    if getattr(pf, "is_removed_file", False):
+        return "removed"
+    if getattr(pf, "is_rename", False):
+        return "renamed"
+    return "modified"
 
 
 def parse_unified_diff(raw: str) -> tuple[PRFileChange, ...]:
     """Parse a unified diff string into per-file change records."""
-    sections = _DIFF_HEADER_RE.split(raw)
-    if len(sections) < 4:
+    try:
+        patch_set = PatchSet(raw)
+    except Exception:
         return ()
-
-    files: list[PRFileChange] = []
-    # sections layout: [preamble, a_path, b_path, chunk, a_path, b_path, chunk, ...]
-    i = 1
-    while i + 2 < len(sections):
-        a_path = sections[i]
-        b_path = sections[i + 1]
-        chunk = sections[i + 2]
-
-        additions = chunk.count("\n+") - chunk.count("\n+++")
-        deletions = chunk.count("\n-") - chunk.count("\n---")
-
-        # Detect add/remove from --- /dev/null or +++ /dev/null in the chunk
-        has_dev_null_old = "--- /dev/null" in chunk
-        has_dev_null_new = "+++ /dev/null" in chunk
-
-        if has_dev_null_old and not has_dev_null_new:
-            status = "added"
-        elif not has_dev_null_old and has_dev_null_new:
-            status = "removed"
-        elif a_path != b_path:
-            status = "renamed"
-        else:
-            status = "modified"
-
-        files.append(
-            PRFileChange(
-                filename=b_path,
-                status=status,
-                additions=max(0, additions),
-                deletions=max(0, deletions),
-                patch=chunk.strip(),
-            )
+    return tuple(
+        PRFileChange(
+            filename=pf.path,
+            status=_detect_status(pf),
+            additions=pf.added,
+            deletions=pf.removed,
+            patch=str(pf).strip(),
         )
-        i += 3
-
-    return tuple(files)
+        for pf in patch_set
+    )
 
 
 class DiffFetcher(DataFetcher[PRDiff]):

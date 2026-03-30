@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from franktheunicorn.config.models import LLMBackendConfig
 from franktheunicorn.review.backends import get_backend
@@ -13,6 +16,15 @@ from franktheunicorn.review.backends.base import (
 )
 from franktheunicorn.review.backends.stub_backend import StubBackend
 from tests.conftest import make_pr_context
+
+
+def _cffi_available() -> bool:
+    try:
+        importlib.import_module("_cffi_backend")
+        return True
+    except (ImportError, ModuleNotFoundError):
+        return False
+
 
 _SAMPLE_DIFF = """\
 diff --git a/src/main.py b/src/main.py
@@ -117,6 +129,7 @@ class TestGetBackend:
         backend = get_backend(config)
         assert type(backend).__name__ == "OpenAIBackend"
 
+    @pytest.mark.skipif(not _cffi_available(), reason="google-auth requires _cffi_backend")
     def test_gemini_backend(self) -> None:
         config = LLMBackendConfig(provider="gemini")
         backend = get_backend(config)

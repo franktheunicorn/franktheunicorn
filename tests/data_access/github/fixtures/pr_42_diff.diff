@@ -2,7 +2,7 @@ diff --git a/core/src/test/scala/SchedulerSuite.scala b/core/src/test/scala/Sche
 index abc1234..def5678 100644
 --- a/core/src/test/scala/SchedulerSuite.scala
 +++ b/core/src/test/scala/SchedulerSuite.scala
-@@ -100,5 +100,14 @@
+@@ -100,1 +100,3 @@
 -    assert(result == expected)
 +    eventually(timeout(10.seconds)) {
 +      assert(result == expected)

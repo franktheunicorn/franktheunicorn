@@ -71,3 +71,20 @@ class TestBuildUserMessage:
         ctx = make_pr_context(pr_body="x" * 3000)
         msg = build_user_message("diff", ctx)
         assert "truncated" in msg
+
+
+class TestFindingSchemaGeneration:
+    """Verify the schema is auto-generated from the ReviewFinding Pydantic model."""
+
+    def test_schema_contains_all_model_fields(self) -> None:
+        from franktheunicorn.review.backends.base import ReviewFinding
+        from franktheunicorn.review.prompt import _finding_schema
+
+        schema = _finding_schema()
+        for field_name in ReviewFinding.model_fields:
+            assert field_name in schema, f"Missing field '{field_name}' in generated schema"
+
+    def test_schema_is_cached(self) -> None:
+        from franktheunicorn.review.prompt import _finding_schema
+
+        assert _finding_schema() is _finding_schema()  # same object = lru_cache hit

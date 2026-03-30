@@ -16,7 +16,7 @@ import logging
 import os
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -25,8 +25,9 @@ import django
 if TYPE_CHECKING:
     import httpx
 
-    from franktheunicorn.config.models import CodeRabbitConfig
+    from franktheunicorn.config.models import CodeRabbitConfig, OperatorConfig
     from franktheunicorn.core.models import PullRequest
+    from franktheunicorn.data_access.github.diff_fetcher import DiffFetcher
 
 logger = logging.getLogger(__name__)
 
@@ -84,13 +85,13 @@ def _run_cycle(
     client: object,
     project_configs: Sequence[object],
     operator_username: str,
-    operator_config: object | None = None,
+    operator_config: OperatorConfig | None = None,
 ) -> None:
     """Run one polling cycle across all configured projects."""
     import httpx
     from django.conf import settings
 
-    from franktheunicorn.config.models import OperatorConfig, ProjectConfig
+    from franktheunicorn.config.models import ProjectConfig
     from franktheunicorn.data_access.github.diff_fetcher import DiffFetcher
     from franktheunicorn.github.poller import poll_project
     from franktheunicorn.review.copypasta import check_copypasta
@@ -98,7 +99,7 @@ def _run_cycle(
 
     # Resolve CodeRabbit config from operator config.
     cr_config: CodeRabbitConfig | None = None
-    if isinstance(operator_config, OperatorConfig) and operator_config.coderabbit.enabled:
+    if operator_config is not None and operator_config.coderabbit.enabled:
         cr_config = operator_config.coderabbit
 
     # Shared HTTP client for diff fetching (copypasta + dependency changelogs).
@@ -106,7 +107,7 @@ def _run_cycle(
     diff_fetcher = DiffFetcher(client=diff_http)
 
     all_prs: list[object] = []
-    pr_to_config: dict[int, object] = {}
+    pr_to_config: dict[int, ProjectConfig] = {}
 
     for pc in project_configs:
         if not isinstance(pc, ProjectConfig) or not pc.enabled:
@@ -124,10 +125,7 @@ def _run_cycle(
 
                 # Only draft reviews for PRs without existing drafts
                 if not pr.review_drafts.exists():
-                    op_cfg = (
-                        operator_config if isinstance(operator_config, OperatorConfig) else None
-                    )
-                    drafts = draft_review(pr, pc, operator_config=op_cfg)
+                    drafts = draft_review(pr, pc, operator_config=operator_config)
                     logger.info(
                         "  PR #%d: score=%.2f, %d drafts generated",
                         pr.number,
@@ -238,8 +236,8 @@ def _resolve_base_ref(repo_path: Path, pr: PullRequest) -> str | None:
 
 def _fetch_dependency_changelogs_for_cycle(
     prs: list[object],
-    project_configs_by_pr: dict[int, object],
-    diff_fetcher: object,
+    project_configs_by_pr: Mapping[int, object],
+    diff_fetcher: DiffFetcher,
     http_client: httpx.Client,
 ) -> None:
     """Fetch dependency changelogs for all PRs in a cycle that touch dependency files."""
@@ -272,7 +270,7 @@ def _fetch_dependency_changelogs_for_cycle(
 
         for pr, pc in eligible:
             try:
-                diff = diff_fetcher.fetch(pc.owner, pc.repo, pr.number)  # type: ignore[attr-defined]
+                diff = diff_fetcher.fetch(pc.owner, pc.repo, pr.number)
                 detect_and_fetch_changelogs(pr, diff, http_client)
             except Exception:
                 logger.exception(

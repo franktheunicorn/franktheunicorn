@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Generator
 from pathlib import Path
 
 import httpx
@@ -13,10 +12,8 @@ from franktheunicorn.data_access.rate_limiter import GitHubRateLimiter
 
 
 @pytest.fixture
-def limiter(tmp_path: Path) -> Generator[GitHubRateLimiter, None, None]:
-    rl = GitHubRateLimiter(db_path=tmp_path / "rl.db")
-    yield rl
-    rl.close()
+def limiter(tmp_path: Path) -> GitHubRateLimiter:
+    return GitHubRateLimiter(db_path=tmp_path / "rl.db")
 
 
 class TestGitHubRateLimiter:
@@ -61,14 +58,13 @@ class TestGitHubRateLimiter:
         limiter1 = GitHubRateLimiter(db_path=db_path, requests_per_hour=5)
         for _ in range(3):
             limiter1.acquire()
-        limiter1.close()
+        del limiter1
 
         limiter2 = GitHubRateLimiter(db_path=db_path, requests_per_hour=5)
         limiter2.acquire()  # reuse existing DB; verify state persists across instances
-        limiter2.close()
+        del limiter2
 
     def test_creates_parent_directory(self, tmp_path: Path) -> None:
         db_path = tmp_path / "subdir" / "nested" / "rl.db"
-        limiter = GitHubRateLimiter(db_path=db_path)
+        GitHubRateLimiter(db_path=db_path)
         assert db_path.parent.exists()
-        limiter.close()

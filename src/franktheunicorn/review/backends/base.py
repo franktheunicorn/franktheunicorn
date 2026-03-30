@@ -76,12 +76,7 @@ class BaseLLMBackend:
     def __init__(self, config: LLMBackendConfig) -> None:
         self._config = config
         self._model = config.model or self._default_model
-
-    def generate_findings(
-        self,
-        diff: str,
-        pr_context: PRContext,
-    ) -> list[ReviewFinding]:
+        self._sdk_available = True
         if self._sdk_module:
             try:
                 __import__(self._sdk_module)
@@ -90,7 +85,15 @@ class BaseLLMBackend:
                     "%s package not installed. Run: pip install franktheunicorn",
                     self._sdk_module,
                 )
-                return []
+                self._sdk_available = False
+
+    def generate_findings(
+        self,
+        diff: str,
+        pr_context: PRContext,
+    ) -> list[ReviewFinding]:
+        if not self._sdk_available:
+            return []
 
         api_key = self._resolve_api_key()
         if self._default_key_env and not api_key:
