@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -15,7 +16,6 @@ from franktheunicorn.config.loader import (
 )
 from franktheunicorn.config.models import OperatorConfig, ProjectConfig
 from franktheunicorn.config.schema import validate_yaml_file
-
 
 # ---------------------------------------------------------------------------
 # Model defaults
