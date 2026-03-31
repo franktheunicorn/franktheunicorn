@@ -217,10 +217,9 @@ def _run_coderabbit_for_pr(
             )
             return
 
-        # TODO(v1.5): Determine proper merge base from PR metadata once we
-        # have local checkout support. For now, require the repo clone to be
-        # checked out to the PR branch with a meaningful base available.
-        # We skip rather than guess with HEAD~1, which would produce garbage.
+        # Determine the base ref for diffing. The repo manager keeps the
+        # working tree on the default branch, so origin/main or origin/master
+        # should be available.
         base_ref = _resolve_base_ref(repo_path, pr)
         if base_ref is None:
             return

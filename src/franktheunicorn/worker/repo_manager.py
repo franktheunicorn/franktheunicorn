@@ -23,16 +23,18 @@ def ensure_repo(
 ) -> Path | None:
     """Ensure a local clone exists for the given repo.
 
-    If the repo doesn't exist, clones it. If it does, fetches latest.
+    If the repo doesn't exist, clones it (checked out to the default branch).
+    If it does, fetches latest and updates the working tree to the default
+    branch tip so features that read files (copypasta, CodeRabbit) work.
+
     Returns the repo path, or None if cloning/fetching fails.
     """
     repo_path = repos_dir / owner / repo
 
     if repo_path.is_dir() and (repo_path / ".git").is_dir():
-        # Already cloned — just fetch latest.
-        if _git_fetch(repo_path):
-            return repo_path
-        logger.warning("git fetch failed for %s/%s; using stale clone", owner, repo)
+        # Already cloned — fetch latest and fast-forward the default branch.
+        _git_fetch(repo_path)
+        _update_default_branch(repo_path)
         return repo_path
 
     # Need to clone.
@@ -42,7 +44,7 @@ def ensure_repo(
     repo_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         subprocess.run(
-            ["git", "clone", "--no-checkout", clone_url, str(repo_path)],
+            ["git", "clone", clone_url, str(repo_path)],
             capture_output=True,
             text=True,
             check=True,
@@ -56,6 +58,49 @@ def ensure_repo(
     except subprocess.TimeoutExpired:
         logger.warning("git clone timed out for %s/%s", owner, repo)
         return None
+
+
+def _update_default_branch(repo_path: Path) -> None:
+    """Fast-forward the working tree to the default branch tip.
+
+    Keeps the local clone's working tree current with origin/main (or
+    origin/master). This is needed for features that read files from the
+    working tree (copypasta detection, CodeRabbit).
+    """
+    for branch in ("main", "master"):
+        try:
+            # Check if origin/<branch> exists.
+            result = subprocess.run(
+                ["git", "rev-parse", "--verify", f"origin/{branch}"],
+                capture_output=True,
+                text=True,
+                cwd=str(repo_path),
+                timeout=5,
+            )
+            if result.returncode != 0:
+                continue
+
+            # Reset working tree to this branch. Using reset --hard is safe
+            # because the worker never makes local modifications.
+            subprocess.run(
+                ["git", "checkout", "-f", branch],
+                capture_output=True,
+                text=True,
+                cwd=str(repo_path),
+                timeout=15,
+            )
+            subprocess.run(
+                ["git", "reset", "--hard", f"origin/{branch}"],
+                capture_output=True,
+                text=True,
+                cwd=str(repo_path),
+                timeout=15,
+            )
+            logger.debug("Updated %s to origin/%s", repo_path, branch)
+            return
+        except Exception:
+            continue
+    logger.debug("Could not determine default branch for %s", repo_path)
 
 
 def _git_fetch(repo_path: Path) -> bool:
