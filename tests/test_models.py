@@ -165,6 +165,9 @@ class TestReviewDraftModel:
         assert draft.confidence == 0.5
         assert draft.edited_body == ""
         assert draft.suggestion == ""
+        assert draft.rejection_probability is None
+        assert draft.is_auto_suppressed is False
+        assert draft.code_context == ""
 
     def test_ordering(self, db_pr: PullRequest) -> None:
         now = timezone.now()

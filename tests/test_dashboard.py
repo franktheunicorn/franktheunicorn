@@ -239,6 +239,22 @@ class TestStatsView:
         response = client.get("/stats/")
         assert response.status_code == 200
 
+    def test_stats_rejection_predictor_section(self, client: Client, db_pr: PullRequest) -> None:
+        ReviewDraftFactory(
+            pull_request=db_pr,
+            rejection_probability=0.9,
+            is_auto_suppressed=True,
+        )
+        ReviewDraftFactory(
+            pull_request=db_pr,
+            rejection_probability=0.3,
+            is_auto_suppressed=False,
+        )
+        response = client.get("/stats/")
+        assert response.status_code == 200
+        assert b"Rejection Predictor" in response.content
+        assert b"Auto-Suppressed Findings" in response.content
+
 
 @pytest.mark.django_db
 class TestPRDetailWithTestRuns:
@@ -385,3 +401,109 @@ class TestAgentFeedbackViews:
         assert response.status_code == 200
         assert b"Invalid assessment" in response.content
         assert AgentFeedback.objects.count() == 0
+
+
+@pytest.mark.django_db
+class TestRejectionProbabilityDisplay:
+    """Tests for v1.75 rejection probability display in dashboard."""
+
+    def test_draft_with_rejection_probability(self, client: Client, db_pr: PullRequest) -> None:
+        ReviewDraftFactory(
+            pull_request=db_pr,
+            rejection_probability=0.65,
+            comment_body="Some nit.",
+        )
+        response = client.get(f"/pr/{db_pr.pk}/")
+        assert response.status_code == 200
+        assert b"P(reject): 0.65" in response.content
+
+    def test_draft_without_rejection_probability(self, client: Client, db_pr: PullRequest) -> None:
+        ReviewDraftFactory(
+            pull_request=db_pr,
+            rejection_probability=None,
+            comment_body="Good finding.",
+        )
+        response = client.get(f"/pr/{db_pr.pk}/")
+        assert response.status_code == 200
+        assert b"P(reject)" not in response.content
+
+    def test_likely_low_value_badge(self, client: Client, db_pr: PullRequest) -> None:
+        ReviewDraftFactory(
+            pull_request=db_pr,
+            rejection_probability=0.65,
+            is_auto_suppressed=False,
+            comment_body="Style nit.",
+        )
+        response = client.get(f"/pr/{db_pr.pk}/")
+        assert response.status_code == 200
+        assert b"likely low-value" in response.content
+
+    def test_suppressed_drafts_in_collapsible(self, client: Client, db_pr: PullRequest) -> None:
+        ReviewDraftFactory(
+            pull_request=db_pr,
+            rejection_probability=0.9,
+            is_auto_suppressed=True,
+            comment_body="Auto-suppressed nit.",
+        )
+        response = client.get(f"/pr/{db_pr.pk}/")
+        assert response.status_code == 200
+        assert b"Suppressed Findings" in response.content
+        assert b"Auto-suppressed nit." in response.content
+        assert b"auto-suppressed" in response.content
+
+    def test_suppressed_drafts_not_in_main_list(self, client: Client, db_pr: PullRequest) -> None:
+        ReviewDraftFactory(
+            pull_request=db_pr,
+            rejection_probability=0.9,
+            is_auto_suppressed=True,
+            comment_body="Suppressed finding body.",
+        )
+        ReviewDraftFactory(
+            pull_request=db_pr,
+            rejection_probability=0.2,
+            is_auto_suppressed=False,
+            comment_body="Visible finding body.",
+        )
+        response = client.get(f"/pr/{db_pr.pk}/")
+        content = response.content.decode()
+        # The suppressed finding should only appear in the suppressed section.
+        main_section_end = content.index("Suppressed Findings")
+        main_section = content[:main_section_end]
+        assert "Visible finding body." in main_section
+        assert "Suppressed finding body." not in main_section
+
+    def test_suppressed_draft_has_action_buttons(self, client: Client, db_pr: PullRequest) -> None:
+        ReviewDraftFactory(
+            pull_request=db_pr,
+            rejection_probability=0.9,
+            is_auto_suppressed=True,
+            comment_body="Suppressed but actionable.",
+        )
+        response = client.get(f"/pr/{db_pr.pk}/")
+        assert response.status_code == 200
+        assert b"Approve" in response.content
+
+    def test_approve_suppressed_draft_unsuppresses(
+        self, client: Client, db_pr: PullRequest
+    ) -> None:
+        draft = ReviewDraftFactory(
+            pull_request=db_pr,
+            rejection_probability=0.9,
+            is_auto_suppressed=True,
+            comment_body="Was suppressed.",
+        )
+        response = client.post(f"/draft/{draft.pk}/approve/")
+        assert response.status_code == 200
+        draft.refresh_from_db()
+        assert draft.status == "accepted"
+        assert draft.is_auto_suppressed is False
+
+    def test_no_suppressed_section_when_none(self, client: Client, db_pr: PullRequest) -> None:
+        ReviewDraftFactory(
+            pull_request=db_pr,
+            is_auto_suppressed=False,
+            comment_body="Normal finding.",
+        )
+        response = client.get(f"/pr/{db_pr.pk}/")
+        assert response.status_code == 200
+        assert b"Suppressed Findings" not in response.content

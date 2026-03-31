@@ -43,4 +43,13 @@
         <tr><td>Total Findings Suppressed</td><td>{{ ap_stats.total_triggers|default:0 }}</td></tr>
     </tbody>
 </table>
+
+<h3 style="margin-top: 1.5rem;">Rejection Predictor (v1.75)</h3>
+<table>
+    <thead><tr><th>Metric</th><th>Value</th></tr></thead>
+    <tbody>
+        <tr><td>Findings Scored by Predictor</td><td>{{ scored_count }}</td></tr>
+        <tr><td>Auto-Suppressed Findings</td><td>{{ suppressed_count }}</td></tr>
+    </tbody>
+</table>
 {% endblock %}

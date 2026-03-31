@@ -114,4 +114,18 @@
 {% else %}
 <p class="empty-state">No review findings yet.</p>
 {% endif %}
+
+{% if suppressed_drafts %}
+<details style="margin-top: 1.5rem;">
+    <summary style="cursor: pointer; font-size: 0.9rem; color: #666;">
+        Suppressed Findings ({{ suppressed_drafts|length }})
+        <span style="font-size: 0.75rem; color: #999;">&mdash; auto-suppressed by rejection predictor</span>
+    </summary>
+    <div class="draft-list suppressed" style="margin-top: 0.5rem; opacity: 0.8;">
+        {% for draft in suppressed_drafts %}
+        {% include "dashboard/_draft_item.html" %}
+        {% endfor %}
+    </div>
+</details>
+{% endif %}
 {% endblock %}

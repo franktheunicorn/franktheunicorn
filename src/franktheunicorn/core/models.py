@@ -156,6 +156,11 @@ class ReviewDraft(models.Model):
     tone_guard_applied = models.BooleanField(default=False)
     backend_used = models.CharField(max_length=100, blank=True, default="")
 
+    # Rejection predictor (v1.75 — Tier 2 learning)
+    rejection_probability = models.FloatField(null=True, blank=True)
+    is_auto_suppressed = models.BooleanField(default=False)
+    code_context = models.TextField(blank=True, default="")
+
     # Operator disposition
     STATUS_CHOICES = [
         ("pending", "Pending"),
