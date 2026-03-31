@@ -52,6 +52,7 @@ Two env vars. One command. Working dashboard.
 ## Documentation
 
 - **[Master Design Document](docs/franktheunicorn-master-design.md)** — the full architecture, all decisions, implementation phases
+- **[Security Design](docs/security-design.md)** — threat model, trust boundaries, attack surfaces, CI trust rules, and hardening checklist
 - **[CLAUDE.md](CLAUDE.md)** — instructions for Claude Code working on this repo
 - **[AGENTS.md](AGENTS.md)** — instructions for any AI agent contributing
 - **[REVIEWER.md](REVIEWER.md)** — instructions for franktheunicorn reviewing its own PRs
