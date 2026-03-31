@@ -155,6 +155,27 @@ def _run_cycle(
                     if cr_config is not None:
                         _run_coderabbit_for_pr(pr, cr_config)
 
+                # LLM sub-checks (coverage, etc.) — runs after draft review.
+                if pc.llm_checks:
+                    try:
+                        from franktheunicorn.review.checks import run_enabled_checks
+
+                        check_diff = diff_fetcher.fetch(pc.owner, pc.repo, pr.number)
+                        check_drafts = run_enabled_checks(
+                            pr,
+                            check_diff,
+                            project_config=pc,
+                            operator_config=operator_config,
+                        )
+                        if check_drafts:
+                            logger.info(
+                                "  PR #%d: %d LLM check findings",
+                                pr.number,
+                                len(check_drafts),
+                            )
+                    except Exception:
+                        logger.exception("Error in LLM checks for PR #%d", pr.number)
+
                 # Differential test verification (§9).
                 try:
                     test_run = test_runner.run_differential_test(pr, pc)

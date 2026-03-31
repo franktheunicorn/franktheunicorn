@@ -151,6 +151,9 @@ class ProjectConfig(BaseModel):
     copypasta_scan_extensions: list[str] = Field(default_factory=lambda: [".py"])
     copypasta_llm_enabled: bool = False
 
+    # LLM sub-checks (v1) — e.g. ["coverage"]
+    llm_checks: list[str] = Field(default_factory=list)
+
     @field_validator("copypasta_min_lines")
     @classmethod
     def copypasta_min_lines_valid(cls, v: int) -> int:
