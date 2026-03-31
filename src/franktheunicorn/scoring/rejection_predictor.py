@@ -153,7 +153,7 @@ class RejectionPredictor:
             severity=draft.severity,
             file_path=draft.file_path,
             comment_body=draft.comment_body,
-            code_context=getattr(draft, "code_context", ""),
+            code_context=draft.code_context,
             governance=governance,
             is_new_contributor=pr.is_new_contributor,
             is_ai_pr=pr.likely_ai_generated,
@@ -316,7 +316,7 @@ class RejectionPredictor:
         return predictor
 
 
-def _model_path_for_project(project_owner: str, project_repo: str) -> Path:
+def model_path_for_project(project_owner: str, project_repo: str) -> Path:
     """Return the path where the rejection model pickle is stored."""
     from django.conf import settings
 
@@ -334,7 +334,7 @@ def load_predictor_for_project(
     project_repo: str,
 ) -> RejectionPredictor | None:
     """Load a trained predictor for a project, or None if not available."""
-    path = _model_path_for_project(project_owner, project_repo)
+    path = model_path_for_project(project_owner, project_repo)
     if not path.exists():
         return None
     try:
@@ -366,7 +366,7 @@ def maybe_retrain(
     if action_count < MIN_ACTIONS_TO_TRAIN:
         return False
 
-    model_path = _model_path_for_project(project_owner, project_repo)
+    model_path = model_path_for_project(project_owner, project_repo)
     lock_path = _lock_path_for_model(model_path)
 
     # Check if retrain is needed.

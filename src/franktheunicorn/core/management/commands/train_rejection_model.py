@@ -8,7 +8,7 @@ from franktheunicorn.core.models import OperatorAction, Project
 from franktheunicorn.scoring.rejection_predictor import (
     MIN_ACTIONS_TO_TRAIN,
     RejectionPredictor,
-    _model_path_for_project,
+    model_path_for_project,
 )
 
 
@@ -87,7 +87,7 @@ class Command(BaseCommand):
             self.stdout.write(self.style.WARNING(f"  {project.full_name}: Training failed."))
             return False
 
-        model_path = _model_path_for_project(project.owner, project.repo)
+        model_path = model_path_for_project(project.owner, project.repo)
         predictor.save(model_path)
 
         self.stdout.write(

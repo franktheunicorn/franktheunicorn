@@ -87,8 +87,10 @@ def _extract_code_context(diff: str, file_path: str, line_number: int | None) ->
         patch = PatchSet(diff)
         for patched_file in patch:
             # Match by filename (strip a/ b/ prefixes).
+            # unidiff strips a/b/ prefixes from patched_file.path.
             fname = patched_file.path
-            if fname == file_path or fname.lstrip("ab/") == file_path.lstrip("ab/"):
+            target = file_path.removeprefix("a/").removeprefix("b/")
+            if fname == target:
                 if line_number is None:
                     # No specific line — return first hunk.
                     if patched_file:

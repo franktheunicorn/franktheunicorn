@@ -100,7 +100,7 @@ class TestTrainRejectionModelCommand:
         out = StringIO()
         model_path = tmp_path / "models" / "apache-spark" / "rejection_model.pkl"
         with patch(
-            "franktheunicorn.core.management.commands.train_rejection_model._model_path_for_project",
+            "franktheunicorn.core.management.commands.train_rejection_model.model_path_for_project",
             return_value=model_path,
         ):
             call_command(
@@ -128,7 +128,7 @@ class TestTrainRejectionModelCommand:
         out = StringIO()
         model_path = tmp_path / "models" / "apache-spark" / "rejection_model.pkl"
         with patch(
-            "franktheunicorn.core.management.commands.train_rejection_model._model_path_for_project",
+            "franktheunicorn.core.management.commands.train_rejection_model.model_path_for_project",
             return_value=model_path,
         ):
             call_command(
@@ -163,7 +163,7 @@ class TestTrainRejectionModelCommand:
         out = StringIO()
         model_path = tmp_path / "models" / "apache-spark" / "rejection_model.pkl"
         with patch(
-            "franktheunicorn.core.management.commands.train_rejection_model._model_path_for_project",
+            "franktheunicorn.core.management.commands.train_rejection_model.model_path_for_project",
             return_value=model_path,
         ):
             call_command("train_rejection_model", stdout=out)

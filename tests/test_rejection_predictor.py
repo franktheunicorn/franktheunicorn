@@ -310,7 +310,7 @@ class TestLoadPredictorForProject:
         predictor.save(model_path)
 
         with patch(
-            "franktheunicorn.scoring.rejection_predictor._model_path_for_project",
+            "franktheunicorn.scoring.rejection_predictor.model_path_for_project",
             return_value=model_path,
         ):
             loaded = load_predictor_for_project("apache", "spark")
@@ -337,7 +337,7 @@ class TestMaybeRetrain:
     def test_skips_below_threshold(self, db_project: Project, tmp_path: Path) -> None:
         self._create_actions(db_project, 10)
         with patch(
-            "franktheunicorn.scoring.rejection_predictor._model_path_for_project",
+            "franktheunicorn.scoring.rejection_predictor.model_path_for_project",
             return_value=tmp_path / "model.pkl",
         ):
             result = maybe_retrain(db_project.pk, "apache", "spark")
@@ -347,7 +347,7 @@ class TestMaybeRetrain:
         self._create_actions(db_project, 55)
         model_path = tmp_path / "model.pkl"
         with patch(
-            "franktheunicorn.scoring.rejection_predictor._model_path_for_project",
+            "franktheunicorn.scoring.rejection_predictor.model_path_for_project",
             return_value=model_path,
         ):
             result = maybe_retrain(db_project.pk, "apache", "spark")
@@ -360,7 +360,7 @@ class TestMaybeRetrain:
 
         # First retrain should succeed.
         with patch(
-            "franktheunicorn.scoring.rejection_predictor._model_path_for_project",
+            "franktheunicorn.scoring.rejection_predictor.model_path_for_project",
             return_value=model_path,
         ):
             assert maybe_retrain(db_project.pk, "apache", "spark") is True
@@ -380,7 +380,7 @@ class TestMaybeRetrain:
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             try:
                 with patch(
-                    "franktheunicorn.scoring.rejection_predictor._model_path_for_project",
+                    "franktheunicorn.scoring.rejection_predictor.model_path_for_project",
                     return_value=model_path,
                 ):
                     result = maybe_retrain(db_project.pk, "apache", "spark")
