@@ -18,6 +18,7 @@ help: ## Show this help
 $(VENV)/bin/python:
 	python3 -m venv $(VENV)
 	$(PIP) install --upgrade pip
+	$(PIP) install -e ".[dev]"
 
 venv: $(VENV)/bin/python ## Create virtual environment if it doesn't exist
 
@@ -40,7 +41,7 @@ typecheck: venv ## Run mypy type checking
 
 check: lint typecheck test ## Run all checks (lint + typecheck + test)
 
-serve: venv ## Start Django dev server
+serve: venv migrate ## Start Django dev server
 	$(PYTHON) manage.py runserver
 
 worker: venv ## Start background worker
