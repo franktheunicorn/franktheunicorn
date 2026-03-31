@@ -15,6 +15,7 @@ from django.db import transaction
 
 from franktheunicorn.config.models import ProjectConfig
 from franktheunicorn.core.models import Project, PullRequest
+from franktheunicorn.core.session_detector import detect_agent_session
 from franktheunicorn.scoring.scorer import score_pull_request_from_model
 
 logger = logging.getLogger(__name__)
@@ -195,6 +196,15 @@ def _upsert_pull_request(
         "github_created_at": _parse_github_datetime(pr_data.get("created_at")),
         "github_updated_at": _parse_github_datetime(pr_data.get("updated_at")),
     }
+
+    # Detect AI agent session from PR description (v1.25).
+    body = defaults["body"]
+    session = detect_agent_session(body) if body else None
+    if session:
+        defaults["ai_agent_source"] = session.agent_source
+        defaults["agent_session_url"] = session.session_url
+        defaults["agent_task_id"] = session.task_id
+        defaults["likely_ai_generated"] = True
 
     pr_obj, _created = PullRequest.objects.update_or_create(
         project=project,
