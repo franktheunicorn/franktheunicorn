@@ -198,7 +198,7 @@ def create_drafts_from_findings(
                     rejection_probability,
                 )
 
-        draft = ReviewDraft.objects.create(
+        draft = ReviewDraft.objects.create(  # type: ignore[misc]
             pull_request=pr,
             file_path=finding.file_path,
             line_number=finding.line_number,
