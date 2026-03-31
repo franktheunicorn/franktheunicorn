@@ -15,6 +15,9 @@ urlpatterns = [
     path("draft/<int:draft_id>/reject/", views.reject_draft, name="reject_draft"),
     path("draft/<int:draft_id>/edit/", views.edit_draft, name="edit_draft"),
     path("pr/<int:pr_id>/post/", views.post_review, name="post_review"),
+    # Agent feedback (v1.25)
+    path("pr/<int:pr_id>/compose-feedback/", views.compose_feedback, name="compose_feedback"),
+    path("pr/<int:pr_id>/send-feedback/", views.send_feedback, name="send_feedback"),
     # Anti-pattern manager
     path("anti-patterns/", views.anti_pattern_list, name="anti_patterns"),
     path("anti-patterns/create/", views.anti_pattern_create, name="anti_pattern_create"),

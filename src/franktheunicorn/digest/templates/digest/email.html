@@ -42,11 +42,17 @@
 
 {% if digest.stats.prs_reviewed %}
 <h3 style="margin-top: 1.5rem;">WEEKLY STATS</h3>
-<table style="font-size: 0.9rem;">
-<tr><td>Reviewed:</td><td>{{ digest.stats.prs_reviewed }}</td></tr>
-<tr><td>Posted:</td><td>{{ digest.stats.findings_posted }}</td></tr>
-<tr><td>Accuracy:</td><td>{{ digest.stats.accuracy_pct|floatformat:0 }}% as-is</td></tr>
-<tr><td>Cost:</td><td>~${{ digest.stats.total_cost_usd|floatformat:2 }}</td></tr>
+<table style="font-size: 0.9rem; border-collapse: collapse;">
+<tr><td style="padding: 0.2rem 0.5rem;">Reviewed:</td><td style="padding: 0.2rem 0.5rem;">{{ digest.stats.prs_reviewed }}</td></tr>
+<tr><td style="padding: 0.2rem 0.5rem;">Posted:</td><td style="padding: 0.2rem 0.5rem;">{{ digest.stats.findings_posted }}</td></tr>
+<tr><td style="padding: 0.2rem 0.5rem;">Accuracy:</td><td style="padding: 0.2rem 0.5rem;">{{ digest.stats.accuracy_pct|floatformat:0 }}% as-is</td></tr>
+<tr><td style="padding: 0.2rem 0.5rem;">Cost:</td><td style="padding: 0.2rem 0.5rem;">~${{ digest.stats.total_cost_usd|floatformat:2 }}</td></tr>
+{% if digest.stats.anti_patterns_suppressed %}
+<tr><td style="padding: 0.2rem 0.5rem;">Anti-patterns:</td><td style="padding: 0.2rem 0.5rem;">suppressed {{ digest.stats.anti_patterns_suppressed }} findings</td></tr>
+{% endif %}
+{% if digest.stats.stale_anti_patterns %}
+<tr><td style="padding: 0.2rem 0.5rem;">Stale patterns:</td><td style="padding: 0.2rem 0.5rem;">{{ digest.stats.stale_anti_patterns }} haven't matched in 60 days</td></tr>
+{% endif %}
 </table>
 {% endif %}
 

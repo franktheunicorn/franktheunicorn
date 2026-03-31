@@ -57,6 +57,21 @@ digest_enabled: false
 #   model: "claude-sonnet-4-20250514"
 #   api_key_env: "ANTHROPIC_API_KEY"
 
+# --- Agent Feedback Channel (v1.25) ---
+# Direct feedback to AI agent sessions that created PRs.
+# When a PR description contains a session link (Claude Code, Codex),
+# the dashboard shows a "Send Feedback to Session" button.
+# agent_feedback:
+#   direct_session_enabled: true
+#   supported_agents:
+#     - name: claude-code
+#       session_pattern: 'Session:\s*(https://claude\.ai/code/session/\S+)'
+#       feedback_method: url-open
+#     - name: codex
+#       session_pattern: 'Task ID:\s*(task_\S+)'
+#       feedback_method: api
+#       api_endpoint_env: CODEX_FEEDBACK_API
+
 # CodeRabbit CLI integration (optional, runs alongside LLM backends)
 # Install: npm install -g coderabbitai (or see https://docs.coderabbit.ai/cli)
 # Findings are attributed as [CodeRabbit] in the dashboard and still

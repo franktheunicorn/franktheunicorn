@@ -84,6 +84,11 @@ class PullRequest(models.Model):
     is_low_context = models.BooleanField(default=False)
     is_likely_unowned = models.BooleanField(default=False)
 
+    # Agent session tracking (v1.25 — direct feedback channel)
+    ai_agent_source = models.CharField(max_length=100, blank=True, default="")
+    agent_session_url = models.URLField(max_length=1000, blank=True, default="")
+    agent_task_id = models.CharField(max_length=255, blank=True, default="")
+
     # Merge status (fetched from single-PR endpoint)
     mergeable = models.BooleanField(null=True, blank=True)
 
@@ -338,3 +343,39 @@ class TestRun(models.Model):
     def __str__(self) -> str:
         verdict = f" [{self.differential_verdict}]" if self.differential_verdict else ""
         return f"TestRun for {self.pull_request}{verdict}"
+
+
+class AgentFeedback(models.Model):
+    """Feedback sent to an AI agent session that created a PR (v1.25).
+
+    Tracks structured feedback sent directly to Claude Code sessions
+    or Codex tasks, as an alternative to posting GitHub comments.
+    """
+
+    ASSESSMENT_CHOICES = [
+        ("good", "Good"),
+        ("needs-work", "Needs Work"),
+        ("reject", "Reject"),
+    ]
+
+    FEEDBACK_METHOD_CHOICES = [
+        ("session-url", "Session URL"),
+        ("github-comment", "GitHub Comment"),
+    ]
+
+    pull_request = models.ForeignKey(
+        PullRequest, on_delete=models.CASCADE, related_name="agent_feedbacks"
+    )
+    assessment = models.CharField(max_length=20, choices=ASSESSMENT_CHOICES)
+    feedback_body = models.TextField()
+    feedback_method = models.CharField(
+        max_length=20, choices=FEEDBACK_METHOD_CHOICES, default="session-url"
+    )
+    sent_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"Feedback for {self.pull_request}: {self.assessment}"

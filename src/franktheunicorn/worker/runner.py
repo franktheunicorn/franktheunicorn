@@ -116,10 +116,26 @@ def _run_cycle(
             continue
         try:
             logger.info("Polling %s/%s ...", pc.owner, pc.repo)
+
+            # Ensure local repo clone exists and is fetched (v1.25).
+            repo_path: Path | None = None
+            try:
+                from franktheunicorn.worker.repo_manager import ensure_repo
+
+                repo_path = ensure_repo(Path(settings.FRANK_REPOS_DIR), pc.owner, pc.repo)
+            except Exception:
+                logger.debug(
+                    "Repo checkout failed for %s/%s; blame will be skipped",
+                    pc.owner,
+                    pc.repo,
+                    exc_info=True,
+                )
+
             prs = poll_project(
                 client=client,  # type: ignore[arg-type]
                 project_config=pc,
                 operator_username=operator_username,
+                repo_path=repo_path,
             )
             for pr in prs:
                 all_prs.append(pr)
@@ -201,10 +217,9 @@ def _run_coderabbit_for_pr(
             )
             return
 
-        # TODO(v1.5): Determine proper merge base from PR metadata once we
-        # have local checkout support. For now, require the repo clone to be
-        # checked out to the PR branch with a meaningful base available.
-        # We skip rather than guess with HEAD~1, which would produce garbage.
+        # Determine the base ref for diffing. The repo manager keeps the
+        # working tree on the default branch, so origin/main or origin/master
+        # should be available.
         base_ref = _resolve_base_ref(repo_path, pr)
         if base_ref is None:
             return

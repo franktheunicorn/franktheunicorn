@@ -10,6 +10,7 @@ from django.db import IntegrityError
 from django.utils import timezone
 
 from franktheunicorn.core.models import (
+    AgentFeedback,
     AntiPattern,
     OperatorAction,
     Project,
@@ -17,6 +18,7 @@ from franktheunicorn.core.models import (
     ReviewDraft,
 )
 from tests.factories import (
+    AgentFeedbackFactory,
     AntiPatternFactory,
     OperatorActionFactory,
     ProjectFactory,
@@ -327,3 +329,82 @@ class TestCascadeDeletes:
         project.delete()
         assert PullRequest.objects.count() == 0
         assert ReviewDraft.objects.count() == 0
+
+    def test_pr_delete_cascades_to_agent_feedback(self) -> None:
+        pr = PullRequestFactory()
+        AgentFeedbackFactory(pull_request=pr)
+        assert AgentFeedback.objects.count() == 1
+        pr.delete()
+        assert AgentFeedback.objects.count() == 0
+
+
+@pytest.mark.django_db
+class TestPullRequestAgentFields:
+    """Tests for v1.25 agent session tracking fields."""
+
+    def test_agent_fields_default_empty(self) -> None:
+        pr = PullRequestFactory()
+        assert pr.ai_agent_source == ""
+        assert pr.agent_session_url == ""
+        assert pr.agent_task_id == ""
+
+    def test_agent_fields_populated(self) -> None:
+        pr = PullRequestFactory(
+            ai_agent_source="claude-code",
+            agent_session_url="https://claude.ai/code/session/abc123",
+            agent_task_id="",
+        )
+        assert pr.ai_agent_source == "claude-code"
+        assert pr.agent_session_url == "https://claude.ai/code/session/abc123"
+
+    def test_codex_agent_fields(self) -> None:
+        pr = PullRequestFactory(
+            ai_agent_source="codex",
+            agent_task_id="task_xyz789",
+        )
+        assert pr.ai_agent_source == "codex"
+        assert pr.agent_task_id == "task_xyz789"
+
+
+@pytest.mark.django_db
+class TestAgentFeedbackModel:
+    """Tests for v1.25 AgentFeedback model."""
+
+    def test_create_feedback(self, db_pr: PullRequest) -> None:
+        fb = AgentFeedbackFactory(
+            pull_request=db_pr,
+            assessment="good",
+            feedback_body="Nice work!",
+            feedback_method="session-url",
+        )
+        assert "good" in str(fb)
+        assert fb.sent_at is None
+        assert fb.created_at is not None
+
+    def test_defaults(self) -> None:
+        fb = AgentFeedbackFactory()
+        assert fb.feedback_method == "session-url"
+        assert fb.sent_at is None
+
+    def test_assessment_choices_valid(self) -> None:
+        for val, _ in AgentFeedback.ASSESSMENT_CHOICES:
+            fb = AgentFeedbackFactory(assessment=val)
+            fb.full_clean()
+
+    def test_feedback_method_choices_valid(self) -> None:
+        for val, _ in AgentFeedback.FEEDBACK_METHOD_CHOICES:
+            fb = AgentFeedbackFactory(feedback_method=val)
+            fb.full_clean()
+
+    def test_ordering(self) -> None:
+        now = timezone.now()
+        fb1 = AgentFeedbackFactory(created_at=now - timedelta(minutes=1))
+        fb2 = AgentFeedbackFactory(created_at=now)
+        results = list(AgentFeedback.objects.all())
+        assert results[0] == fb2
+        assert results[1] == fb1
+
+    def test_related_name(self, db_pr: PullRequest) -> None:
+        AgentFeedbackFactory(pull_request=db_pr)
+        AgentFeedbackFactory(pull_request=db_pr)
+        assert db_pr.agent_feedbacks.count() == 2

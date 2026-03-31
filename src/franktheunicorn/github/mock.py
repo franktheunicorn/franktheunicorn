@@ -46,8 +46,14 @@ class MockGitHubClient:
             with fixture_path.open() as f:
                 result: dict[str, Any] = json.load(f)
                 return result
-        # Demo data — include mergeable status.
-        return {"number": pr_number, "mergeable": True, "mergeable_state": "clean"}
+        # Demo data — include mergeable status + base/head refs.
+        return {
+            "number": pr_number,
+            "mergeable": True,
+            "mergeable_state": "clean",
+            "base": {"ref": "main", "sha": "0" * 40},
+            "head": {"ref": f"pr-{pr_number}", "sha": "1" * 40},
+        }
 
     def get_pull_request_files(self, owner: str, repo: str, pr_number: int) -> list[dict[str, Any]]:
         """Load PR files from fixture or return demo files."""

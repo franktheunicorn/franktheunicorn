@@ -69,6 +69,59 @@ class TestOperatorConfig:
         assert config.llm_backends[0].provider == "claude"
 
 
+class TestAgentFeedbackConfig:
+    def test_defaults(self) -> None:
+        config = OperatorConfig()
+        assert config.agent_feedback.direct_session_enabled is True
+        assert config.agent_feedback.supported_agents == []
+
+    def test_with_supported_agents(self) -> None:
+        from franktheunicorn.config.models import AgentFeedbackConfig, SupportedAgentConfig
+
+        config = OperatorConfig(
+            agent_feedback=AgentFeedbackConfig(
+                direct_session_enabled=True,
+                supported_agents=[
+                    SupportedAgentConfig(
+                        name="claude-code",
+                        session_pattern=r"Session:\s*(https://claude\.ai/code/session/\S+)",
+                        feedback_method="url-open",
+                    ),
+                    SupportedAgentConfig(
+                        name="codex",
+                        session_pattern=r"Task ID:\s*(task_\S+)",
+                        feedback_method="api",
+                        api_endpoint_env="CODEX_FEEDBACK_API",
+                    ),
+                ],
+            ),
+        )
+        assert len(config.agent_feedback.supported_agents) == 2
+        assert config.agent_feedback.supported_agents[0].name == "claude-code"
+        assert config.agent_feedback.supported_agents[1].feedback_method == "api"
+
+    def test_disabled(self) -> None:
+        from franktheunicorn.config.models import AgentFeedbackConfig
+
+        config = OperatorConfig(
+            agent_feedback=AgentFeedbackConfig(direct_session_enabled=False),
+        )
+        assert config.agent_feedback.direct_session_enabled is False
+
+    def test_from_dict(self) -> None:
+        config = OperatorConfig(
+            **{
+                "agent_feedback": {
+                    "direct_session_enabled": True,
+                    "supported_agents": [
+                        {"name": "claude-code", "feedback_method": "url-open"},
+                    ],
+                },
+            }
+        )
+        assert len(config.agent_feedback.supported_agents) == 1
+
+
 class TestProjectConfig:
     def test_defaults(self) -> None:
         config = ProjectConfig(owner="apache", repo="spark")

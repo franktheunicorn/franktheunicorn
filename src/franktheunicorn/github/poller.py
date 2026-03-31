@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Protocol
 
 from django.db import transaction
 
 from franktheunicorn.config.models import ProjectConfig
 from franktheunicorn.core.models import Project, PullRequest
+from franktheunicorn.core.session_detector import detect_agent_session
 from franktheunicorn.scoring.scorer import score_pull_request_from_model
 
 logger = logging.getLogger(__name__)
@@ -40,9 +42,14 @@ def poll_project(
     client: GitHubClientProtocol,
     project_config: ProjectConfig,
     operator_username: str,
+    *,
+    repo_path: Path | None = None,
 ) -> list[PullRequest]:
     """
     Poll a single project for PRs, score them, and store in the DB.
+
+    If repo_path is provided and points to a valid git clone, blame data
+    is fetched for changed files and passed to the scorer.
 
     Returns the list of PullRequest objects that were created or updated.
     """
@@ -70,7 +77,8 @@ def poll_project(
 
         pr_obj = _upsert_pull_request(project, pr_data, changed_files)
 
-        # Fetch mergeable status (requires single-PR endpoint).
+        # Fetch PR detail (includes mergeable status + base/head refs).
+        pr_detail: dict[str, Any] = {}
         try:
             pr_detail = client.get_pull_request(
                 project_config.owner, project_config.repo, pr_number
@@ -79,13 +87,59 @@ def poll_project(
             if isinstance(raw_mergeable, bool):
                 pr_obj.mergeable = raw_mergeable
         except Exception:
-            logger.debug("Could not fetch mergeable status for PR #%d", pr_number)
+            logger.debug("Could not fetch PR detail for #%d", pr_number)
+
+        # Extract base/head SHAs for blame (v1.25).
+        base_sha = ""
+        head_sha = ""
+        base_data = pr_detail.get("base")
+        head_data = pr_detail.get("head")
+        if isinstance(base_data, dict):
+            base_sha = base_data.get("sha", "")
+        if isinstance(head_data, dict):
+            head_sha = head_data.get("sha", "")
+
+        # Fetch blame data if repo clone is available (v1.25).
+        blame_data: list[dict[str, object]] | None = None
+        if repo_path is not None and repo_path.is_dir() and changed_files and base_sha:
+            try:
+                from franktheunicorn.scoring.blame_fetcher import fetch_blame_for_files
+                from franktheunicorn.worker.repo_manager import ensure_ref_available
+
+                # Verify both refs are available locally before running blame.
+                base_ok = ensure_ref_available(repo_path, base_sha)
+                head_ok = ensure_ref_available(repo_path, head_sha) if head_sha else False
+
+                if base_ok and head_ok:
+                    blame_data = fetch_blame_for_files(
+                        repo_path, changed_files, base_ref=base_sha, head_ref=head_sha
+                    )
+                elif base_ok:
+                    # Head not available but base is — diff will be against
+                    # working tree. Only useful if repo happens to be on the
+                    # right branch, so log a warning.
+                    logger.debug(
+                        "Head SHA %s not available locally for PR #%d; "
+                        "blame diff may be inaccurate",
+                        head_sha[:12],
+                        pr_number,
+                    )
+                    blame_data = fetch_blame_for_files(repo_path, changed_files, base_ref=base_sha)
+                else:
+                    logger.debug(
+                        "Base SHA %s not available locally for PR #%d; skipping blame",
+                        base_sha[:12],
+                        pr_number,
+                    )
+            except Exception:
+                logger.debug("Blame fetch failed for PR #%d", pr_number, exc_info=True)
 
         # Score the PR
         score, breakdown = score_pull_request_from_model(
             pr=pr_obj,
             project_config=project_config,
             operator_username=operator_username,
+            blame_data=blame_data,
         )
         pr_obj.interest_score = score
         pr_obj.score_breakdown = breakdown
@@ -195,6 +249,16 @@ def _upsert_pull_request(
         "github_created_at": _parse_github_datetime(pr_data.get("created_at")),
         "github_updated_at": _parse_github_datetime(pr_data.get("updated_at")),
     }
+
+    # Detect AI agent session from PR description (v1.25).
+    # Always set these fields so stale values are cleared on update.
+    body = defaults["body"]
+    session = detect_agent_session(body) if body else None
+    defaults["ai_agent_source"] = session.agent_source if session else ""
+    defaults["agent_session_url"] = session.session_url if session else ""
+    defaults["agent_task_id"] = session.task_id if session else ""
+    if session:
+        defaults["likely_ai_generated"] = True
 
     pr_obj, _created = PullRequest.objects.update_or_create(
         project=project,

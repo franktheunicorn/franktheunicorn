@@ -7,6 +7,7 @@ from decimal import Decimal
 import factory  # type: ignore[import-untyped]
 
 from franktheunicorn.core.models import (
+    AgentFeedback,
     AntiPattern,
     CostRecord,
     OperatorAction,
@@ -59,6 +60,9 @@ class PullRequestFactory(factory.django.DjangoModelFactory):  # type: ignore[mis
     is_new_contributor = False
     is_low_context = False
     is_likely_unowned = False
+    ai_agent_source = ""
+    agent_session_url = ""
+    agent_task_id = ""
     queue = "review"
 
 
@@ -135,3 +139,15 @@ class TestRunFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
     status = "pending"
     test_scope = factory.LazyFunction(list)
     container_image = "python:3.12-slim"
+
+
+class AgentFeedbackFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
+    """Factory for AgentFeedback model instances."""
+
+    class Meta:
+        model = AgentFeedback
+
+    pull_request = factory.SubFactory(PullRequestFactory)
+    assessment = "good"
+    feedback_body = factory.Faker("paragraph")
+    feedback_method = "session-url"

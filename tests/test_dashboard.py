@@ -6,6 +6,7 @@ import pytest
 from django.test import Client
 
 from franktheunicorn.core.models import (
+    AgentFeedback,
     AntiPattern,
     DependencyChange,
     OperatorAction,
@@ -264,6 +265,20 @@ class TestWorkspace:
         response = client.get("/")
         assert response.status_code == 200
 
+    def test_workspace_cookie_persists_across_requests(
+        self, client: Client, db_pr: PullRequest
+    ) -> None:
+        """Verify that set_workspace sets a cookie that subsequent requests use."""
+        # Set workspace via POST
+        response = client.post("/set-workspace/", {"workspace": "my-workspace"})
+        assert response.status_code == 302
+        assert "workspace" in response.cookies
+        assert response.cookies["workspace"].value == "my-workspace"
+
+        # Subsequent GET should have the cookie set (Django test client carries cookies)
+        response = client.get("/")
+        assert response.status_code == 200
+
     def test_post_review_no_token(self, client: Client, db_pr: PullRequest) -> None:
         ReviewDraftFactory(
             pull_request=db_pr,
@@ -274,3 +289,99 @@ class TestWorkspace:
         assert response.status_code == 200
         # Token not configured so should say "Cannot post"
         assert b"Cannot post" in response.content or b"No approved" in response.content
+
+
+@pytest.mark.django_db
+class TestAgentFeedbackViews:
+    """Tests for v1.25 agent feedback dashboard views."""
+
+    def test_pr_detail_shows_agent_info(self, client: Client) -> None:
+        pr = PullRequestFactory(
+            ai_agent_source="claude-code",
+            agent_session_url="https://claude.ai/code/session/abc123",
+        )
+        response = client.get(f"/pr/{pr.pk}/")
+        assert response.status_code == 200
+        assert b"claude-code" in response.content
+        assert b"Send Feedback to Session" in response.content
+        assert b"Open Session" in response.content
+
+    def test_pr_detail_hides_agent_info_for_normal_pr(self, client: Client) -> None:
+        pr = PullRequestFactory(ai_agent_source="")
+        response = client.get(f"/pr/{pr.pk}/")
+        assert response.status_code == 200
+        assert b"Send Feedback to Session" not in response.content
+
+    def test_compose_feedback(self, client: Client) -> None:
+        pr = PullRequestFactory(
+            ai_agent_source="claude-code",
+            agent_session_url="https://claude.ai/code/session/abc123",
+            title="AI fix",
+        )
+        ReviewDraftFactory(
+            pull_request=pr,
+            file_path="src/main.py",
+            line_number=10,
+            comment_body="Fix this bug.",
+        )
+        response = client.get(f"/pr/{pr.pk}/compose-feedback/")
+        assert response.status_code == 200
+        assert b"Compose Feedback" in response.content
+        assert b"Fix this bug." in response.content
+        assert b"assessment" in response.content
+
+    def test_send_feedback_creates_record(self, client: Client) -> None:
+        pr = PullRequestFactory(
+            ai_agent_source="claude-code",
+            agent_session_url="https://claude.ai/code/session/abc123",
+        )
+        response = client.post(
+            f"/pr/{pr.pk}/send-feedback/",
+            {
+                "assessment": "good",
+                "feedback_body": "Nice work on this PR!",
+            },
+        )
+        assert response.status_code == 200
+        assert b"Feedback recorded" in response.content
+        fb = AgentFeedback.objects.get(pull_request=pr)
+        assert fb.assessment == "good"
+        assert fb.feedback_body == "Nice work on this PR!"
+        assert fb.feedback_method == "session-url"
+
+    def test_send_feedback_github_comment_method(self, client: Client) -> None:
+        pr = PullRequestFactory(
+            ai_agent_source="codex",
+            agent_session_url="",
+            agent_task_id="task_123",
+        )
+        response = client.post(
+            f"/pr/{pr.pk}/send-feedback/",
+            {
+                "assessment": "needs-work",
+                "feedback_body": "Please fix the tests.",
+            },
+        )
+        assert response.status_code == 200
+        fb = AgentFeedback.objects.get(pull_request=pr)
+        assert fb.feedback_method == "github-comment"
+
+    def test_send_feedback_empty_body_rejected(self, client: Client) -> None:
+        pr = PullRequestFactory(ai_agent_source="claude-code")
+        response = client.post(
+            f"/pr/{pr.pk}/send-feedback/",
+            {"assessment": "good", "feedback_body": "   "},
+        )
+        assert response.status_code == 200
+        assert b"cannot be empty" in response.content
+        assert AgentFeedback.objects.count() == 0
+
+    def test_send_feedback_invalid_assessment_rejected(self, client: Client) -> None:
+        pr = PullRequestFactory(ai_agent_source="claude-code")
+        response = client.post(
+            f"/pr/{pr.pk}/send-feedback/",
+            {"assessment": "invalid-value", "feedback_body": "Some feedback"},
+        )
+        assert response.status_code == 200
+        assert b"Invalid assessment" in response.content
+        assert AgentFeedback.objects.count() == 0
