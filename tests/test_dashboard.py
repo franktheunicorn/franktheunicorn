@@ -265,6 +265,20 @@ class TestWorkspace:
         response = client.get("/")
         assert response.status_code == 200
 
+    def test_workspace_cookie_persists_across_requests(
+        self, client: Client, db_pr: PullRequest
+    ) -> None:
+        """Verify that set_workspace sets a cookie that subsequent requests use."""
+        # Set workspace via POST
+        response = client.post("/set-workspace/", {"workspace": "my-workspace"})
+        assert response.status_code == 302
+        assert "workspace" in response.cookies
+        assert response.cookies["workspace"].value == "my-workspace"
+
+        # Subsequent GET should have the cookie set (Django test client carries cookies)
+        response = client.get("/")
+        assert response.status_code == 200
+
     def test_post_review_no_token(self, client: Client, db_pr: PullRequest) -> None:
         ReviewDraftFactory(
             pull_request=db_pr,
