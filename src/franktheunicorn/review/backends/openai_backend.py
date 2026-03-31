@@ -30,4 +30,7 @@ class OpenAIBackend(BaseLLMBackend):
                 {"role": "user", "content": user_message},
             ],
         )
+        if hasattr(response, "usage") and response.usage:
+            self._last_tokens_in = getattr(response.usage, "prompt_tokens", 0)
+            self._last_tokens_out = getattr(response.usage, "completion_tokens", 0)
         return response.choices[0].message.content or "" if response.choices else ""

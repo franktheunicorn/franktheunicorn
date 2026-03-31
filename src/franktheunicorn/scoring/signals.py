@@ -19,6 +19,7 @@ WEIGHTS: dict[str, int] = {
     "keyword_match": 10,
     "ai_generated": -10,
     "llm_interest": 20,
+    "committer_is_on_it": -25,
 }
 
 MAX_SCORE: int = 100
@@ -136,6 +137,44 @@ def score_ai_generated(author: str, ai_agents: list[str] | None = None) -> int |
     if is_ai_agent(author, ai_agents or []):
         return WEIGHTS["ai_generated"]
     return None
+
+
+def score_committer_is_on_it(
+    recent_reviews: list[dict[str, str]],
+    operator_username: str,
+    committers: list[str],
+    watched_paths: list[str],
+    changed_files: list[str],
+    mentioned_or_assigned: bool = False,
+    recency_hours: int = 48,
+) -> int | None:
+    """Down-rank PRs where another committer is actively reviewing (§2.7).
+
+    Conditions for down-ranking (all must be true):
+    - A known committer (not operator) has reviewed within *recency_hours*
+    - PR is NOT in operator's watch_paths
+    - Operator is NOT mentioned or assigned
+    """
+    if mentioned_or_assigned:
+        return None
+
+    # Check if PR touches watched paths — if so, don't derank
+    if watched_paths and changed_files:
+        if any(f.startswith(tuple(watched_paths)) for f in changed_files):
+            return None
+
+    committer_set = _lowered(committers)
+    op = operator_username.lower()
+    committer_set.discard(op)
+
+    if not committer_set:
+        return None
+
+    has_active_committer = any(
+        e.get("reviewer", "").lower() in committer_set for e in recent_reviews
+    )
+
+    return WEIGHTS["committer_is_on_it"] if has_active_committer else None
 
 
 def score_llm_interest(llm_judgment: str | None) -> int | None:

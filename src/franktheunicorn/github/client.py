@@ -59,5 +59,31 @@ class GitHubClient:
         response.raise_for_status()
         return response.text
 
+    def create_review(
+        self, owner: str, repo: str, pr_number: int, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Create a pull request review with comments."""
+        url = f"/repos/{owner}/{repo}/pulls/{pr_number}/reviews"
+        response = self._client.post(url, json=body)
+        response.raise_for_status()
+        result: dict[str, Any] = response.json()
+        return result
+
+    def get_review_comments(
+        self, owner: str, repo: str, pr_number: int, review_id: int
+    ) -> list[dict[str, Any]]:
+        """Fetch comments from a specific review."""
+        url = f"/repos/{owner}/{repo}/pulls/{pr_number}/reviews/{review_id}/comments"
+        response = self._client.get(url, params={"per_page": 100})
+        response.raise_for_status()
+        result: list[dict[str, Any]] = response.json()
+        return result
+
+    def delete_review_comment(self, owner: str, repo: str, comment_id: int) -> None:
+        """Delete a review comment (for recall)."""
+        url = f"/repos/{owner}/{repo}/pulls/comments/{comment_id}"
+        response = self._client.delete(url)
+        response.raise_for_status()
+
     def close(self) -> None:
         self._client.close()

@@ -12,6 +12,7 @@ from franktheunicorn.scoring.signals import (
     MAX_SCORE,
     WEIGHTS,
     score_ai_generated,
+    score_committer_is_on_it,
     score_has_review_request,
     score_keyword_match,
     score_llm_interest,
@@ -47,6 +48,7 @@ def score_pull_request(
     review_history: list[dict[str, str]] | None = None,
     custom_expressions: list[str] | None = None,
     collaborator_scores: dict[str, float | None] | None = None,
+    recent_reviews: list[dict[str, str]] | None = None,
 ) -> tuple[float, dict[str, float]]:
     """Score a PR for operator interest. Pure function — no Django imports.
 
@@ -121,6 +123,22 @@ def score_pull_request(
             ),
         )
 
+    # Committer-is-on-it down-ranking (§2.7)
+    if recent_reviews is not None:
+        committers = _get_list(project_config_dict, "committers")
+        mentioned = breakdown.get("mentioned_or_assigned") is not None
+        _add(
+            "committer_is_on_it",
+            score_committer_is_on_it(
+                recent_reviews,
+                operator_username,
+                committers,
+                watched,
+                changed_files,
+                mentioned_or_assigned=mentioned,
+            ),
+        )
+
     if custom_expressions:
         for i, expr in enumerate(custom_expressions):
             result = evaluate_custom_score(expr, pr_dict, project_config_dict)
@@ -144,6 +162,7 @@ def score_pull_request_from_model(
     review_history: list[dict[str, str]] | None = None,
     custom_expressions: list[str] | None = None,
     collaborator_scores: dict[str, float | None] | None = None,
+    recent_reviews: list[dict[str, str]] | None = None,
 ) -> tuple[float, dict[str, float]]:
     """Django-aware wrapper: converts models to dicts, resolves known_authors."""
     pr_dict: dict[str, object] = {
@@ -162,6 +181,10 @@ def score_pull_request_from_model(
         age = (datetime.now(tz=UTC) - pr.github_created_at).days
         pr_dict["pr_age_days"] = age
 
+    committers: list[str] = []
+    if hasattr(project_config, "committers"):
+        committers = project_config.committers
+
     config_dict: dict[str, object] = {
         "watched_paths": project_config.watched_paths,
         "frequent_contributors": project_config.frequent_contributors,
@@ -169,6 +192,7 @@ def score_pull_request_from_model(
         "ai_agents": project_config.ai_agents,
         "scoring_weights": project_config.scoring_weights,
         "custom_scoring_max_boost": project_config.custom_scoring_max_boost,
+        "committers": committers,
     }
 
     if known_authors is None:
@@ -193,4 +217,5 @@ def score_pull_request_from_model(
         review_history=review_history,
         custom_expressions=custom_expressions or project_config.custom_scoring_expressions,
         collaborator_scores=collaborator_scores,
+        recent_reviews=recent_reviews,
     )

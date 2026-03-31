@@ -1,9 +1,10 @@
 """
 Review drafter — dispatches to configured LLM backends.
 
-Runs all enabled backends, collects findings from each, gates them
-through anti-pattern checks, and persists as ReviewDraft rows.
-Multiple backends can run in parallel; their findings are combined.
+Runs all enabled backends, collects findings from each, deduplicates,
+applies tone guard, gates through anti-pattern checks, and persists
+as ReviewDraft rows. Multiple backends can run in parallel; their
+findings are combined.
 """
 
 from __future__ import annotations
@@ -15,6 +16,8 @@ from franktheunicorn.core.models import ReviewDraft
 from franktheunicorn.review.antipattern import check_against_anti_patterns
 from franktheunicorn.review.backends import get_backend
 from franktheunicorn.review.backends.base import PRContext, ReviewFinding
+from franktheunicorn.review.dedup import deduplicate_findings
+from franktheunicorn.review.tone_guard import apply_tone_guard_batch
 
 if TYPE_CHECKING:
     from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig, ProjectConfig
@@ -68,6 +71,8 @@ def create_drafts_from_findings(
     findings: list[ReviewFinding],
     source: str,
     project: Project | None = None,
+    *,
+    tone_guard_applied: bool = False,
 ) -> list[ReviewDraft]:
     """Convert ReviewFinding objects into ReviewDraft rows with anti-pattern gating."""
     drafts: list[ReviewDraft] = []
@@ -84,6 +89,14 @@ def create_drafts_from_findings(
             )
             continue
 
+        # Map severity string to a valid category if present in the finding title.
+        category = "other"
+        for cat in ("correctness", "style", "security", "test-coverage",
+                     "architectural", "naming", "suggested-change", "moderation"):
+            if cat in (finding.title or "").lower():
+                category = cat
+                break
+
         draft = ReviewDraft.objects.create(
             pull_request=pr,
             file_path=finding.file_path,
@@ -91,6 +104,13 @@ def create_drafts_from_findings(
             comment_body=finding.body,
             suggestion=finding.suggestion,
             confidence=finding.confidence,
+            severity=finding.severity if finding.severity in (
+                "critical", "important", "nit", "informational"
+            ) else "nit",
+            category=category,
+            reasoning_trace=finding.title,  # original body before tone guard
+            tone_guard_applied=tone_guard_applied,
+            backend_used=source,
             status="pending",
             source=source,
         )
@@ -151,11 +171,41 @@ def draft_review(
 
         backend_configs = [LLMBackendConfig()]
 
-    all_drafts: list[ReviewDraft] = []
+    # Collect findings from all backends.
+    all_findings: list[tuple[str, ReviewFinding]] = []
     for backend_config in backend_configs:
         source, findings = _run_single_backend(backend_config, diff, pr_context)
-        if findings:
-            drafts = create_drafts_from_findings(pr, findings, source=source, project=pr.project)
-            all_drafts.extend(drafts)
+        for f in findings:
+            all_findings.append((source, f))
 
-    return all_drafts
+    if not all_findings:
+        return []
+
+    # Deduplicate across backends.
+    raw_findings = [f for _, f in all_findings]
+    deduped = deduplicate_findings(raw_findings)
+
+    # Apply tone guard rewrite pass.
+    tone_backend = backend_configs[0] if backend_configs else None
+    is_new_contributor = getattr(pr, "is_new_contributor", False)
+    new_contributor_addendum = ""
+    if project_config and hasattr(project_config, "new_contributor_addendum"):
+        new_contributor_addendum = project_config.new_contributor_addendum
+
+    tone_applied = False
+    if tone_backend and tone_backend.provider != "stub":
+        deduped = apply_tone_guard_batch(
+            deduped,
+            pr_context,
+            backend_config=tone_backend,
+            is_new_contributor=is_new_contributor,
+            new_contributor_addendum=new_contributor_addendum,
+        )
+        tone_applied = True
+
+    # Persist as ReviewDraft rows with anti-pattern gating.
+    source_name = all_findings[0][0] if all_findings else "agent"
+    return create_drafts_from_findings(
+        pr, deduped, source=source_name, project=pr.project,
+        tone_guard_applied=tone_applied,
+    )
