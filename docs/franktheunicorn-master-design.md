@@ -1130,7 +1130,7 @@ class RejectionPredictor:
 
 Findings with `P(rejection) > 0.8` are auto-suppressed (not shown to operator by default, but visible in a "suppressed" section of the dashboard). Findings with `0.5 < P(rejection) < 0.8` are shown but flagged as "likely low-value." This reduces noise without losing signal.
 
-**Retraining:** Automatic. After every 50 new operator actions, retrain the model (takes < 1 second). Store the model in `~/.review-agent/models/<project>/rejection_model.pkl`.
+**Retraining:** Automatic. After every 50 new operator actions, retrain the model (takes < 1 second). Store the model in `DATA_DIR/models/<owner>-<repo>/rejection_model.pkl` (where `DATA_DIR` defaults to `<project_root>/data/`, configurable via `FRANK_DATA_DIR`).
 
 **Data requirement:** 50+ operator actions to start (enough for basic Bayesian estimation). Gets meaningfully better at 200+.
 

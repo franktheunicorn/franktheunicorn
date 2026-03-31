@@ -239,6 +239,22 @@ class TestStatsView:
         response = client.get("/stats/")
         assert response.status_code == 200
 
+    def test_stats_rejection_predictor_section(self, client: Client, db_pr: PullRequest) -> None:
+        ReviewDraftFactory(
+            pull_request=db_pr,
+            rejection_probability=0.9,
+            is_auto_suppressed=True,
+        )
+        ReviewDraftFactory(
+            pull_request=db_pr,
+            rejection_probability=0.3,
+            is_auto_suppressed=False,
+        )
+        response = client.get("/stats/")
+        assert response.status_code == 200
+        assert b"Rejection Predictor" in response.content
+        assert b"Auto-Suppressed Findings" in response.content
+
 
 @pytest.mark.django_db
 class TestPRDetailWithTestRuns:

@@ -82,7 +82,7 @@ def _extract_code_context(diff: str, file_path: str, line_number: int | None) ->
         return ""
 
     try:
-        from unidiff import PatchSet
+        from unidiff import PatchSet  # type: ignore[import-untyped]
 
         patch = PatchSet(diff)
         for patched_file in patch:

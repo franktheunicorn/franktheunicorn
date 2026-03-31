@@ -424,6 +424,10 @@ def stats(request: HttpRequest) -> HttpResponse:
     total_drafts = ReviewDraft.objects.count()
     posted_drafts = ReviewDraft.objects.filter(status="posted").count()
 
+    # Rejection predictor stats (v1.75).
+    suppressed_count = ReviewDraft.objects.filter(is_auto_suppressed=True).count()
+    scored_count = ReviewDraft.objects.filter(rejection_probability__isnull=False).count()
+
     return render(
         request,
         "dashboard/stats.html",
@@ -435,5 +439,7 @@ def stats(request: HttpRequest) -> HttpResponse:
             "ap_stats": ap_stats,
             "total_drafts": total_drafts,
             "posted_drafts": posted_drafts,
+            "suppressed_count": suppressed_count,
+            "scored_count": scored_count,
         },
     )
