@@ -81,6 +81,9 @@ class ReviewDraftFactory(factory.django.DjangoModelFactory):  # type: ignore[mis
     source = "agent"
     category = "other"
     severity = "nit"
+    rejection_probability = None
+    is_auto_suppressed = False
+    code_context = ""
     status = "pending"
     edited_body = ""
     backend_used = ""
