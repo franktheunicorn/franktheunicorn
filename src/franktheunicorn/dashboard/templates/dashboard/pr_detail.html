@@ -16,6 +16,20 @@
     &middot; <a href="{{ pr.url }}" target="_blank" rel="noopener noreferrer">View on GitHub &nearr;</a>
 </div>
 
+{% if pr.ai_agent_source %}
+<div style="margin-top: 0.75rem; padding: 0.5rem 0.75rem; background: #e3f2fd; border-radius: 4px; font-size: 0.9rem; border-left: 3px solid #1976d2;">
+    <strong>Agent:</strong> {{ pr.ai_agent_source }}
+    {% if pr.agent_session_url %}&middot; <a href="{{ pr.agent_session_url }}" target="_blank" rel="noopener noreferrer">Open Session &nearr;</a>{% endif %}
+    {% if pr.agent_task_id %}&middot; Task: <code>{{ pr.agent_task_id }}</code>{% endif %}
+    &middot;
+    <button class="action-btn"
+            hx-get="{% url 'dashboard:compose_feedback' pr.pk %}"
+            hx-target="#feedback-area"
+            hx-swap="innerHTML">Send Feedback to Session</button>
+</div>
+<div id="feedback-area"></div>
+{% endif %}
+
 {% if pr.body %}
 <div style="margin-top: 1rem; padding: 0.75rem; background: #f5f5f5; border-radius: 4px; font-size: 0.9rem;">
     {{ pr.body|linebreaksbr }}

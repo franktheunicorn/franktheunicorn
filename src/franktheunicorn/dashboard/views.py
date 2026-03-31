@@ -15,6 +15,7 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_POST
 
 from franktheunicorn.core.models import (
+    AgentFeedback,
     AntiPattern,
     CostRecord,
     DependencyChange,
@@ -259,6 +260,54 @@ def post_review(request: HttpRequest, pr_id: int) -> HttpResponse:
         return HttpResponse(
             '<div class="post-result" style="color: #c00;">Failed to post review.</div>'
         )
+
+
+# --- Agent feedback (v1.25) ---
+
+
+def compose_feedback(request: HttpRequest, pr_id: int) -> HttpResponse:
+    """Return HTML fragment with pre-populated feedback form for an AI-generated PR."""
+    from franktheunicorn.review.feedback_formatter import format_feedback_markdown
+
+    pr = get_object_or_404(PullRequest.objects.select_related("project"), pk=pr_id)
+    drafts = ReviewDraft.objects.filter(pull_request=pr).order_by("file_path", "line_number")
+    test_runs = TestRun.objects.filter(pull_request=pr).order_by("-created_at")
+
+    feedback_body = format_feedback_markdown(pr, drafts, test_runs, "needs-work")
+
+    return render(
+        request,
+        "dashboard/_feedback_compose.html",
+        {
+            "pr": pr,
+            "feedback_body": feedback_body,
+        },
+    )
+
+
+@require_POST
+def send_feedback(request: HttpRequest, pr_id: int) -> HttpResponse:
+    """Record agent feedback for a PR."""
+    pr = get_object_or_404(PullRequest, pk=pr_id)
+    assessment = request.POST.get("assessment", "needs-work")
+    feedback_body = request.POST.get("feedback_body", "")
+
+    if not feedback_body.strip():
+        return HttpResponse(
+            '<div class="feedback-result" style="color: #c00;">'
+            "Feedback body cannot be empty.</div>"
+        )
+
+    feedback_method = "session-url" if pr.agent_session_url else "github-comment"
+
+    AgentFeedback.objects.create(
+        pull_request=pr,
+        assessment=assessment,
+        feedback_body=feedback_body,
+        feedback_method=feedback_method,
+    )
+
+    return render(request, "dashboard/_feedback_sent.html", {"pr": pr})
 
 
 # --- Anti-pattern manager ---

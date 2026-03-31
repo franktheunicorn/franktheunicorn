@@ -1,0 +1,40 @@
+<div style="margin-top: 1rem; padding: 1rem; background: #f5f5f5; border-radius: 4px; border: 1px solid #ddd;">
+    <h4 style="margin-top: 0;">Compose Feedback for Agent Session</h4>
+
+    {% if pr.agent_session_url %}
+    <p style="font-size: 0.85rem; margin-bottom: 0.75rem;">
+        Session: <a href="{{ pr.agent_session_url }}" target="_blank" rel="noopener noreferrer">{{ pr.agent_session_url }}</a>
+        — Copy the feedback below and paste it into the session.
+    </p>
+    {% elif pr.agent_task_id %}
+    <p style="font-size: 0.85rem; margin-bottom: 0.75rem;">
+        Task: <code>{{ pr.agent_task_id }}</code>
+    </p>
+    {% endif %}
+
+    <form hx-post="{% url 'dashboard:send_feedback' pr.pk %}"
+          hx-target="#feedback-area"
+          hx-swap="innerHTML">
+        {% csrf_token %}
+
+        <div style="margin-bottom: 0.75rem;">
+            <label style="font-weight: 600; font-size: 0.9rem;">Assessment:</label>
+            <div style="display: flex; gap: 1rem; margin-top: 0.25rem;">
+                <label><input type="radio" name="assessment" value="good"> Good</label>
+                <label><input type="radio" name="assessment" value="needs-work" checked> Needs Work</label>
+                <label><input type="radio" name="assessment" value="reject"> Reject</label>
+            </div>
+        </div>
+
+        <div style="margin-bottom: 0.75rem;">
+            <label for="feedback_body" style="font-weight: 600; font-size: 0.9rem;">Feedback:</label>
+            <textarea id="feedback_body" name="feedback_body"
+                      rows="15"
+                      style="width: 100%; font-family: monospace; font-size: 0.85rem; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; margin-top: 0.25rem;">{{ feedback_body }}</textarea>
+        </div>
+
+        <div style="display: flex; gap: 0.5rem;">
+            <button type="submit" class="action-btn post">Record Feedback</button>
+        </div>
+    </form>
+</div>
