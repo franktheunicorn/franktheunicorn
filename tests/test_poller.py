@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -10,7 +12,7 @@ from franktheunicorn.config.models import ProjectConfig
 from franktheunicorn.core.models import Project, PullRequest
 from franktheunicorn.github.mock import MockGitHubClient
 from franktheunicorn.github.poller import _upsert_pull_request, poll_project
-from tests.factories import ProjectFactory
+from tests.factories import ProjectFactory, ReviewDraftFactory
 
 
 @pytest.mark.django_db
@@ -162,3 +164,82 @@ class TestSessionDetectionInPoller:
         assert pr.ai_agent_source == ""
         assert pr.agent_session_url == ""
         assert pr.agent_task_id == ""
+
+
+class _TrackingMockClient(MockGitHubClient):
+    """MockGitHubClient that tracks get_issue_comments calls."""
+
+    def __init__(
+        self, fixtures_dir: str | Path, comments: list[dict[str, Any]] | None = None
+    ) -> None:
+        super().__init__(fixtures_dir)
+        self.issue_comments_calls: list[tuple[str, str, int]] = []
+        self._comments = comments or []
+
+    def get_issue_comments(
+        self, owner: str, repo: str, issue_number: int, since: str | None = None
+    ) -> list[dict[str, Any]]:
+        self.issue_comments_calls.append((owner, repo, issue_number))
+        return self._comments
+
+
+@pytest.mark.django_db
+class TestReEngagementDataInPoller:
+    def test_issue_comments_fetched_for_reviewed_pr(self, tmp_path: Any) -> None:
+        """get_issue_comments is called for PRs with posted ReviewDrafts."""
+        client = _TrackingMockClient(tmp_path)
+        config = ProjectConfig(owner="apache", repo="spark")
+        # First poll to create PRs
+        prs = poll_project(client, config, operator_username="holdenk")
+        pr42 = next(p for p in prs if p.number == 42)
+
+        # Create a posted ReviewDraft for PR #42
+        ReviewDraftFactory(
+            pull_request=pr42,
+            status="posted",
+            posted_at=datetime(2026, 3, 25, tzinfo=UTC),
+        )
+
+        # Re-poll — should now fetch issue comments for PR #42
+        client.issue_comments_calls.clear()
+        poll_project(client, config, operator_username="holdenk")
+        called_prs = [call[2] for call in client.issue_comments_calls]
+        assert 42 in called_prs
+
+    def test_issue_comments_not_fetched_for_unreviewed_pr(self, tmp_path: Any) -> None:
+        """get_issue_comments is NOT called for PRs without posted ReviewDrafts."""
+        client = _TrackingMockClient(tmp_path)
+        config = ProjectConfig(owner="apache", repo="spark")
+        poll_project(client, config, operator_username="holdenk")
+        assert len(client.issue_comments_calls) == 0
+
+    def test_author_replies_boost_score(self, tmp_path: Any) -> None:
+        """PRs with author replies after operator review get higher scores."""
+        # First poll without review data
+        client_no_replies = _TrackingMockClient(tmp_path)
+        config = ProjectConfig(owner="apache", repo="spark")
+        prs = poll_project(client_no_replies, config, operator_username="holdenk")
+        pr42 = next(p for p in prs if p.number == 42)
+        score_without = pr42.interest_score
+
+        # Add a posted review and author reply
+        ReviewDraftFactory(
+            pull_request=pr42,
+            status="posted",
+            posted_at=datetime(2026, 3, 25, tzinfo=UTC),
+        )
+        author_comments = [
+            {
+                "user": {"login": "alice-dev"},
+                "created_at": "2026-03-27T10:00:00Z",
+                "body": "Done, I addressed your feedback.",
+            }
+        ]
+        client_with_replies = _TrackingMockClient(tmp_path, comments=author_comments)
+        prs = poll_project(client_with_replies, config, operator_username="holdenk")
+        pr42 = next(p for p in prs if p.number == 42)
+        score_with = pr42.interest_score
+
+        assert score_with > score_without
+        assert "updated_since_operator_review" in pr42.score_breakdown
+        assert "pending_response" in pr42.score_breakdown

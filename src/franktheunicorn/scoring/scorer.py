@@ -20,8 +20,10 @@ from franktheunicorn.scoring.signals import (
     score_merge_conflict,
     score_new_human_contributor,
     score_path_overlap,
+    score_pending_response,
     score_prior_review_history,
     score_recently_updated,
+    score_updated_since_operator_review,
 )
 
 if TYPE_CHECKING:
@@ -51,6 +53,8 @@ def score_pull_request(
     custom_expressions: list[str] | None = None,
     collaborator_scores: dict[str, float | None] | None = None,
     recent_reviews: list[dict[str, str]] | None = None,
+    operator_review_posted_at: str | None = None,
+    author_replies_after_review: list[str] | None = None,
 ) -> tuple[float, dict[str, float]]:
     """Score a PR for operator interest. Pure function — no Django imports.
 
@@ -152,6 +156,21 @@ def score_pull_request(
             ),
         )
 
+    # Re-engagement signals: boost PRs updated since operator review
+    pr_updated_at = pr_dict.get("github_updated_at")
+    _add(
+        "updated_since_operator_review",
+        score_updated_since_operator_review(
+            operator_review_posted_at,
+            str(pr_updated_at) if pr_updated_at else None,
+        ),
+    )
+    if author_replies_after_review is not None:
+        _add(
+            "pending_response",
+            score_pending_response(operator_review_posted_at, author_replies_after_review),
+        )
+
     if custom_expressions:
         for i, expr in enumerate(custom_expressions):
             result = evaluate_custom_score(expr, pr_dict, project_config_dict)
@@ -176,6 +195,8 @@ def score_pull_request_from_model(
     custom_expressions: list[str] | None = None,
     collaborator_scores: dict[str, float | None] | None = None,
     recent_reviews: list[dict[str, str]] | None = None,
+    operator_review_posted_at: str | None = None,
+    author_replies_after_review: list[str] | None = None,
 ) -> tuple[float, dict[str, float]]:
     """Django-aware wrapper: converts models to dicts, resolves known_authors."""
     pr_dict: dict[str, object] = {
@@ -197,6 +218,7 @@ def score_pull_request_from_model(
     if pr.github_updated_at:
         delta = datetime.now(tz=UTC) - pr.github_updated_at
         pr_dict["hours_since_update"] = delta.total_seconds() / 3600
+        pr_dict["github_updated_at"] = pr.github_updated_at.isoformat()
 
     if hasattr(pr, "mergeable"):
         pr_dict["mergeable"] = pr.mergeable
@@ -228,6 +250,19 @@ def score_pull_request_from_model(
     if collaborator_scores is None:
         collaborator_scores = project_config.collaborator_scores or None
 
+    # Auto-compute operator review timestamp from posted ReviewDrafts.
+    if operator_review_posted_at is None:
+        from franktheunicorn.core.models import ReviewDraft
+
+        latest_posted_at = (
+            ReviewDraft.objects.filter(pull_request=pr, status="posted", posted_at__isnull=False)
+            .order_by("-posted_at")
+            .values_list("posted_at", flat=True)
+            .first()
+        )
+        if latest_posted_at is not None:
+            operator_review_posted_at = latest_posted_at.isoformat()
+
     return score_pull_request(
         pr_dict,
         config_dict,
@@ -238,4 +273,6 @@ def score_pull_request_from_model(
         custom_expressions=custom_expressions or project_config.custom_scoring_expressions,
         collaborator_scores=collaborator_scores,
         recent_reviews=recent_reviews,
+        operator_review_posted_at=operator_review_posted_at,
+        author_replies_after_review=author_replies_after_review,
     )

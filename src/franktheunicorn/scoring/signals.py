@@ -7,6 +7,7 @@ Each function returns int | None (points if signal fires, None to skip).
 from __future__ import annotations
 
 import re
+from datetime import datetime, timedelta
 
 WEIGHTS: dict[str, int] = {
     "path_overlap": 30,
@@ -22,6 +23,8 @@ WEIGHTS: dict[str, int] = {
     "ai_generated": -10,
     "llm_interest": 20,
     "committer_is_on_it": -25,
+    "updated_since_operator_review": 25,
+    "pending_response": 20,
 }
 
 MAX_SCORE: int = 100
@@ -215,3 +218,49 @@ def score_llm_interest(llm_judgment: str | None) -> int | None:
             return WEIGHTS["llm_interest"] // 2
         case _:
             return None
+
+
+def _parse_iso(dt_str: str) -> datetime:
+    """Parse an ISO 8601 datetime string to a timezone-aware datetime."""
+    return datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+
+
+_REVIEW_GRACE_PERIOD = timedelta(minutes=5)
+
+
+def score_updated_since_operator_review(
+    operator_review_posted_at: str | None,
+    pr_updated_at: str | None,
+) -> int | None:
+    """Boost when PR was updated after the operator posted a review.
+
+    Compares the operator's most recent posted review timestamp against
+    the PR's github_updated_at. A 5-minute grace period prevents the
+    operator's own review comment from triggering this signal (posting
+    a review bumps github_updated_at).
+    """
+    if not operator_review_posted_at or not pr_updated_at:
+        return None
+    try:
+        review_dt = _parse_iso(operator_review_posted_at)
+        updated_dt = _parse_iso(pr_updated_at)
+    except (ValueError, TypeError):
+        return None
+    if updated_dt > review_dt + _REVIEW_GRACE_PERIOD:
+        return WEIGHTS["updated_since_operator_review"]
+    return None
+
+
+def score_pending_response(
+    operator_review_posted_at: str | None,
+    author_replies_after_review: list[str],
+) -> int | None:
+    """Boost when the PR author replied after the operator's review.
+
+    author_replies_after_review is a list of ISO 8601 timestamps of
+    comments by the PR author posted after the operator's last review.
+    If any exist, the author is likely waiting for follow-up.
+    """
+    if not operator_review_posted_at or not author_replies_after_review:
+        return None
+    return WEIGHTS["pending_response"]

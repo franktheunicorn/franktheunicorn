@@ -15,7 +15,7 @@ from typing import Any, Protocol
 from django.db import transaction
 
 from franktheunicorn.config.models import ProjectConfig
-from franktheunicorn.core.models import Project, PullRequest
+from franktheunicorn.core.models import Project, PullRequest, ReviewDraft
 from franktheunicorn.core.session_detector import detect_agent_session
 from franktheunicorn.scoring.scorer import score_pull_request_from_model
 
@@ -33,6 +33,10 @@ class GitHubClientProtocol(Protocol):
 
     def get_pull_request_files(
         self, owner: str, repo: str, pr_number: int
+    ) -> list[dict[str, Any]]: ...
+
+    def get_issue_comments(
+        self, owner: str, repo: str, issue_number: int, since: str | None = None
     ) -> list[dict[str, Any]]: ...
 
     def close(self) -> None: ...
@@ -134,12 +138,45 @@ def poll_project(
             except Exception:
                 logger.debug("Blame fetch failed for PR #%d", pr_number, exc_info=True)
 
+        # Gather re-engagement data: check if operator has posted reviews
+        # and if the author has replied since.
+        operator_review_posted_at: str | None = None
+        author_replies: list[str] | None = None
+
+        latest_posted_at = (
+            ReviewDraft.objects.filter(
+                pull_request=pr_obj, status="posted", posted_at__isnull=False
+            )
+            .order_by("-posted_at")
+            .values_list("posted_at", flat=True)
+            .first()
+        )
+        if latest_posted_at is not None:
+            operator_review_posted_at = latest_posted_at.isoformat()
+            try:
+                issue_comments = client.get_issue_comments(
+                    project_config.owner,
+                    project_config.repo,
+                    pr_number,
+                    since=operator_review_posted_at,
+                )
+                pr_author = pr_obj.author.lower()
+                author_replies = [
+                    c["created_at"]
+                    for c in issue_comments
+                    if c.get("user", {}).get("login", "").lower() == pr_author
+                ]
+            except Exception:
+                logger.debug("Could not fetch comments for PR #%d", pr_number)
+
         # Score the PR
         score, breakdown = score_pull_request_from_model(
             pr=pr_obj,
             project_config=project_config,
             operator_username=operator_username,
             blame_data=blame_data,
+            operator_review_posted_at=operator_review_posted_at,
+            author_replies_after_review=author_replies,
         )
         pr_obj.interest_score = score
         pr_obj.score_breakdown = breakdown

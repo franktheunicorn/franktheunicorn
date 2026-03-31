@@ -87,6 +87,27 @@ class GitHubClient:
         result: list[dict[str, Any]] = response.json()
         return result
 
+    def get_issue_comments(
+        self,
+        owner: str,
+        repo: str,
+        issue_number: int,
+        since: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch conversation comments on a PR/issue.
+
+        If *since* is provided (ISO 8601), only returns comments updated
+        at or after that timestamp.
+        """
+        url = f"/repos/{owner}/{repo}/issues/{issue_number}/comments"
+        params: dict[str, str | int] = {"per_page": 100}
+        if since:
+            params["since"] = since
+        response = self._client.get(url, params=params)
+        response.raise_for_status()
+        result: list[dict[str, Any]] = response.json()
+        return result
+
     def delete_review_comment(self, owner: str, repo: str, comment_id: int) -> None:
         """Delete a review comment (for recall)."""
         url = f"/repos/{owner}/{repo}/pulls/comments/{comment_id}"
