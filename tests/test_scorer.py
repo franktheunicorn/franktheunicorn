@@ -179,3 +179,108 @@ class TestRecencyAndMergeInScorer:
         pr = {**_ALICE_PR, "mergeable": False}
         _, bd = score_pull_request(pr, {"scoring_weights": {"merge_conflict": -30}}, "holdenk")
         assert bd["merge_conflict"] == -30.0
+
+
+class TestReEngagementSignals:
+    def test_updated_since_operator_review_in_breakdown(self) -> None:
+        pr = {**_ALICE_PR, "github_updated_at": "2026-03-30T12:00:00Z"}
+        _, bd = score_pull_request(
+            pr, {}, "holdenk", operator_review_posted_at="2026-03-29T12:00:00Z"
+        )
+        assert "updated_since_operator_review" in bd
+        assert bd["updated_since_operator_review"] == 25.0
+
+    def test_updated_since_not_fired_without_review(self) -> None:
+        pr = {**_ALICE_PR, "github_updated_at": "2026-03-30T12:00:00Z"}
+        _, bd = score_pull_request(pr, {}, "holdenk")
+        assert "updated_since_operator_review" not in bd
+
+    def test_pending_response_in_breakdown(self) -> None:
+        _, bd = score_pull_request(
+            _ALICE_PR,
+            {},
+            "holdenk",
+            operator_review_posted_at="2026-03-29T12:00:00Z",
+            author_replies_after_review=["2026-03-30T10:00:00Z"],
+        )
+        assert "pending_response" in bd
+        assert bd["pending_response"] == 20.0
+
+    def test_pending_response_not_fired_without_replies(self) -> None:
+        _, bd = score_pull_request(
+            _ALICE_PR,
+            {},
+            "holdenk",
+            operator_review_posted_at="2026-03-29T12:00:00Z",
+            author_replies_after_review=[],
+        )
+        assert "pending_response" not in bd
+
+    def test_both_signals_stack(self) -> None:
+        pr = {**_ALICE_PR, "github_updated_at": "2026-03-30T12:00:00Z"}
+        _, bd = score_pull_request(
+            pr,
+            {},
+            "holdenk",
+            operator_review_posted_at="2026-03-29T12:00:00Z",
+            author_replies_after_review=["2026-03-30T10:00:00Z"],
+        )
+        assert "updated_since_operator_review" in bd
+        assert "pending_response" in bd
+        assert bd["updated_since_operator_review"] == 25.0
+        assert bd["pending_response"] == 20.0
+
+    def test_pending_response_absent_when_none(self) -> None:
+        """Signal skipped entirely when author_replies_after_review is None."""
+        _, bd = score_pull_request(
+            _ALICE_PR,
+            {},
+            "holdenk",
+            operator_review_posted_at="2026-03-29T12:00:00Z",
+        )
+        assert "pending_response" not in bd
+
+    def test_weight_override_updated_since(self) -> None:
+        pr = {**_ALICE_PR, "github_updated_at": "2026-03-30T12:00:00Z"}
+        _, bd = score_pull_request(
+            pr,
+            {"scoring_weights": {"updated_since_operator_review": 50}},
+            "holdenk",
+            operator_review_posted_at="2026-03-29T12:00:00Z",
+        )
+        assert bd["updated_since_operator_review"] == 50.0
+
+    def test_weight_override_pending_response(self) -> None:
+        _, bd = score_pull_request(
+            _ALICE_PR,
+            {"scoring_weights": {"pending_response": 40}},
+            "holdenk",
+            operator_review_posted_at="2026-03-29T12:00:00Z",
+            author_replies_after_review=["2026-03-30T10:00:00Z"],
+        )
+        assert bd["pending_response"] == 40.0
+
+
+@pytest.mark.django_db
+class TestReEngagementFromModel:
+    def test_auto_compute_from_review_draft(
+        self, make_pr: Any, spark_project_config: ProjectConfig
+    ) -> None:
+        """score_pull_request_from_model auto-computes operator_review_posted_at."""
+        from datetime import UTC, datetime
+
+        from franktheunicorn.core.models import ReviewDraft
+
+        pr = make_pr(
+            author="alice",
+            changed_files=["README.md"],
+            github_updated_at=datetime(2026, 3, 30, 12, 0, tzinfo=UTC),
+        )
+        ReviewDraft.objects.create(
+            pull_request=pr,
+            comment_body="LGTM",
+            status="posted",
+            posted_at=datetime(2026, 3, 28, 12, 0, tzinfo=UTC),
+        )
+        _, bd = score_pull_request_from_model(pr, spark_project_config, "holdenk")
+        assert "updated_since_operator_review" in bd

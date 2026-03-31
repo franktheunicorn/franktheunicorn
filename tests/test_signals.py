@@ -14,7 +14,9 @@ from franktheunicorn.scoring.signals import (
     score_mentioned_or_assigned,
     score_new_human_contributor,
     score_path_overlap,
+    score_pending_response,
     score_prior_review_history,
+    score_updated_since_operator_review,
 )
 
 
@@ -242,3 +244,67 @@ class TestMergeConflict:
         from franktheunicorn.scoring.signals import score_merge_conflict
 
         assert score_merge_conflict(None) is None
+
+
+class TestUpdatedSinceOperatorReview:
+    def test_no_operator_review(self) -> None:
+        assert score_updated_since_operator_review(None, "2026-03-30T12:00:00Z") is None
+
+    def test_no_pr_updated_at(self) -> None:
+        assert score_updated_since_operator_review("2026-03-29T12:00:00Z", None) is None
+
+    def test_both_none(self) -> None:
+        assert score_updated_since_operator_review(None, None) is None
+
+    def test_not_updated_since(self) -> None:
+        assert (
+            score_updated_since_operator_review("2026-03-30T12:00:00Z", "2026-03-29T12:00:00Z")
+            is None
+        )
+
+    def test_same_timestamp(self) -> None:
+        assert (
+            score_updated_since_operator_review("2026-03-30T12:00:00Z", "2026-03-30T12:00:00Z")
+            is None
+        )
+
+    def test_within_grace_period(self) -> None:
+        """Update within 5 minutes of review is ignored (operator's own comment)."""
+        assert (
+            score_updated_since_operator_review("2026-03-30T12:00:00Z", "2026-03-30T12:03:00Z")
+            is None
+        )
+
+    def test_updated_since(self) -> None:
+        result = score_updated_since_operator_review("2026-03-29T12:00:00Z", "2026-03-30T12:00:00Z")
+        assert result == WEIGHTS["updated_since_operator_review"]
+
+    def test_updated_just_past_grace_period(self) -> None:
+        """Update 6 minutes after review fires the signal."""
+        result = score_updated_since_operator_review("2026-03-30T12:00:00Z", "2026-03-30T12:06:00Z")
+        assert result == WEIGHTS["updated_since_operator_review"]
+
+    def test_invalid_timestamp(self) -> None:
+        assert score_updated_since_operator_review("not-a-date", "2026-03-30T12:00:00Z") is None
+
+
+class TestPendingResponse:
+    def test_no_operator_review(self) -> None:
+        assert score_pending_response(None, ["2026-03-30T12:00:00Z"]) is None
+
+    def test_no_replies(self) -> None:
+        assert score_pending_response("2026-03-29T12:00:00Z", []) is None
+
+    def test_empty_posted_at(self) -> None:
+        assert score_pending_response("", ["2026-03-30T12:00:00Z"]) is None
+
+    def test_has_reply(self) -> None:
+        result = score_pending_response("2026-03-29T12:00:00Z", ["2026-03-30T12:00:00Z"])
+        assert result == WEIGHTS["pending_response"]
+
+    def test_multiple_replies(self) -> None:
+        result = score_pending_response(
+            "2026-03-29T12:00:00Z",
+            ["2026-03-30T10:00:00Z", "2026-03-30T14:00:00Z"],
+        )
+        assert result == WEIGHTS["pending_response"]

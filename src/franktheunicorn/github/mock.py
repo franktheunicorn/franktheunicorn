@@ -72,6 +72,19 @@ class MockGitHubClient:
             return fixture_path.read_text()
         return "--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n+# Updated\n"
 
+    def get_issue_comments(
+        self,
+        owner: str,
+        repo: str,
+        issue_number: int,
+        since: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Load issue comments from fixture or return empty list."""
+        fixture_path = self._fixtures_dir / f"{owner}_{repo}_issue_{issue_number}_comments.json"
+        if fixture_path.exists():
+            return _load_json_fixture(fixture_path)
+        return []
+
     def close(self) -> None:
         pass
 
