@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Protocol
 
 from django.db import transaction
@@ -41,9 +42,14 @@ def poll_project(
     client: GitHubClientProtocol,
     project_config: ProjectConfig,
     operator_username: str,
+    *,
+    repo_path: Path | None = None,
 ) -> list[PullRequest]:
     """
     Poll a single project for PRs, score them, and store in the DB.
+
+    If repo_path is provided and points to a valid git clone, blame data
+    is fetched for changed files and passed to the scorer.
 
     Returns the list of PullRequest objects that were created or updated.
     """
@@ -82,11 +88,22 @@ def poll_project(
         except Exception:
             logger.debug("Could not fetch mergeable status for PR #%d", pr_number)
 
+        # Fetch blame data if repo clone is available (v1.25).
+        blame_data: list[dict[str, object]] | None = None
+        if repo_path is not None and repo_path.is_dir() and changed_files:
+            try:
+                from franktheunicorn.scoring.blame_fetcher import fetch_blame_for_files
+
+                blame_data = fetch_blame_for_files(repo_path, changed_files)
+            except Exception:
+                logger.debug("Blame fetch failed for PR #%d", pr_number, exc_info=True)
+
         # Score the PR
         score, breakdown = score_pull_request_from_model(
             pr=pr_obj,
             project_config=project_config,
             operator_username=operator_username,
+            blame_data=blame_data,
         )
         pr_obj.interest_score = score
         pr_obj.score_breakdown = breakdown

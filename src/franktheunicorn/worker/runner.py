@@ -116,10 +116,12 @@ def _run_cycle(
             continue
         try:
             logger.info("Polling %s/%s ...", pc.owner, pc.repo)
+            repo_path = Path(settings.FRANK_REPOS_DIR) / pc.owner / pc.repo
             prs = poll_project(
                 client=client,  # type: ignore[arg-type]
                 project_config=pc,
                 operator_username=operator_username,
+                repo_path=repo_path if repo_path.is_dir() else None,
             )
             for pr in prs:
                 all_prs.append(pr)
