@@ -507,3 +507,54 @@ class TestRejectionProbabilityDisplay:
         response = client.get(f"/pr/{db_pr.pk}/")
         assert response.status_code == 200
         assert b"Suppressed Findings" not in response.content
+
+
+@pytest.mark.django_db
+class TestAllCorePageTemplatesRender:
+    """Smoke tests: every dashboard route renders without TemplateDoesNotExist."""
+
+    def test_index_renders(self, client: Client) -> None:
+        assert client.get("/").status_code == 200
+
+    def test_pr_detail_renders(self, client: Client, db_pr: PullRequest) -> None:
+        assert client.get(f"/pr/{db_pr.pk}/").status_code == 200
+
+    def test_anti_patterns_renders(self, client: Client) -> None:
+        assert client.get("/anti-patterns/").status_code == 200
+
+    def test_stats_renders(self, client: Client) -> None:
+        assert client.get("/stats/").status_code == 200
+
+    def test_approve_draft_renders(self, client: Client, review_draft: ReviewDraft) -> None:
+        assert client.post(f"/draft/{review_draft.pk}/approve/").status_code == 200
+
+    def test_reject_draft_renders(self, client: Client, review_draft: ReviewDraft) -> None:
+        assert client.post(f"/draft/{review_draft.pk}/reject/").status_code == 200
+
+    def test_edit_draft_renders(self, client: Client, review_draft: ReviewDraft) -> None:
+        resp = client.post(f"/draft/{review_draft.pk}/edit/", {"edited_body": "updated body"})
+        assert resp.status_code == 200
+
+    def test_post_review_renders(self, client: Client, db_pr: PullRequest) -> None:
+        assert client.post(f"/pr/{db_pr.pk}/post/").status_code == 200
+
+    def test_compose_feedback_renders(self, client: Client, db_pr: PullRequest) -> None:
+        assert client.get(f"/pr/{db_pr.pk}/compose-feedback/").status_code == 200
+
+    def test_send_feedback_renders(self, client: Client, db_pr: PullRequest) -> None:
+        resp = client.post(
+            f"/pr/{db_pr.pk}/send-feedback/",
+            {"assessment": "good", "feedback_body": "Looks great"},
+        )
+        assert resp.status_code == 200
+
+    def test_anti_pattern_create_renders(self, client: Client, db_project: object) -> None:
+        resp = client.post("/anti-patterns/create/", {"pattern_text": "smoke test"})
+        assert resp.status_code == 200
+
+    def test_anti_pattern_toggle_renders(self, client: Client) -> None:
+        ap = AntiPatternFactory()
+        assert client.post(f"/anti-patterns/{ap.pk}/toggle/").status_code == 200
+
+    def test_set_workspace_redirects(self, client: Client) -> None:
+        assert client.post("/set-workspace/", {"workspace": "all"}).status_code == 302
