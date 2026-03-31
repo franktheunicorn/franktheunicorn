@@ -106,17 +106,20 @@ def _parse_porcelain_blame(output: str) -> dict[int, str]:
 
 
 def _parse_diff_changed_lines(diff_output: str) -> set[int]:
-    """Parse unified diff output to extract changed line numbers in the base file.
+    """Parse unified diff output (with zero context) to extract changed line numbers.
 
-    Looks at the @@ hunk headers to find which lines in the *old* file (a-side)
-    are being modified or deleted. These are the lines we blame.
+    Expects output from ``git diff -U0`` so hunk headers contain only the
+    actually changed lines, not surrounding context.  Extracts the old-side
+    (a-side) line ranges — these are the lines being modified/deleted.
 
     Format: @@ -start,count +start,count @@
+    A count of 0 means a pure insertion (no old lines touched).
     """
     changed: set[int] = set()
     for match in re.finditer(r"^@@ -(\d+)(?:,(\d+))? \+", diff_output, re.MULTILINE):
         start = int(match.group(1))
-        count = int(match.group(2)) if match.group(2) else 1
+        count = int(match.group(2)) if match.group(2) is not None else 1
+        # count=0 means pure insertion — no old lines are changed.
         for line_no in range(start, start + count):
             changed.add(line_no)
     return changed
@@ -133,7 +136,7 @@ def _get_changed_lines_for_file(
     """
     try:
         result = subprocess.run(
-            ["git", "diff", base_ref, "--", file_path],
+            ["git", "diff", "-U0", base_ref, "--", file_path],
             capture_output=True,
             text=True,
             cwd=str(repo_path),

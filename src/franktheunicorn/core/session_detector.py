@@ -14,7 +14,7 @@ from dataclasses import dataclass
 SESSION_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # Claude Code
     (re.compile(r"Session:\s*(https://claude\.ai/code/session/\S+)", re.IGNORECASE), "claude-code"),
-    (re.compile(r"claude[- ]code.*session[: ]+(\S+)", re.IGNORECASE), "claude-code"),
+    (re.compile(r"claude[- ]code.*session[: ]+(https://\S+)", re.IGNORECASE), "claude-code"),
     # Codex
     (re.compile(r"Task ID:\s*(task_\S+)", re.IGNORECASE), "codex"),
     (re.compile(r"codex.*task[: ]+(\S+)", re.IGNORECASE), "codex"),

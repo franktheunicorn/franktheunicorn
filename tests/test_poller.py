@@ -129,3 +129,36 @@ class TestSessionDetectionInPoller:
         assert pr.ai_agent_source == ""
         assert pr.agent_session_url == ""
         assert pr.agent_task_id == ""
+
+    def test_stale_session_fields_cleared_on_body_change(self) -> None:
+        """If a PR body previously had a session link but now doesn't, fields are cleared."""
+        project = ProjectFactory(owner="test", repo="repo")
+        # First ingestion: has session link
+        pr_data_with_session = {
+            "number": 4,
+            "id": 2004,
+            "title": "AI PR",
+            "user": {"login": "bot"},
+            "state": "open",
+            "html_url": "https://github.com/test/repo/pull/4",
+            "diff_url": "",
+            "body": "Session: https://claude.ai/code/session/abc123",
+            "labels": [],
+            "requested_reviewers": [],
+            "assignees": [],
+            "draft": False,
+            "additions": 1,
+            "deletions": 1,
+            "created_at": "2026-03-30T10:00:00Z",
+            "updated_at": "2026-03-30T10:00:00Z",
+        }
+        pr = _upsert_pull_request(project, pr_data_with_session, [])
+        assert pr.ai_agent_source == "claude-code"
+        assert pr.agent_session_url == "https://claude.ai/code/session/abc123"
+
+        # Second ingestion: session link removed from body
+        pr_data_without_session = {**pr_data_with_session, "body": "Updated PR description."}
+        pr = _upsert_pull_request(project, pr_data_without_session, [])
+        assert pr.ai_agent_source == ""
+        assert pr.agent_session_url == ""
+        assert pr.agent_task_id == ""

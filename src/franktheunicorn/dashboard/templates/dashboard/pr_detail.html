@@ -21,11 +21,12 @@
     <strong>Agent:</strong> {{ pr.ai_agent_source }}
     {% if pr.agent_session_url %}&middot; <a href="{{ pr.agent_session_url }}" target="_blank" rel="noopener noreferrer">Open Session &nearr;</a>{% endif %}
     {% if pr.agent_task_id %}&middot; Task: <code>{{ pr.agent_task_id }}</code>{% endif %}
-    &middot;
+    {% if feedback_enabled %}&middot;
     <button class="action-btn"
             hx-get="{% url 'dashboard:compose_feedback' pr.pk %}"
             hx-target="#feedback-area"
             hx-swap="innerHTML">Send Feedback to Session</button>
+    {% endif %}
 </div>
 <div id="feedback-area"></div>
 {% endif %}

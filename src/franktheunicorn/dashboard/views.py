@@ -141,6 +141,10 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
     drafts = ReviewDraft.objects.filter(pull_request=pr).order_by("file_path", "line_number")
     dep_changes = DependencyChange.objects.filter(pull_request=pr).order_by("package_name")
     test_runs = TestRun.objects.filter(pull_request=pr).order_by("-created_at")
+
+    # Check if agent feedback is enabled (v1.25).
+    feedback_enabled = _is_agent_feedback_enabled()
+
     return render(
         request,
         "dashboard/pr_detail.html",
@@ -149,6 +153,7 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
             "drafts": drafts,
             "dep_changes": dep_changes,
             "test_runs": test_runs,
+            "feedback_enabled": feedback_enabled,
         },
     )
 
@@ -262,6 +267,19 @@ def post_review(request: HttpRequest, pr_id: int) -> HttpResponse:
         )
 
 
+def _is_agent_feedback_enabled() -> bool:
+    """Check if direct agent feedback is enabled in operator config."""
+    try:
+        from django.conf import settings
+
+        from franktheunicorn.config.loader import load_operator_config
+
+        config = load_operator_config(settings.FRANK_OPERATOR_CONFIG)
+        return config.agent_feedback.direct_session_enabled
+    except Exception:
+        return True  # default enabled per config schema
+
+
 # --- Agent feedback (v1.25) ---
 
 
@@ -291,6 +309,12 @@ def send_feedback(request: HttpRequest, pr_id: int) -> HttpResponse:
     pr = get_object_or_404(PullRequest, pk=pr_id)
     assessment = request.POST.get("assessment", "needs-work")
     feedback_body = request.POST.get("feedback_body", "")
+
+    valid_assessments = {choice[0] for choice in AgentFeedback.ASSESSMENT_CHOICES}
+    if assessment not in valid_assessments:
+        return HttpResponse(
+            '<div class="feedback-result" style="color: #c00;">Invalid assessment value.</div>'
+        )
 
     if not feedback_body.strip():
         return HttpResponse(

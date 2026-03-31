@@ -149,6 +149,12 @@ class TestParseDiffChangedLines:
         result = _parse_diff_changed_lines(diff)
         assert result == {7}
 
+    def test_pure_insertion_no_old_lines(self) -> None:
+        # -U0 format: count=0 means pure insertion, no old lines changed
+        diff = "@@ -5,0 +6,3 @@\n+new1\n+new2\n+new3\n"
+        result = _parse_diff_changed_lines(diff)
+        assert result == set()  # no old lines were modified
+
     def test_no_hunks(self) -> None:
         assert _parse_diff_changed_lines("no diff here") == set()
 

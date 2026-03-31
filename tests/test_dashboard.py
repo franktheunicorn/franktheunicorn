@@ -375,3 +375,13 @@ class TestAgentFeedbackViews:
         assert response.status_code == 200
         assert b"cannot be empty" in response.content
         assert AgentFeedback.objects.count() == 0
+
+    def test_send_feedback_invalid_assessment_rejected(self, client: Client) -> None:
+        pr = PullRequestFactory(ai_agent_source="claude-code")
+        response = client.post(
+            f"/pr/{pr.pk}/send-feedback/",
+            {"assessment": "invalid-value", "feedback_body": "Some feedback"},
+        )
+        assert response.status_code == 200
+        assert b"Invalid assessment" in response.content
+        assert AgentFeedback.objects.count() == 0

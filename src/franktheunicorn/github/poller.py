@@ -215,12 +215,13 @@ def _upsert_pull_request(
     }
 
     # Detect AI agent session from PR description (v1.25).
+    # Always set these fields so stale values are cleared on update.
     body = defaults["body"]
     session = detect_agent_session(body) if body else None
+    defaults["ai_agent_source"] = session.agent_source if session else ""
+    defaults["agent_session_url"] = session.session_url if session else ""
+    defaults["agent_task_id"] = session.task_id if session else ""
     if session:
-        defaults["ai_agent_source"] = session.agent_source
-        defaults["agent_session_url"] = session.session_url
-        defaults["agent_task_id"] = session.task_id
         defaults["likely_ai_generated"] = True
 
     pr_obj, _created = PullRequest.objects.update_or_create(

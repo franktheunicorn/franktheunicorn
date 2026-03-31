@@ -51,6 +51,12 @@ class TestDetectAgentSession:
         assert result.agent_source == "generic"
         assert result.session_url == "https://someagent.example.com/session/123"
 
+    def test_claude_code_rejects_non_url_session(self) -> None:
+        body = "claude-code session: not-a-url"
+        result = detect_agent_session(body)
+        # Should not match — second pattern now requires https://
+        assert result is None
+
     def test_no_match(self) -> None:
         body = "This PR fixes a bug in the scheduler module."
         result = detect_agent_session(body)
