@@ -45,6 +45,9 @@
 - [20. Resolved Design Decisions](#20-resolved-design-decisions)
 - [21. Research Items](#21-research-items)
 
+> **Security:** For the full threat model, trust boundary map, attack surfaces, remote CI trust
+> rules, and hardening checklist, see **[Security Design](security-design.md)**.
+
 ---
 
 ## Overview
