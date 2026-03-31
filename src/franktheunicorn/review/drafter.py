@@ -2,9 +2,9 @@
 Review drafter — dispatches to configured LLM backends.
 
 Runs all enabled backends, collects findings from each, deduplicates,
-applies tone guard, gates through anti-pattern checks, and persists
-as ReviewDraft rows. Multiple backends can run in parallel; their
-findings are combined.
+applies tone guard, gates through anti-pattern checks, scores with
+the rejection predictor (v1.75), and persists as ReviewDraft rows.
+Multiple backends can run in parallel; their findings are combined.
 """
 
 from __future__ import annotations
@@ -18,10 +18,16 @@ from franktheunicorn.review.backends import get_backend
 from franktheunicorn.review.backends.base import PRContext, ReviewFinding
 from franktheunicorn.review.dedup import deduplicate_findings
 from franktheunicorn.review.tone_guard import apply_tone_guard_batch
+from franktheunicorn.scoring.rejection_predictor import (
+    SUPPRESS_THRESHOLD,
+    load_predictor_for_project,
+    maybe_retrain,
+)
 
 if TYPE_CHECKING:
     from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig, ProjectConfig
     from franktheunicorn.core.models import Project, PullRequest
+    from franktheunicorn.scoring.rejection_predictor import RejectionPredictor
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +72,41 @@ def _get_pr_diff(pr: PullRequest, diff: str = "") -> str:
     return "\n".join(f"+++ b/{f}" for f in files) + "\n" if files else "+++ b/unknown_file.py\n"
 
 
+def _extract_code_context(diff: str, file_path: str, line_number: int | None) -> str:
+    """Extract the relevant diff hunk for a finding's file and line.
+
+    Uses unidiff to parse the diff and find the hunk containing the target line.
+    Returns the hunk text, or empty string if not found.
+    """
+    if not diff or not file_path:
+        return ""
+
+    try:
+        from unidiff import PatchSet
+
+        patch = PatchSet(diff)
+        for patched_file in patch:
+            # Match by filename (strip a/ b/ prefixes).
+            fname = patched_file.path
+            if fname == file_path or fname.lstrip("ab/") == file_path.lstrip("ab/"):
+                if line_number is None:
+                    # No specific line — return first hunk.
+                    if patched_file:
+                        return str(patched_file[0])
+                    return ""
+                # Find the hunk containing the target line.
+                for hunk in patched_file:
+                    if hunk.target_start <= line_number <= hunk.target_start + hunk.target_length:
+                        return str(hunk)
+                # If no hunk matches the exact line, return the closest.
+                if patched_file:
+                    return str(patched_file[0])
+                return ""
+    except Exception:
+        logger.debug("Could not parse diff for code context extraction.")
+    return ""
+
+
 def create_drafts_from_findings(
     pr: PullRequest,
     findings: list[ReviewFinding],
@@ -73,9 +114,20 @@ def create_drafts_from_findings(
     project: Project | None = None,
     *,
     tone_guard_applied: bool = False,
+    diff: str = "",
+    governance: str = "standard",
 ) -> list[ReviewDraft]:
-    """Convert ReviewFinding objects into ReviewDraft rows with anti-pattern gating."""
+    """Convert ReviewFinding objects into ReviewDraft rows.
+
+    Gates through anti-pattern checks, scores with rejection predictor,
+    and auto-suppresses high-P(rejection) findings.
+    """
     drafts: list[ReviewDraft] = []
+
+    # Try to load the rejection predictor for this project.
+    predictor: RejectionPredictor | None = None
+    if project is not None:
+        predictor = load_predictor_for_project(project.owner, project.repo)
 
     for finding in findings:
         # Anti-pattern gate.
@@ -105,6 +157,37 @@ def create_drafts_from_findings(
                 category = cat
                 break
 
+        # Extract code context from the diff.
+        code_context = _extract_code_context(diff, finding.file_path, finding.line_number)
+
+        # Rejection predictor scoring (v1.75).
+        rejection_probability: float | None = None
+        is_auto_suppressed = False
+        if predictor is not None:
+            features = predictor.extract_features(
+                category=category,
+                severity=finding.severity
+                if finding.severity in ("critical", "important", "nit", "informational")
+                else "nit",
+                file_path=finding.file_path,
+                comment_body=finding.body,
+                code_context=code_context,
+                governance=governance,
+                is_new_contributor=pr.is_new_contributor,
+                is_ai_pr=pr.likely_ai_generated,
+                additions=pr.additions,
+                deletions=pr.deletions,
+                project_id=pr.project_id,
+            )
+            rejection_probability = predictor.predict_rejection(features)
+            if rejection_probability > SUPPRESS_THRESHOLD:
+                is_auto_suppressed = True
+                logger.info(
+                    "Auto-suppressed finding '%s' — P(rejection)=%.2f",
+                    finding.title[:40],
+                    rejection_probability,
+                )
+
         draft = ReviewDraft.objects.create(
             pull_request=pr,
             file_path=finding.file_path,
@@ -121,8 +204,18 @@ def create_drafts_from_findings(
             backend_used=source,
             status="pending",
             source=source,
+            code_context=code_context,
+            rejection_probability=rejection_probability,
+            is_auto_suppressed=is_auto_suppressed,
         )
         drafts.append(draft)
+
+    # Auto-retrain check (v1.75).
+    if project is not None:
+        try:
+            maybe_retrain(project.pk, project.owner, project.repo)
+        except Exception:
+            logger.debug("Rejection model retrain check failed.", exc_info=True)
 
     return drafts
 
@@ -211,7 +304,10 @@ def draft_review(
         )
         tone_applied = True
 
-    # Persist as ReviewDraft rows with anti-pattern gating.
+    # Resolve governance for rejection predictor features.
+    governance = getattr(project_config, "governance", "standard")
+
+    # Persist as ReviewDraft rows with anti-pattern gating + rejection scoring.
     source_name = all_findings[0][0] if all_findings else "agent"
     return create_drafts_from_findings(
         pr,
@@ -219,4 +315,6 @@ def draft_review(
         source=source_name,
         project=pr.project,
         tone_guard_applied=tone_applied,
+        diff=diff,
+        governance=governance,
     )
