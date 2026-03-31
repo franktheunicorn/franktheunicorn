@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 from franktheunicorn.review.backends.base import ReviewFinding
 from franktheunicorn.review.tone_guard import (
+    _build_tone_prompt,
     apply_tone_guard,
     apply_tone_guard_batch,
 )
@@ -109,3 +110,17 @@ class TestApplyToneGuardBatch:
 
         assert result[0].body == "Good1"
         assert result[1].body == "Good2"
+
+
+class TestToneGuardPersonality:
+    def test_external_voice_injected_into_tone_prompt(self) -> None:
+        ctx = make_pr_context(
+            personality_external_voice="Drop all character references — no unicorn."
+        )
+        prompt = _build_tone_prompt(ctx)
+        assert "Drop all character references" in prompt
+
+    def test_no_external_voice_omitted(self) -> None:
+        ctx = make_pr_context(personality_external_voice="")
+        prompt = _build_tone_prompt(ctx)
+        assert "External voice guidance" not in prompt

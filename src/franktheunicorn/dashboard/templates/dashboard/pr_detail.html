@@ -97,7 +97,7 @@
 </table>
 {% endif %}
 
-<h3 style="margin-top: 1.5rem;">Review Findings
+<h3 style="margin-top: 1.5rem;">{% if personality_name %}{{ personality_name }}'s Findings{% else %}Review Findings{% endif %}
     <button class="action-btn post" style="float: right;"
             hx-post="{% url 'dashboard:post_review' pr.pk %}"
             hx-target="#post-result"

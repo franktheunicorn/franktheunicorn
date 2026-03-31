@@ -23,9 +23,11 @@ You are a tone editor for code review comments. Your job is to rewrite
 the comment for constructive tone WITHOUT changing the technical content.
 
 Preserve: directness, technical precision, actionable suggestions.
-Remove: unnecessary abrasiveness, pedantic corrections, snarky phrasing, condescension.
+Remove: unnecessary abrasiveness, pedantic corrections, snarky phrasing,
+        condescension, character voice, persona references, whimsy.
 
 {tone_objective}
+{personality_guidance}
 {addendum}
 
 Return ONLY the rewritten comment text. Do not add preamble or explanation.
@@ -39,10 +41,17 @@ def _build_tone_prompt(
 ) -> str:
     """Build the tone guard system prompt from project context."""
     tone_objective = f"Tone objective: {pr_context.tone}" if pr_context.tone else ""
+    personality_guidance = ""
+    if pr_context.personality_external_voice:
+        personality_guidance = f"External voice guidance: {pr_context.personality_external_voice}"
     addendum = ""
     if is_new_contributor and new_contributor_addendum:
         addendum = f"NEW CONTRIBUTOR — additional guidance: {new_contributor_addendum}"
-    return _TONE_GUARD_SYSTEM.format(tone_objective=tone_objective, addendum=addendum)
+    return _TONE_GUARD_SYSTEM.format(
+        tone_objective=tone_objective,
+        personality_guidance=personality_guidance,
+        addendum=addendum,
+    )
 
 
 def apply_tone_guard(
