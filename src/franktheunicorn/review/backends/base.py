@@ -34,6 +34,10 @@ class PRContext:
     test_expectations: str
     governance: str
     anti_patterns: list[str] = field(default_factory=list)
+    personality_identity: str = ""
+    personality_internal_voice: str = ""
+    personality_external_voice: str = ""
+    personality_review_philosophy: str = ""
 
 
 class ReviewFinding(BaseModel):

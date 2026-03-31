@@ -82,6 +82,7 @@ class OperatorConfig(BaseModel):
 
     github_username: str = ""
     review_style: str = "direct but kind"
+    personality: str = "frank"
     auto_post: bool = False
     poll_interval_seconds: int | None = None
     digest_email: str = ""

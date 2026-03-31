@@ -169,6 +169,10 @@ def make_pr_context(**overrides: Any) -> PRContext:
         "test_expectations": "tests required",
         "governance": "asf",
         "anti_patterns": [],
+        "personality_identity": "",
+        "personality_internal_voice": "",
+        "personality_external_voice": "",
+        "personality_review_philosophy": "",
     }
     defaults.update(overrides)
     return PRContext(**defaults)

@@ -73,6 +73,36 @@ class TestBuildUserMessage:
         assert "truncated" in msg
 
 
+class TestPersonalityInPrompt:
+    def test_personality_identity_in_system_prompt(self) -> None:
+        ctx = make_pr_context(
+            personality_identity="You are Frank the Unicorn.",
+            personality_internal_voice="Use first person.",
+        )
+        prompt = build_system_prompt(ctx)
+        assert "Frank the Unicorn" in prompt
+        assert "Use first person" in prompt
+
+    def test_no_personality_uses_default_opening(self) -> None:
+        ctx = make_pr_context(personality_identity="", personality_internal_voice="")
+        prompt = build_system_prompt(ctx)
+        assert "You are a code reviewer acting on behalf of an open-source maintainer." in prompt
+
+    def test_personality_review_philosophy_in_prompt(self) -> None:
+        ctx = make_pr_context(
+            personality_identity="You are Frank.",
+            personality_review_philosophy="Correctness over style, always.",
+        )
+        prompt = build_system_prompt(ctx)
+        assert "Correctness over style" in prompt
+
+    def test_review_philosophy_omitted_when_empty(self) -> None:
+        ctx = make_pr_context(personality_review_philosophy="")
+        prompt = build_system_prompt(ctx)
+        # Should not have stray blank lines from missing philosophy
+        assert "Correctness" not in prompt
+
+
 class TestFindingSchemaGeneration:
     """Verify the schema is auto-generated from the ReviewFinding Pydantic model."""
 

@@ -43,6 +43,10 @@ def build_pr_context(
     except Exception:
         logger.debug("Could not load anti-patterns for prompt context.")
 
+    from franktheunicorn.personalities import load_personality
+
+    personality = load_personality(operator_config.personality)
+
     return PRContext(
         pr_title=pr.title,
         pr_body=pr.body or "",
@@ -55,6 +59,10 @@ def build_pr_context(
         test_expectations=project_config.test_expectations,
         governance=project_config.governance,
         anti_patterns=anti_patterns,
+        personality_identity=personality.identity if personality else "",
+        personality_internal_voice=personality.internal_voice if personality else "",
+        personality_external_voice=personality.external_voice if personality else "",
+        personality_review_philosophy=(personality.review_philosophy if personality else ""),
     )
 
 

@@ -8,6 +8,13 @@ github_username: "holdenk"
 # Default review style/tone for draft comments
 review_style: "direct but kind"
 
+# Reviewer personality — controls the voice of internal content
+# (dashboard summaries, digest emails, agent feedback).
+# GitHub-posted comments remain professional regardless of personality.
+# Default: "frank" (Frank the Unicorn). Set to "" to disable.
+# Custom personalities: place a markdown file in ~/.review-agent/personalities/
+personality: "frank"
+
 # Whether to auto-post draft comments to GitHub (default: false, always off in v0)
 auto_post: false
 

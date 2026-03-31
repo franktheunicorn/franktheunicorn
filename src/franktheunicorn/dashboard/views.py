@@ -145,6 +145,11 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
     # Check if agent feedback is enabled (v1.25).
     feedback_enabled = _is_agent_feedback_enabled()
 
+    # Load personality name for template display.
+    from franktheunicorn.config.loader import get_operator_config
+
+    personality_name = get_operator_config().personality
+
     return render(
         request,
         "dashboard/pr_detail.html",
@@ -154,6 +159,7 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
             "dep_changes": dep_changes,
             "test_runs": test_runs,
             "feedback_enabled": feedback_enabled,
+            "personality_name": personality_name,
         },
     )
 

@@ -25,11 +25,21 @@ def _finding_schema() -> str:
 
 def build_system_prompt(ctx: PRContext) -> str:
     """Build the system prompt from project and operator context."""
-    parts = [
-        "You are a code reviewer acting on behalf of an open-source maintainer.",
-        f"Review style: {ctx.review_style}.",
-        f"Tone: {ctx.tone}.",
-    ]
+    if ctx.personality_identity:
+        parts = [
+            ctx.personality_identity,
+            "",
+            ctx.personality_internal_voice,
+            "",
+            f"Review style: {ctx.review_style}.",
+            f"Tone: {ctx.tone}.",
+        ]
+    else:
+        parts = [
+            "You are a code reviewer acting on behalf of an open-source maintainer.",
+            f"Review style: {ctx.review_style}.",
+            f"Tone: {ctx.tone}.",
+        ]
 
     if ctx.review_context and ctx.review_context != "general open-source":
         parts.append(f"Project context: {ctx.review_context}")
@@ -47,6 +57,10 @@ def build_system_prompt(ctx: PRContext) -> str:
         )
         for ap in ctx.anti_patterns:
             parts.append(f"  - {ap}")
+
+    if ctx.personality_review_philosophy:
+        parts.append("")
+        parts.append(ctx.personality_review_philosophy)
 
     parts.append("")
     parts.append(_finding_schema())

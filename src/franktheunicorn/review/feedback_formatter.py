@@ -20,6 +20,7 @@ def format_feedback_markdown(
     drafts: Iterable[ReviewDraft],
     test_runs: Iterable[TestRun],
     assessment: str,
+    personality_name: str = "",
 ) -> str:
     """Format review findings and test results as structured markdown.
 
@@ -28,6 +29,7 @@ def format_feedback_markdown(
         drafts: Review draft findings (any status — caller decides filtering).
         test_runs: Test run results for this PR.
         assessment: One of "good", "needs-work", "reject".
+        personality_name: Optional personality name for flavored headers.
 
     Returns:
         Structured markdown string ready for pasting into an agent session.
@@ -41,7 +43,10 @@ def format_feedback_markdown(
         "reject": "Reject",
     }
     label = assessment_labels.get(assessment, assessment)
-    lines.append(f"# Review Feedback: {label}")
+    if personality_name:
+        lines.append(f"# {personality_name}'s Review: {label}")
+    else:
+        lines.append(f"# Review Feedback: {label}")
     lines.append("")
     lines.append(f"**PR:** {pr.project} #{pr.number} — {pr.title}")
     lines.append(f"**Author:** {pr.author}")
