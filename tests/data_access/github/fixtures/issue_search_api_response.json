@@ -1,0 +1,42 @@
+{
+  "total_count": 2,
+  "incomplete_results": false,
+  "items": [
+    {
+      "id": 1234567890,
+      "number": 42,
+      "title": "Support mapInArrow for Spark Connect",
+      "state": "open",
+      "body": "We should add support for `mapInArrow` in the Spark Connect API.",
+      "user": {
+        "login": "huaxingao",
+        "id": 12345
+      },
+      "labels": [
+        {
+          "id": 100,
+          "name": "enhancement"
+        }
+      ],
+      "html_url": "https://github.com/apache/spark/issues/42"
+    },
+    {
+      "id": 1234567891,
+      "number": 43,
+      "title": "mapInArrow performance regression",
+      "state": "closed",
+      "body": "After upgrading Arrow, mapInArrow is slower.",
+      "user": {
+        "login": "holdenk",
+        "id": 8888
+      },
+      "labels": [
+        {
+          "id": 102,
+          "name": "bug"
+        }
+      ],
+      "html_url": "https://github.com/apache/spark/issues/43"
+    }
+  ]
+}

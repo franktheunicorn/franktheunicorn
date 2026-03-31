@@ -11,6 +11,7 @@ import httpx
 import pytest
 
 from franktheunicorn.data_access.github.diff_fetcher import DiffFetcher
+from franktheunicorn.data_access.github.issue_fetcher import IssueFetcher
 from franktheunicorn.data_access.github.pr_fetcher import PRFetcher
 from franktheunicorn.data_access.github.review_fetcher import ReviewFetcher
 
@@ -76,3 +77,34 @@ def pr_fetcher(http_client: httpx.Client) -> PRFetcher:
 @pytest.fixture
 def review_fetcher(http_client: httpx.Client) -> ReviewFetcher:
     return ReviewFetcher(client=http_client)
+
+
+# -- Issue fixtures --
+
+
+@pytest.fixture
+def issue_api_json() -> dict[str, Any]:
+    return json.loads((FIXTURES_DIR / "issue_api_response.json").read_text())
+
+
+@pytest.fixture
+def issue_comments_api_json() -> list[dict[str, Any]]:
+    return json.loads((FIXTURES_DIR / "issue_comments_api_response.json").read_text())
+
+
+@pytest.fixture
+def issue_search_api_json() -> dict[str, Any]:
+    return json.loads((FIXTURES_DIR / "issue_search_api_response.json").read_text())
+
+
+@pytest.fixture
+def issue_scrape_html() -> str:
+    return (FIXTURES_DIR / "issue_page.html").read_text()
+
+
+@pytest.fixture
+def issue_fetcher(http_client: httpx.Client, tmp_path: Path) -> IssueFetcher:
+    from franktheunicorn.data_access.cache import FileCache
+
+    cache = FileCache("github_issues", cache_dir=tmp_path, ttl_seconds=0)
+    return IssueFetcher(client=http_client, cache=cache)

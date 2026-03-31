@@ -1,0 +1,18 @@
+{
+  "id": "cmpl-abc123",
+  "model": "sonar",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "The mapInArrow API in Apache Spark allows users to apply vectorized operations using Apache Arrow. It was introduced to improve performance for Python UDFs by leveraging columnar data processing. Recent discussions on the Spark dev mailing list suggest extending this to Spark Connect."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "citations": [
+    "https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql.html",
+    "https://issues.apache.org/jira/browse/SPARK-54102"
+  ]
+}
