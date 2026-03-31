@@ -94,6 +94,17 @@ def build_user_message(diff: str, ctx: PRContext) -> str:
 
     header_parts.append(f"\nDiff:\n```diff\n{diff}\n```")
 
+    # v1.5: inject external context (labeled as untrusted).
+    from franktheunicorn.data_access.context_orchestrator import format_context_for_prompt
+
+    external_ctx = format_context_for_prompt(
+        community_ctx=ctx.community_context,
+        jira_ctx=ctx.jira_context,
+        sentry_ctx=ctx.sentry_context,
+    )
+    if external_ctx:
+        header_parts.append(external_ctx)
+
     return "\n".join(header_parts)
 
 

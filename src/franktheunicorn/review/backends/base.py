@@ -38,6 +38,10 @@ class PRContext:
     personality_internal_voice: str = ""
     personality_external_voice: str = ""
     personality_review_philosophy: str = ""
+    # v1.5 context injection fields
+    community_context: str = ""
+    jira_context: str = ""
+    sentry_context: str = ""
 
 
 class ReviewFinding(BaseModel):
