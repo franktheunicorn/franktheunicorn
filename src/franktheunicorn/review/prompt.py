@@ -11,13 +11,22 @@ if TYPE_CHECKING:
 
 
 @lru_cache(maxsize=1)
-def _finding_schema() -> str:
-    """Generate the JSON schema from the Pydantic model (lazy to avoid circular import)."""
+def finding_schema_json() -> str:
+    """Return the ReviewFinding JSON schema as a formatted string.
+
+    Public helper reused by sub-checks that need the schema in custom prompts.
+    """
     from franktheunicorn.review.backends.base import ReviewFinding
 
+    return json.dumps(ReviewFinding.model_json_schema(), indent=2)
+
+
+@lru_cache(maxsize=1)
+def _finding_schema() -> str:
+    """Generate the full schema instruction block for the default review prompt."""
     return (
         "Return your review as a JSON array of finding objects matching this schema:\n"
-        + json.dumps(ReviewFinding.model_json_schema(), indent=2)
+        + finding_schema_json()
         + "\n\nIf you have no findings, return an empty array: []"
         '\nWrap the array in {"findings": [...]}.'
     )
@@ -74,4 +83,4 @@ def build_user_message(diff: str, ctx: PRContext) -> str:
     return "\n".join(header_parts)
 
 
-__all__ = ["build_system_prompt", "build_user_message"]
+__all__ = ["build_system_prompt", "build_user_message", "finding_schema_json"]
