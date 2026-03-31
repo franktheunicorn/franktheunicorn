@@ -27,6 +27,8 @@ class GitHubClientProtocol(Protocol):
         self, owner: str, repo: str, state: str = "open"
     ) -> list[dict[str, Any]]: ...
 
+    def get_pull_request(self, owner: str, repo: str, pr_number: int) -> dict[str, Any]: ...
+
     def get_pull_request_files(
         self, owner: str, repo: str, pr_number: int
     ) -> list[dict[str, Any]]: ...
@@ -68,6 +70,15 @@ def poll_project(
 
         pr_obj = _upsert_pull_request(project, pr_data, changed_files)
 
+        # Fetch mergeable status (requires single-PR endpoint).
+        try:
+            pr_detail = client.get_pull_request(
+                project_config.owner, project_config.repo, pr_number
+            )
+            pr_obj.mergeable = pr_detail.get("mergeable")
+        except Exception:
+            logger.debug("Could not fetch mergeable status for PR #%d", pr_number)
+
         # Score the PR
         score, breakdown = score_pull_request_from_model(
             pr=pr_obj,
@@ -89,6 +100,7 @@ def poll_project(
                 "is_new_contributor",
                 "is_low_context",
                 "is_likely_unowned",
+                "mergeable",
             ]
         )
 

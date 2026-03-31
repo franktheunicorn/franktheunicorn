@@ -44,6 +44,14 @@ class GitHubClient:
         result: list[dict[str, Any]] = response.json()
         return result
 
+    def get_pull_request(self, owner: str, repo: str, pr_number: int) -> dict[str, Any]:
+        """Fetch a single PR detail (includes mergeable status)."""
+        url = f"/repos/{owner}/{repo}/pulls/{pr_number}"
+        response = self._client.get(url)
+        response.raise_for_status()
+        result: dict[str, Any] = response.json()
+        return result
+
     def get_pull_request_files(self, owner: str, repo: str, pr_number: int) -> list[dict[str, Any]]:
         """Fetch the list of files changed in a PR."""
         url = f"/repos/{owner}/{repo}/pulls/{pr_number}/files"

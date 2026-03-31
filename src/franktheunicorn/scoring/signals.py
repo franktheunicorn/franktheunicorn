@@ -12,9 +12,11 @@ WEIGHTS: dict[str, int] = {
     "path_overlap": 30,
     "mentioned_or_assigned": 25,
     "has_review_request": 20,
+    "recently_updated": 20,
     "prior_review_history": 15,
     "collaborator": 15,
     "touches_operator_code": 15,
+    "merge_conflict": -15,
     "new_human_contributor": 10,
     "keyword_match": 10,
     "ai_generated": -10,
@@ -178,6 +180,28 @@ def score_committer_is_on_it(
     )
 
     return WEIGHTS["committer_is_on_it"] if has_active_committer else None
+
+
+def score_recently_updated(
+    hours_since_update: float | None,
+) -> int | None:
+    """Boost for recently updated PRs. +20 if updated today, +10 if this week."""
+    if hours_since_update is None:
+        return None
+    today_boost = WEIGHTS["recently_updated"]
+    week_boost = today_boost // 2
+    if hours_since_update < 24:
+        return today_boost
+    if hours_since_update < 168:  # 7 days
+        return week_boost
+    return None
+
+
+def score_merge_conflict(mergeable: bool | None) -> int | None:
+    """Penalty when PR has merge conflicts (not mergeable)."""
+    if mergeable is None:
+        return None  # unknown status, don't penalize
+    return WEIGHTS["merge_conflict"] if not mergeable else None
 
 
 def score_llm_interest(llm_judgment: str | None) -> int | None:

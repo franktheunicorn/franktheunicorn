@@ -84,6 +84,9 @@ class PullRequest(models.Model):
     is_low_context = models.BooleanField(default=False)
     is_likely_unowned = models.BooleanField(default=False)
 
+    # Merge status (fetched from single-PR endpoint)
+    mergeable = models.BooleanField(null=True, blank=True)
+
     # Queue routing (§2.2)
     queue = models.CharField(max_length=50, choices=QUEUE_CHOICES, default="review")
 

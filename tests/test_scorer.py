@@ -135,3 +135,47 @@ class TestPureFunctionOrchestrator:
 
         assert tuple_bd == list_bd
         assert tuple_score == list_score
+
+
+class TestRecencyAndMergeInScorer:
+    def test_recently_updated_flows_through(self) -> None:
+        pr = {**_ALICE_PR, "hours_since_update": 5.0}
+        _, bd = score_pull_request(pr, {}, "holdenk")
+        assert "recently_updated" in bd
+        assert bd["recently_updated"] == 20.0
+
+    def test_recently_updated_week(self) -> None:
+        pr = {**_ALICE_PR, "hours_since_update": 100.0}
+        _, bd = score_pull_request(pr, {}, "holdenk")
+        assert bd.get("recently_updated") == 10.0
+
+    def test_recently_updated_old(self) -> None:
+        pr = {**_ALICE_PR, "hours_since_update": 500.0}
+        _, bd = score_pull_request(pr, {}, "holdenk")
+        assert "recently_updated" not in bd
+
+    def test_merge_conflict_penalty(self) -> None:
+        pr = {**_ALICE_PR, "mergeable": False}
+        _, bd = score_pull_request(pr, {}, "holdenk")
+        assert "merge_conflict" in bd
+        assert bd["merge_conflict"] == -15.0
+
+    def test_mergeable_true_no_penalty(self) -> None:
+        pr = {**_ALICE_PR, "mergeable": True}
+        _, bd = score_pull_request(pr, {}, "holdenk")
+        assert "merge_conflict" not in bd
+
+    def test_mergeable_none_no_penalty(self) -> None:
+        pr = {**_ALICE_PR}
+        _, bd = score_pull_request(pr, {}, "holdenk")
+        assert "merge_conflict" not in bd
+
+    def test_weight_override_recency(self) -> None:
+        pr = {**_ALICE_PR, "hours_since_update": 5.0}
+        _, bd = score_pull_request(pr, {"scoring_weights": {"recently_updated": 40}}, "holdenk")
+        assert bd["recently_updated"] == 40.0
+
+    def test_weight_override_merge_conflict(self) -> None:
+        pr = {**_ALICE_PR, "mergeable": False}
+        _, bd = score_pull_request(pr, {"scoring_weights": {"merge_conflict": -30}}, "holdenk")
+        assert bd["merge_conflict"] == -30.0

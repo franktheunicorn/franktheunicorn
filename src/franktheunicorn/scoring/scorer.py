@@ -17,9 +17,11 @@ from franktheunicorn.scoring.signals import (
     score_keyword_match,
     score_llm_interest,
     score_mentioned_or_assigned,
+    score_merge_conflict,
     score_new_human_contributor,
     score_path_overlap,
     score_prior_review_history,
+    score_recently_updated,
 )
 
 if TYPE_CHECKING:
@@ -101,6 +103,17 @@ def score_pull_request(
     _add("ai_generated", score_ai_generated(author, ai_agents or None))
     _add("llm_interest", score_llm_interest(pr_dict.get("llm_interest")))  # type: ignore[arg-type]
 
+    # Recency and merge conflict signals
+    hours_val = pr_dict.get("hours_since_update")
+    hours_since_update = float(hours_val) if isinstance(hours_val, (int, float)) else None
+    _add("recently_updated", score_recently_updated(hours_since_update))
+
+    mergeable = pr_dict.get("mergeable")
+    _add(
+        "merge_conflict",
+        score_merge_conflict(mergeable if isinstance(mergeable, bool) else None),
+    )
+
     # Collaborator + review history signals
     _add(
         "collaborator",
@@ -180,6 +193,13 @@ def score_pull_request_from_model(
     if pr.github_created_at:
         age = (datetime.now(tz=UTC) - pr.github_created_at).days
         pr_dict["pr_age_days"] = age
+
+    if pr.github_updated_at:
+        delta = datetime.now(tz=UTC) - pr.github_updated_at
+        pr_dict["hours_since_update"] = delta.total_seconds() / 3600
+
+    if hasattr(pr, "mergeable"):
+        pr_dict["mergeable"] = pr.mergeable
 
     committers: list[str] = []
     if hasattr(project_config, "committers"):
