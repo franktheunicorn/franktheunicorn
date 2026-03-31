@@ -1,0 +1,55 @@
+{
+  "key": "SPARK-12345",
+  "id": "1234567",
+  "self": "https://issues.apache.org/jira/rest/api/2/issue/1234567",
+  "fields": {
+    "summary": "Add DataFrame.mapInArrow for Connect",
+    "description": "This JIRA tracks adding mapInArrow support to the Connect API.\n\nThe implementation should mirror the existing mapInPandas but use Arrow batches directly.",
+    "status": {
+      "name": "Open",
+      "id": "1"
+    },
+    "priority": {
+      "name": "Major",
+      "id": "3"
+    },
+    "assignee": {
+      "displayName": "Huaxin Gao",
+      "name": "huaxin-gao",
+      "emailAddress": "huaxin@example.com"
+    },
+    "issuetype": {
+      "name": "Improvement",
+      "id": "4"
+    },
+    "project": {
+      "key": "SPARK",
+      "name": "Apache Spark"
+    },
+    "created": "2026-03-15T10:00:00.000+0000",
+    "updated": "2026-03-27T14:30:00.000+0000",
+    "comment": {
+      "comments": [
+        {
+          "id": "101",
+          "author": {
+            "displayName": "Dongjoon Hyun",
+            "name": "dongjoon-hyun"
+          },
+          "body": "This looks like a good approach. Can we also consider batching for large datasets?",
+          "created": "2026-03-20T09:00:00.000+0000"
+        },
+        {
+          "id": "102",
+          "author": {
+            "displayName": "Huaxin Gao",
+            "name": "huaxin-gao"
+          },
+          "body": "Good point. I'll add batch size configuration in the follow-up PR.",
+          "created": "2026-03-21T11:00:00.000+0000"
+        }
+      ],
+      "total": 2
+    }
+  }
+}
