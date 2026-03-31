@@ -1,7 +1,18 @@
 {% extends "dashboard/base.html" %}
 {% block title %}PRs — franktheunicorn{% endblock %}
 {% block content %}
-<h2>Pull Requests</h2>
+<div class="tab-bar">
+    {% for tab in queue_tabs %}
+    <a href="?queue={{ tab.key }}"
+       {% if active_queue == tab.key %}class="active"{% endif %}>
+        {{ tab.label }}
+        {% if queue_counts %}
+        <span class="tab-count">{{ queue_counts|default_if_none:0 }}</span>
+        {% endif %}
+    </a>
+    {% endfor %}
+</div>
+
 {% if pull_requests %}
 <ul class="pr-list">
     {% for pr in pull_requests %}
@@ -15,7 +26,9 @@
         <div class="pr-meta">
             by <strong>{{ pr.author }}</strong>
             · {{ pr.additions }}+ / {{ pr.deletions }}-
-            {% if pr.is_draft %}· 📝 Draft{% endif %}
+            {% if pr.is_draft %}· Draft{% endif %}
+            {% if pr.likely_ai_generated %}· AI{% endif %}
+            {% if pr.is_new_contributor %}· New Contributor{% endif %}
             {% if pr.labels %}· {% for label in pr.labels %}{{ label }} {% endfor %}{% endif %}
         </div>
     </li>
@@ -23,7 +36,7 @@
 </ul>
 {% else %}
 <div class="empty-state">
-    <p>No pull requests ingested yet.</p>
+    <p>No pull requests in the <strong>{{ active_queue }}</strong> queue.</p>
     <p>Start the worker to poll GitHub or run in mock mode.</p>
 </div>
 {% endif %}

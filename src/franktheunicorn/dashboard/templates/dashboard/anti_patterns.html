@@ -1,0 +1,56 @@
+{% extends "dashboard/base.html" %}
+{% block title %}Anti-Patterns — franktheunicorn{% endblock %}
+{% block content %}
+<h2>Anti-Pattern Manager</h2>
+<p style="font-size: 0.85rem; color: var(--muted); margin-bottom: 1rem;">
+    Anti-patterns are comments the operator doesn't want to make.
+    Rejected findings automatically suggest new patterns.
+</p>
+
+<form hx-post="{% url 'dashboard:anti_pattern_create' %}"
+      hx-target="#ap-list" hx-swap="afterbegin"
+      style="margin-bottom: 1.5rem; padding: 1rem; background: var(--card); border: 1px solid var(--border); border-radius: 4px;">
+    <div class="form-row">
+        <input type="text" name="pattern_text" placeholder="Pattern text (substring match)" required>
+        <select name="project_id">
+            <option value="">Global (all projects)</option>
+            {% for project in projects %}
+            <option value="{{ project.pk }}">{{ project.full_name }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div class="form-row">
+        <input type="text" name="description" placeholder="Description (optional)">
+        <button class="action-btn" type="submit" style="white-space: nowrap;">Add Pattern</button>
+    </div>
+</form>
+
+<div class="form-row" style="margin-bottom: 1rem;">
+    <span style="font-size: 0.85rem;">Filter by project:</span>
+    <a href="{% url 'dashboard:anti_patterns' %}" {% if not active_project %}style="font-weight: 600;"{% endif %}>All</a>
+    {% for project in projects %}
+    <a href="{% url 'dashboard:anti_patterns' %}?project={{ project.pk }}"
+       {% if active_project == project.pk|stringformat:"d" %}style="font-weight: 600;"{% endif %}>{{ project.full_name }}</a>
+    {% endfor %}
+</div>
+
+<table>
+    <thead>
+        <tr>
+            <th>Pattern</th>
+            <th>Project</th>
+            <th>Triggers</th>
+            <th>Active</th>
+            <th>Last Matched</th>
+            <th>Actions</th>
+        </tr>
+    </thead>
+    <tbody id="ap-list">
+        {% for ap in anti_patterns %}
+        {% include "dashboard/_anti_pattern_row.html" %}
+        {% empty %}
+        <tr><td colspan="6" class="empty-state">No anti-patterns yet.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

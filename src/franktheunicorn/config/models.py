@@ -70,6 +70,7 @@ class OperatorConfig(BaseModel):
     poll_interval_seconds: int | None = None
     digest_email: str = ""
     digest_enabled: bool = False
+    workspaces: dict[str, object] = Field(default_factory=dict)
     coderabbit: CodeRabbitConfig = Field(default_factory=CodeRabbitConfig)
     # Multiple LLM backends can run in parallel. Each produces findings
     # independently; results are combined and deduped via anti-patterns.

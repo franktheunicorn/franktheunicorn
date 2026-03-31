@@ -1,16 +1,19 @@
 {% extends "dashboard/base.html" %}
 {% block title %}PR #{{ pr.number }} — franktheunicorn{% endblock %}
 {% block content %}
-<a href="{% url 'dashboard:index' %}" class="back-link">← Back to list</a>
+<a href="{% url 'dashboard:index' %}" class="back-link">&larr; Back to list</a>
 
 <h2>{{ pr.project }} #{{ pr.number }}: {{ pr.title }}</h2>
 
 <div class="pr-meta" style="margin-top: 0.5rem;">
     by <strong>{{ pr.author }}</strong>
-    · {{ pr.additions }}+ / {{ pr.deletions }}-
-    · Score: <span class="score-badge">{{ pr.interest_score|floatformat:2 }}</span>
-    {% if pr.is_draft %}· 📝 Draft{% endif %}
-    · <a href="{{ pr.url }}" target="_blank" rel="noopener noreferrer">View on GitHub ↗</a>
+    &middot; {{ pr.additions }}+ / {{ pr.deletions }}-
+    &middot; Score: <span class="score-badge">{{ pr.interest_score|floatformat:2 }}</span>
+    {% if pr.is_draft %}&middot; Draft{% endif %}
+    {% if pr.likely_ai_generated %}&middot; AI-Generated{% endif %}
+    {% if pr.is_new_contributor %}&middot; New Contributor{% endif %}
+    &middot; Queue: {{ pr.queue }}
+    &middot; <a href="{{ pr.url }}" target="_blank" rel="noopener noreferrer">View on GitHub &nearr;</a>
 </div>
 
 {% if pr.body %}
@@ -29,75 +32,71 @@
 </dl>
 {% endif %}
 
+{% if test_runs %}
+<h3 style="margin-top: 1.5rem;">Test Runs</h3>
+{% for run in test_runs %}
+<div style="margin-bottom: 0.5rem; font-size: 0.9rem;">
+    <strong>{{ run.run_type }}</strong> &mdash; {{ run.status }}
+    {% if run.differential_verdict %}
+    <span class="verdict-badge verdict-{{ run.differential_verdict }}">{{ run.differential_verdict|upper }}</span>
+    {% endif %}
+    {% if run.error_log %}
+    <details><summary style="font-size: 0.8rem; cursor: pointer;">Error log</summary>
+    <pre style="font-size: 0.75rem; background: #f0f0f0; padding: 0.5rem; margin-top: 0.25rem;">{{ run.error_log }}</pre>
+    </details>
+    {% endif %}
+</div>
+{% endfor %}
+{% endif %}
+
 {% if dep_changes %}
 <h3 style="margin-top: 1.5rem;">Dependency Changes</h3>
-<table class="dep-changes-table" style="width: 100%; border-collapse: collapse; font-size: 0.9rem; margin-top: 0.5rem;">
+<table>
     <thead>
-        <tr style="border-bottom: 2px solid #ddd; text-align: left;">
-            <th style="padding: 0.5rem;">Package</th>
-            <th style="padding: 0.5rem;">Old</th>
-            <th style="padding: 0.5rem;">New</th>
-            <th style="padding: 0.5rem;">Source</th>
-            <th style="padding: 0.5rem;">Changelog</th>
-            <th style="padding: 0.5rem;">Flags</th>
-        </tr>
+        <tr><th>Package</th><th>Old</th><th>New</th><th>Source</th><th>Changelog</th><th>Flags</th></tr>
     </thead>
     <tbody>
         {% for dep in dep_changes %}
-        <tr style="border-bottom: 1px solid #eee;">
-            <td style="padding: 0.5rem;"><strong>{{ dep.package_name }}</strong></td>
-            <td style="padding: 0.5rem;">{{ dep.old_version|default:"—" }}</td>
-            <td style="padding: 0.5rem;">{{ dep.new_version|default:"—" }}</td>
-            <td style="padding: 0.5rem; font-size: 0.8rem;">{{ dep.source_file }}</td>
-            <td style="padding: 0.5rem;">
-                {% if dep.changelog_url %}
-                <a href="{{ dep.changelog_url }}" target="_blank" rel="noopener noreferrer">View ↗</a>
-                {% elif dep.changelog_fetch_error %}
-                <span style="color: #999; font-size: 0.8rem;">{{ dep.changelog_fetch_error }}</span>
-                {% else %}
-                —
-                {% endif %}
+        <tr>
+            <td><strong>{{ dep.package_name }}</strong></td>
+            <td>{{ dep.old_version|default:"&mdash;" }}</td>
+            <td>{{ dep.new_version|default:"&mdash;" }}</td>
+            <td style="font-size: 0.8rem;">{{ dep.source_file }}</td>
+            <td>
+                {% if dep.changelog_url %}<a href="{{ dep.changelog_url }}" target="_blank">View &nearr;</a>
+                {% elif dep.changelog_fetch_error %}<span style="color: #999; font-size: 0.8rem;">{{ dep.changelog_fetch_error }}</span>
+                {% else %}&mdash;{% endif %}
             </td>
-            <td style="padding: 0.5rem;">
-                {% if dep.breaking_changes_detected %}<span style="background: #fee; color: #c00; padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.75rem;">breaking</span>{% endif %}
-                {% if dep.deprecations_detected %}<span style="background: #fff3e0; color: #e65100; padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.75rem;">deprecations</span>{% endif %}
+            <td>
+                {% if dep.breaking_changes_detected %}<span style="background: var(--red-bg); color: var(--red); padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.75rem;">breaking</span>{% endif %}
+                {% if dep.deprecations_detected %}<span style="background: var(--orange-bg); color: var(--orange); padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.75rem;">deprecations</span>{% endif %}
             </td>
         </tr>
         {% if dep.changelog_text %}
-        <tr>
-            <td colspan="6" style="padding: 0.5rem;">
-                <details>
-                    <summary style="cursor: pointer; font-size: 0.8rem; color: #666;">Show release notes</summary>
-                    <div style="margin-top: 0.5rem; padding: 0.75rem; background: #f9f9f9; border-radius: 4px; font-size: 0.85rem; white-space: pre-wrap;">{{ dep.changelog_text|truncatewords:500 }}</div>
-                </details>
-            </td>
-        </tr>
+        <tr><td colspan="6"><details><summary style="cursor: pointer; font-size: 0.8rem;">Release notes</summary>
+            <div style="margin-top: 0.5rem; padding: 0.75rem; background: #f9f9f9; border-radius: 4px; font-size: 0.85rem; white-space: pre-wrap;">{{ dep.changelog_text|truncatewords:500 }}</div>
+        </details></td></tr>
         {% endif %}
         {% endfor %}
     </tbody>
 </table>
 {% endif %}
 
-<h3 style="margin-top: 1.5rem;">Draft Reviews</h3>
+<h3 style="margin-top: 1.5rem;">Review Findings
+    <button class="action-btn post" style="float: right;"
+            hx-post="{% url 'dashboard:post_review' pr.pk %}"
+            hx-target="#post-result"
+            hx-swap="innerHTML">Post Approved to GitHub</button>
+</h3>
+<div id="post-result"></div>
+
 {% if drafts %}
-<div class="draft-list">
+<div class="draft-list" id="draft-list">
     {% for draft in drafts %}
-    <div class="draft-item">
-        <strong>{{ draft.file_path }}{% if draft.line_number %}:{{ draft.line_number }}{% endif %}</strong>
-        {% if draft.source == "coderabbit" %}
-        <span class="source-badge source-coderabbit">CodeRabbit</span>
-        {% else %}
-        <span class="source-badge source-agent">Agent</span>
-        {% endif %}
-        <span style="font-size: 0.75rem; color: #999;">(confidence: {{ draft.confidence|floatformat:1 }}, {{ draft.status }})</span>
-        <p style="margin-top: 0.25rem;">{{ draft.comment_body }}</p>
-        {% if draft.suggestion %}
-        <pre style="background: #f0f0f0; padding: 0.5rem; margin-top: 0.25rem; font-size: 0.8rem;">{{ draft.suggestion }}</pre>
-        {% endif %}
-    </div>
+    {% include "dashboard/_draft_item.html" %}
     {% endfor %}
 </div>
 {% else %}
-<p class="empty-state">No draft reviews yet.</p>
+<p class="empty-state">No review findings yet.</p>
 {% endif %}
 {% endblock %}

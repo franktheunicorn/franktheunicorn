@@ -14,7 +14,7 @@ class TestDashboardViews:
     def test_index_empty(self, client: Client) -> None:
         response = client.get("/")
         assert response.status_code == 200
-        assert b"No pull requests ingested yet" in response.content
+        assert b"No pull requests in the" in response.content
 
     def test_index_with_prs(self, client: Client, db_pr: PullRequest) -> None:
         response = client.get("/")

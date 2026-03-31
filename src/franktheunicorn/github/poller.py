@@ -76,12 +76,69 @@ def poll_project(
         )
         pr_obj.interest_score = score
         pr_obj.score_breakdown = breakdown
-        pr_obj.save(update_fields=["interest_score", "score_breakdown"])
+
+        # Compute moderation flags and route to queue (§2.2).
+        _route_pr_to_queue(pr_obj, operator_username)
+
+        pr_obj.save(update_fields=[
+            "interest_score", "score_breakdown",
+            "queue", "is_operator_pr", "is_new_contributor",
+            "is_low_context", "is_likely_unowned",
+        ])
 
         results.append(pr_obj)
 
     logger.info("Polled %s: %d PRs ingested/updated", project.full_name, len(results))
     return results
+
+
+def _route_pr_to_queue(pr_obj: PullRequest, operator_username: str) -> None:
+    """Set queue and boolean flags based on moderation flags."""
+    from franktheunicorn.scoring.moderation import compute_moderation_flags
+
+    pr_dict: dict[str, object] = {
+        "author": pr_obj.author,
+        "is_draft": pr_obj.is_draft,
+        "additions": pr_obj.additions,
+        "deletions": pr_obj.deletions,
+        "body": pr_obj.body,
+        "labels": pr_obj.labels,
+        "changed_files": pr_obj.changed_files,
+        "requested_reviewers": pr_obj.requested_reviewers,
+    }
+    if pr_obj.github_created_at:
+        from datetime import UTC, datetime
+
+        age = (datetime.now(tz=UTC) - pr_obj.github_created_at).days
+        pr_dict["pr_age_days"] = age
+
+    known_authors = list(
+        PullRequest.objects.filter(project=pr_obj.project)
+        .exclude(pk=pr_obj.pk)
+        .values_list("author", flat=True)
+        .distinct()
+    )
+
+    flags = compute_moderation_flags(pr_dict, operator_username, known_authors)
+
+    pr_obj.is_operator_pr = "is_operator_pr" in flags
+    pr_obj.is_new_contributor = "new_contributor" in flags
+    pr_obj.is_low_context = "low_context" in flags
+    pr_obj.is_likely_unowned = "likely_unowned" in flags
+
+    # Route to queue based on priority of flags.
+    if pr_obj.is_operator_pr:
+        pr_obj.queue = "your-prs"
+    elif pr_obj.likely_ai_generated or "bot" in flags:
+        pr_obj.queue = "ai-generated"
+    elif pr_obj.is_new_contributor:
+        pr_obj.queue = "new-contributor"
+    elif pr_obj.is_likely_unowned:
+        pr_obj.queue = "consider-closing"
+    elif pr_obj.is_low_context:
+        pr_obj.queue = "needs-triage"
+    else:
+        pr_obj.queue = "review"
 
 
 def _parse_github_datetime(dt_str: str | None) -> datetime | None:
