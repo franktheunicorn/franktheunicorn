@@ -24,11 +24,31 @@ MAX_BLAME_FILES = 50
 NEAR_LINES_WINDOW = 5
 
 # Extensions to skip (docs, configs, generated).
-SKIP_EXTENSIONS = frozenset({
-    ".md", ".rst", ".txt", ".csv", ".json", ".yaml", ".yml", ".toml",
-    ".cfg", ".ini", ".lock", ".svg", ".png", ".jpg", ".jpeg", ".gif",
-    ".ico", ".woff", ".woff2", ".ttf", ".eot",
-})
+SKIP_EXTENSIONS = frozenset(
+    {
+        ".md",
+        ".rst",
+        ".txt",
+        ".csv",
+        ".json",
+        ".yaml",
+        ".yml",
+        ".toml",
+        ".cfg",
+        ".ini",
+        ".lock",
+        ".svg",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".ico",
+        ".woff",
+        ".woff2",
+        ".ttf",
+        ".eot",
+    }
+)
 
 
 @dataclass
@@ -145,10 +165,12 @@ def fetch_blame_for_files(
         # "Near authors" — authors of lines adjacent to the code.
         # Since we don't have diff hunk info here, we treat all authors as
         # both direct and near. The scorer uses this for proximity scoring.
-        results.append({
-            "file_path": file_path,
-            "authors": all_authors,
-            "near_authors": all_authors,
-        })
+        results.append(
+            {
+                "file_path": file_path,
+                "authors": all_authors,
+                "near_authors": all_authors,
+            }
+        )
 
     return results

@@ -9,7 +9,6 @@ import pytest
 
 from franktheunicorn.scoring.blame_fetcher import (
     MAX_BLAME_FILES,
-    BlameEntry,
     _is_code_file,
     _parse_porcelain_blame,
     fetch_blame_for_file,

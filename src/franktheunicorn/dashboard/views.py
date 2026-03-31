@@ -294,8 +294,7 @@ def send_feedback(request: HttpRequest, pr_id: int) -> HttpResponse:
 
     if not feedback_body.strip():
         return HttpResponse(
-            '<div class="feedback-result" style="color: #c00;">'
-            "Feedback body cannot be empty.</div>"
+            '<div class="feedback-result" style="color: #c00;">Feedback body cannot be empty.</div>'
         )
 
     feedback_method = "session-url" if pr.agent_session_url else "github-comment"

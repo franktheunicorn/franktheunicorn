@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pytest
 
-from franktheunicorn.core.models import PullRequest
 from franktheunicorn.review.feedback_formatter import format_feedback_markdown
 from tests.factories import PullRequestFactory, ReviewDraftFactory, TestRunFactory
 

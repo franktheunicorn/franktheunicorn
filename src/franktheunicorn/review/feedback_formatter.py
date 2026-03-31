@@ -78,9 +78,9 @@ def format_feedback_markdown(
                     lines.append(f"- {draft.comment_body}")
 
                 if draft.suggestion:
-                    lines.append(f"  ```suggestion")
+                    lines.append("  ```suggestion")
                     lines.append(f"  {draft.suggestion}")
-                    lines.append(f"  ```")
+                    lines.append("  ```")
             lines.append("")
     else:
         lines.append("No specific findings.")

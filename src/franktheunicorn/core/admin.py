@@ -38,7 +38,14 @@ class PullRequestAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
         "is_draft",
         "github_updated_at",
     )
-    list_filter = ("state", "is_draft", "likely_ai_generated", "ai_agent_source", "queue", "project")
+    list_filter = (
+        "state",
+        "is_draft",
+        "likely_ai_generated",
+        "ai_agent_source",
+        "queue",
+        "project",
+    )
     search_fields = ("title", "author")
     readonly_fields = ("created_at", "updated_at")
 
