@@ -27,51 +27,18 @@ class TestCoverageCheckPrompt:
         ctx = make_pr_context(test_expectations="")
         check = CoverageCheck()
         system, _user = check.build_prompt("diff here", ctx)
-        # Should not crash; expectations section is just empty
         assert "test-coverage" in system
 
-    def test_user_message_includes_diff(self) -> None:
+    def test_user_message_delegates_to_build_user_message(self) -> None:
+        """User message is built by the shared build_user_message helper."""
         diff = "+++ b/main.py\n+def new_func():\n+    pass"
-        ctx = make_pr_context()
+        ctx = make_pr_context(pr_number=99, pr_title="Add widget")
         check = CoverageCheck()
         _system, user = check.build_prompt(diff, ctx)
+        assert "PR #99" in user
+        assert "Add widget" in user
         assert "new_func" in user
         assert "```diff" in user
-
-    def test_user_message_includes_pr_metadata(self) -> None:
-        ctx = make_pr_context(
-            pr_number=99,
-            pr_title="Add widget feature",
-            pr_author="bob",
-            project_name="acme/widgets",
-        )
-        check = CoverageCheck()
-        _system, user = check.build_prompt("diff", ctx)
-        assert "PR #99" in user
-        assert "Add widget feature" in user
-        assert "bob" in user
-        assert "acme/widgets" in user
-
-    def test_user_message_includes_pr_body(self) -> None:
-        ctx = make_pr_context(pr_body="This adds a caching layer.")
-        check = CoverageCheck()
-        _system, user = check.build_prompt("diff", ctx)
-        assert "caching layer" in user
-
-    def test_user_message_truncates_long_body(self) -> None:
-        long_body = "A" * 3000
-        ctx = make_pr_context(pr_body=long_body)
-        check = CoverageCheck()
-        _system, user = check.build_prompt("diff", ctx)
-        assert "(truncated)" in user
-        # First 2000 chars present, full 3000 not
-        assert "A" * 2000 in user
-
-    def test_user_message_handles_empty_body(self) -> None:
-        ctx = make_pr_context(pr_body="")
-        check = CoverageCheck()
-        _system, user = check.build_prompt("diff", ctx)
-        assert "PR #" in user  # still has header
 
 
 class TestCoverageCheckName:

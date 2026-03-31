@@ -2,20 +2,13 @@
 
 from __future__ import annotations
 
-import json
-from functools import lru_cache
 from typing import TYPE_CHECKING
 
-from franktheunicorn.review.backends.base import ReviewFinding
 from franktheunicorn.review.checks import BaseCheck
+from franktheunicorn.review.prompt import build_user_message, finding_schema_json
 
 if TYPE_CHECKING:
     from franktheunicorn.review.backends.base import PRContext
-
-
-@lru_cache(maxsize=1)
-def _finding_schema() -> str:
-    return json.dumps(ReviewFinding.model_json_schema(), indent=2)
 
 
 _SYSTEM_PROMPT = """\
@@ -42,18 +35,6 @@ Set category to "test-coverage" in the title field of every finding.
 If you have no findings, return: {{"findings": []}}
 """
 
-_USER_TEMPLATE = """\
-PR #{pr_number}: {pr_title}
-Author: {pr_author}
-Project: {project_name}
-
-{pr_body_section}
-Diff:
-```diff
-{diff}
-```
-"""
-
 
 class CoverageCheck(BaseCheck):
     """Evaluates whether a PR's changes have adequate test coverage."""
@@ -67,23 +48,9 @@ class CoverageCheck(BaseCheck):
 
         system_prompt = _SYSTEM_PROMPT.format(
             test_expectations=test_exp,
-            schema=_finding_schema(),
+            schema=finding_schema_json(),
         )
 
-        body_section = ""
-        if pr_context.pr_body:
-            body_preview = pr_context.pr_body[:2000]
-            if len(pr_context.pr_body) > 2000:
-                body_preview += "\n... (truncated)"
-            body_section = f"PR description:\n{body_preview}\n"
-
-        user_message = _USER_TEMPLATE.format(
-            pr_number=pr_context.pr_number,
-            pr_title=pr_context.pr_title,
-            pr_author=pr_context.pr_author,
-            project_name=pr_context.project_name,
-            pr_body_section=body_section,
-            diff=diff,
-        )
+        user_message = build_user_message(diff, pr_context)
 
         return system_prompt, user_message

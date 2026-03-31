@@ -14,10 +14,8 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from franktheunicorn.review.backends import get_backend
 from franktheunicorn.review.backends.base import PRContext, ReviewFinding, parse_llm_response
 from franktheunicorn.review.drafter import build_pr_context, create_drafts_from_findings
 
@@ -26,14 +24,6 @@ if TYPE_CHECKING:
     from franktheunicorn.core.models import PullRequest, ReviewDraft
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class CheckResult:
-    """Container for findings from a single check."""
-
-    check_name: str
-    findings: list[ReviewFinding]
 
 
 class BaseCheck(ABC):
@@ -75,9 +65,10 @@ def run_enabled_checks(
     parses findings, and feeds them through ``create_drafts_from_findings`` for
     anti-pattern gating and persistence.
     """
-    if operator_config is None:
-        from franktheunicorn.config.models import OperatorConfig as DefaultOperatorConfig
+    from franktheunicorn.config.models import LLMBackendConfig
+    from franktheunicorn.config.models import OperatorConfig as DefaultOperatorConfig
 
+    if operator_config is None:
         operator_config = DefaultOperatorConfig()
 
     enabled = project_config.llm_checks
@@ -88,11 +79,7 @@ def run_enabled_checks(
     pr_context = build_pr_context(pr, project_config, operator_config)
 
     # Use first configured backend (or stub fallback).
-    backend_configs = operator_config.llm_backends
-    if not backend_configs:
-        from franktheunicorn.config.models import LLMBackendConfig
-
-        backend_configs = [LLMBackendConfig()]
+    backend_configs = operator_config.llm_backends or [LLMBackendConfig()]
     backend_config = backend_configs[0]
 
     all_drafts: list[ReviewDraft] = []
@@ -132,6 +119,8 @@ def _run_single_check(
     backend_config: LLMBackendConfig,
 ) -> list[ReviewFinding]:
     """Run one check against a single LLM backend."""
+    from franktheunicorn.review.backends import get_backend
+
     backend = get_backend(backend_config)
     system_prompt, user_message = check.build_prompt(diff, pr_context)
     api_key = ""

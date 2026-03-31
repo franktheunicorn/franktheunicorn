@@ -11,7 +11,6 @@ from franktheunicorn.core.models import AntiPattern, PullRequest
 from franktheunicorn.review.backends.base import ReviewFinding
 from franktheunicorn.review.checks import (
     BaseCheck,
-    CheckResult,
     _get_registry,
     run_enabled_checks,
 )
@@ -26,14 +25,6 @@ class TestRegistry:
         registry = _get_registry()
         for cls in registry.values():
             assert issubclass(cls, BaseCheck)
-
-
-class TestCheckResult:
-    def test_check_result_fields(self) -> None:
-        finding = ReviewFinding(body="needs tests", severity="important")
-        result = CheckResult(check_name="coverage", findings=[finding])
-        assert result.check_name == "coverage"
-        assert len(result.findings) == 1
 
 
 @pytest.mark.django_db
