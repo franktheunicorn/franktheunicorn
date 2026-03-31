@@ -157,6 +157,15 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
 
     personality_name = get_operator_config().personality
 
+    # v1.5: Separate CodeRabbit-sourced findings.
+    coderabbit_drafts = [d for d in drafts if "coderabbit" in (d.source or "")]
+    agent_drafts = [d for d in drafts if "coderabbit" not in (d.source or "")]
+
+    # v1.5: External context (JIRA, community, Sentry).
+    jira_context = pr.jira_cache if pr.jira_cache else None
+    community_context = pr.community_context_cache if pr.community_context_cache else None
+    sentry_context = pr.sentry_context_cache if pr.sentry_context_cache else None
+
     return render(
         request,
         "dashboard/pr_detail.html",
@@ -164,10 +173,15 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
             "pr": pr,
             "drafts": drafts,
             "suppressed_drafts": suppressed_drafts,
+            "agent_drafts": agent_drafts,
+            "coderabbit_drafts": coderabbit_drafts,
             "dep_changes": dep_changes,
             "test_runs": test_runs,
             "feedback_enabled": feedback_enabled,
             "personality_name": personality_name,
+            "jira_context": jira_context,
+            "community_context": community_context,
+            "sentry_context": sentry_context,
         },
     )
 

@@ -404,6 +404,7 @@ class TestAgentFeedbackViews:
 
 
 @pytest.mark.django_db
+<<<<<<< HEAD
 class TestRejectionProbabilityDisplay:
     """Tests for v1.75 rejection probability display in dashboard."""
 
@@ -558,3 +559,56 @@ class TestAllCorePageTemplatesRender:
 
     def test_set_workspace_redirects(self, client: Client) -> None:
         assert client.post("/set-workspace/", {"workspace": "all"}).status_code == 302
+
+
+@pytest.mark.django_db
+class TestDashboardV15:
+    """Tests for v1.5 dashboard additions."""
+
+    def test_pr_detail_with_jira_context(self, client: Client) -> None:
+        pr = PullRequestFactory(
+            jira_cache={"ticket_id": "SPARK-123", "summary": "Fix bug", "status": "Open"},
+        )
+        response = client.get(f"/pr/{pr.pk}/")
+        assert response.status_code == 200
+        assert response.context["jira_context"] is not None
+        assert response.context["jira_context"]["ticket_id"] == "SPARK-123"
+
+    def test_pr_detail_with_community_context(self, client: Client) -> None:
+        pr = PullRequestFactory(
+            community_context_cache={
+                "sources": [{"type": "mailing-list", "name": "dev@"}],
+                "query": "test",
+            },
+        )
+        response = client.get(f"/pr/{pr.pk}/")
+        assert response.status_code == 200
+        assert response.context["community_context"] is not None
+
+    def test_pr_detail_with_sentry_context(self, client: Client) -> None:
+        pr = PullRequestFactory(
+            sentry_context_cache={
+                "issues": [{"title": "NPE in RDD.scala", "count": 42}],
+            },
+        )
+        response = client.get(f"/pr/{pr.pk}/")
+        assert response.status_code == 200
+        assert response.context["sentry_context"] is not None
+
+    def test_pr_detail_coderabbit_drafts_separated(self, client: Client) -> None:
+        pr = PullRequestFactory()
+        ReviewDraftFactory(pull_request=pr, source="agent")
+        ReviewDraftFactory(pull_request=pr, source="coderabbit")
+        ReviewDraftFactory(pull_request=pr, source="agent,coderabbit")
+        response = client.get(f"/pr/{pr.pk}/")
+        assert response.status_code == 200
+        assert len(response.context["agent_drafts"]) == 1
+        assert len(response.context["coderabbit_drafts"]) == 2
+
+    def test_pr_detail_no_context_is_none(self, client: Client) -> None:
+        pr = PullRequestFactory()
+        response = client.get(f"/pr/{pr.pk}/")
+        assert response.status_code == 200
+        assert response.context["jira_context"] is None
+        assert response.context["community_context"] is None
+        assert response.context["sentry_context"] is None
