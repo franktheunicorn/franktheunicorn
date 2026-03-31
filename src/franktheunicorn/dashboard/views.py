@@ -138,7 +138,12 @@ def set_workspace(request: HttpRequest) -> HttpResponse:
 def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
     """Detail view for a single PR showing drafts and score breakdown."""
     pr = get_object_or_404(PullRequest.objects.select_related("project"), pk=pr_id)
-    drafts = ReviewDraft.objects.filter(pull_request=pr).order_by("file_path", "line_number")
+    drafts = ReviewDraft.objects.filter(pull_request=pr, is_auto_suppressed=False).order_by(
+        "file_path", "line_number"
+    )
+    suppressed_drafts = ReviewDraft.objects.filter(
+        pull_request=pr, is_auto_suppressed=True
+    ).order_by("file_path", "line_number")
     dep_changes = DependencyChange.objects.filter(pull_request=pr).order_by("package_name")
     test_runs = TestRun.objects.filter(pull_request=pr).order_by("-created_at")
 
@@ -151,6 +156,7 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
         {
             "pr": pr,
             "drafts": drafts,
+            "suppressed_drafts": suppressed_drafts,
             "dep_changes": dep_changes,
             "test_runs": test_runs,
             "feedback_enabled": feedback_enabled,
@@ -166,7 +172,8 @@ def approve_draft(request: HttpRequest, draft_id: int) -> HttpResponse:
     """Approve a draft finding."""
     draft = get_object_or_404(ReviewDraft, pk=draft_id)
     draft.status = "accepted"
-    draft.save(update_fields=["status", "updated_at"])
+    draft.is_auto_suppressed = False
+    draft.save(update_fields=["status", "is_auto_suppressed", "updated_at"])
 
     OperatorAction.objects.create(
         action_type="accept_draft",

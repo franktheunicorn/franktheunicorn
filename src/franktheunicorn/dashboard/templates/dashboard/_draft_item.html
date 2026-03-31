@@ -8,6 +8,14 @@
     <span style="font-size: 0.75rem; color: #999;">
         ({{ draft.severity }}, confidence: {{ draft.confidence|floatformat:1 }}, {{ draft.status }})
         {% if draft.tone_guard_applied %}<span title="Tone guard applied">TG</span>{% endif %}
+        {% if draft.rejection_probability != None %}
+        <span title="P(rejection) from Bayesian model" style="margin-left: 0.25rem;">P(reject): {{ draft.rejection_probability|floatformat:2 }}</span>
+        {% if draft.is_auto_suppressed %}
+        <span style="background: #e0e0e0; color: #555; padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.7rem; margin-left: 0.25rem;">auto-suppressed</span>
+        {% elif draft.rejection_probability > 0.5 %}
+        <span style="background: var(--orange-bg, #fff3e0); color: var(--orange, #e65100); padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.7rem; margin-left: 0.25rem;">likely low-value</span>
+        {% endif %}
+        {% endif %}
     </span>
 
     {% if draft.status == "edited" and draft.edited_body %}
