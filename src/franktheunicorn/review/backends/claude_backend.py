@@ -23,6 +23,9 @@ class ClaudeBackend(BaseLLMBackend):
             system=system_prompt,
             messages=[{"role": "user", "content": user_message}],
         )
+        if hasattr(response, "usage") and response.usage:
+            self._last_tokens_in = getattr(response.usage, "input_tokens", 0)
+            self._last_tokens_out = getattr(response.usage, "output_tokens", 0)
         if response.content:
             first_block = response.content[0]
             if hasattr(first_block, "text"):

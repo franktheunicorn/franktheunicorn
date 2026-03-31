@@ -4,10 +4,12 @@ from django.contrib import admin
 
 from franktheunicorn.core.models import (
     AntiPattern,
+    CostRecord,
     OperatorAction,
     Project,
     PullRequest,
     ReviewDraft,
+    TestRun,
 )
 
 
@@ -35,7 +37,7 @@ class PullRequestAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
         "is_draft",
         "github_updated_at",
     )
-    list_filter = ("state", "is_draft", "likely_ai_generated", "project")
+    list_filter = ("state", "is_draft", "likely_ai_generated", "queue", "project")
     search_fields = ("title", "author")
     readonly_fields = ("created_at", "updated_at")
 
@@ -44,8 +46,16 @@ class PullRequestAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
 class ReviewDraftAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
     """Admin for LLM-generated review drafts."""
 
-    list_display = ("pull_request", "file_path", "source", "status", "confidence", "created_at")
-    list_filter = ("status", "source")
+    list_display = (
+        "pull_request",
+        "file_path",
+        "source",
+        "status",
+        "severity",
+        "confidence",
+        "created_at",
+    )
+    list_filter = ("status", "source", "severity", "category", "tone_guard_applied")
     search_fields = ("file_path", "comment_body")
     readonly_fields = ("created_at", "updated_at")
 
@@ -54,8 +64,16 @@ class ReviewDraftAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
 class AntiPatternAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
     """Admin for anti-pattern feedback entries."""
 
-    list_display = ("pattern_text_short", "project", "weight", "times_triggered", "created_at")
-    list_filter = ("project",)
+    list_display = (
+        "pattern_text_short",
+        "project",
+        "weight",
+        "times_triggered",
+        "is_active",
+        "last_matched_at",
+        "created_at",
+    )
+    list_filter = ("project", "is_active")
     search_fields = ("pattern_text", "description")
     readonly_fields = ("created_at", "updated_at")
 
@@ -71,4 +89,37 @@ class OperatorActionAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
     list_display = ("action_type", "pull_request", "review_draft", "created_at")
     list_filter = ("action_type",)
     search_fields = ("notes",)
+    readonly_fields = ("created_at",)
+
+
+@admin.register(CostRecord)
+class CostRecordAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
+    """Admin for LLM cost tracking."""
+
+    list_display = (
+        "action_type",
+        "backend",
+        "project",
+        "tokens_in",
+        "tokens_out",
+        "estimated_cost_usd",
+        "created_at",
+    )
+    list_filter = ("action_type", "backend", "project")
+    readonly_fields = ("created_at",)
+
+
+@admin.register(TestRun)
+class TestRunAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
+    """Admin for differential test runs."""
+
+    list_display = (
+        "pull_request",
+        "run_type",
+        "status",
+        "differential_verdict",
+        "started_at",
+        "finished_at",
+    )
+    list_filter = ("status", "differential_verdict", "run_type")
     readonly_fields = ("created_at",)

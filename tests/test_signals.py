@@ -185,3 +185,60 @@ class TestLlmInterest:
     def test_case_insensitive(self) -> None:
         assert score_llm_interest("HIGH") == WEIGHTS["llm_interest"]
         assert score_llm_interest(" Medium ") == WEIGHTS["llm_interest"] // 2
+
+
+class TestRecentlyUpdated:
+    def test_updated_today(self) -> None:
+        from franktheunicorn.scoring.signals import WEIGHTS, score_recently_updated
+
+        assert score_recently_updated(2.0) == WEIGHTS["recently_updated"]
+
+    def test_updated_this_week(self) -> None:
+        from franktheunicorn.scoring.signals import WEIGHTS, score_recently_updated
+
+        result = score_recently_updated(72.0)
+        assert result == WEIGHTS["recently_updated"] // 2
+
+    def test_updated_long_ago(self) -> None:
+        from franktheunicorn.scoring.signals import score_recently_updated
+
+        assert score_recently_updated(200.0) is None
+
+    def test_boundary_24h(self) -> None:
+        from franktheunicorn.scoring.signals import WEIGHTS, score_recently_updated
+
+        # Exactly 24h should get the week boost, not the today boost
+        assert score_recently_updated(24.0) == WEIGHTS["recently_updated"] // 2
+
+    def test_boundary_168h(self) -> None:
+        from franktheunicorn.scoring.signals import score_recently_updated
+
+        # Exactly 168h (7 days) should return None
+        assert score_recently_updated(168.0) is None
+
+    def test_none_input(self) -> None:
+        from franktheunicorn.scoring.signals import score_recently_updated
+
+        assert score_recently_updated(None) is None
+
+    def test_zero_hours(self) -> None:
+        from franktheunicorn.scoring.signals import WEIGHTS, score_recently_updated
+
+        assert score_recently_updated(0.0) == WEIGHTS["recently_updated"]
+
+
+class TestMergeConflict:
+    def test_mergeable_true(self) -> None:
+        from franktheunicorn.scoring.signals import score_merge_conflict
+
+        assert score_merge_conflict(True) is None
+
+    def test_mergeable_false(self) -> None:
+        from franktheunicorn.scoring.signals import WEIGHTS, score_merge_conflict
+
+        assert score_merge_conflict(False) == WEIGHTS["merge_conflict"]
+
+    def test_mergeable_none(self) -> None:
+        from franktheunicorn.scoring.signals import score_merge_conflict
+
+        assert score_merge_conflict(None) is None

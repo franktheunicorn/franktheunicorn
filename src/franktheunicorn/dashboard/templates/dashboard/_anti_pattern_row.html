@@ -1,0 +1,23 @@
+<tr id="ap-{{ ap.pk }}">
+    <td title="{{ ap.pattern_text }}">{{ ap.pattern_text|truncatechars:60 }}
+        {% if ap.description %}<br><small style="color: var(--muted);">{{ ap.description|truncatechars:80 }}</small>{% endif %}
+    </td>
+    <td>{% if ap.project %}{{ ap.project.full_name }}{% else %}<em>Global</em>{% endif %}</td>
+    <td>{{ ap.times_triggered }}</td>
+    <td>
+        <button class="action-btn" style="font-size: 0.7rem;"
+                hx-post="{% url 'dashboard:anti_pattern_toggle' ap.pk %}"
+                hx-target="#ap-{{ ap.pk }}"
+                hx-swap="outerHTML">
+            {% if ap.is_active %}Active{% else %}Inactive{% endif %}
+        </button>
+    </td>
+    <td style="font-size: 0.8rem;">{% if ap.last_matched_at %}{{ ap.last_matched_at|timesince }} ago{% else %}&mdash;{% endif %}</td>
+    <td>
+        <button class="action-btn reject" style="font-size: 0.7rem;"
+                hx-post="{% url 'dashboard:anti_pattern_delete' ap.pk %}"
+                hx-target="#ap-{{ ap.pk }}"
+                hx-swap="outerHTML"
+                hx-confirm="Delete this anti-pattern?">Delete</button>
+    </td>
+</tr>

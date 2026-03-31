@@ -87,6 +87,11 @@ class BaseLLMBackend:
                 )
                 self._sdk_available = False
 
+    # Cost tracking: subclasses set these after _call_api to record usage.
+    _last_tokens_in: int = 0
+    _last_tokens_out: int = 0
+    _last_duration: float | None = None
+
     def generate_findings(
         self,
         diff: str,
@@ -104,13 +109,54 @@ class BaseLLMBackend:
         system_prompt = build_system_prompt(pr_context)
         user_message = build_user_message(diff, pr_context)
 
+        import time
+
+        start = time.monotonic()
+        self._last_tokens_in = 0
+        self._last_tokens_out = 0
+
         try:
             raw_text = self._call_api(system_prompt, user_message, api_key)
         except Exception:
             logger.exception("%s API call failed.", type(self).__name__)
             return []
+        finally:
+            self._last_duration = time.monotonic() - start
 
         return parse_llm_response(raw_text)
+
+    def record_cost(
+        self,
+        project_id: int | None,
+        pr_id: int | None,
+        action_type: str = "review",
+    ) -> None:
+        """Record a CostRecord for the last API call. Safe to call unconditionally."""
+        if not self._last_tokens_in and not self._last_tokens_out:
+            return
+        if project_id is None:
+            return
+        try:
+            from franktheunicorn.core.models import CostRecord
+
+            cost = _estimate_cost(
+                self._config.provider,
+                self._model,
+                self._last_tokens_in,
+                self._last_tokens_out,
+            )
+            CostRecord.objects.create(
+                project_id=project_id,
+                pull_request_id=pr_id,
+                action_type=action_type,
+                backend=f"{self._config.provider}/{self._model}",
+                tokens_in=self._last_tokens_in,
+                tokens_out=self._last_tokens_out,
+                estimated_cost_usd=cost,
+                duration_seconds=self._last_duration,
+            )
+        except Exception:
+            logger.debug("Failed to record cost", exc_info=True)
 
     def _resolve_api_key(self) -> str:
         key_env = self._config.api_key_env or self._default_key_env
@@ -181,6 +227,23 @@ def parse_llm_response(raw_text: str) -> list[ReviewFinding]:
             continue
 
     return findings
+
+
+_COST_PER_MTOK: dict[str, tuple[float, float]] = {
+    # (input_per_mtok, output_per_mtok) in USD
+    "claude": (3.0, 15.0),
+    "openai": (2.5, 10.0),
+    "gemini": (1.25, 5.0),
+    "ollama": (0.0, 0.0),
+    "stub": (0.0, 0.0),
+}
+
+
+def _estimate_cost(provider: str, model: str, tokens_in: int, tokens_out: int) -> float:
+    """Rough cost estimate in USD based on provider pricing."""
+    rates = _COST_PER_MTOK.get(provider, (3.0, 15.0))
+    cost = (tokens_in * rates[0] + tokens_out * rates[1]) / 1_000_000
+    return round(cost, 6)
 
 
 __all__ = [

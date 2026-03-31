@@ -1,0 +1,54 @@
+<div class="draft-item {{ draft.status }}" id="draft-{{ draft.pk }}" data-draft-id="{{ draft.pk }}">
+    <strong>{{ draft.file_path }}{% if draft.line_number %}:{{ draft.line_number }}{% endif %}{% if draft.line_end %}-{{ draft.line_end }}{% endif %}</strong>
+    {% if draft.source == "coderabbit" %}
+    <span class="source-badge source-coderabbit">CodeRabbit</span>
+    {% else %}
+    <span class="source-badge source-agent">Agent</span>
+    {% endif %}
+    <span style="font-size: 0.75rem; color: #999;">
+        ({{ draft.severity }}, confidence: {{ draft.confidence|floatformat:1 }}, {{ draft.status }})
+        {% if draft.tone_guard_applied %}<span title="Tone guard applied">TG</span>{% endif %}
+    </span>
+
+    {% if draft.status == "edited" and draft.edited_body %}
+    <p style="margin-top: 0.25rem;">{{ draft.edited_body }}</p>
+    <details><summary style="font-size: 0.75rem; cursor: pointer;">Original</summary>
+        <p style="font-size: 0.85rem; color: #666;">{{ draft.comment_body }}</p>
+    </details>
+    {% else %}
+    <p style="margin-top: 0.25rem;">{{ draft.comment_body }}</p>
+    {% endif %}
+
+    {% if draft.suggestion %}
+    <pre style="background: #f0f0f0; padding: 0.5rem; margin-top: 0.25rem; font-size: 0.8rem;">{{ draft.suggestion }}</pre>
+    {% endif %}
+
+    {% if draft.status == "pending" %}
+    <div style="margin-top: 0.5rem;">
+        <button class="action-btn approve"
+                hx-post="{% url 'dashboard:approve_draft' draft.pk %}"
+                hx-target="#draft-{{ draft.pk }}"
+                hx-swap="outerHTML">Approve (a)</button>
+        <button class="action-btn reject"
+                hx-post="{% url 'dashboard:reject_draft' draft.pk %}"
+                hx-target="#draft-{{ draft.pk }}"
+                hx-swap="outerHTML"
+                hx-include="[name=reason]">Reject (r)</button>
+        <button class="action-btn edit"
+                onclick="this.nextElementSibling.style.display='block'; this.style.display='none';">Edit (e)</button>
+        <form style="display:none; margin-top: 0.5rem;"
+              hx-post="{% url 'dashboard:edit_draft' draft.pk %}"
+              hx-target="#draft-{{ draft.pk }}"
+              hx-swap="outerHTML">
+            <textarea name="edited_body" rows="3" style="width: 100%; font-size: 0.85rem;">{{ draft.comment_body }}</textarea>
+            <button class="action-btn" type="submit">Save</button>
+            <button class="action-btn" type="button" onclick="this.parentElement.style.display='none';">Cancel</button>
+        </form>
+    </div>
+    {% elif draft.status == "posted" %}
+    <div style="margin-top: 0.25rem; font-size: 0.75rem; color: var(--green);">
+        Posted {{ draft.posted_at|timesince }} ago
+        {% if draft.github_comment_id %}(#{{ draft.github_comment_id }}){% endif %}
+    </div>
+    {% endif %}
+</div>

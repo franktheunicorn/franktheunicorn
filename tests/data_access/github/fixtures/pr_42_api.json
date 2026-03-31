@@ -13,5 +13,7 @@
   "created_at": "2026-03-20T10:00:00Z",
   "updated_at": "2026-03-27T14:30:00Z",
   "additions": 15,
-  "deletions": 3
+  "deletions": 3,
+  "mergeable": true,
+  "mergeable_state": "clean"
 }

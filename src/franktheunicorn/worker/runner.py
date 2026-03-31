@@ -96,6 +96,7 @@ def _run_cycle(
     from franktheunicorn.github.poller import poll_project
     from franktheunicorn.review.copypasta import check_copypasta
     from franktheunicorn.review.drafter import draft_review
+    from franktheunicorn.worker.test_runner import TestRunner
 
     # Resolve CodeRabbit config from operator config.
     cr_config: CodeRabbitConfig | None = None
@@ -105,6 +106,7 @@ def _run_cycle(
     # Shared HTTP client for diff fetching (copypasta + dependency changelogs).
     diff_http = httpx.Client()
     diff_fetcher = DiffFetcher(client=diff_http)
+    test_runner = TestRunner()
 
     all_prs: list[object] = []
     pr_to_config: dict[int, ProjectConfig] = {}
@@ -136,6 +138,18 @@ def _run_cycle(
                     # Run CodeRabbit if enabled and no CR drafts exist yet.
                     if cr_config is not None:
                         _run_coderabbit_for_pr(pr, cr_config)
+
+                # Differential test verification (§9).
+                try:
+                    test_run = test_runner.run_differential_test(pr, pc)
+                    if test_run:
+                        logger.info(
+                            "  PR #%d: test verdict=%s",
+                            pr.number,
+                            test_run.differential_verdict or "pending",
+                        )
+                except Exception:
+                    logger.exception("Error in test verification for PR #%d", pr.number)
 
                 # Copy-pasta detection (runs even if drafts already exist)
                 if pc.copypasta_enabled:

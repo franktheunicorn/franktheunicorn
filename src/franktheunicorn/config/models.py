@@ -70,6 +70,7 @@ class OperatorConfig(BaseModel):
     poll_interval_seconds: int | None = None
     digest_email: str = ""
     digest_enabled: bool = False
+    workspaces: dict[str, object] = Field(default_factory=dict)
     coderabbit: CodeRabbitConfig = Field(default_factory=CodeRabbitConfig)
     # Multiple LLM backends can run in parallel. Each produces findings
     # independently; results are combined and deduped via anti-patterns.
@@ -123,6 +124,8 @@ class ProjectConfig(BaseModel):
     watch_keywords: list[str] = Field(default_factory=list)
     collaborator_scores: dict[str, float | None] = Field(default_factory=dict)
     ai_agents: list[str] = Field(default_factory=list)
+    committers: list[str] = Field(default_factory=list)
+    new_contributor_addendum: str = ""
     enabled: bool = True
 
     # Copy-pasta detection

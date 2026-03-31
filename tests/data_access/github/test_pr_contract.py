@@ -44,3 +44,7 @@ class TestPRContract:
         assert pr_result.fetched_via in (FetchMethod.API, FetchMethod.SCRAPE)
         assert "bug" in pr_result.labels
         assert len(pr_result.body) > 0
+
+    def test_mergeable_field(self, pr_result: PRSummary) -> None:
+        """Both API and scrape paths should return mergeable status."""
+        assert pr_result.mergeable is True

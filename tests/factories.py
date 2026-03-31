@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import factory  # type: ignore[import-untyped]
 
 from franktheunicorn.core.models import (
     AntiPattern,
+    CostRecord,
     OperatorAction,
     Project,
     PullRequest,
     ReviewDraft,
+    TestRun,
 )
 
 
@@ -51,6 +55,11 @@ class PullRequestFactory(factory.django.DjangoModelFactory):  # type: ignore[mis
     score_breakdown = factory.LazyFunction(dict)
     is_draft = False
     likely_ai_generated = False
+    is_operator_pr = False
+    is_new_contributor = False
+    is_low_context = False
+    is_likely_unowned = False
+    queue = "review"
 
 
 class ReviewDraftFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
@@ -66,8 +75,11 @@ class ReviewDraftFactory(factory.django.DjangoModelFactory):  # type: ignore[mis
     suggestion = ""
     confidence = 0.5
     source = "agent"
+    category = "other"
+    severity = "nit"
     status = "pending"
     edited_body = ""
+    backend_used = ""
 
 
 class AntiPatternFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
@@ -80,6 +92,7 @@ class AntiPatternFactory(factory.django.DjangoModelFactory):  # type: ignore[mis
     description = factory.Faker("paragraph")
     weight = 1.0
     times_triggered = 0
+    is_active = True
     project = None
 
 
@@ -93,3 +106,32 @@ class OperatorActionFactory(factory.django.DjangoModelFactory):  # type: ignore[
     review_draft = None
     pull_request = factory.SubFactory(PullRequestFactory)
     notes = ""
+
+
+class CostRecordFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
+    """Factory for CostRecord model instances."""
+
+    class Meta:
+        model = CostRecord
+
+    project = factory.SubFactory(ProjectFactory)
+    pull_request = None
+    action_type = "review"
+    backend = "claude"
+    tokens_in = 1000
+    tokens_out = 500
+    estimated_cost_usd = Decimal("0.0150")
+    duration_seconds = 2.5
+
+
+class TestRunFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
+    """Factory for TestRun model instances."""
+
+    class Meta:
+        model = TestRun
+
+    pull_request = factory.SubFactory(PullRequestFactory)
+    run_type = "pr_branch"
+    status = "pending"
+    test_scope = factory.LazyFunction(list)
+    container_image = "python:3.12-slim"

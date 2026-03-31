@@ -4,80 +4,117 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}franktheunicorn{% endblock %}</title>
+    <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+    {% load static %}
     <style>
+        :root {
+            --bg: #fafafa; --card: #fff; --border: #e0e0e0;
+            --text: #333; --muted: #666; --accent: #0366d6;
+            --green: #2e7d32; --green-bg: #e8f5e9;
+            --orange: #e65100; --orange-bg: #fff3e0;
+            --blue: #1565c0; --blue-bg: #e3f2fd;
+            --red: #c00; --red-bg: #fee;
+            --yellow: #fdd835; --yellow-bg: #fffde7;
+            --purple: #6e40c9;
+        }
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            line-height: 1.6;
-            color: #333;
-            max-width: 960px;
-            margin: 0 auto;
-            padding: 1rem;
-            background: #fafafa;
+            line-height: 1.6; color: var(--text);
+            max-width: 1024px; margin: 0 auto; padding: 1rem;
+            background: var(--bg);
         }
-        header {
-            border-bottom: 2px solid #e0e0e0;
-            padding-bottom: 0.5rem;
-            margin-bottom: 1.5rem;
+        header { border-bottom: 2px solid var(--border); padding-bottom: 0.5rem; margin-bottom: 1rem; }
+        header h1 { font-size: 1.4rem; display: inline; }
+        header h1 a { color: var(--text); text-decoration: none; }
+        nav { display: flex; gap: 1rem; align-items: center; margin-top: 0.5rem; font-size: 0.85rem; }
+        nav a { color: var(--muted); text-decoration: none; }
+        nav a:hover, nav a.active { color: var(--accent); font-weight: 600; }
+        .workspace-select { margin-left: auto; }
+        .workspace-select select { font-size: 0.8rem; padding: 0.2rem; }
+        .tab-bar { display: flex; gap: 0; border-bottom: 2px solid var(--border); margin-bottom: 1rem; overflow-x: auto; }
+        .tab-bar a {
+            padding: 0.5rem 1rem; text-decoration: none; color: var(--muted);
+            border-bottom: 2px solid transparent; margin-bottom: -2px;
+            white-space: nowrap; font-size: 0.85rem;
         }
-        header h1 { font-size: 1.4rem; }
-        header h1 a { color: #333; text-decoration: none; }
-        header p { color: #666; font-size: 0.85rem; }
+        .tab-bar a:hover { color: var(--text); }
+        .tab-bar a.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+        .tab-count { font-size: 0.7rem; background: var(--border); border-radius: 8px; padding: 0.1rem 0.4rem; margin-left: 0.3rem; }
         .pr-list { list-style: none; }
-        .pr-item {
-            background: #fff;
-            border: 1px solid #e0e0e0;
-            border-radius: 4px;
-            padding: 0.75rem 1rem;
-            margin-bottom: 0.5rem;
-        }
+        .pr-item { background: var(--card); border: 1px solid var(--border); border-radius: 4px; padding: 0.75rem 1rem; margin-bottom: 0.5rem; }
         .pr-item:hover { border-color: #999; }
         .pr-title { font-weight: 600; }
-        .pr-title a { color: #0366d6; text-decoration: none; }
-        .pr-meta { font-size: 0.8rem; color: #666; margin-top: 0.25rem; }
-        .score-badge {
-            display: inline-block;
-            background: #e8f5e9;
-            color: #2e7d32;
-            padding: 0.1rem 0.4rem;
-            border-radius: 3px;
-            font-size: 0.8rem;
-            font-weight: 600;
-        }
-        .score-badge.low { background: #fff3e0; color: #e65100; }
-        .score-badge.mid { background: #e3f2fd; color: #1565c0; }
+        .pr-title a { color: var(--accent); text-decoration: none; }
+        .pr-meta { font-size: 0.8rem; color: var(--muted); margin-top: 0.25rem; }
+        .score-badge { display: inline-block; background: var(--green-bg); color: var(--green); padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.8rem; font-weight: 600; }
+        .score-badge.low { background: var(--orange-bg); color: var(--orange); }
+        .score-badge.mid { background: var(--blue-bg); color: var(--blue); }
         .draft-list { margin-top: 1rem; }
-        .draft-item {
-            background: #fffde7;
-            border-left: 3px solid #fdd835;
-            padding: 0.5rem 0.75rem;
-            margin-bottom: 0.5rem;
-            font-size: 0.9rem;
-        }
+        .draft-item { background: var(--yellow-bg); border-left: 3px solid var(--yellow); padding: 0.5rem 0.75rem; margin-bottom: 0.5rem; font-size: 0.9rem; }
+        .draft-item.accepted { border-left-color: var(--green); background: var(--green-bg); }
+        .draft-item.rejected { border-left-color: var(--red); background: var(--red-bg); opacity: 0.7; }
+        .draft-item.posted { border-left-color: var(--blue); background: var(--blue-bg); }
+        .draft-item.edited { border-left-color: var(--orange); background: var(--orange-bg); }
+        .draft-item.focused { outline: 2px solid var(--accent); outline-offset: 2px; }
         .breakdown { font-size: 0.8rem; color: #555; }
         .breakdown dt { font-weight: 600; display: inline; }
         .breakdown dd { display: inline; margin-right: 1rem; }
         .empty-state { color: #999; padding: 2rem; text-align: center; }
-        a.back-link { font-size: 0.85rem; color: #666; }
-        .source-badge {
-            font-size: 0.7rem;
-            padding: 0.1rem 0.4rem;
-            border-radius: 3px;
-            margin-left: 0.3rem;
-            font-weight: 600;
-            vertical-align: middle;
+        a.back-link { font-size: 0.85rem; color: var(--muted); }
+        .source-badge { font-size: 0.7rem; padding: 0.1rem 0.4rem; border-radius: 3px; margin-left: 0.3rem; font-weight: 600; vertical-align: middle; }
+        .source-coderabbit { background: var(--purple); color: #fff; }
+        .source-agent { background: var(--green); color: #fff; }
+        .action-btn { font-size: 0.75rem; padding: 0.2rem 0.5rem; border: 1px solid var(--border); border-radius: 3px; cursor: pointer; background: var(--card); margin-right: 0.3rem; }
+        .action-btn:hover { background: var(--border); }
+        .action-btn.approve { color: var(--green); border-color: var(--green); }
+        .action-btn.reject { color: var(--red); border-color: var(--red); }
+        .action-btn.edit { color: var(--orange); border-color: var(--orange); }
+        .action-btn.post { color: #fff; background: var(--accent); border-color: var(--accent); }
+        .verdict-badge { font-size: 0.75rem; padding: 0.1rem 0.4rem; border-radius: 3px; font-weight: 600; }
+        .verdict-good { background: var(--green-bg); color: var(--green); }
+        .verdict-suspect { background: var(--orange-bg); color: var(--orange); }
+        .verdict-broken { background: var(--red-bg); color: var(--red); }
+        .verdict-infra { background: var(--blue-bg); color: var(--blue); }
+        table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+        th, td { padding: 0.5rem; text-align: left; border-bottom: 1px solid var(--border); }
+        thead th { border-bottom: 2px solid var(--border); }
+        .form-row { display: flex; gap: 0.5rem; margin-bottom: 0.5rem; align-items: center; }
+        .form-row input, .form-row select, .form-row textarea { font-size: 0.85rem; padding: 0.3rem 0.5rem; }
+        .form-row input[type=text], .form-row textarea { flex: 1; }
+        #shortcut-help { display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: var(--card); border: 2px solid var(--border); border-radius: 8px; padding: 1.5rem; z-index: 100; box-shadow: 0 4px 12px rgba(0,0,0,0.15); max-width: 400px; }
+        #shortcut-help h3 { margin-bottom: 0.5rem; }
+        #shortcut-help kbd { background: var(--border); padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.85rem; }
+        @media (max-width: 600px) {
+            body { padding: 0.5rem; }
+            .tab-bar a { padding: 0.4rem 0.6rem; font-size: 0.75rem; }
         }
-        .source-coderabbit { background: #6e40c9; color: #fff; }
-        .source-agent { background: #1a7f37; color: #fff; }
     </style>
 </head>
 <body>
     <header>
-        <h1><a href="/">🦄 franktheunicorn</a></h1>
-        <p>Local-first AI code review assistant</p>
+        <h1><a href="/">franktheunicorn</a></h1>
+        <nav>
+            <a href="{% url 'dashboard:index' %}" {% if request.resolver_match.url_name == 'index' %}class="active"{% endif %}>Inbox</a>
+            <a href="{% url 'dashboard:anti_patterns' %}" {% if request.resolver_match.url_name == 'anti_patterns' %}class="active"{% endif %}>Anti-Patterns</a>
+            <a href="{% url 'dashboard:stats' %}" {% if request.resolver_match.url_name == 'stats' %}class="active"{% endif %}>Stats</a>
+        </nav>
     </header>
     <main>
         {% block content %}{% endblock %}
     </main>
+    <div id="shortcut-help">
+        <h3>Keyboard Shortcuts</h3>
+        <p><kbd>j</kbd>/<kbd>k</kbd> Navigate findings</p>
+        <p><kbd>a</kbd> Approve</p>
+        <p><kbd>e</kbd> Edit</p>
+        <p><kbd>r</kbd> Reject</p>
+        <p><kbd>n</kbd>/<kbd>p</kbd> Next/prev PR</p>
+        <p><kbd>s</kbd> Post all approved</p>
+        <p><kbd>A</kbd> Approve all nits</p>
+        <p><kbd>?</kbd> Toggle this help</p>
+        <p><button onclick="document.getElementById('shortcut-help').style.display='none'">Close</button></p>
+    </div>
+    <script src="{% static 'dashboard/shortcuts.js' %}"></script>
 </body>
 </html>

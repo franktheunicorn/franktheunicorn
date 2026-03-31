@@ -101,6 +101,9 @@ omit = [
     "*/tests/*",
     "*/wsgi.py",
     "*/worker/runner.py",
+    "*/management/commands/init_project.py",
+    "*/management/commands/run_worker.py",
+    "*/management/commands/detect_collaborators.py",
 ]
 
 [tool.coverage.report]

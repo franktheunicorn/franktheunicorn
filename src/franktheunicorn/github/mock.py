@@ -39,6 +39,16 @@ class MockGitHubClient:
         logger.info("No fixture found at %s, using built-in demo data", fixture_path)
         return _builtin_demo_pulls(owner, repo)
 
+    def get_pull_request(self, owner: str, repo: str, pr_number: int) -> dict[str, Any]:
+        """Load single PR detail from fixture or return demo data with mergeable."""
+        fixture_path = self._fixtures_dir / f"{owner}_{repo}_pr{pr_number}.json"
+        if fixture_path.exists():
+            with fixture_path.open() as f:
+                result: dict[str, Any] = json.load(f)
+                return result
+        # Demo data — include mergeable status.
+        return {"number": pr_number, "mergeable": True, "mergeable_state": "clean"}
+
     def get_pull_request_files(self, owner: str, repo: str, pr_number: int) -> list[dict[str, Any]]:
         """Load PR files from fixture or return demo files."""
         fixture_path = self._fixtures_dir / f"{owner}_{repo}_pr{pr_number}_files.json"

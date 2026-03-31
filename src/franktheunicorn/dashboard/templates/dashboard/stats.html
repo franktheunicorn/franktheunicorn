@@ -1,0 +1,46 @@
+{% extends "dashboard/base.html" %}
+{% block title %}Stats — franktheunicorn{% endblock %}
+{% block content %}
+<h2>History &amp; Stats</h2>
+
+<h3 style="margin-top: 1.5rem;">Operator Actions</h3>
+<table>
+    <thead><tr><th>Action</th><th>Count</th></tr></thead>
+    <tbody>
+        <tr><td>Approved</td><td>{{ action_counts.accept_draft|default:0 }}</td></tr>
+        <tr><td>Edited</td><td>{{ action_counts.edit_draft|default:0 }}</td></tr>
+        <tr><td>Rejected</td><td>{{ action_counts.reject_draft|default:0 }}</td></tr>
+        <tr><td>Dismissed PRs</td><td>{{ action_counts.dismiss_pr|default:0 }}</td></tr>
+        <tr><td>Flagged Anti-Patterns</td><td>{{ action_counts.flag_anti_pattern|default:0 }}</td></tr>
+    </tbody>
+</table>
+
+<h3 style="margin-top: 1.5rem;">Review Findings</h3>
+<table>
+    <thead><tr><th>Metric</th><th>Value</th></tr></thead>
+    <tbody>
+        <tr><td>Total Findings Generated</td><td>{{ total_drafts }}</td></tr>
+        <tr><td>Posted to GitHub</td><td>{{ posted_drafts }}</td></tr>
+    </tbody>
+</table>
+
+<h3 style="margin-top: 1.5rem;">LLM Costs</h3>
+<table>
+    <thead><tr><th>Metric</th><th>Value</th></tr></thead>
+    <tbody>
+        <tr><td>Total Estimated Cost</td><td>${{ total_cost|floatformat:4 }}</td></tr>
+        <tr><td>Total Input Tokens</td><td>{{ total_tokens_in|floatformat:0 }}</td></tr>
+        <tr><td>Total Output Tokens</td><td>{{ total_tokens_out|floatformat:0 }}</td></tr>
+    </tbody>
+</table>
+
+<h3 style="margin-top: 1.5rem;">Anti-Pattern Effectiveness</h3>
+<table>
+    <thead><tr><th>Metric</th><th>Value</th></tr></thead>
+    <tbody>
+        <tr><td>Total Anti-Patterns</td><td>{{ ap_stats.total|default:0 }}</td></tr>
+        <tr><td>Active</td><td>{{ ap_stats.active|default:0 }}</td></tr>
+        <tr><td>Total Findings Suppressed</td><td>{{ ap_stats.total_triggers|default:0 }}</td></tr>
+    </tbody>
+</table>
+{% endblock %}

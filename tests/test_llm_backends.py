@@ -281,3 +281,44 @@ class TestOllamaBackend:
         findings = backend.generate_findings(_SAMPLE_DIFF, ctx)
         assert len(findings) == 1
         assert findings[0].confidence == 0.3  # nit -> 0.3
+
+
+class TestCostEstimation:
+    def test_estimate_cost_claude(self) -> None:
+        from franktheunicorn.review.backends.base import _estimate_cost
+
+        cost = _estimate_cost("claude", "claude-sonnet-4-20250514", 1000, 500)
+        assert cost > 0
+        assert isinstance(cost, float)
+
+    def test_estimate_cost_stub(self) -> None:
+        from franktheunicorn.review.backends.base import _estimate_cost
+
+        cost = _estimate_cost("stub", "stub", 1000, 500)
+        assert cost == 0.0
+
+    def test_estimate_cost_unknown_provider(self) -> None:
+        from franktheunicorn.review.backends.base import _estimate_cost
+
+        cost = _estimate_cost("unknown", "model", 1000, 500)
+        assert cost > 0  # uses default rates
+
+    def test_record_cost_no_tokens(self) -> None:
+        from franktheunicorn.review.backends.base import BaseLLMBackend
+
+        config = LLMBackendConfig(provider="stub")
+        backend = BaseLLMBackend(config)
+        backend._last_tokens_in = 0
+        backend._last_tokens_out = 0
+        # Should not raise
+        backend.record_cost(project_id=1, pr_id=1)
+
+    def test_record_cost_no_project(self) -> None:
+        from franktheunicorn.review.backends.base import BaseLLMBackend
+
+        config = LLMBackendConfig(provider="stub")
+        backend = BaseLLMBackend(config)
+        backend._last_tokens_in = 100
+        backend._last_tokens_out = 50
+        # Should return early when project_id is None
+        backend.record_cost(project_id=None, pr_id=None)
