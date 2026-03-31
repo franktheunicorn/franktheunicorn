@@ -77,7 +77,8 @@ def poll_project(
 
         pr_obj = _upsert_pull_request(project, pr_data, changed_files)
 
-        # Fetch mergeable status (requires single-PR endpoint).
+        # Fetch PR detail (includes mergeable status + base/head refs).
+        pr_detail: dict[str, Any] = {}
         try:
             pr_detail = client.get_pull_request(
                 project_config.owner, project_config.repo, pr_number
@@ -86,15 +87,50 @@ def poll_project(
             if isinstance(raw_mergeable, bool):
                 pr_obj.mergeable = raw_mergeable
         except Exception:
-            logger.debug("Could not fetch mergeable status for PR #%d", pr_number)
+            logger.debug("Could not fetch PR detail for #%d", pr_number)
+
+        # Extract base/head SHAs for blame (v1.25).
+        base_sha = ""
+        head_sha = ""
+        base_data = pr_detail.get("base")
+        head_data = pr_detail.get("head")
+        if isinstance(base_data, dict):
+            base_sha = base_data.get("sha", "")
+        if isinstance(head_data, dict):
+            head_sha = head_data.get("sha", "")
 
         # Fetch blame data if repo clone is available (v1.25).
         blame_data: list[dict[str, object]] | None = None
-        if repo_path is not None and repo_path.is_dir() and changed_files:
+        if repo_path is not None and repo_path.is_dir() and changed_files and base_sha:
             try:
                 from franktheunicorn.scoring.blame_fetcher import fetch_blame_for_files
+                from franktheunicorn.worker.repo_manager import ensure_ref_available
 
-                blame_data = fetch_blame_for_files(repo_path, changed_files)
+                # Verify both refs are available locally before running blame.
+                base_ok = ensure_ref_available(repo_path, base_sha)
+                head_ok = ensure_ref_available(repo_path, head_sha) if head_sha else False
+
+                if base_ok and head_ok:
+                    blame_data = fetch_blame_for_files(
+                        repo_path, changed_files, base_ref=base_sha, head_ref=head_sha
+                    )
+                elif base_ok:
+                    # Head not available but base is — diff will be against
+                    # working tree. Only useful if repo happens to be on the
+                    # right branch, so log a warning.
+                    logger.debug(
+                        "Head SHA %s not available locally for PR #%d; "
+                        "blame diff may be inaccurate",
+                        head_sha[:12],
+                        pr_number,
+                    )
+                    blame_data = fetch_blame_for_files(repo_path, changed_files, base_ref=base_sha)
+                else:
+                    logger.debug(
+                        "Base SHA %s not available locally for PR #%d; skipping blame",
+                        base_sha[:12],
+                        pr_number,
+                    )
             except Exception:
                 logger.debug("Blame fetch failed for PR #%d", pr_number, exc_info=True)
 

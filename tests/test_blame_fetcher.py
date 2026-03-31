@@ -225,31 +225,42 @@ class TestFetchBlameForFile:
 
 
 class TestFetchBlameForFiles:
-    def test_classifies_direct_vs_near_authors(self, git_repo: Path) -> None:
-        """The core test: blame correctly distinguishes who authored changed lines."""
-        # Diff from alice-base to HEAD: bob changed line 2 of main.py
+    def test_classifies_direct_vs_near_with_two_ref_diff(self, git_repo: Path) -> None:
+        """Core test: two-ref diff (base..head) correctly identifies changed lines."""
+        # Diff from alice-base..HEAD: bob changed line 2 of main.py.
+        # Blame on alice-base shows alice authored all 3 lines.
+        # The diff should show line 2 changed → alice is in "authors" (she
+        # authored the base line being modified).
         results = fetch_blame_for_files(
             git_repo,
             ["src/main.py"],
             base_ref="alice-base",
+            head_ref="HEAD",
         )
         assert len(results) == 1
         entry = results[0]
         assert entry["file_path"] == "src/main.py"
-        # alice authored lines 1,3 which are the OLD lines being replaced.
-        # bob's change replaces alice's line 2 → alice is the "author" of
-        # the changed lines (she wrote the base code being modified).
-        # The diff hunk is on the base side (alice-base), so the changed
-        # lines in the base belong to alice.
         authors = entry["authors"]
         assert isinstance(authors, list)
         assert "alice" in authors
+
+    def test_fallback_single_ref_diff(self, git_repo: Path) -> None:
+        """When head_ref is None, falls back to diff against working tree."""
+        results = fetch_blame_for_files(
+            git_repo,
+            ["src/main.py"],
+            base_ref="alice-base",
+            head_ref=None,
+        )
+        # Should still work (repo working tree is at HEAD which is bob's commit)
+        assert len(results) == 1
 
     def test_skips_non_code_files(self, git_repo: Path) -> None:
         results = fetch_blame_for_files(
             git_repo,
             ["src/main.py", "README.md"],
             base_ref="alice-base",
+            head_ref="HEAD",
         )
         file_paths = [r["file_path"] for r in results]
         assert "README.md" not in file_paths
@@ -268,6 +279,7 @@ class TestFetchBlameForFiles:
             git_repo,
             ["src/main.py", "nonexistent.py"],
             base_ref="alice-base",
+            head_ref="HEAD",
         )
         file_paths = [r["file_path"] for r in results]
         assert "nonexistent.py" not in file_paths
@@ -278,6 +290,7 @@ class TestFetchBlameForFiles:
             git_repo,
             ["src/main.py"],
             base_ref="alice-base",
+            head_ref="HEAD",
         )
         if results:
             entry = results[0]
@@ -297,6 +310,7 @@ class TestEndToEndBlameScoring:
             git_repo,
             ["src/main.py"],
             base_ref="alice-base",
+            head_ref="HEAD",
         )
         assert len(results) > 0
 
@@ -312,6 +326,7 @@ class TestEndToEndBlameScoring:
             git_repo,
             ["src/main.py"],
             base_ref="alice-base",
+            head_ref="HEAD",
         )
         # "charlie" never touched any file → no credit
         score = score_touches_operator_code(results, "charlie")

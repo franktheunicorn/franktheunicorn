@@ -129,14 +129,19 @@ def _get_changed_lines_for_file(
     repo_path: Path,
     file_path: str,
     base_ref: str,
+    head_ref: str | None = None,
 ) -> set[int] | None:
-    """Get the set of line numbers changed in a file relative to base_ref.
+    """Get the set of line numbers changed in a file between two refs.
+
+    If head_ref is provided, diffs base_ref..head_ref (two explicit commits).
+    Otherwise, diffs base_ref against the working tree (less reliable).
 
     Returns None if diff fails (e.g. new file with no base).
     """
     try:
+        diff_spec = f"{base_ref}..{head_ref}" if head_ref else base_ref
         result = subprocess.run(
-            ["git", "diff", "-U0", base_ref, "--", file_path],
+            ["git", "diff", "-U0", diff_spec, "--", file_path],
             capture_output=True,
             text=True,
             cwd=str(repo_path),
@@ -215,14 +220,25 @@ def fetch_blame_for_files(
     repo_path: Path,
     changed_files: list[str],
     base_ref: str = "HEAD",
+    head_ref: str | None = None,
 ) -> list[dict[str, object]]:
     """Fetch blame data for changed files, returning scorer-compatible format.
 
-    For each file, runs ``git blame`` on the base ref and ``git diff`` to
-    determine which lines actually changed. Authors are classified as:
+    For each file, runs ``git blame`` on the base ref and ``git diff`` between
+    base and head to determine which lines actually changed. Authors are
+    classified as:
     - ``authors``: authored lines that are being modified (full credit)
     - ``near_authors``: authored lines within NEAR_LINES_WINDOW of changes
       but not the changes themselves (half credit)
+
+    Args:
+        repo_path: Path to local repo clone.
+        changed_files: List of file paths changed in the PR.
+        base_ref: Base commit SHA or ref to blame against (e.g. the PR's
+            base branch). This is what we run ``git blame`` on.
+        head_ref: Head commit SHA or ref (e.g. the PR's head commit).
+            Used for ``git diff base..head``. If None, diffs against the
+            working tree (unreliable unless repo is checked out to PR head).
 
     Returns list of dicts with keys: file_path, authors, near_authors.
     This matches the format expected by score_touches_operator_code() in
@@ -248,7 +264,7 @@ def fetch_blame_for_files(
             continue
 
         # Get which lines actually changed so we can classify authors properly.
-        changed_lines = _get_changed_lines_for_file(repo_path, file_path, base_ref)
+        changed_lines = _get_changed_lines_for_file(repo_path, file_path, base_ref, head_ref)
 
         if changed_lines:
             direct, near_only = _classify_authors(blame, changed_lines)
