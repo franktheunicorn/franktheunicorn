@@ -3,6 +3,7 @@
 from django.contrib import admin
 
 from franktheunicorn.core.models import (
+    AgentFeedback,
     AntiPattern,
     CostRecord,
     OperatorAction,
@@ -37,7 +38,7 @@ class PullRequestAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
         "is_draft",
         "github_updated_at",
     )
-    list_filter = ("state", "is_draft", "likely_ai_generated", "queue", "project")
+    list_filter = ("state", "is_draft", "likely_ai_generated", "ai_agent_source", "queue", "project")
     search_fields = ("title", "author")
     readonly_fields = ("created_at", "updated_at")
 
@@ -122,4 +123,19 @@ class TestRunAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
         "finished_at",
     )
     list_filter = ("status", "differential_verdict", "run_type")
+    readonly_fields = ("created_at",)
+
+
+@admin.register(AgentFeedback)
+class AgentFeedbackAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
+    """Admin for agent feedback records (v1.25)."""
+
+    list_display = (
+        "pull_request",
+        "assessment",
+        "feedback_method",
+        "sent_at",
+        "created_at",
+    )
+    list_filter = ("assessment", "feedback_method")
     readonly_fields = ("created_at",)
