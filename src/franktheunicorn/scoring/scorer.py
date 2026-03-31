@@ -55,6 +55,8 @@ def score_pull_request(
     recent_reviews: list[dict[str, str]] | None = None,
     operator_review_posted_at: str | None = None,
     author_replies_after_review: list[str] | None = None,
+    downstream_apis: dict[str, list[str]] | None = None,
+    sentry_error_count: int | None = None,
 ) -> tuple[float, dict[str, float]]:
     """Score a PR for operator interest. Pure function — no Django imports.
 
@@ -171,6 +173,19 @@ def score_pull_request(
             score_pending_response(operator_review_posted_at, author_replies_after_review),
         )
 
+    # Cross-project downstream impact (v1.5 §2.5)
+    if downstream_apis:
+        from franktheunicorn.scoring.downstream import score_downstream_impact
+
+        diff_text = str(pr_dict.get("diff_text", ""))
+        _add(
+            "downstream_impact", score_downstream_impact(changed_files, diff_text, downstream_apis)
+        )
+
+    # Sentry error context scoring signal (v1.5)
+    if sentry_error_count is not None and sentry_error_count > 0:
+        _add("sentry_errors", weights.get("sentry_errors", 15))
+
     if custom_expressions:
         for i, expr in enumerate(custom_expressions):
             result = evaluate_custom_score(expr, pr_dict, project_config_dict)
@@ -197,6 +212,8 @@ def score_pull_request_from_model(
     recent_reviews: list[dict[str, str]] | None = None,
     operator_review_posted_at: str | None = None,
     author_replies_after_review: list[str] | None = None,
+    downstream_apis: dict[str, list[str]] | None = None,
+    sentry_error_count: int | None = None,
 ) -> tuple[float, dict[str, float]]:
     """Django-aware wrapper: converts models to dicts, resolves known_authors."""
     pr_dict: dict[str, object] = {
@@ -275,4 +292,6 @@ def score_pull_request_from_model(
         recent_reviews=recent_reviews,
         operator_review_posted_at=operator_review_posted_at,
         author_replies_after_review=author_replies_after_review,
+        downstream_apis=downstream_apis,
+        sentry_error_count=sentry_error_count,
     )
