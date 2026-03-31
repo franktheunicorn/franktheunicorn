@@ -345,3 +345,234 @@ class TestValidateYamlFile:
         f.write_text("- item1\n- item2\n")
         errors = validate_yaml_file(f, "operator")
         assert any("mapping" in e.lower() for e in errors)
+
+
+# --- v1.5 Config Models ---
+
+
+class TestJiraConfig:
+    def test_defaults(self) -> None:
+        from franktheunicorn.config.models import JiraConfig
+
+        config = JiraConfig()
+        assert config.enabled is False
+        assert config.server == ""
+        assert config.project_prefix == ""
+
+    def test_valid_server(self) -> None:
+        from franktheunicorn.config.models import JiraConfig
+
+        config = JiraConfig(
+            enabled=True, server="https://issues.apache.org/jira", project_prefix="SPARK"
+        )
+        assert config.server == "https://issues.apache.org/jira"
+        assert config.project_prefix == "SPARK"
+
+    def test_trailing_slash_stripped(self) -> None:
+        from franktheunicorn.config.models import JiraConfig
+
+        config = JiraConfig(server="https://issues.apache.org/jira/")
+        assert config.server == "https://issues.apache.org/jira"
+
+    def test_invalid_server_no_scheme(self) -> None:
+        from franktheunicorn.config.models import JiraConfig
+
+        with pytest.raises(ValidationError, match="URL"):
+            JiraConfig(server="issues.apache.org/jira")
+
+
+class TestCommunitySourceConfig:
+    def test_mailing_list(self) -> None:
+        from franktheunicorn.config.models import CommunitySourceConfig
+
+        config = CommunitySourceConfig(
+            type="mailing-list",
+            name="Spark dev@",
+            archive_url="https://lists.apache.org/list.html?dev@spark.apache.org",
+        )
+        assert config.type == "mailing-list"
+        assert config.timeout_seconds == 30
+        assert config.cache_ttl_days == 7
+        assert config.niceness_delay_seconds == 2.0
+
+    def test_discord(self) -> None:
+        from franktheunicorn.config.models import CommunitySourceConfig
+
+        config = CommunitySourceConfig(
+            type="discord",
+            name="Spark Discord",
+            guild_id="123456789",
+            bot_token_env="DISCORD_BOT_TOKEN",
+        )
+        assert config.guild_id == "123456789"
+
+    def test_unknown_type_warns(self, caplog: pytest.LogCaptureFixture) -> None:
+        from franktheunicorn.config.models import CommunitySourceConfig
+
+        with caplog.at_level(logging.WARNING):
+            config = CommunitySourceConfig(type="unknown-source")
+        assert config.type == "unknown-source"
+        assert "Unknown community source type" in caplog.text
+
+    def test_zero_timeout_rejected(self) -> None:
+        from franktheunicorn.config.models import CommunitySourceConfig
+
+        with pytest.raises(ValidationError, match="timeout_seconds"):
+            CommunitySourceConfig(type="mailing-list", timeout_seconds=0)
+
+
+class TestDownstreamConfig:
+    def test_basic(self) -> None:
+        from franktheunicorn.config.models import DownstreamConfig
+
+        config = DownstreamConfig(
+            project="spark-testing-base",
+            repo="holdenk/spark-testing-base",
+            tracked_apis_file="~/.review-agent/cache/spark-testing-base-imports.json",
+        )
+        assert config.project == "spark-testing-base"
+        assert config.repo == "holdenk/spark-testing-base"
+
+
+class TestPostingConfig:
+    def test_defaults_to_draft_only(self) -> None:
+        from franktheunicorn.config.models import PostingConfig
+
+        config = PostingConfig()
+        assert config.mode == "draft-only"
+        assert config.confidence_threshold == 0.85
+        assert config.bot_token_env == "GITHUB_TOKEN_BOT"
+
+    def test_confidence_gated(self) -> None:
+        from franktheunicorn.config.models import PostingConfig
+
+        config = PostingConfig(mode="confidence-gated", confidence_threshold=0.9)
+        assert config.mode == "confidence-gated"
+        assert config.confidence_threshold == 0.9
+
+    def test_invalid_mode(self) -> None:
+        from franktheunicorn.config.models import PostingConfig
+
+        with pytest.raises(ValidationError, match="posting mode"):
+            PostingConfig(mode="auto")
+
+    def test_threshold_out_of_range(self) -> None:
+        from franktheunicorn.config.models import PostingConfig
+
+        with pytest.raises(ValidationError, match="confidence_threshold"):
+            PostingConfig(confidence_threshold=1.5)
+
+
+class TestSentryConfig:
+    def test_defaults(self) -> None:
+        from franktheunicorn.config.models import SentryConfig
+
+        config = SentryConfig()
+        assert config.enabled is False
+        assert config.auth_token_env == "SENTRY_AUTH_TOKEN"
+        assert config.score_weight == 15
+
+    def test_configured(self) -> None:
+        from franktheunicorn.config.models import SentryConfig
+
+        config = SentryConfig(enabled=True, org_slug="myorg", project_slug="myproject")
+        assert config.org_slug == "myorg"
+
+
+class TestPerplexityConfig:
+    def test_defaults(self) -> None:
+        from franktheunicorn.config.models import PerplexityConfig
+
+        config = PerplexityConfig()
+        assert config.enabled is False
+        assert config.mode == "both"
+
+    def test_valid_modes(self) -> None:
+        from franktheunicorn.config.models import PerplexityConfig
+
+        for mode in ("general", "technical", "both"):
+            config = PerplexityConfig(mode=mode)
+            assert config.mode == mode
+
+    def test_invalid_mode(self) -> None:
+        from franktheunicorn.config.models import PerplexityConfig
+
+        with pytest.raises(ValidationError, match="Perplexity mode"):
+            PerplexityConfig(mode="invalid")
+
+
+class TestProjectConfigV15:
+    def test_v15_defaults(self) -> None:
+        config = ProjectConfig(owner="apache", repo="spark")
+        assert config.jira.enabled is False
+        assert config.community_sources == []
+        assert config.downstream == []
+        assert config.posting.mode == "draft-only"
+
+    def test_with_jira(self) -> None:
+        config = ProjectConfig(
+            owner="apache",
+            repo="spark",
+            jira={
+                "enabled": True,
+                "server": "https://issues.apache.org/jira",
+                "project_prefix": "SPARK",
+            },
+        )
+        assert config.jira.enabled is True
+        assert config.jira.project_prefix == "SPARK"
+
+    def test_with_community_sources(self) -> None:
+        config = ProjectConfig(
+            owner="apache",
+            repo="spark",
+            community_sources=[
+                {"type": "mailing-list", "name": "dev@", "archive_url": "https://lists.apache.org"},
+                {"type": "discourse", "name": "Forum", "base_url": "https://forum.example.com"},
+            ],
+        )
+        assert len(config.community_sources) == 2
+        assert config.community_sources[0].type == "mailing-list"
+        assert config.community_sources[1].type == "discourse"
+
+    def test_with_downstream(self) -> None:
+        config = ProjectConfig(
+            owner="apache",
+            repo="spark",
+            downstream=[
+                {"project": "spark-testing-base", "repo": "holdenk/spark-testing-base"},
+            ],
+        )
+        assert len(config.downstream) == 1
+        assert config.downstream[0].project == "spark-testing-base"
+
+    def test_with_confidence_gated_posting(self) -> None:
+        config = ProjectConfig(
+            owner="apache",
+            repo="spark",
+            posting={"mode": "confidence-gated", "confidence_threshold": 0.9},
+        )
+        assert config.posting.mode == "confidence-gated"
+        assert config.posting.confidence_threshold == 0.9
+
+
+class TestOperatorConfigV15:
+    def test_sentry_defaults(self) -> None:
+        config = OperatorConfig()
+        assert config.sentry.enabled is False
+
+    def test_perplexity_defaults(self) -> None:
+        config = OperatorConfig()
+        assert config.perplexity.enabled is False
+
+    def test_with_sentry(self) -> None:
+        config = OperatorConfig(
+            sentry={"enabled": True, "org_slug": "myorg", "project_slug": "myproject"},
+        )
+        assert config.sentry.enabled is True
+
+    def test_with_perplexity(self) -> None:
+        config = OperatorConfig(
+            perplexity={"enabled": True, "mode": "technical"},
+        )
+        assert config.perplexity.mode == "technical"
