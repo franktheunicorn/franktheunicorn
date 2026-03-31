@@ -1,37 +1,53 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help setup test lint format typecheck check serve worker migrate docker-up docker-build clean
+VENV := .venv
+PYTHON := $(VENV)/bin/python
+PIP := $(VENV)/bin/pip
+
+# Auto-detect if venv exists; if not, use system python for venv creation.
+ifeq ($(wildcard $(VENV)/bin/python),)
+  ACTIVATE_MSG := "(run 'make venv' first or 'make setup')"
+endif
+
+.PHONY: help venv setup test lint format typecheck check serve worker migrate docker-up docker-build clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
 
-setup: ## One-time local development setup
-	scripts/dev_setup.sh
+$(VENV)/bin/python:
+	python3 -m venv $(VENV)
+	$(PIP) install --upgrade pip
 
-test: ## Run tests with coverage
-	pytest --cov=franktheunicorn --cov-report=term-missing
+venv: $(VENV)/bin/python ## Create virtual environment if it doesn't exist
 
-lint: ## Check linting and formatting
-	ruff check src/ tests/
-	ruff format --check src/ tests/
+setup: venv ## One-time local development setup (creates venv + installs deps)
+	$(PIP) install -e ".[dev]"
+	$(PYTHON) manage.py migrate
 
-format: ## Auto-format code
-	ruff format src/ tests/
+test: venv ## Run tests with coverage
+	$(PYTHON) -m pytest --cov=franktheunicorn --cov-report=term-missing
 
-typecheck: ## Run mypy type checking
-	mypy src/franktheunicorn/
+lint: venv ## Check linting and formatting
+	$(VENV)/bin/ruff check src/ tests/
+	$(VENV)/bin/ruff format --check src/ tests/
+
+format: venv ## Auto-format code
+	$(VENV)/bin/ruff format src/ tests/
+
+typecheck: venv ## Run mypy type checking
+	$(PYTHON) -m mypy src/franktheunicorn/
 
 check: lint typecheck test ## Run all checks (lint + typecheck + test)
 
-serve: ## Start Django dev server
-	python manage.py runserver
+serve: venv ## Start Django dev server
+	$(PYTHON) manage.py runserver
 
-worker: ## Start background worker
-	python -m franktheunicorn.worker.runner
+worker: venv ## Start background worker
+	$(PYTHON) -m franktheunicorn.worker.runner
 
-migrate: ## Run database migrations
-	python manage.py migrate
+migrate: venv ## Run database migrations
+	$(PYTHON) manage.py migrate
 
 docker-up: ## Start all services with Docker Compose
 	docker compose up

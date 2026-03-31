@@ -42,6 +42,7 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "franktheunicorn.core",
     "franktheunicorn.dashboard",
+    "franktheunicorn.digest",
 ]
 
 MIDDLEWARE = [
