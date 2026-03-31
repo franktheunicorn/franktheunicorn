@@ -119,5 +119,14 @@ FRANK_REPOS_DIR = Path(os.environ.get("FRANK_REPOS_DIR", str(DATA_DIR / "repos")
 # Worker polling interval in seconds
 FRANK_POLL_INTERVAL = int(os.environ.get("FRANK_POLL_INTERVAL", "300"))
 
+# Email settings for digest (optional — skip silently if not configured)
+EMAIL_HOST = os.environ.get("REVIEW_AGENT_SMTP_HOST", "")
+EMAIL_PORT = int(os.environ.get("REVIEW_AGENT_SMTP_PORT", "587"))
+EMAIL_HOST_USER = os.environ.get("REVIEW_AGENT_SMTP_USER", "")
+EMAIL_HOST_PASSWORD = os.environ.get("REVIEW_AGENT_SMTP_PASS", "")
+EMAIL_USE_TLS = True
+DEFAULT_FROM_EMAIL = os.environ.get("REVIEW_AGENT_EMAIL_FROM", "frank@localhost")
+FRANK_DIGEST_EMAIL = os.environ.get("FRANK_DIGEST_EMAIL", "")
+
 USE_TZ = True
 TIME_ZONE = "UTC"
