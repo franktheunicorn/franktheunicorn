@@ -41,6 +41,7 @@ class PRSummary(FetchResult):
     additions: int = 0
     deletions: int = 0
     files: tuple[PRFileChange, ...] = ()
+    mergeable: bool | None = None
 
 
 @dataclass(frozen=True)

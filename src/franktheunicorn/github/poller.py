@@ -75,7 +75,9 @@ def poll_project(
             pr_detail = client.get_pull_request(
                 project_config.owner, project_config.repo, pr_number
             )
-            pr_obj.mergeable = pr_detail.get("mergeable")
+            raw_mergeable = pr_detail.get("mergeable")
+            if isinstance(raw_mergeable, bool):
+                pr_obj.mergeable = raw_mergeable
         except Exception:
             logger.debug("Could not fetch mergeable status for PR #%d", pr_number)
 

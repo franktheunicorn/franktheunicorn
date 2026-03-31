@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from bs4 import BeautifulSoup
@@ -14,6 +15,8 @@ from franktheunicorn.data_access.base import (
     get_login,
 )
 from franktheunicorn.data_access.github.types import PRFileChange, PRSummary
+
+logger = logging.getLogger(__name__)
 
 
 class PRFetcher(DataFetcher[PRSummary]):
@@ -46,6 +49,20 @@ class PRFetcher(DataFetcher[PRSummary]):
             elif "closed" in state_text:
                 state = "closed"
 
+        # Best-effort merge conflict detection from the merge box.
+        # GitHub shows "This branch has conflicts" or a green merge button.
+        try:
+            mergeable = _scrape_mergeable(soup)
+        except MergeStatusParseError:
+            logger.warning(
+                "Could not parse merge status for %s/%s#%d from HTML; "
+                "GitHub's HTML structure may have changed.",
+                owner,
+                repo,
+                pr_number,
+            )
+            mergeable = None
+
         return PRSummary(
             fetched_via=FetchMethod.SCRAPE,
             number=pr_number,
@@ -60,7 +77,49 @@ class PRFetcher(DataFetcher[PRSummary]):
             ),
             requested_reviewers=(),
             is_draft="Draft" in (state_el.get_text(strip=True) if state_el else ""),
+            mergeable=mergeable,
         )
+
+
+class MergeStatusParseError(Exception):
+    """Raised when we can't determine merge status from the HTML."""
+
+
+def _scrape_mergeable(soup: BeautifulSoup) -> bool | None:
+    """Best-effort extraction of mergeable status from the PR page HTML.
+
+    GitHub's merge box contains text like:
+    - "This branch has conflicts that must be resolved"
+    - "This branch has no conflicts with the base branch"
+    - "Merging can be performed automatically"
+
+    Returns True (mergeable), False (conflicts), or None (can't determine).
+    Raises MergeStatusParseError if the merge box is found but unparseable.
+    """
+    # Look for the merge status area.
+    merge_box = soup.select_one(".merge-message, .merging-body, [data-merge-box]")
+    if merge_box is None:
+        return None  # No merge box found (e.g., closed PR, or HTML changed)
+
+    text = merge_box.get_text(" ", strip=True).lower()
+    if not text:
+        return None
+
+    if "has conflicts" in text or "resolve conflicts" in text or "can't be merged" in text:
+        return False
+    if (
+        "no conflicts" in text
+        or "can be performed automatically" in text
+        or "able to merge" in text
+        or "merge pull request" in text
+    ):
+        return True
+
+    # Found a merge box but couldn't parse it — raise so caller knows
+    # the HTML structure may have changed.
+    raise MergeStatusParseError(
+        f"Found merge box but could not determine status from: {text[:200]}"
+    )
 
 
 def _api_json_to_pr_summary(
@@ -68,6 +127,13 @@ def _api_json_to_pr_summary(
     files_json: list[dict[str, Any]],
 ) -> PRSummary:
     """Map GitHub API JSON to a PRSummary dataclass."""
+    # GitHub returns mergeable as true/false/null. null means "not yet computed"
+    # which we treat the same as None (unknown).
+    raw_mergeable = pr_json.get("mergeable")
+    mergeable: bool | None = None
+    if isinstance(raw_mergeable, bool):
+        mergeable = raw_mergeable
+
     return PRSummary(
         fetched_via=FetchMethod.API,
         number=pr_json.get("number", 0),
@@ -100,4 +166,5 @@ def _api_json_to_pr_summary(
             )
             for f in files_json
         ),
+        mergeable=mergeable,
     )
