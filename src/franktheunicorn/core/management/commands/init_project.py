@@ -9,7 +9,7 @@ from django.core.management.base import BaseCommand
 
 
 class Command(BaseCommand):
-    help = "Initialize franktheunicorn configuration"  # noqa: A003
+    help = "Initialize franktheunicorn configuration"
 
     def handle(self, *args: object, **options: object) -> None:
         config_dir = Path(os.environ.get("FRANK_CONFIG_DIR", str(Path.home() / ".review-agent")))
@@ -26,11 +26,11 @@ class Command(BaseCommand):
             style = input("Review style [direct but kind]: ").strip() or "direct but kind"
 
             operator_path.write_text(
-                f"github_username: \"{username}\"\n"
-                f"review_style: \"{style}\"\n"
+                f'github_username: "{username}"\n'
+                f'review_style: "{style}"\n'
                 f"auto_post: false\n"
                 f"poll_interval_seconds: 300\n"
-                f"digest_email: \"\"\n"
+                f'digest_email: ""\n'
                 f"digest_enabled: false\n"
                 f"llm_backends:\n"
                 f"  - provider: stub\n"

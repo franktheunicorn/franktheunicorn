@@ -36,7 +36,9 @@ class TestTestRunner:
         mock_docker.containers.run.return_value = mock_container
         mock_docker.ping.return_value = True
 
-        with patch("franktheunicorn.worker.test_runner.TestRunner._get_docker", return_value=mock_docker):
+        with patch(
+            "franktheunicorn.worker.test_runner.TestRunner._get_docker", return_value=mock_docker
+        ):
             from franktheunicorn.config.models import ProjectConfig
 
             config = ProjectConfig(owner="test", repo="test")
@@ -61,7 +63,9 @@ class TestTestRunner:
         mock_docker.containers.run.return_value = mock_container
         mock_docker.ping.return_value = True
 
-        with patch("franktheunicorn.worker.test_runner.TestRunner._get_docker", return_value=mock_docker):
+        with patch(
+            "franktheunicorn.worker.test_runner.TestRunner._get_docker", return_value=mock_docker
+        ):
             from franktheunicorn.config.models import ProjectConfig
 
             config = ProjectConfig(owner="test", repo="test")
@@ -88,28 +92,40 @@ class TestTestRunner:
 class TestComputeVerdict:
     def test_good_verdict(self) -> None:
         runner = DockerTestRunner()
-        assert runner._compute_verdict(
-            {"exit_code": 0, "stderr": ""},
-            {"exit_code": 1, "stderr": "AssertionError"},
-        ) == "good"
+        assert (
+            runner._compute_verdict(
+                {"exit_code": 0, "stderr": ""},
+                {"exit_code": 1, "stderr": "AssertionError"},
+            )
+            == "good"
+        )
 
     def test_suspect_verdict(self) -> None:
         runner = DockerTestRunner()
-        assert runner._compute_verdict(
-            {"exit_code": 0, "stderr": ""},
-            {"exit_code": 0, "stderr": ""},
-        ) == "suspect"
+        assert (
+            runner._compute_verdict(
+                {"exit_code": 0, "stderr": ""},
+                {"exit_code": 0, "stderr": ""},
+            )
+            == "suspect"
+        )
 
     def test_broken_verdict(self) -> None:
         runner = DockerTestRunner()
-        assert runner._compute_verdict(
-            {"exit_code": 1, "stderr": ""},
-            {"exit_code": 1, "stderr": ""},
-        ) == "broken"
+        assert (
+            runner._compute_verdict(
+                {"exit_code": 1, "stderr": ""},
+                {"exit_code": 1, "stderr": ""},
+            )
+            == "broken"
+        )
 
     def test_infra_verdict(self) -> None:
         runner = DockerTestRunner()
-        assert runner._compute_verdict(
-            {"exit_code": 0, "stderr": ""},
-            {"exit_code": 1, "stderr": "ImportError: No module named 'foo'"},
-        ) == "infra"
+        assert (
+            runner._compute_verdict(
+                {"exit_code": 0, "stderr": ""},
+                {"exit_code": 1, "stderr": "ImportError: No module named 'foo'"},
+            )
+            == "infra"
+        )

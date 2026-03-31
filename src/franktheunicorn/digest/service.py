@@ -133,19 +133,24 @@ def build_daily_digest(hours: int = 24) -> DailyDigest:
     )
 
     posted_7d = ReviewDraft.objects.filter(
-        status="posted", posted_at__gte=week_cutoff,
+        status="posted",
+        posted_at__gte=week_cutoff,
     ).count()
 
     ap_suppressed = AntiPattern.objects.filter(
         is_active=True,
     ).aggregate(total=Sum("times_triggered"))
 
-    stale_aps = AntiPattern.objects.filter(
-        is_active=True,
-    ).filter(
-        Q(last_matched_at__lt=datetime.now(tz=UTC) - timedelta(days=60))
-        | Q(last_matched_at__isnull=True),
-    ).count()
+    stale_aps = (
+        AntiPattern.objects.filter(
+            is_active=True,
+        )
+        .filter(
+            Q(last_matched_at__lt=datetime.now(tz=UTC) - timedelta(days=60))
+            | Q(last_matched_at__isnull=True),
+        )
+        .count()
+    )
 
     digest.stats = DigestStats(
         prs_reviewed=total_actions,
@@ -172,7 +177,7 @@ def render_digest_text(digest: DailyDigest) -> str:
         for e in digest.high_interest:
             test_str = f" Tests: {e.test_verdict}" if e.test_verdict else ""
             lines.append(
-                f"  {e.project_name}#{e.pr_number} — \"{e.pr_title}\""
+                f'  {e.project_name}#{e.pr_number} — "{e.pr_title}"'
                 f"\n  score: {e.interest_score:.2f} · {e.pending_drafts} drafts{test_str}"
             )
         lines.append("")
@@ -180,15 +185,14 @@ def render_digest_text(digest: DailyDigest) -> str:
     if digest.your_prs:
         lines.append("YOUR PRs NEEDING ACTION")
         for e in digest.your_prs:
-            lines.append(f"  {e.project_name}#{e.pr_number} — \"{e.pr_title}\"")
+            lines.append(f'  {e.project_name}#{e.pr_number} — "{e.pr_title}"')
         lines.append("")
 
     if digest.ai_generated:
         lines.append("AI-GENERATED PRs")
         for e in digest.ai_generated:
             lines.append(
-                f"  {e.project_name}#{e.pr_number} — \"{e.pr_title}\""
-                f"\n  {e.pending_drafts} drafts"
+                f'  {e.project_name}#{e.pr_number} — "{e.pr_title}"\n  {e.pending_drafts} drafts'
             )
         lines.append("")
 
@@ -201,9 +205,7 @@ def render_digest_text(digest: DailyDigest) -> str:
     if digest.test_issues:
         lines.append("TEST ISSUES")
         for e in digest.test_issues:
-            lines.append(
-                f"  {e.project_name}#{e.pr_number} — {e.test_verdict}"
-            )
+            lines.append(f"  {e.project_name}#{e.pr_number} — {e.test_verdict}")
         lines.append("")
 
     if digest.stats.prs_reviewed > 0:

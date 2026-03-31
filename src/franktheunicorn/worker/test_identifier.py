@@ -24,7 +24,8 @@ _TEST_FILE_PATTERNS = (
 def identify_tests_from_diff(changed_files: list[str]) -> list[str]:
     """Source 1: Identify test files from the PR's changed files."""
     return [
-        f for f in changed_files
+        f
+        for f in changed_files
         if any(re.search(pat, f, re.IGNORECASE) for pat in _TEST_FILE_PATTERNS)
     ]
 
@@ -39,7 +40,7 @@ def identify_tests_from_description(body: str) -> list[str]:
     """
     tests: list[str] = []
     # Match file paths that look like test files.
-    for match in re.finditer(r'[\w/]+(?:test_\w+|_test)\.\w+', body, re.IGNORECASE):
+    for match in re.finditer(r"[\w/]+(?:test_\w+|_test)\.\w+", body, re.IGNORECASE):
         tests.append(match.group(0))
     return tests
 
@@ -61,7 +62,7 @@ def identify_tests_from_template(body: str) -> list[str]:
             if re.match(r"#{1,3}\s", line):
                 in_test_section = False
                 continue
-            for match in re.finditer(r'[\w/]+\.\w+', line):
+            for match in re.finditer(r"[\w/]+\.\w+", line):
                 path = match.group(0)
                 if any(re.search(pat, path, re.IGNORECASE) for pat in _TEST_FILE_PATTERNS):
                     tests.append(path)

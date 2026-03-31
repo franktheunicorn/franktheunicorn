@@ -6,13 +6,17 @@ from django.core.management.base import BaseCommand
 
 
 class Command(BaseCommand):
-    help = "Build and send the daily email digest"  # noqa: A003
+    help = "Build and send the daily email digest"
 
     def add_arguments(self, parser: object) -> None:
         pass
 
     def handle(self, *args: object, **options: object) -> None:
-        from franktheunicorn.digest.service import build_daily_digest, render_digest_text, send_digest
+        from franktheunicorn.digest.service import (
+            build_daily_digest,
+            render_digest_text,
+            send_digest,
+        )
 
         digest = build_daily_digest()
         self.stdout.write(render_digest_text(digest))

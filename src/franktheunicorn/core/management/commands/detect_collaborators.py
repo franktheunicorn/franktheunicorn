@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 class Command(BaseCommand):
-    help = "Detect collaborators for a project from git log and review history"  # noqa: A003
+    help = "Detect collaborators for a project from git log and review history"
 
     def add_arguments(self, parser: CommandParser) -> None:
         parser.add_argument("--project", required=True, help="Project full_name (owner/repo)")
@@ -101,9 +101,9 @@ class Command(BaseCommand):
         if dry_run:
             self.stdout.write(self.style.WARNING("\n--dry-run: no changes saved"))
         else:
-            self.stdout.write(self.style.SUCCESS(
-                f"\nDetected {len(results)} collaborators for {project_name}."
-            ))
+            self.stdout.write(
+                self.style.SUCCESS(f"\nDetected {len(results)} collaborators for {project_name}.")
+            )
 
 
 def _analyze_git_log(repo_path: Path, operator: str, months: int) -> Counter[str]:
@@ -112,7 +112,10 @@ def _analyze_git_log(repo_path: Path, operator: str, months: int) -> Counter[str
     try:
         result = subprocess.run(
             ["git", "log", f"--since={months} months ago", "--format=%aN", "--no-merges"],
-            capture_output=True, text=True, cwd=str(repo_path), timeout=60,
+            capture_output=True,
+            text=True,
+            cwd=str(repo_path),
+            timeout=60,
         )
         if result.returncode == 0:
             for author in result.stdout.strip().split("\n"):
@@ -130,7 +133,10 @@ def _analyze_co_authors(repo_path: Path, operator: str, months: int) -> Counter[
     try:
         result = subprocess.run(
             ["git", "log", f"--since={months} months ago", "--format=%b"],
-            capture_output=True, text=True, cwd=str(repo_path), timeout=60,
+            capture_output=True,
+            text=True,
+            cwd=str(repo_path),
+            timeout=60,
         )
         if result.returncode == 0:
             import re

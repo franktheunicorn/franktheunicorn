@@ -91,8 +91,16 @@ def create_drafts_from_findings(
 
         # Map severity string to a valid category if present in the finding title.
         category = "other"
-        for cat in ("correctness", "style", "security", "test-coverage",
-                     "architectural", "naming", "suggested-change", "moderation"):
+        for cat in (
+            "correctness",
+            "style",
+            "security",
+            "test-coverage",
+            "architectural",
+            "naming",
+            "suggested-change",
+            "moderation",
+        ):
             if cat in (finding.title or "").lower():
                 category = cat
                 break
@@ -104,9 +112,9 @@ def create_drafts_from_findings(
             comment_body=finding.body,
             suggestion=finding.suggestion,
             confidence=finding.confidence,
-            severity=finding.severity if finding.severity in (
-                "critical", "important", "nit", "informational"
-            ) else "nit",
+            severity=finding.severity
+            if finding.severity in ("critical", "important", "nit", "informational")
+            else "nit",
             category=category,
             reasoning_trace=finding.title,  # original body before tone guard
             tone_guard_applied=tone_guard_applied,
@@ -206,6 +214,9 @@ def draft_review(
     # Persist as ReviewDraft rows with anti-pattern gating.
     source_name = all_findings[0][0] if all_findings else "agent"
     return create_drafts_from_findings(
-        pr, deduped, source=source_name, project=pr.project,
+        pr,
+        deduped,
+        source=source_name,
+        project=pr.project,
         tone_guard_applied=tone_applied,
     )

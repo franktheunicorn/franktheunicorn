@@ -6,7 +6,7 @@ from django.core.management.base import BaseCommand
 
 
 class Command(BaseCommand):
-    help = "Start the franktheunicorn background worker"  # noqa: A003
+    help = "Start the franktheunicorn background worker"
 
     def handle(self, *args: object, **options: object) -> None:
         from franktheunicorn.worker.runner import run_worker

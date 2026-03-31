@@ -269,9 +269,7 @@ class OperatorAction(models.Model):
 class CostRecord(models.Model):
     """Tracks LLM API token usage and estimated cost per call."""
 
-    project = models.ForeignKey(
-        Project, on_delete=models.CASCADE, related_name="cost_records"
-    )
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="cost_records")
     pull_request = models.ForeignKey(
         PullRequest, on_delete=models.SET_NULL, null=True, blank=True, related_name="cost_records"
     )

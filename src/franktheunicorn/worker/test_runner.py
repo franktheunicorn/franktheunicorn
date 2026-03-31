@@ -40,9 +40,9 @@ class TestRunner:
         if self._docker is not None:
             return self._docker
         try:
-            import docker
+            import docker  # type: ignore[import-untyped,unused-ignore]
 
-            self._docker = docker.from_env()
+            self._docker = docker.from_env()  # type: ignore[attr-defined]
             self._docker.ping()
             return self._docker
         except Exception:
@@ -96,10 +96,18 @@ class TestRunner:
 
         try:
             pr_result = self._run_container(
-                docker, container_image, test_scope, resources, "pr_branch",
+                docker,
+                container_image,
+                test_scope,
+                resources,
+                "pr_branch",
             )
             base_result = self._run_container(
-                docker, container_image, test_scope, resources, "base_cherry_pick",
+                docker,
+                container_image,
+                test_scope,
+                resources,
+                "base_cherry_pick",
             )
 
             verdict = self._compute_verdict(pr_result, base_result)

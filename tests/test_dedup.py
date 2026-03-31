@@ -81,7 +81,9 @@ class TestDeduplicateFindings:
                 line_number=10,
                 suggestion="fix this",
             ),
-            ReviewFinding(body="no suggestion but longer body text here", file_path="a.py", line_number=10),
+            ReviewFinding(
+                body="no suggestion but longer body text here", file_path="a.py", line_number=10
+            ),
         ]
         result = deduplicate_findings(findings)
         assert len(result) == 1

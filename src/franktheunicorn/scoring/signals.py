@@ -159,9 +159,12 @@ def score_committer_is_on_it(
         return None
 
     # Check if PR touches watched paths — if so, don't derank
-    if watched_paths and changed_files:
-        if any(f.startswith(tuple(watched_paths)) for f in changed_files):
-            return None
+    if (
+        watched_paths
+        and changed_files
+        and any(f.startswith(tuple(watched_paths)) for f in changed_files)
+    ):
+        return None
 
     committer_set = _lowered(committers)
     op = operator_username.lower()

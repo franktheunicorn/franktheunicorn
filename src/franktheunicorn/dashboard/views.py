@@ -8,12 +8,10 @@ from __future__ import annotations
 
 import logging
 from decimal import Decimal
-from typing import Any
 
 from django.db.models import Count, Q, Sum
 from django.http import HttpRequest, HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
-from django.utils import timezone
 from django.views.decorators.http import require_POST
 
 from franktheunicorn.core.models import (
@@ -95,14 +93,18 @@ def index(request: HttpRequest) -> HttpResponse:
     workspace = request.COOKIES.get("workspace", "all")
     workspaces = _get_workspace_list()
 
-    return render(request, "dashboard/pr_list.html", {
-        "pull_requests": prs,
-        "queue_tabs": QUEUE_TABS,
-        "active_queue": queue,
-        "queue_counts": queue_counts,
-        "workspace": workspace,
-        "workspaces": workspaces,
-    })
+    return render(
+        request,
+        "dashboard/pr_list.html",
+        {
+            "pull_requests": prs,
+            "queue_tabs": QUEUE_TABS,
+            "active_queue": queue,
+            "queue_counts": queue_counts,
+            "workspace": workspace,
+            "workspaces": workspaces,
+        },
+    )
 
 
 def _get_workspace_list() -> list[dict[str, str]]:
@@ -117,7 +119,7 @@ def _get_workspace_list() -> list[dict[str, str]]:
         raw = getattr(config, "workspaces", {})
         if raw and isinstance(raw, dict):
             for key, val in raw.items():
-                desc = val.get("description", key) if isinstance(val, dict) else key
+                desc = str(val.get("description", key)) if isinstance(val, dict) else str(key)
                 workspaces.append({"key": key, "label": desc})
     except Exception:
         pass
@@ -220,15 +222,13 @@ def post_review(request: HttpRequest, pr_id: int) -> HttpResponse:
     """Post all approved findings for a PR as a single GitHub review."""
     pr = get_object_or_404(PullRequest, pk=pr_id)
     approved = list(
-        ReviewDraft.objects.filter(
-            pull_request=pr, status="accepted"
-        ).order_by("file_path", "line_number")
+        ReviewDraft.objects.filter(pull_request=pr, status="accepted").order_by(
+            "file_path", "line_number"
+        )
     )
 
     if not approved:
-        return HttpResponse(
-            '<div class="post-result">No approved findings to post.</div>'
-        )
+        return HttpResponse('<div class="post-result">No approved findings to post.</div>')
 
     try:
         from django.conf import settings
@@ -272,11 +272,15 @@ def anti_pattern_list(request: HttpRequest) -> HttpResponse:
         aps = aps.filter(project__pk=project_filter)
 
     projects = Project.objects.filter(enabled=True).order_by("owner", "repo")
-    return render(request, "dashboard/anti_patterns.html", {
-        "anti_patterns": aps,
-        "projects": projects,
-        "active_project": project_filter,
-    })
+    return render(
+        request,
+        "dashboard/anti_patterns.html",
+        {
+            "anti_patterns": aps,
+            "projects": projects,
+            "active_project": project_filter,
+        },
+    )
 
 
 @require_POST
@@ -341,12 +345,16 @@ def stats(request: HttpRequest) -> HttpResponse:
     total_drafts = ReviewDraft.objects.count()
     posted_drafts = ReviewDraft.objects.filter(status="posted").count()
 
-    return render(request, "dashboard/stats.html", {
-        "action_counts": action_counts,
-        "total_cost": total_cost.get("total") or Decimal("0"),
-        "total_tokens_in": total_cost.get("total_tokens_in") or 0,
-        "total_tokens_out": total_cost.get("total_tokens_out") or 0,
-        "ap_stats": ap_stats,
-        "total_drafts": total_drafts,
-        "posted_drafts": posted_drafts,
-    })
+    return render(
+        request,
+        "dashboard/stats.html",
+        {
+            "action_counts": action_counts,
+            "total_cost": total_cost.get("total") or Decimal("0"),
+            "total_tokens_in": total_cost.get("total_tokens_in") or 0,
+            "total_tokens_out": total_cost.get("total_tokens_out") or 0,
+            "ap_stats": ap_stats,
+            "total_drafts": total_drafts,
+            "posted_drafts": posted_drafts,
+        },
+    )

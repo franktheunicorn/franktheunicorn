@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -15,7 +14,7 @@ from franktheunicorn.github.poster import (
     _format_comment_body,
     _format_suggestion_block,
 )
-from tests.factories import ProjectFactory, PullRequestFactory, ReviewDraftFactory
+from tests.factories import PullRequestFactory, ReviewDraftFactory
 
 
 class TestFormatSuggestionBlock:
@@ -36,17 +35,13 @@ class TestFormatCommentBody:
         assert "Good point." in body
 
     def test_includes_suggestion_block(self) -> None:
-        draft = ReviewDraftFactory(
-            comment_body="Consider this:", suggestion="better_code()"
-        )
+        draft = ReviewDraftFactory(comment_body="Consider this:", suggestion="better_code()")
         body = _format_comment_body(draft)
         assert "```suggestion" in body
         assert "better_code()" in body
 
     def test_uses_edited_body_when_present(self) -> None:
-        draft = ReviewDraftFactory(
-            comment_body="Original.", edited_body="Edited version."
-        )
+        draft = ReviewDraftFactory(comment_body="Original.", edited_body="Edited version.")
         body = _format_comment_body(draft)
         assert "Edited version." in body
         assert "Original." not in body
@@ -64,12 +59,18 @@ class TestGitHubPoster:
         poster, client = self._make_poster()
         pr = PullRequestFactory()
         d1 = ReviewDraftFactory(
-            pull_request=pr, file_path="a.py", line_number=10,
-            comment_body="Fix this.", status="accepted",
+            pull_request=pr,
+            file_path="a.py",
+            line_number=10,
+            comment_body="Fix this.",
+            status="accepted",
         )
         d2 = ReviewDraftFactory(
-            pull_request=pr, file_path="b.py", line_number=20,
-            comment_body="And this.", status="accepted",
+            pull_request=pr,
+            file_path="b.py",
+            line_number=20,
+            comment_body="And this.",
+            status="accepted",
         )
 
         result = poster.post_review(pr, [d1, d2])
@@ -86,8 +87,11 @@ class TestGitHubPoster:
         poster, _ = self._make_poster()
         pr = PullRequestFactory()
         draft = ReviewDraftFactory(
-            pull_request=pr, file_path="a.py", line_number=5,
-            comment_body="Fix.", status="accepted",
+            pull_request=pr,
+            file_path="a.py",
+            line_number=5,
+            comment_body="Fix.",
+            status="accepted",
         )
 
         poster.post_review(pr, [draft])
@@ -107,9 +111,12 @@ class TestGitHubPoster:
         poster, client = self._make_poster()
         pr = PullRequestFactory()
         draft = ReviewDraftFactory(
-            pull_request=pr, file_path="a.py",
-            line_number=10, line_end=15,
-            comment_body="Multi-line.", status="accepted",
+            pull_request=pr,
+            file_path="a.py",
+            line_number=10,
+            line_end=15,
+            comment_body="Multi-line.",
+            status="accepted",
         )
 
         poster.post_review(pr, [draft])
@@ -123,8 +130,10 @@ class TestGitHubPoster:
         poster, client = self._make_poster()
         pr = PullRequestFactory()
         draft = ReviewDraftFactory(
-            pull_request=pr, file_path="a.py",
-            comment_body="Recall me.", status="posted",
+            pull_request=pr,
+            file_path="a.py",
+            comment_body="Recall me.",
+            status="posted",
             github_comment_id=999,
             posted_at=datetime.now(tz=UTC) - timedelta(hours=1),
         )
@@ -139,8 +148,10 @@ class TestGitHubPoster:
         poster, client = self._make_poster()
         pr = PullRequestFactory()
         draft = ReviewDraftFactory(
-            pull_request=pr, file_path="a.py",
-            comment_body="Too late.", status="posted",
+            pull_request=pr,
+            file_path="a.py",
+            comment_body="Too late.",
+            status="posted",
             github_comment_id=999,
             posted_at=datetime.now(tz=UTC) - timedelta(hours=48),
         )
@@ -153,7 +164,9 @@ class TestGitHubPoster:
         poster, _ = self._make_poster()
         pr = PullRequestFactory()
         draft = ReviewDraftFactory(
-            pull_request=pr, comment_body="No id.", status="posted",
+            pull_request=pr,
+            comment_body="No id.",
+            status="posted",
         )
 
         result = poster.recall_comment(draft)

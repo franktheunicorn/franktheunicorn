@@ -66,6 +66,9 @@ def apply_tone_guard(
     from franktheunicorn.review.backends import get_backend
 
     backend = get_backend(backend_config)
+    if not hasattr(backend, "_call_api") or not hasattr(backend, "_resolve_api_key"):
+        return finding
+
     system_prompt = _build_tone_prompt(
         pr_context,
         is_new_contributor=is_new_contributor,
@@ -73,10 +76,10 @@ def apply_tone_guard(
     )
 
     try:
-        rewritten = backend._call_api(  # noqa: SLF001
+        rewritten = backend._call_api(
             system_prompt,
             finding.body,
-            backend._resolve_api_key(),  # noqa: SLF001
+            backend._resolve_api_key(),
         )
     except Exception:
         logger.debug("Tone guard LLM call failed; returning original finding.", exc_info=True)

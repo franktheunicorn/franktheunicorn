@@ -134,12 +134,16 @@ class BaseLLMBackend:
         """Record a CostRecord for the last API call. Safe to call unconditionally."""
         if not self._last_tokens_in and not self._last_tokens_out:
             return
+        if project_id is None:
+            return
         try:
             from franktheunicorn.core.models import CostRecord
 
             cost = _estimate_cost(
-                self._config.provider, self._model,
-                self._last_tokens_in, self._last_tokens_out,
+                self._config.provider,
+                self._model,
+                self._last_tokens_in,
+                self._last_tokens_out,
             )
             CostRecord.objects.create(
                 project_id=project_id,
@@ -235,9 +239,7 @@ _COST_PER_MTOK: dict[str, tuple[float, float]] = {
 }
 
 
-def _estimate_cost(
-    provider: str, model: str, tokens_in: int, tokens_out: int
-) -> float:
+def _estimate_cost(provider: str, model: str, tokens_in: int, tokens_out: int) -> float:
     """Rough cost estimate in USD based on provider pricing."""
     rates = _COST_PER_MTOK.get(provider, (3.0, 15.0))
     cost = (tokens_in * rates[0] + tokens_out * rates[1]) / 1_000_000

@@ -65,9 +65,8 @@ def deduplicate_findings(
                 line_number=primary.line_number,
                 title=primary.title,
                 body=primary.body,
-                suggestion=primary.suggestion or next(
-                    (f.suggestion for f in group if f.suggestion), ""
-                ),
+                suggestion=primary.suggestion
+                or next((f.suggestion for f in group if f.suggestion), ""),
                 confidence=best_confidence,
                 severity=best_severity,
             )

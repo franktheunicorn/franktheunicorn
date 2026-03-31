@@ -80,11 +80,17 @@ def poll_project(
         # Compute moderation flags and route to queue (§2.2).
         _route_pr_to_queue(pr_obj, operator_username)
 
-        pr_obj.save(update_fields=[
-            "interest_score", "score_breakdown",
-            "queue", "is_operator_pr", "is_new_contributor",
-            "is_low_context", "is_likely_unowned",
-        ])
+        pr_obj.save(
+            update_fields=[
+                "interest_score",
+                "score_breakdown",
+                "queue",
+                "is_operator_pr",
+                "is_new_contributor",
+                "is_low_context",
+                "is_likely_unowned",
+            ]
+        )
 
         results.append(pr_obj)
 

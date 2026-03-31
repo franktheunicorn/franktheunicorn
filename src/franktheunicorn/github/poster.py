@@ -91,7 +91,7 @@ class GitHubPoster:
         }
 
         try:
-            result = self._client.create_review(
+            result: dict[str, Any] = self._client.create_review(
                 pr.project.owner,
                 pr.project.repo,
                 pr.number,

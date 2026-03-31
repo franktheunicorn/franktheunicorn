@@ -9,7 +9,7 @@ from django.core.management.base import BaseCommand, CommandParser
 
 
 class Command(BaseCommand):
-    help = "Add a new project to monitor"  # noqa: A003
+    help = "Add a new project to monitor"
 
     def add_arguments(self, parser: CommandParser) -> None:
         parser.add_argument("--repo", required=True, help="Repository in owner/repo format")

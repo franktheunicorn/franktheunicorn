@@ -18,8 +18,12 @@ urlpatterns = [
     # Anti-pattern manager
     path("anti-patterns/", views.anti_pattern_list, name="anti_patterns"),
     path("anti-patterns/create/", views.anti_pattern_create, name="anti_pattern_create"),
-    path("anti-patterns/<int:ap_id>/delete/", views.anti_pattern_delete, name="anti_pattern_delete"),
-    path("anti-patterns/<int:ap_id>/toggle/", views.anti_pattern_toggle, name="anti_pattern_toggle"),
+    path(
+        "anti-patterns/<int:ap_id>/delete/", views.anti_pattern_delete, name="anti_pattern_delete"
+    ),
+    path(
+        "anti-patterns/<int:ap_id>/toggle/", views.anti_pattern_toggle, name="anti_pattern_toggle"
+    ),
     # Stats
     path("stats/", views.stats, name="stats"),
 ]
