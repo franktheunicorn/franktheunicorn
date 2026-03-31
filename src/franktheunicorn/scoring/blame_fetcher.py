@@ -1,7 +1,12 @@
 """Local git blame data fetcher for scoring (v1.25).
 
 Runs `git blame --porcelain` on changed files to extract per-line author
-information. Returns data in the format expected by score_touches_operator_code().
+information. Uses `git diff` to determine which lines actually changed,
+then classifies blame authors as:
+- "authors": who authored the lines being changed (Layer 1 — full credit)
+- "near_authors": who authored lines near the changes (Layer 2 — half credit)
+
+Returns data in the format expected by score_touches_operator_code().
 
 Design doc: "Run git blame on the base branch for changed files each time.
 No blame cache."
@@ -100,6 +105,80 @@ def _parse_porcelain_blame(output: str) -> dict[int, str]:
     return authors
 
 
+def _parse_diff_changed_lines(diff_output: str) -> set[int]:
+    """Parse unified diff output to extract changed line numbers in the base file.
+
+    Looks at the @@ hunk headers to find which lines in the *old* file (a-side)
+    are being modified or deleted. These are the lines we blame.
+
+    Format: @@ -start,count +start,count @@
+    """
+    changed: set[int] = set()
+    for match in re.finditer(r"^@@ -(\d+)(?:,(\d+))? \+", diff_output, re.MULTILINE):
+        start = int(match.group(1))
+        count = int(match.group(2)) if match.group(2) else 1
+        for line_no in range(start, start + count):
+            changed.add(line_no)
+    return changed
+
+
+def _get_changed_lines_for_file(
+    repo_path: Path,
+    file_path: str,
+    base_ref: str,
+) -> set[int] | None:
+    """Get the set of line numbers changed in a file relative to base_ref.
+
+    Returns None if diff fails (e.g. new file with no base).
+    """
+    try:
+        result = subprocess.run(
+            ["git", "diff", base_ref, "--", file_path],
+            capture_output=True,
+            text=True,
+            cwd=str(repo_path),
+            timeout=15,
+        )
+        if result.returncode != 0:
+            return None
+        return _parse_diff_changed_lines(result.stdout)
+    except Exception:
+        logger.debug("git diff failed for %s", file_path, exc_info=True)
+        return None
+
+
+def _classify_authors(
+    blame: dict[int, str],
+    changed_lines: set[int],
+    near_window: int = NEAR_LINES_WINDOW,
+) -> tuple[set[str], set[str]]:
+    """Classify blame authors into direct (changed lines) and near (adjacent).
+
+    Returns (direct_authors, near_only_authors) where near_only excludes
+    anyone already in direct_authors.
+    """
+    direct_authors: set[str] = set()
+    near_authors: set[str] = set()
+
+    # Build the "near" set: lines within near_window of any changed line.
+    near_lines: set[int] = set()
+    for line_no in changed_lines:
+        for offset in range(-near_window, near_window + 1):
+            near_lines.add(line_no + offset)
+    # Remove the changed lines themselves from near — those are "direct".
+    near_lines -= changed_lines
+
+    for line_no, author in blame.items():
+        if line_no in changed_lines:
+            direct_authors.add(author)
+        elif line_no in near_lines:
+            near_authors.add(author)
+
+    # near_only: people near the changes but who didn't author the changed lines.
+    near_only = near_authors - direct_authors
+    return direct_authors, near_only
+
+
 def fetch_blame_for_file(
     repo_path: Path,
     file_path: str,
@@ -136,6 +215,12 @@ def fetch_blame_for_files(
 ) -> list[dict[str, object]]:
     """Fetch blame data for changed files, returning scorer-compatible format.
 
+    For each file, runs ``git blame`` on the base ref and ``git diff`` to
+    determine which lines actually changed. Authors are classified as:
+    - ``authors``: authored lines that are being modified (full credit)
+    - ``near_authors``: authored lines within NEAR_LINES_WINDOW of changes
+      but not the changes themselves (half credit)
+
     Returns list of dicts with keys: file_path, authors, near_authors.
     This matches the format expected by score_touches_operator_code() in
     scoring/blame.py.
@@ -159,18 +244,21 @@ def fetch_blame_for_files(
         if blame is None:
             continue
 
-        # All authors who authored any line in the file.
-        all_authors = list(set(blame.values()))
+        # Get which lines actually changed so we can classify authors properly.
+        changed_lines = _get_changed_lines_for_file(repo_path, file_path, base_ref)
 
-        # "Near authors" — authors of lines adjacent to the code.
-        # Since we don't have diff hunk info here, we treat all authors as
-        # both direct and near. The scorer uses this for proximity scoring.
-        results.append(
-            {
-                "file_path": file_path,
-                "authors": all_authors,
-                "near_authors": all_authors,
-            }
-        )
+        if changed_lines:
+            direct, near_only = _classify_authors(blame, changed_lines)
+            results.append(
+                {
+                    "file_path": file_path,
+                    "authors": sorted(direct),
+                    "near_authors": sorted(near_only),
+                }
+            )
+        else:
+            # New file or diff unavailable — can't determine changed lines.
+            # Skip rather than give false credit.
+            logger.debug("No diff hunks for %s; skipping blame classification", file_path)
 
     return results
