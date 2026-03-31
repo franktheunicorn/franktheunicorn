@@ -154,6 +154,19 @@ class ProjectConfig(BaseModel):
     # LLM sub-checks (v1) — e.g. ["coverage"]
     llm_checks: list[str] = Field(default_factory=list)
 
+    @field_validator("llm_checks")
+    @classmethod
+    def llm_checks_warn_unknown(cls, v: list[str]) -> list[str]:
+        known = {"coverage"}
+        for name in v:
+            if name not in known:
+                logger.warning(
+                    "Unknown llm_check '%s'; known checks: %s",
+                    name,
+                    ", ".join(sorted(known)),
+                )
+        return v
+
     @field_validator("copypasta_min_lines")
     @classmethod
     def copypasta_min_lines_valid(cls, v: int) -> int:

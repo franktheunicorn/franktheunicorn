@@ -155,26 +155,26 @@ def _run_cycle(
                     if cr_config is not None:
                         _run_coderabbit_for_pr(pr, cr_config)
 
-                # LLM sub-checks (coverage, etc.) — runs after draft review.
-                if pc.llm_checks:
-                    try:
-                        from franktheunicorn.review.checks import run_enabled_checks
+                    # LLM sub-checks (coverage, etc.) — runs once alongside draft review.
+                    if pc.llm_checks:
+                        try:
+                            from franktheunicorn.review.checks import run_enabled_checks
 
-                        check_diff = diff_fetcher.fetch(pc.owner, pc.repo, pr.number)
-                        check_drafts = run_enabled_checks(
-                            pr,
-                            check_diff,
-                            project_config=pc,
-                            operator_config=operator_config,
-                        )
-                        if check_drafts:
-                            logger.info(
-                                "  PR #%d: %d LLM check findings",
-                                pr.number,
-                                len(check_drafts),
+                            check_pr_diff = diff_fetcher.fetch(pc.owner, pc.repo, pr.number)
+                            check_drafts = run_enabled_checks(
+                                pr,
+                                check_pr_diff.raw_diff,
+                                project_config=pc,
+                                operator_config=operator_config,
                             )
-                    except Exception:
-                        logger.exception("Error in LLM checks for PR #%d", pr.number)
+                            if check_drafts:
+                                logger.info(
+                                    "  PR #%d: %d LLM check findings",
+                                    pr.number,
+                                    len(check_drafts),
+                                )
+                        except Exception:
+                            logger.exception("Error in LLM checks for PR #%d", pr.number)
 
                 # Differential test verification (§9).
                 try:

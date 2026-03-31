@@ -118,14 +118,23 @@ def _run_single_check(
     pr_context: PRContext,
     backend_config: LLMBackendConfig,
 ) -> list[ReviewFinding]:
-    """Run one check against a single LLM backend."""
+    """Run one check against a single LLM backend.
+
+    For backends that extend ``BaseLLMBackend`` we call ``_call_api`` directly
+    with the check's custom prompt.  For other backends (e.g. StubBackend) we
+    fall back to ``generate_findings`` which uses the default review prompt —
+    the findings still flow through the check pipeline.
+    """
     from franktheunicorn.review.backends import get_backend
+    from franktheunicorn.review.backends.base import BaseLLMBackend
 
     backend = get_backend(backend_config)
-    system_prompt, user_message = check.build_prompt(diff, pr_context)
-    api_key = ""
-    if hasattr(backend, "_resolve_api_key"):
-        api_key = backend._resolve_api_key()
 
-    raw_text = backend._call_api(system_prompt, user_message, api_key)
-    return check.parse_response(raw_text)
+    if isinstance(backend, BaseLLMBackend):
+        system_prompt, user_message = check.build_prompt(diff, pr_context)
+        api_key = backend._resolve_api_key()
+        raw_text = backend._call_api(system_prompt, user_message, api_key)
+        return check.parse_response(raw_text)
+
+    # Fallback for backends without _call_api (e.g. StubBackend).
+    return backend.generate_findings(diff, pr_context)
