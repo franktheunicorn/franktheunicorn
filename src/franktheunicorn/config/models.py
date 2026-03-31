@@ -61,6 +61,22 @@ class LLMBackendConfig(BaseModel):
         return v
 
 
+class SupportedAgentConfig(BaseModel):
+    """Config for a supported AI agent type in direct feedback."""
+
+    name: str = ""
+    session_pattern: str = ""
+    feedback_method: str = "url-open"  # "url-open" or "api"
+    api_endpoint_env: str = ""
+
+
+class AgentFeedbackConfig(BaseModel):
+    """Config for direct agent feedback channel (v1.25)."""
+
+    direct_session_enabled: bool = True
+    supported_agents: list[SupportedAgentConfig] = Field(default_factory=list)
+
+
 class OperatorConfig(BaseModel):
     """Top-level operator config loaded from operator.yaml."""
 
@@ -72,6 +88,7 @@ class OperatorConfig(BaseModel):
     digest_enabled: bool = False
     workspaces: dict[str, object] = Field(default_factory=dict)
     coderabbit: CodeRabbitConfig = Field(default_factory=CodeRabbitConfig)
+    agent_feedback: AgentFeedbackConfig = Field(default_factory=AgentFeedbackConfig)
     # Multiple LLM backends can run in parallel. Each produces findings
     # independently; results are combined and deduped via anti-patterns.
     llm_backends: list[LLMBackendConfig] = Field(default_factory=list)
