@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
 from franktheunicorn.data_access.base import (
     DataFetcher,
@@ -142,8 +142,8 @@ def _parse_html(
         if title_el:
             title = title_el.get_text(strip=True)
             link = title_el.find("a")
-            if link and link.get("href"):
-                href = link["href"]
+            if isinstance(link, Tag) and link.get("href"):
+                href = str(link["href"])
                 url = f"{base_url}{href}" if href.startswith("/") else href
 
         excerpt = ""
@@ -159,7 +159,7 @@ def _parse_html(
         date = ""
         date_el = entry.select_one("time")
         if date_el:
-            date = date_el.get("datetime", "")
+            date = str(date_el.get("datetime", ""))
 
         category = ""
         cat_el = entry.select_one(".category-name")

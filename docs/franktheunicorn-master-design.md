@@ -98,13 +98,15 @@ v1:     Assistant (triage + draft + learn from corrections Tier 1)
 v1.25:  Direct agent feedback channel (Claude Code / Codex sessions)
 
 v1.5:   Memory + social awareness
-          + community context search
+          + community context search (mailing lists, Discourse, Discord,
+            Perplexity, GitHub Issues, Sentry)
           + JIRA integration
-          + CodeRabbit CLI with dedup
+          + CodeRabbit CLI with fuzzy cross-source dedup
           + cross-project downstream detection
-          + confidence-gated auto-posting
-          + Comment Curator CLI
-          + CLI triage mode
+          + confidence-gated auto-posting (triple gate)
+          + Comment Curator CLI (Textual TUI)
+
+v3:     CLI triage mode (deferred from v1.5)
 
 v1.75:  Bayesian rejection model (Tier 2 learning)
           + auto-suppress low-value findings
@@ -2357,7 +2359,7 @@ review-agent serve                          # Django dev server / gunicorn
 review-agent worker start                   # background worker (or run via cron)
 review-agent worker status                  # queue depth, active reviews
 review-agent curate-voice --project spark   # Comment Curator TUI
-review-agent triage                         # CLI triage (v1.5)
+# review-agent triage                       # CLI triage (deferred to v3)
 review-agent fine-tune --project spark      # Axolotl (v2)
 ```
 
@@ -2419,9 +2421,12 @@ review-agent fine-tune --project spark      # Axolotl (v2)
 - JIRA lazy-fetch + cache
 - CodeRabbit CLI + finding-level dedup
 - Cross-project downstream impact
-- Confidence-gated auto-posting (triple gate)
-- Comment Curator CLI
-- CLI triage mode
+- Confidence-gated auto-posting (triple gate: confidence + anti-pattern + tone guard)
+- Comment Curator CLI (Textual TUI)
+- Perplexity API integration (general + technical search modes)
+- GitHub Issues context (linked + related issue search)
+- Sentry integration (error context + scoring signal)
+- CLI triage mode (deferred to v3)
 
 ### Phase 5 (v1.75): Bayesian Learning (1-2 weeks)
 - Rejection predictor (sklearn Naive Bayes / logistic regression)
@@ -2634,8 +2639,8 @@ review-agent dataset-stats --project spark              # dataset composition + 
 review-agent fine-tune --project spark [--base-model ...]
 review-agent fine-tune --project spark --eval-only
 
-# --- Triage (v1.5) ---
-review-agent triage                                    # CLI triage mode
+# --- Triage (deferred to v3) ---
+# review-agent triage                                  # CLI triage mode (v3)
 ```
 
 ---

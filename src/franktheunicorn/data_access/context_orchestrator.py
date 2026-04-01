@@ -273,8 +273,8 @@ def _fetch_github_issues(
         owner, repo = parts[-2], parts[-1]
     else:
         return None
-    keywords = query.split()[:5]
-    results = fetcher.fetch_related_issues(owner, repo, keywords)
+    keyword_str = " ".join(query.split()[:5])
+    results = fetcher.fetch_related_issues(owner, repo, keyword_str)
     if not results:
         return None
     return {
@@ -304,7 +304,7 @@ def _fetch_perplexity(
         api_key = os.environ.get(operator_config.perplexity.api_key_env, "")
     if not api_key:
         return None
-    fetcher = PerplexityFetcher(client=http_client)
+    fetcher = PerplexityFetcher()
     mode = operator_config.perplexity.mode if operator_config else "both"
     result = fetcher.fetch(api_key, query, mode=mode)
     if not result.content:
@@ -343,24 +343,18 @@ def fetch_sentry_context(
     try:
         from franktheunicorn.data_access.sentry.fetcher import SentryFetcher
 
-        client = http_client or httpx.Client()
-        close_client = http_client is None
-        try:
-            fetcher = SentryFetcher(client=client)
-            result = fetcher.fetch_issues_for_files(
-                auth_token,
-                operator_config.sentry.org_slug,
-                operator_config.sentry.project_slug,
-                changed_files[:20],
-            )
-            if result.issues:
-                cache_data = result.to_cache_dict()
-                pr.sentry_context_cache = cache_data
-                pr.save(update_fields=["sentry_context_cache", "updated_at"])
-                return result.to_prompt_context()
-        finally:
-            if close_client:
-                client.close()
+        fetcher = SentryFetcher()
+        result = fetcher.fetch_issues_for_files(
+            auth_token,
+            operator_config.sentry.org_slug,
+            operator_config.sentry.project_slug,
+            changed_files[:20],
+        )
+        if result.issues:
+            cache_data = result.to_cache_dict()
+            pr.sentry_context_cache = cache_data
+            pr.save(update_fields=["sentry_context_cache", "updated_at"])
+            return result.to_prompt_context()
     except Exception:
         logger.debug("Failed to fetch Sentry context", exc_info=True)
 
@@ -392,48 +386,54 @@ def _format_community_results(results: list[dict[str, object]]) -> str:
     if not results:
         return ""
 
+    def _get_items(src: dict[str, object], key: str) -> list[dict[str, object]]:
+        raw = src.get(key, [])
+        return list(raw) if isinstance(raw, list) else []
+
     parts: list[str] = []
     for source in results:
-        source_type = source.get("type", "unknown")
-        source_name = source.get("name", source_type)
+        source_type = str(source.get("type", "unknown"))
+        source_name = str(source.get("name", source_type))
         annotation = f"[{source_name}, unverified]"
 
         match source_type:
             case "mailing-list":
-                threads = source.get("threads", [])
+                threads = _get_items(source, "threads")
                 if threads:
                     parts.append(f"\n{annotation}")
-                    for t in threads:  # type: ignore[union-attr]
+                    for t in threads:
                         parts.append(f"  - {t.get('subject', '')} ({t.get('date', '')})")
-                        snippet = t.get("snippet", "")
+                        snippet = str(t.get("snippet", ""))
                         if snippet:
                             parts.append(f"    {snippet[:200]}")
             case "discourse":
-                posts = source.get("posts", [])
+                posts = _get_items(source, "posts")
                 if posts:
                     parts.append(f"\n{annotation}")
-                    for p in posts:  # type: ignore[union-attr]
+                    for p in posts:
                         parts.append(f"  - {p.get('title', '')} ({p.get('url', '')})")
             case "discord":
-                messages = source.get("messages", [])
+                messages = _get_items(source, "messages")
                 if messages:
                     parts.append(f"\n{annotation}")
-                    for m in messages:  # type: ignore[union-attr]
-                        parts.append(f"  - [{m.get('author', '')}] {m.get('content', '')[:200]}")
+                    for m in messages:
+                        parts.append(
+                            f"  - [{m.get('author', '')}] {str(m.get('content', ''))[:200]}"
+                        )
             case "github-issues":
-                issues = source.get("issues", [])
+                issues = _get_items(source, "issues")
                 if issues:
                     parts.append(f"\n{annotation}")
-                    for i in issues:  # type: ignore[union-attr]
+                    for item in issues:
                         parts.append(
-                            f"  - #{i.get('number', '')} {i.get('title', '')} "
-                            f"[{i.get('state', '')}]"
+                            f"  - #{item.get('number', '')} {item.get('title', '')} "
+                            f"[{item.get('state', '')}]"
                         )
             case "perplexity":
-                content = source.get("content", "")
+                content = str(source.get("content", ""))
                 if content:
                     parts.append("\n[Perplexity search, unverified]")
-                    parts.append(f"  {str(content)[:500]}")
+                    parts.append(f"  {content[:500]}")
 
     return "\n".join(parts)
 
