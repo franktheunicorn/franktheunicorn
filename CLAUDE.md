@@ -126,16 +126,22 @@ docker compose up                   # dashboard + worker
 docker compose up web               # dashboard only
 ```
 
-## Pre-Push Checks (Claude Code Hook)
+## Preflight Checks (Claude Code Hooks)
 
-Claude Code agents automatically run lint, type-check, and test checks before any `git push`. Configured in `.claude/settings.json`, the hook runs the same checks as CI:
+Claude Code hooks automatically enforce code quality at two gates:
 
+### Before every `git commit` (fast checks)
 - `ruff check src/ tests/` — linting
 - `ruff format --check src/ tests/` — formatting
 - `mypy src/franktheunicorn/` — type checking
+
+### Before every `git push` (full checks)
+- All of the above, plus:
 - `pytest -x --tb=short` — tests (fails fast, no coverage gating)
 
-If any check fails, the push is blocked and the agent must fix the issues first. The hook script lives at `.claude/hooks/pre-push-lint.sh`.
+If any check fails, the commit or push is blocked and the agent must fix the issues first. The hook script lives at `.claude/hooks/pre-push-lint.sh`.
+
+**Important for agents:** Always run `ruff check src/ tests/`, `ruff format --check src/ tests/`, and `mypy src/franktheunicorn/` after making changes and before committing. Fix all errors before staging. Do not commit code that has lint, format, or type errors — the hook will block the commit anyway, so check proactively to avoid wasted cycles.
 
 ## Version Roadmap Context
 
