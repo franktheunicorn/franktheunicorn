@@ -140,11 +140,11 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
     pr = get_object_or_404(PullRequest.objects.select_related("project"), pk=pr_id)
     drafts = ReviewDraft.objects.filter(
         pull_request=pr,
-        is_auto_suppressed=False,  # type: ignore[misc]
+        is_auto_suppressed=False,
     ).order_by("file_path", "line_number")
     suppressed_drafts = ReviewDraft.objects.filter(
         pull_request=pr,
-        is_auto_suppressed=True,  # type: ignore[misc]
+        is_auto_suppressed=True,
     ).order_by("file_path", "line_number")
     dep_changes = DependencyChange.objects.filter(pull_request=pr).order_by("package_name")
     test_runs = TestRun.objects.filter(pull_request=pr).order_by("-created_at")
@@ -433,8 +433,8 @@ def stats(request: HttpRequest) -> HttpResponse:
     posted_drafts = ReviewDraft.objects.filter(status="posted").count()
 
     # Rejection predictor stats (v1.75).
-    suppressed_count = ReviewDraft.objects.filter(is_auto_suppressed=True).count()  # type: ignore[misc]
-    scored_count = ReviewDraft.objects.filter(rejection_probability__isnull=False).count()  # type: ignore[misc]
+    suppressed_count = ReviewDraft.objects.filter(is_auto_suppressed=True).count()
+    scored_count = ReviewDraft.objects.filter(rejection_probability__isnull=False).count()
 
     return render(
         request,
