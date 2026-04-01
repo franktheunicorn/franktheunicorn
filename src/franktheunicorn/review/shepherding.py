@@ -9,8 +9,10 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
+
+from django.utils import timezone
 
 from franktheunicorn.core.models import ReviewDraft
 
@@ -159,34 +161,40 @@ def _generate_condition_alerts(pr: PullRequest) -> list[ReviewDraft]:
 
     # Rebase needed.
     if pr.mergeable is False:
-        alert = ReviewDraft.objects.create(
+        reasoning = "Detected mergeable=False from GitHub API"
+        alert, _created = ReviewDraft.objects.get_or_create(
             pull_request=pr,
-            comment_body="This PR has merge conflicts and needs a rebase.",
-            confidence=1.0,
             source="shepherding",
-            category="other",
-            severity="informational",
-            reasoning_trace="Detected mergeable=False from GitHub API",
-            status="pending",
+            reasoning_trace=reasoning,
+            defaults={
+                "comment_body": "This PR has merge conflicts and needs a rebase.",
+                "confidence": 1.0,
+                "category": "other",
+                "severity": "informational",
+                "status": "pending",
+            },
         )
         alerts.append(alert)
 
     # Staleness check.
     if pr.github_updated_at:
-        age = datetime.now(tz=UTC) - pr.github_updated_at
+        age = timezone.now() - pr.github_updated_at
         if age > timedelta(days=STALENESS_DAYS):
-            alert = ReviewDraft.objects.create(
+            reasoning = f"PR inactive for {age.days} days"
+            alert, _created = ReviewDraft.objects.get_or_create(
                 pull_request=pr,
-                comment_body=(
-                    f"This PR has had no activity for {age.days} days. "
-                    "Consider pinging reviewers or closing if no longer needed."
-                ),
-                confidence=1.0,
                 source="shepherding",
-                category="other",
-                severity="informational",
-                reasoning_trace=f"PR inactive for {age.days} days",
-                status="pending",
+                reasoning_trace=reasoning,
+                defaults={
+                    "comment_body": (
+                        f"This PR has had no activity for {age.days} days. "
+                        "Consider pinging reviewers or closing if no longer needed."
+                    ),
+                    "confidence": 1.0,
+                    "category": "other",
+                    "severity": "informational",
+                    "status": "pending",
+                },
             )
             alerts.append(alert)
 

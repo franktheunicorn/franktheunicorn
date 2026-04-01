@@ -74,8 +74,8 @@ def _next_version(models_dir: Path, project_name: str) -> int:
 class AxolotlConfigResult:
     """Result of generating an Axolotl config."""
 
-    config_path: Path
-    output_dir: Path
+    config_path: Path | None
+    output_dir: Path | None
     version: int
     config: dict[str, Any]
     error: str = ""
@@ -103,8 +103,8 @@ def generate_axolotl_config(
     train_path = dataset_dir / "train.jsonl"
     if not train_path.exists():
         return AxolotlConfigResult(
-            config_path=Path(),
-            output_dir=Path(),
+            config_path=None,
+            output_dir=None,
             version=0,
             config={},
             error=f"Training data not found at {train_path}",

@@ -247,9 +247,10 @@ def _run_shepherding_pass(
 
         try:
             # Skip if already shepherded recently (within the poll interval).
+            shepherd_throttle = operator_config.poll_interval_seconds or 300
             if (
                 pr.last_shepherded_at
-                and (timezone.now() - pr.last_shepherded_at).total_seconds() < 300
+                and (timezone.now() - pr.last_shepherded_at).total_seconds() < shepherd_throttle
             ):
                 continue
 

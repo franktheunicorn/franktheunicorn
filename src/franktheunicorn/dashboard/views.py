@@ -499,6 +499,7 @@ def merge_queue_view(request: HttpRequest) -> HttpResponse:
     from django.conf import settings
 
     from franktheunicorn.config.loader import load_project_configs
+    from franktheunicorn.config.models import ProjectConfig
     from franktheunicorn.worker.merge_queue import evaluate_merge_eligibility
 
     eligible_prs = (
@@ -507,15 +508,15 @@ def merge_queue_view(request: HttpRequest) -> HttpResponse:
         .order_by("-interest_score")[:50]
     )
 
+    # Load all project configs once and build a lookup dict.
+    configs = load_project_configs(getattr(settings, "FRANK_PROJECTS_DIR", ""))
+    config_by_project: dict[str, ProjectConfig] = {f"{c.owner}/{c.repo}": c for c in configs}
+
     pr_data: list[dict[str, object]] = []
     for pr in eligible_prs:
         # Load merge queue config for this project.
         try:
-            configs = load_project_configs(getattr(settings, "FRANK_PROJECTS_DIR", ""))
-            pc = next(
-                (c for c in configs if c.owner == pr.project.owner and c.repo == pr.project.repo),
-                None,
-            )
+            pc = config_by_project.get(f"{pr.project.owner}/{pr.project.repo}")
             if pc and pc.merge_queue.enabled:
                 eligibility = evaluate_merge_eligibility(pr, pc.merge_queue)
                 pr_data.append(
@@ -544,7 +545,8 @@ def merge_pr(request: HttpRequest, pr_id: int) -> HttpResponse:
     from django.conf import settings
 
     from franktheunicorn.config.loader import load_project_configs
-    from franktheunicorn.worker.merge_queue import execute_merge
+    from franktheunicorn.github.client import GitHubClient
+    from franktheunicorn.worker.merge_queue import evaluate_merge_eligibility, execute_merge
 
     pr = get_object_or_404(PullRequest, pk=pr_id)
 
@@ -559,7 +561,26 @@ def merge_pr(request: HttpRequest, pr_id: int) -> HttpResponse:
             "Merge queue not enabled for this project.</div>"
         )
 
-    result = execute_merge(pr, pc.merge_queue)
+    # Re-verify merge eligibility server-side before executing.
+    eligibility = evaluate_merge_eligibility(pr, pc.merge_queue)
+    if not eligibility.eligible:
+        return HttpResponse(
+            f'<div class="merge-result" style="color: #c00;">'
+            f"PR is no longer eligible for merge: {eligibility.details}</div>"
+        )
+
+    token = getattr(settings, "FRANK_GITHUB_TOKEN", "")
+    if not token:
+        return HttpResponse(
+            '<div class="merge-result" style="color: #c00;">'
+            "Cannot merge: GITHUB_TOKEN not configured.</div>"
+        )
+
+    github_client = GitHubClient(token=token)
+    try:
+        result = execute_merge(pr, pc.merge_queue, github_client=github_client)
+    finally:
+        github_client.close()
 
     if result.success:
         return HttpResponse(

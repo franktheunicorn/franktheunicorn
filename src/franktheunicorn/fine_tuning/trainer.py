@@ -124,15 +124,19 @@ def _run_axolotl_docker(config_path: Path, dataset_dir: Path) -> tuple[bool, str
     if not shutil.which("docker"):
         return False, "Docker not found on PATH"
 
+    # Resolve to absolute paths so Docker volume mounts match config references.
+    abs_dataset_dir = dataset_dir.resolve()
+    abs_config_path = config_path.resolve()
+
     cmd = [
         "docker",
         "run",
         "--gpus",
         "all",
         "-v",
-        f"{dataset_dir}:/workspace/data",
+        f"{abs_dataset_dir}:/workspace/data",
         "-v",
-        f"{config_path}:/workspace/config.yaml",
+        f"{abs_config_path}:/workspace/config.yaml",
         "winglian/axolotl:latest",
         "accelerate",
         "launch",

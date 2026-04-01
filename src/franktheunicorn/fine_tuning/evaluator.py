@@ -129,7 +129,7 @@ def evaluate_model(
         gold_text = gold.get("output", gold.get("chosen", ""))
 
         # Category accuracy.
-        pred_cat = _extract_category_from_text(pred_text)
+        pred_cat = pred.get("category") or _extract_category_from_text(pred_text)
         gold_cat = gold.get("category", _extract_category_from_text(gold_text))
         if pred_cat == gold_cat:
             category_correct += 1

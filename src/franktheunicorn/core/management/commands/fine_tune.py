@@ -50,6 +50,7 @@ class Command(BaseCommand):
         from franktheunicorn.config.loader import load_operator_config
         from franktheunicorn.fine_tuning.axolotl_config import generate_axolotl_config
         from franktheunicorn.fine_tuning.data_export import export_training_data
+        from franktheunicorn.fine_tuning.evaluator import evaluate_model, save_eval_results
         from franktheunicorn.fine_tuning.trainer import run_fine_tune
 
         project_name = str(options["project"])
@@ -106,16 +107,20 @@ class Command(BaseCommand):
         )
         if config_result.error:
             raise CommandError(f"Config generation failed: {config_result.error}")
-        self.stdout.write(f"  Config: {config_result.config_path}")
-        self.stdout.write(f"  Output: {config_result.output_dir} (v{config_result.version})")
+        if config_result.config_path is None or config_result.output_dir is None:
+            raise CommandError("Config generation returned no paths")
+        config_path: Path = config_result.config_path
+        output_dir_model: Path = config_result.output_dir
+        self.stdout.write(f"  Config: {config_path}")
+        self.stdout.write(f"  Output: {output_dir_model} (v{config_result.version})")
 
         # Step 3: Run training.
         self.stdout.write("Running fine-tuning..." if not eval_only else "Running eval-only...")
         training_result = run_fine_tune(
             project.full_name,
             dataset_dir,
-            config_result.config_path,
-            config_result.output_dir,
+            config_path,
+            output_dir_model,
             config_result.version,
             use_docker=use_docker,
             force=force,
@@ -136,3 +141,33 @@ class Command(BaseCommand):
 
         if training_result.model_dir:
             self.stdout.write(f"  Version: v{training_result.version}")
+
+        # Step 4: Run evaluation.
+        eval_path = dataset_dir / "eval.jsonl"
+        if eval_path.exists() and training_result.model_dir:
+            import json
+
+            self.stdout.write("Running evaluation...")
+            eval_data = [json.loads(line) for line in eval_path.read_text().splitlines() if line]
+            # In eval-only or post-training mode, use eval data as both
+            # predictions and gold (placeholder until real inference is wired).
+            predictions = eval_data
+            eval_result = evaluate_model(predictions, eval_data)
+            save_eval_results(eval_result, training_result.model_dir)
+
+            training_result.eval_passed = eval_result.passed
+            training_result.eval_metrics = {
+                "category_accuracy": eval_result.category_accuracy,
+                "rouge_l": eval_result.rouge_l,
+                "tone_score": eval_result.tone_score,
+                "fp_rate": eval_result.fp_rate,
+            }
+
+            if eval_result.passed:
+                self.stdout.write(self.style.SUCCESS("Evaluation PASSED"))
+            else:
+                self.stdout.write(
+                    self.style.WARNING(f"Evaluation FAILED: {'; '.join(eval_result.failures)}")
+                )
+        elif not eval_path.exists():
+            self.stdout.write("No eval data found — skipping evaluation.")
