@@ -1,4 +1,5 @@
 {% extends "dashboard/base.html" %}
+{% load static %}
 {% block title %}PRs — franktheunicorn{% endblock %}
 {% block content %}
 <div class="tab-bar">
@@ -36,6 +37,8 @@
 </ul>
 {% else %}
 <div class="empty-state">
+    <img src="{% static 'dashboard/img/bathtub.svg' %}" alt="" width="120" height="78">
+    <img src="{% static 'dashboard/img/rubber-duck.svg' %}" alt="" width="60" height="48" style="margin-top: -2rem; opacity: 0.8;">
     <p>No pull requests in the <strong>{{ active_queue }}</strong> queue.</p>
     <p>Start the worker to poll GitHub or run in mock mode.</p>
 </div>

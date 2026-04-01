@@ -6,6 +6,7 @@
     <title>{% block title %}franktheunicorn{% endblock %}</title>
     <script src="https://unpkg.com/htmx.org@1.9.12"></script>
     {% load static %}
+    <link rel="icon" type="image/svg+xml" href="{% static 'dashboard/img/duck-icon.svg' %}">
     <style>
         :root {
             --bg: #fafafa; --card: #fff; --border: #e0e0e0;
@@ -61,6 +62,8 @@
         .breakdown dt { font-weight: 600; display: inline; }
         .breakdown dd { display: inline; margin-right: 1rem; }
         .empty-state { color: #999; padding: 2rem; text-align: center; }
+        .empty-state img { display: block; margin: 0 auto 1rem; max-width: 120px; height: auto; opacity: 0.6; }
+        .empty-state p { margin-top: 0.5rem; }
         a.back-link { font-size: 0.85rem; color: var(--muted); }
         .source-badge { font-size: 0.7rem; padding: 0.1rem 0.4rem; border-radius: 3px; margin-left: 0.3rem; font-weight: 600; vertical-align: middle; }
         .source-coderabbit { background: var(--purple); color: #fff; }
@@ -88,12 +91,14 @@
         @media (max-width: 600px) {
             body { padding: 0.5rem; }
             .tab-bar a { padding: 0.4rem 0.6rem; font-size: 0.75rem; }
+            .empty-state img { max-width: 80px; }
+            header h1 img { width: 22px; height: 17px; }
         }
     </style>
 </head>
 <body>
     <header>
-        <h1><a href="/">franktheunicorn</a></h1>
+        <h1><img src="{% static 'dashboard/img/rubber-duck.svg' %}" alt="" width="28" height="22" style="vertical-align: middle; margin-right: 0.3rem;"><a href="/">franktheunicorn</a></h1>
         <nav>
             <a href="{% url 'dashboard:index' %}" {% if request.resolver_match.url_name == 'index' %}class="active"{% endif %}>Inbox</a>
             <a href="{% url 'dashboard:anti_patterns' %}" {% if request.resolver_match.url_name == 'anti_patterns' %}class="active"{% endif %}>Anti-Patterns</a>
