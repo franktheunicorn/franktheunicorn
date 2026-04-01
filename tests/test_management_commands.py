@@ -12,6 +12,7 @@ from django.core.management import call_command
 from franktheunicorn.core.models import Project
 from tests.factories import (
     OperatorActionFactory,
+    ProjectFactory,
     PullRequestFactory,
     ReviewDraftFactory,
 )
@@ -169,3 +170,62 @@ class TestTrainRejectionModelCommand:
             call_command("train_rejection_model", stdout=out)
         output = out.getvalue()
         assert "Trained" in output
+
+
+@pytest.mark.django_db
+class TestExportTrainingDataCommand:
+    def _create_actions(self, project: Project, count: int) -> None:
+        for _ in range(count):
+            pr = PullRequestFactory(project=project)
+            draft = ReviewDraftFactory(
+                pull_request=pr,
+                comment_body="Great approach. Consider adding error handling.",
+            )
+            OperatorActionFactory(
+                action_type="accept_draft",
+                review_draft=draft,
+                pull_request=pr,
+            )
+
+    def test_export_with_force(self, tmp_path: Path) -> None:
+        project = ProjectFactory(owner="test", repo="export")
+        self._create_actions(project, 5)
+        out = StringIO()
+        call_command(
+            "export_training_data",
+            "--project=test/export",
+            f"--output-dir={tmp_path / 'out'}",
+            "--force",
+            stdout=out,
+        )
+        output = out.getvalue()
+        assert "Exported" in output
+        assert (tmp_path / "out" / "train.jsonl").exists()
+
+    def test_nonexistent_project(self) -> None:
+        with pytest.raises(Exception, match="not found"):
+            call_command(
+                "export_training_data",
+                "--project=nonexistent/project",
+            )
+
+    def test_insufficient_data_without_force(self) -> None:
+        project = ProjectFactory(owner="test", repo="small")
+        self._create_actions(project, 3)
+        with pytest.raises(Exception, match="Not enough"):
+            call_command(
+                "export_training_data",
+                "--project=test/small",
+            )
+
+
+@pytest.mark.django_db
+class TestFineTuneCommand:
+    def test_export_failure_stops_pipeline(self) -> None:
+        ProjectFactory(owner="test", repo="empty")
+        with pytest.raises(Exception, match=r"Not enough|No operator"):
+            call_command("fine_tune", "--project=test/empty")
+
+    def test_nonexistent_project(self) -> None:
+        with pytest.raises(Exception, match="not found"):
+            call_command("fine_tune", "--project=nonexistent/project")
