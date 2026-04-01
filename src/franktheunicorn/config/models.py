@@ -178,6 +178,145 @@ class LLMBackendConfig(BaseModel):
         return v
 
 
+KNOWN_SCHEDULE_FREQUENCIES: frozenset[str] = frozenset({"daily", "weekly", "monthly"})
+
+KNOWN_QUANTIZATION_MODES: frozenset[str] = frozenset({"qlora-4bit", "qlora-8bit", "lora"})
+
+KNOWN_FT_PROVIDERS: frozenset[str] = frozenset(
+    {"ollama", "vllm", "llama-cpp", "modal", "runpod", "together"}
+)
+
+KNOWN_FT_SLOTS: frozenset[str] = frozenset({"first-pass", "fast", "primary", "reasoning"})
+
+KNOWN_MERGE_METHODS: frozenset[str] = frozenset({"merge", "squash", "rebase"})
+
+
+class AutoScheduleConfig(BaseModel):
+    """Config for automatic fine-tuning scheduling (v2)."""
+
+    enabled: bool = False
+    check_frequency: str = "weekly"
+    min_new_actions: int = 50
+    notify_on_completion: bool = True
+
+    @field_validator("check_frequency")
+    @classmethod
+    def frequency_must_be_known(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in KNOWN_SCHEDULE_FREQUENCIES:
+            msg = f"check_frequency must be one of: {', '.join(sorted(KNOWN_SCHEDULE_FREQUENCIES))}"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("min_new_actions")
+    @classmethod
+    def min_actions_positive(cls, v: int) -> int:
+        if v <= 0:
+            msg = "min_new_actions must be positive"
+            raise ValueError(msg)
+        return v
+
+
+class DatasetRefreshConfig(BaseModel):
+    """Config for incremental training data refresh (v2)."""
+
+    enabled: bool = True
+    frequency: str = "daily"
+
+    @field_validator("frequency")
+    @classmethod
+    def frequency_must_be_known(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in KNOWN_SCHEDULE_FREQUENCIES:
+            msg = f"frequency must be one of: {', '.join(sorted(KNOWN_SCHEDULE_FREQUENCIES))}"
+            raise ValueError(msg)
+        return v
+
+
+class FineTuningConfig(BaseModel):
+    """Config for fine-tuning pipeline (v2 — Tier 3 learning)."""
+
+    enabled: bool = False
+    default_base_model: str = "Qwen/Qwen2.5-Coder-7B-Instruct"
+    quantization: str = "qlora-4bit"
+    target_hardware: str = "3090"
+    auto_schedule: AutoScheduleConfig = Field(default_factory=AutoScheduleConfig)
+    dataset_refresh: DatasetRefreshConfig = Field(default_factory=DatasetRefreshConfig)
+
+    @field_validator("quantization")
+    @classmethod
+    def quantization_must_be_known(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in KNOWN_QUANTIZATION_MODES:
+            logger.warning(
+                "Unknown quantization mode '%s'; known: %s",
+                v,
+                ", ".join(sorted(KNOWN_QUANTIZATION_MODES)),
+            )
+        return v
+
+
+class FineTunedModelConfig(BaseModel):
+    """Config for a deployed fine-tuned model on a project (v2)."""
+
+    enabled: bool = False
+    provider: str = "ollama"
+    model: str = ""
+    endpoint: str = "http://localhost:11434"
+    slot: str = "first-pass"
+    refine_with: str = "primary"
+
+    @field_validator("provider")
+    @classmethod
+    def provider_must_be_known(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in KNOWN_FT_PROVIDERS:
+            logger.warning(
+                "Unknown fine-tuned model provider '%s'; known: %s",
+                v,
+                ", ".join(sorted(KNOWN_FT_PROVIDERS)),
+            )
+        return v
+
+    @field_validator("slot")
+    @classmethod
+    def slot_must_be_known(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in KNOWN_FT_SLOTS:
+            msg = f"slot must be one of: {', '.join(sorted(KNOWN_FT_SLOTS))}"
+            raise ValueError(msg)
+        return v
+
+
+class MergeQueueConfig(BaseModel):
+    """Config for merge queue tracking and execution (v2)."""
+
+    enabled: bool = False
+    required_approvals: int = 1
+    require_ci_pass: bool = True
+    require_no_conflicts: bool = True
+    merge_script: str = ""
+    auto_merge: bool = False
+    merge_method: str = "merge"
+
+    @field_validator("required_approvals")
+    @classmethod
+    def approvals_non_negative(cls, v: int) -> int:
+        if v < 0:
+            msg = "required_approvals must be non-negative"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("merge_method")
+    @classmethod
+    def merge_method_must_be_known(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in KNOWN_MERGE_METHODS:
+            msg = f"merge_method must be one of: {', '.join(sorted(KNOWN_MERGE_METHODS))}"
+            raise ValueError(msg)
+        return v
+
+
 class SupportedAgentConfig(BaseModel):
     """Config for a supported AI agent type in direct feedback."""
 
@@ -209,6 +348,7 @@ class OperatorConfig(BaseModel):
     agent_feedback: AgentFeedbackConfig = Field(default_factory=AgentFeedbackConfig)
     sentry: SentryConfig = Field(default_factory=SentryConfig)
     perplexity: PerplexityConfig = Field(default_factory=PerplexityConfig)
+    fine_tuning: FineTuningConfig = Field(default_factory=FineTuningConfig)
     # Multiple LLM backends can run in parallel. Each produces findings
     # independently; results are combined and deduped via anti-patterns.
     llm_backends: list[LLMBackendConfig] = Field(default_factory=list)
@@ -276,6 +416,10 @@ class ProjectConfig(BaseModel):
     copypasta_min_lines: int = 4
     copypasta_scan_extensions: list[str] = Field(default_factory=lambda: [".py"])
     copypasta_llm_enabled: bool = False
+
+    # v2 features
+    fine_tuned_model: FineTunedModelConfig = Field(default_factory=FineTunedModelConfig)
+    merge_queue: MergeQueueConfig = Field(default_factory=MergeQueueConfig)
 
     # LLM sub-checks (v1) — e.g. ["coverage"]
     llm_checks: list[str] = Field(default_factory=list)
