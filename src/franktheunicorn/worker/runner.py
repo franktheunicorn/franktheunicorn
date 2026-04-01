@@ -213,7 +213,67 @@ def _run_cycle(
 
     # Fetch dependency changelogs reusing the same HTTP client.
     _fetch_dependency_changelogs_for_cycle(all_prs, pr_to_config, diff_fetcher, diff_http)
+
+    # Shepherding pass for operator's own PRs (v2 — §2.3).
+    if operator_config is not None:
+        _run_shepherding_pass(all_prs, pr_to_config, operator_config)
+
     diff_http.close()
+
+
+def _run_shepherding_pass(
+    all_prs: list[object],
+    pr_to_config: Mapping[int, object],
+    operator_config: OperatorConfig,
+) -> None:
+    """Run shepherding on operator's own PRs with new reviewer comments."""
+    from django.utils import timezone
+
+    from franktheunicorn.config.models import ProjectConfig
+    from franktheunicorn.core.models import PullRequest as PullRequestModel
+    from franktheunicorn.review.shepherding import (
+        generate_shepherd_drafts,
+    )
+
+    for pr in all_prs:
+        if not isinstance(pr, PullRequestModel):
+            continue
+        if not pr.is_operator_pr:
+            continue
+
+        pc = pr_to_config.get(pr.pk)
+        if not isinstance(pc, ProjectConfig):
+            continue
+
+        try:
+            # Skip if already shepherded recently (within the poll interval).
+            if pr.last_shepherded_at and (
+                timezone.now() - pr.last_shepherded_at
+            ).total_seconds() < 300:
+                continue
+
+            # Check for new reviewer comments via the existing review count field.
+            # In a full implementation, this would fetch from GitHub API.
+            # For now, generate condition alerts (rebase, staleness) which
+            # don't require fetching comments.
+            drafts = generate_shepherd_drafts(
+                pr,
+                [],  # No comments fetched yet — condition alerts only.
+                operator_config,
+                pc,
+            )
+
+            if drafts:
+                logger.info(
+                    "  PR #%d: %d shepherding findings",
+                    pr.number,
+                    len(drafts),
+                )
+
+            pr.last_shepherded_at = timezone.now()
+            pr.save(update_fields=["last_shepherded_at", "updated_at"])
+        except Exception:
+            logger.exception("Error in shepherding for PR #%d", pr.number)
 
 
 def _run_coderabbit_for_pr(

@@ -189,6 +189,13 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
 # --- Finding actions (htmx) ---
 
 
+def _action_type_for_draft(draft: ReviewDraft, action: str) -> str:
+    """Return the appropriate action type based on draft source."""
+    if draft.source == "shepherding":
+        return f"{action}_shepherd"
+    return f"{action}_draft"
+
+
 @require_POST
 def approve_draft(request: HttpRequest, draft_id: int) -> HttpResponse:
     """Approve a draft finding."""
@@ -198,7 +205,7 @@ def approve_draft(request: HttpRequest, draft_id: int) -> HttpResponse:
     draft.save(update_fields=["status", "is_auto_suppressed", "updated_at"])
 
     OperatorAction.objects.create(
-        action_type="accept_draft",
+        action_type=_action_type_for_draft(draft, "accept"),
         review_draft=draft,
         pull_request=draft.pull_request,
     )
@@ -215,7 +222,7 @@ def reject_draft(request: HttpRequest, draft_id: int) -> HttpResponse:
     draft.save(update_fields=["status", "rejection_reason", "updated_at"])
 
     OperatorAction.objects.create(
-        action_type="reject_draft",
+        action_type=_action_type_for_draft(draft, "reject"),
         review_draft=draft,
         pull_request=draft.pull_request,
         notes=reason,
@@ -245,7 +252,7 @@ def edit_draft(request: HttpRequest, draft_id: int) -> HttpResponse:
         draft.save(update_fields=["status", "edited_body", "updated_at"])
 
         OperatorAction.objects.create(
-            action_type="edit_draft",
+            action_type=_action_type_for_draft(draft, "edit"),
             review_draft=draft,
             pull_request=draft.pull_request,
         )
@@ -450,6 +457,16 @@ def stats(request: HttpRequest) -> HttpResponse:
     suppressed_count = ReviewDraft.objects.filter(is_auto_suppressed=True).count()
     scored_count = ReviewDraft.objects.filter(rejection_probability__isnull=False).count()
 
+    # Shepherding stats (v2).
+    shepherd_actions = OperatorAction.objects.filter(
+        action_type__in=["accept_shepherd", "reject_shepherd", "edit_shepherd"],
+    )
+    shepherd_total = shepherd_actions.count()
+    shepherd_rejected = shepherd_actions.filter(action_type="reject_shepherd").count()
+    shepherd_rejection_rate = (
+        shepherd_rejected / shepherd_total if shepherd_total > 0 else 0.0
+    )
+
     return render(
         request,
         "dashboard/stats.html",
@@ -463,5 +480,8 @@ def stats(request: HttpRequest) -> HttpResponse:
             "posted_drafts": posted_drafts,
             "suppressed_count": suppressed_count,
             "scored_count": scored_count,
+            "shepherd_total": shepherd_total,
+            "shepherd_rejected": shepherd_rejected,
+            "shepherd_rejection_rate": shepherd_rejection_rate,
         },
     )
