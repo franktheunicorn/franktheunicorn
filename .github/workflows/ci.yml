@@ -70,3 +70,43 @@ jobs:
 
       - name: Build worker image
         run: docker build -f docker/Dockerfile --target worker .
+
+  docker-compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start services
+        run: docker compose up -d --build
+
+      - name: Wait for web to be healthy
+        run: |
+          for i in $(seq 1 30); do
+            if docker compose exec -T web python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/')"; then
+              echo "Web service is healthy"
+              exit 0
+            fi
+            echo "Waiting for web service... ($i/30)"
+            sleep 5
+          done
+          echo "Web service failed to become healthy"
+          docker compose logs
+          exit 1
+
+      - name: Verify root page renders
+        run: |
+          status=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/)
+          if [ "$status" != "200" ]; then
+            echo "Root page returned HTTP $status, expected 200"
+            docker compose logs
+            exit 1
+          fi
+          echo "Root page returned HTTP 200"
+
+      - name: Show logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
