@@ -468,9 +468,7 @@ def stats(request: HttpRequest) -> HttpResponse:
     )
     shepherd_total = shepherd_actions.count()
     shepherd_rejected = shepherd_actions.filter(action_type="reject_shepherd").count()
-    shepherd_rejection_rate = (
-        shepherd_rejected / shepherd_total if shepherd_total > 0 else 0.0
-    )
+    shepherd_rejection_rate = shepherd_rejected / shepherd_total if shepherd_total > 0 else 0.0
 
     return render(
         request,
@@ -503,31 +501,33 @@ def merge_queue_view(request: HttpRequest) -> HttpResponse:
     from franktheunicorn.config.loader import load_project_configs
     from franktheunicorn.worker.merge_queue import evaluate_merge_eligibility
 
-    eligible_prs = PullRequest.objects.filter(
-        state="open", is_operator_pr=True
-    ).select_related("project").order_by("-interest_score")[:50]
+    eligible_prs = (
+        PullRequest.objects.filter(state="open", is_operator_pr=True)
+        .select_related("project")
+        .order_by("-interest_score")[:50]
+    )
 
     pr_data: list[dict[str, object]] = []
     for pr in eligible_prs:
         # Load merge queue config for this project.
         try:
-            configs = load_project_configs(
-                getattr(settings, "FRANK_PROJECTS_DIR", "")
-            )
+            configs = load_project_configs(getattr(settings, "FRANK_PROJECTS_DIR", ""))
             pc = next(
                 (c for c in configs if c.owner == pr.project.owner and c.repo == pr.project.repo),
                 None,
             )
             if pc and pc.merge_queue.enabled:
                 eligibility = evaluate_merge_eligibility(pr, pc.merge_queue)
-                pr_data.append({
-                    "pr": pr,
-                    "eligible": eligibility.eligible,
-                    "ci_pass": eligibility.ci_pass,
-                    "approvals_met": eligibility.approvals_met,
-                    "no_conflicts": eligibility.no_conflicts,
-                    "details": eligibility.details,
-                })
+                pr_data.append(
+                    {
+                        "pr": pr,
+                        "eligible": eligibility.eligible,
+                        "ci_pass": eligibility.ci_pass,
+                        "approvals_met": eligibility.approvals_met,
+                        "no_conflicts": eligibility.no_conflicts,
+                        "details": eligibility.details,
+                    }
+                )
         except Exception:
             logger.debug("Error loading merge config for %s", pr.project.full_name)
 
@@ -567,6 +567,5 @@ def merge_pr(request: HttpRequest, pr_id: int) -> HttpResponse:
             f"Merged PR #{pr.number} via {result.method}.</div>"
         )
     return HttpResponse(
-        f'<div class="merge-result" style="color: #c00;">'
-        f"Merge failed: {result.error}</div>"
+        f'<div class="merge-result" style="color: #c00;">Merge failed: {result.error}</div>'
     )

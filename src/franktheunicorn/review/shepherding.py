@@ -105,23 +105,24 @@ def generate_shepherd_drafts(
         prompt = _build_shepherd_prompt(comment, pr, project_config)
 
         try:
-            # Use a simple system prompt for shepherding.
-            system = (
-                "You are helping a PR author respond to reviewer feedback. "
-                "Be concise, professional, and constructive. "
-                "If you agree with the reviewer, say so and mention the fix. "
-                "If you disagree, explain your reasoning clearly."
+            from franktheunicorn.review.backends.base import PRContext
+
+            # Build a minimal PRContext for the backend's generate_findings call.
+            shepherd_context = PRContext(
+                pr_title=pr.title,
+                pr_body=prompt,
+                pr_author=pr.author,
+                pr_number=pr.number,
+                project_name=pr.project.full_name,
+                review_context=project_config.review_context,
+                review_style="concise and helpful",
+                tone=project_config.tone,
+                test_expectations="",
+                governance=project_config.governance,
             )
-            from franktheunicorn.review.backends.base import parse_llm_response
 
-            raw = backend._call_api(system, prompt, backend._resolve_api_key())  # type: ignore[union-attr]
-            # For shepherding, the raw text IS the response (not JSON findings).
-            response_text = raw.strip()
-
-            # If the backend returned JSON (stub mode), extract text.
-            if response_text.startswith("{") or response_text.startswith("["):
-                findings = parse_llm_response(response_text)
-                response_text = findings[0].body if findings else "Thank you for the feedback."
+            findings = backend.generate_findings("", shepherd_context)
+            response_text = findings[0].body if findings else "Thank you for the feedback."
 
         except Exception:
             logger.debug("LLM call failed for shepherding, using placeholder.")

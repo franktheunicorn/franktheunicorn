@@ -247,9 +247,10 @@ def _run_shepherding_pass(
 
         try:
             # Skip if already shepherded recently (within the poll interval).
-            if pr.last_shepherded_at and (
-                timezone.now() - pr.last_shepherded_at
-            ).total_seconds() < 300:
+            if (
+                pr.last_shepherded_at
+                and (timezone.now() - pr.last_shepherded_at).total_seconds() < 300
+            ):
                 continue
 
             # Check for new reviewer comments via the existing review count field.

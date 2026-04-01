@@ -152,7 +152,7 @@ def execute_merge_api(
                 error="GitHub client not available (mock mode?)",
             )
 
-        response = github_client.client.put(
+        response = github_client._client.put(
             f"https://api.github.com/repos/{pr.project.full_name}/pulls/{pr.number}/merge",
             json={"merge_method": config.merge_method},
         )
