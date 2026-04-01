@@ -64,3 +64,24 @@ posting:
   mode: draft-only  # Change to "confidence-gated" to enable auto-posting
   confidence_threshold: 0.85
   bot_token_env: "GITHUB_TOKEN_BOT"
+
+# --- v2 features ---
+
+# Fine-tuned model — deployed after running `python manage.py fine_tune`
+# fine_tuned_model:
+#   enabled: true
+#   provider: "ollama"
+#   model: "franktheunicorn-spark-v1"
+#   endpoint: "http://localhost:11434"
+#   slot: "first-pass"       # first-pass | fast | primary | reasoning
+#   refine_with: "primary"   # which backend refines the first-pass output
+
+# Merge queue — track and merge PRs meeting configurable criteria
+# merge_queue:
+#   enabled: true
+#   required_approvals: 2
+#   require_ci_pass: true
+#   require_no_conflicts: true
+#   merge_script: "/path/to/merge_spark_pr.py"  # custom merge script
+#   auto_merge: false
+#   merge_method: "merge"    # merge | squash | rebase

@@ -101,6 +101,17 @@ class PullRequest(models.Model):
     # Queue routing (§2.2)
     queue = models.CharField(max_length=50, choices=QUEUE_CHOICES, default="review")
 
+    # Shepherding (v2 — §2.3)
+    last_shepherded_at = models.DateTimeField(null=True, blank=True)
+    reviewer_comment_count = models.IntegerField(default=0)
+
+    # Merge queue (v2)
+    ci_status = models.CharField(max_length=20, blank=True, default="")
+    approval_count = models.IntegerField(default=0)
+    merge_queue_eligible = models.BooleanField(default=False)
+    merged_at = models.DateTimeField(null=True, blank=True)
+    merged_by = models.CharField(max_length=255, blank=True, default="")
+
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
     github_created_at = models.DateTimeField(null=True, blank=True)
@@ -267,6 +278,10 @@ class OperatorAction(models.Model):
         ("edit_draft", "Edit Draft"),
         ("dismiss_pr", "Dismiss PR"),
         ("flag_anti_pattern", "Flag Anti-Pattern"),
+        # Shepherding actions (v2 — §2.3)
+        ("accept_shepherd", "Accept Shepherd Draft"),
+        ("reject_shepherd", "Reject Shepherd Draft"),
+        ("edit_shepherd", "Edit Shepherd Draft"),
     ]
     action_type = models.CharField(max_length=50, choices=ACTION_CHOICES)
     review_draft = models.ForeignKey(

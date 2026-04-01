@@ -29,6 +29,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+fine-tuning = [
+    "axolotl>=0.4",
+    "rouge-score>=0.1.2",
+]
 dev = [
     "pytest>=8.0,<9.0",
     "pytest-django>=4.8,<5.0",

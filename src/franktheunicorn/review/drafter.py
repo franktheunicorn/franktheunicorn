@@ -237,6 +237,32 @@ def create_drafts_from_findings(
     return drafts
 
 
+def _maybe_inject_fine_tuned_model(
+    backend_configs: list[LLMBackendConfig],
+    project_config: ProjectConfig,
+) -> list[LLMBackendConfig]:
+    """Inject a fine-tuned model backend if the project has one enabled.
+
+    The fine-tuned model is inserted at the beginning of the backend list,
+    acting as the first-pass reviewer. Other backends still run for coverage.
+    """
+    ft_config = project_config.fine_tuned_model
+    if not ft_config.enabled or not ft_config.model:
+        return backend_configs
+
+    from franktheunicorn.config.models import LLMBackendConfig
+
+    ft_backend = LLMBackendConfig(
+        provider=ft_config.provider,
+        model=ft_config.model,
+        base_url=ft_config.endpoint,
+        temperature=0.3,
+    )
+
+    # Insert at the beginning (first-pass slot).
+    return [ft_backend, *backend_configs]
+
+
 def _run_single_backend(
     backend_config: LLMBackendConfig,
     diff: str,
@@ -282,12 +308,15 @@ def draft_review(
     diff = _get_pr_diff(pr)
 
     # Resolve which backends to run.
-    backend_configs = operator_config.llm_backends
+    backend_configs = list(operator_config.llm_backends)
     if not backend_configs:
         # No backends configured — use stub for demo/test mode.
         from franktheunicorn.config.models import LLMBackendConfig
 
         backend_configs = [LLMBackendConfig()]
+
+    # Inject fine-tuned model if configured for this project (v2).
+    backend_configs = _maybe_inject_fine_tuned_model(backend_configs, project_config)
 
     # Collect findings from all backends.
     all_findings: list[tuple[str, ReviewFinding]] = []

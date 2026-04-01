@@ -1,0 +1,231 @@
+---
+# franktheunicorn K8s deployment manifest (v2)
+# Basic deployment: web (Django) + worker
+# Usage: kubectl apply -f deploy.yaml
+# Requires: FRANK_GITHUB_TOKEN and ANTHROPIC_API_KEY secrets
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: franktheunicorn
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: frank-config
+  namespace: franktheunicorn
+data:
+  DJANGO_SETTINGS_MODULE: "franktheunicorn.settings"
+  FRANK_DATA_DIR: "/data"
+  FRANK_MOCK_MODE: "false"
+  FRANK_POLL_INTERVAL: "300"
+  DJANGO_DEBUG: "false"
+  DJANGO_ALLOWED_HOSTS: "*"
+
+---
+# Create this secret manually:
+# kubectl -n franktheunicorn create secret generic frank-secrets \
+#   --from-literal=FRANK_GITHUB_TOKEN=ghp_... \
+#   --from-literal=ANTHROPIC_API_KEY=sk-ant-...
+apiVersion: v1
+kind: Secret
+metadata:
+  name: frank-secrets
+  namespace: franktheunicorn
+type: Opaque
+data: {}
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: frank-data
+  namespace: franktheunicorn
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frank-web
+  namespace: franktheunicorn
+  labels:
+    app: franktheunicorn
+    component: web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: franktheunicorn
+      component: web
+  template:
+    metadata:
+      labels:
+        app: franktheunicorn
+        component: web
+    spec:
+      containers:
+        - name: web
+          image: franktheunicorn:latest
+          command: ["python", "manage.py", "runserver", "0.0.0.0:8000"]
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: frank-config
+            - secretRef:
+                name: frank-secrets
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: frank-data
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frank-worker
+  namespace: franktheunicorn
+  labels:
+    app: franktheunicorn
+    component: worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: franktheunicorn
+      component: worker
+  template:
+    metadata:
+      labels:
+        app: franktheunicorn
+        component: worker
+    spec:
+      containers:
+        - name: worker
+          image: franktheunicorn:latest
+          command: ["python", "-m", "franktheunicorn.worker.runner"]
+          envFrom:
+            - configMapRef:
+                name: frank-config
+            - secretRef:
+                name: frank-secrets
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: frank-data
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frank-web
+  namespace: franktheunicorn
+spec:
+  selector:
+    app: franktheunicorn
+    component: web
+  ports:
+    - port: 80
+      targetPort: 8000
+  type: ClusterIP
+
+---
+# Optional: Postgres deployment (uncomment to use instead of SQLite)
+# Note: when using Postgres, set DATABASE_URL in the ConfigMap
+#
+# apiVersion: apps/v1
+# kind: StatefulSet
+# metadata:
+#   name: frank-postgres
+#   namespace: franktheunicorn
+# spec:
+#   serviceName: frank-postgres
+#   replicas: 1
+#   selector:
+#     matchLabels:
+#       app: franktheunicorn
+#       component: postgres
+#   template:
+#     metadata:
+#       labels:
+#         app: franktheunicorn
+#         component: postgres
+#     spec:
+#       containers:
+#         - name: postgres
+#           image: postgres:16-alpine
+#           env:
+#             - name: POSTGRES_DB
+#               value: franktheunicorn
+#             - name: POSTGRES_USER
+#               value: frank
+#             - name: POSTGRES_PASSWORD
+#               valueFrom:
+#                 secretKeyRef:
+#                   name: frank-secrets
+#                   key: POSTGRES_PASSWORD
+#           ports:
+#             - containerPort: 5432
+#           volumeMounts:
+#             - name: pgdata
+#               mountPath: /var/lib/postgresql/data
+#   volumeClaimTemplates:
+#     - metadata:
+#         name: pgdata
+#       spec:
+#         accessModes: ["ReadWriteOnce"]
+#         resources:
+#           requests:
+#             storage: 5Gi
+#
+# ---
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   name: frank-postgres
+#   namespace: franktheunicorn
+# spec:
+#   selector:
+#     app: franktheunicorn
+#     component: postgres
+#   ports:
+#     - port: 5432

@@ -87,3 +87,23 @@ digest_enabled: false
 #   enabled: true
 #   cli_path: "coderabbit"
 #   extra_args: []
+
+# --- Fine-Tuning Pipeline (v2) ---
+# Train a personal model on your review feedback using Axolotl QLoRA.
+# Requires 200+ operator actions per project and a GPU (3090 recommended).
+# fine_tuning:
+#   enabled: true
+#   default_base_model: "Qwen/Qwen2.5-Coder-7B-Instruct"
+#   quantization: "qlora-4bit"   # qlora-4bit | qlora-8bit | lora
+#   target_hardware: "3090"
+#   auto_schedule:
+#     enabled: false
+#     check_frequency: "weekly"  # daily | weekly | monthly
+#     min_new_actions: 50
+#   dataset_refresh:
+#     enabled: true
+#     frequency: "daily"
+#
+# CLI usage:
+#   python manage.py export_training_data --project apache/spark
+#   python manage.py fine_tune --project apache/spark

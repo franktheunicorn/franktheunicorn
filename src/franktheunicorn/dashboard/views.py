@@ -189,6 +189,13 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
 # --- Finding actions (htmx) ---
 
 
+def _action_type_for_draft(draft: ReviewDraft, action: str) -> str:
+    """Return the appropriate action type based on draft source."""
+    if draft.source == "shepherding":
+        return f"{action}_shepherd"
+    return f"{action}_draft"
+
+
 @require_POST
 def approve_draft(request: HttpRequest, draft_id: int) -> HttpResponse:
     """Approve a draft finding."""
@@ -198,7 +205,7 @@ def approve_draft(request: HttpRequest, draft_id: int) -> HttpResponse:
     draft.save(update_fields=["status", "is_auto_suppressed", "updated_at"])
 
     OperatorAction.objects.create(
-        action_type="accept_draft",
+        action_type=_action_type_for_draft(draft, "accept"),
         review_draft=draft,
         pull_request=draft.pull_request,
     )
@@ -215,7 +222,7 @@ def reject_draft(request: HttpRequest, draft_id: int) -> HttpResponse:
     draft.save(update_fields=["status", "rejection_reason", "updated_at"])
 
     OperatorAction.objects.create(
-        action_type="reject_draft",
+        action_type=_action_type_for_draft(draft, "reject"),
         review_draft=draft,
         pull_request=draft.pull_request,
         notes=reason,
@@ -245,7 +252,7 @@ def edit_draft(request: HttpRequest, draft_id: int) -> HttpResponse:
         draft.save(update_fields=["status", "edited_body", "updated_at"])
 
         OperatorAction.objects.create(
-            action_type="edit_draft",
+            action_type=_action_type_for_draft(draft, "edit"),
             review_draft=draft,
             pull_request=draft.pull_request,
         )
@@ -446,9 +453,22 @@ def stats(request: HttpRequest) -> HttpResponse:
     total_drafts = ReviewDraft.objects.count()
     posted_drafts = ReviewDraft.objects.filter(status="posted").count()
 
+    # Merge queue stats (v2).
+    merge_eligible_count = PullRequest.objects.filter(
+        state="open", merge_queue_eligible=True
+    ).count()
+
     # Rejection predictor stats (v1.75).
     suppressed_count = ReviewDraft.objects.filter(is_auto_suppressed=True).count()
     scored_count = ReviewDraft.objects.filter(rejection_probability__isnull=False).count()
+
+    # Shepherding stats (v2).
+    shepherd_actions = OperatorAction.objects.filter(
+        action_type__in=["accept_shepherd", "reject_shepherd", "edit_shepherd"],
+    )
+    shepherd_total = shepherd_actions.count()
+    shepherd_rejected = shepherd_actions.filter(action_type="reject_shepherd").count()
+    shepherd_rejection_rate = shepherd_rejected / shepherd_total if shepherd_total > 0 else 0.0
 
     return render(
         request,
@@ -463,5 +483,110 @@ def stats(request: HttpRequest) -> HttpResponse:
             "posted_drafts": posted_drafts,
             "suppressed_count": suppressed_count,
             "scored_count": scored_count,
+            "shepherd_total": shepherd_total,
+            "shepherd_rejected": shepherd_rejected,
+            "shepherd_rejection_rate": shepherd_rejection_rate,
+            "merge_eligible_count": merge_eligible_count,
         },
+    )
+
+
+# --- Merge Queue (v2) ---
+
+
+def merge_queue_view(request: HttpRequest) -> HttpResponse:
+    """Show PRs eligible for merging."""
+    from django.conf import settings
+
+    from franktheunicorn.config.loader import load_project_configs
+    from franktheunicorn.config.models import ProjectConfig
+    from franktheunicorn.worker.merge_queue import evaluate_merge_eligibility
+
+    eligible_prs = (
+        PullRequest.objects.filter(state="open", is_operator_pr=True)
+        .select_related("project")
+        .order_by("-interest_score")[:50]
+    )
+
+    # Load all project configs once and build a lookup dict.
+    configs = load_project_configs(getattr(settings, "FRANK_PROJECTS_DIR", ""))
+    config_by_project: dict[str, ProjectConfig] = {f"{c.owner}/{c.repo}": c for c in configs}
+
+    pr_data: list[dict[str, object]] = []
+    for pr in eligible_prs:
+        # Load merge queue config for this project.
+        try:
+            pc = config_by_project.get(f"{pr.project.owner}/{pr.project.repo}")
+            if pc and pc.merge_queue.enabled:
+                eligibility = evaluate_merge_eligibility(pr, pc.merge_queue)
+                pr_data.append(
+                    {
+                        "pr": pr,
+                        "eligible": eligibility.eligible,
+                        "ci_pass": eligibility.ci_pass,
+                        "approvals_met": eligibility.approvals_met,
+                        "no_conflicts": eligibility.no_conflicts,
+                        "details": eligibility.details,
+                    }
+                )
+        except Exception:
+            logger.debug("Error loading merge config for %s", pr.project.full_name)
+
+    return render(
+        request,
+        "dashboard/merge_queue.html",
+        {"pr_data": pr_data},
+    )
+
+
+@require_POST
+def merge_pr(request: HttpRequest, pr_id: int) -> HttpResponse:
+    """Execute a merge for a PR."""
+    from django.conf import settings
+
+    from franktheunicorn.config.loader import load_project_configs
+    from franktheunicorn.github.client import GitHubClient
+    from franktheunicorn.worker.merge_queue import evaluate_merge_eligibility, execute_merge
+
+    pr = get_object_or_404(PullRequest, pk=pr_id)
+
+    configs = load_project_configs(getattr(settings, "FRANK_PROJECTS_DIR", ""))
+    pc = next(
+        (c for c in configs if c.owner == pr.project.owner and c.repo == pr.project.repo),
+        None,
+    )
+    if not pc or not pc.merge_queue.enabled:
+        return HttpResponse(
+            '<div class="merge-result" style="color: #c00;">'
+            "Merge queue not enabled for this project.</div>"
+        )
+
+    # Re-verify merge eligibility server-side before executing.
+    eligibility = evaluate_merge_eligibility(pr, pc.merge_queue)
+    if not eligibility.eligible:
+        return HttpResponse(
+            f'<div class="merge-result" style="color: #c00;">'
+            f"PR is no longer eligible for merge: {eligibility.details}</div>"
+        )
+
+    token = getattr(settings, "FRANK_GITHUB_TOKEN", "")
+    if not token:
+        return HttpResponse(
+            '<div class="merge-result" style="color: #c00;">'
+            "Cannot merge: GITHUB_TOKEN not configured.</div>"
+        )
+
+    github_client = GitHubClient(token=token)
+    try:
+        result = execute_merge(pr, pc.merge_queue, github_client=github_client)
+    finally:
+        github_client.close()
+
+    if result.success:
+        return HttpResponse(
+            f'<div class="merge-result" style="color: #2e7d32;">'
+            f"Merged PR #{pr.number} via {result.method}.</div>"
+        )
+    return HttpResponse(
+        f'<div class="merge-result" style="color: #c00;">Merge failed: {result.error}</div>'
     )

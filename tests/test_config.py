@@ -576,3 +576,207 @@ class TestOperatorConfigV15:
             perplexity={"enabled": True, "mode": "technical"},
         )
         assert config.perplexity.mode == "technical"
+
+
+# --- v2 Config Models ---
+
+
+class TestFineTuningConfig:
+    def test_defaults(self) -> None:
+        from franktheunicorn.config.models import FineTuningConfig
+
+        config = FineTuningConfig()
+        assert config.enabled is False
+        assert config.default_base_model == "Qwen/Qwen2.5-Coder-7B-Instruct"
+        assert config.quantization == "qlora-4bit"
+        assert config.target_hardware == "3090"
+        assert config.auto_schedule.enabled is False
+        assert config.dataset_refresh.enabled is True
+
+    def test_enabled_with_custom_model(self) -> None:
+        from franktheunicorn.config.models import FineTuningConfig
+
+        config = FineTuningConfig(
+            enabled=True,
+            default_base_model="mistralai/Mistral-7B-v0.3",
+            quantization="qlora-8bit",
+        )
+        assert config.enabled is True
+        assert config.default_base_model == "mistralai/Mistral-7B-v0.3"
+        assert config.quantization == "qlora-8bit"
+
+    def test_unknown_quantization_warns(self, caplog: pytest.LogCaptureFixture) -> None:
+        from franktheunicorn.config.models import FineTuningConfig
+
+        with caplog.at_level(logging.WARNING):
+            config = FineTuningConfig(quantization="unknown-mode")
+        assert config.quantization == "unknown-mode"
+        assert "Unknown quantization mode" in caplog.text
+
+    def test_auto_schedule_with_values(self) -> None:
+        from franktheunicorn.config.models import AutoScheduleConfig, FineTuningConfig
+
+        config = FineTuningConfig(
+            auto_schedule=AutoScheduleConfig(
+                enabled=True,
+                check_frequency="daily",
+                min_new_actions=100,
+            )
+        )
+        assert config.auto_schedule.enabled is True
+        assert config.auto_schedule.check_frequency == "daily"
+        assert config.auto_schedule.min_new_actions == 100
+
+    def test_auto_schedule_invalid_frequency(self) -> None:
+        from franktheunicorn.config.models import AutoScheduleConfig
+
+        with pytest.raises(ValidationError, match="check_frequency"):
+            AutoScheduleConfig(check_frequency="hourly")
+
+    def test_auto_schedule_invalid_min_actions(self) -> None:
+        from franktheunicorn.config.models import AutoScheduleConfig
+
+        with pytest.raises(ValidationError, match="min_new_actions"):
+            AutoScheduleConfig(min_new_actions=0)
+
+    def test_dataset_refresh_invalid_frequency(self) -> None:
+        from franktheunicorn.config.models import DatasetRefreshConfig
+
+        with pytest.raises(ValidationError, match="frequency"):
+            DatasetRefreshConfig(frequency="hourly")
+
+    def test_operator_config_has_fine_tuning(self) -> None:
+        config = OperatorConfig()
+        assert config.fine_tuning.enabled is False
+        assert config.fine_tuning.default_base_model == "Qwen/Qwen2.5-Coder-7B-Instruct"
+
+    def test_operator_config_from_dict(self) -> None:
+        config = OperatorConfig(
+            fine_tuning={
+                "enabled": True,
+                "default_base_model": "mistralai/Mistral-7B-v0.3",
+                "auto_schedule": {"enabled": True, "check_frequency": "monthly"},
+            },
+        )
+        assert config.fine_tuning.enabled is True
+        assert config.fine_tuning.auto_schedule.check_frequency == "monthly"
+
+
+class TestFineTunedModelConfig:
+    def test_defaults(self) -> None:
+        from franktheunicorn.config.models import FineTunedModelConfig
+
+        config = FineTunedModelConfig()
+        assert config.enabled is False
+        assert config.provider == "ollama"
+        assert config.endpoint == "http://localhost:11434"
+        assert config.slot == "first-pass"
+        assert config.refine_with == "primary"
+
+    def test_configured(self) -> None:
+        from franktheunicorn.config.models import FineTunedModelConfig
+
+        config = FineTunedModelConfig(
+            enabled=True,
+            provider="vllm",
+            model="franktheunicorn-spark-v1",
+            endpoint="http://localhost:8000",
+            slot="primary",
+        )
+        assert config.enabled is True
+        assert config.provider == "vllm"
+        assert config.model == "franktheunicorn-spark-v1"
+
+    def test_unknown_provider_warns(self, caplog: pytest.LogCaptureFixture) -> None:
+        from franktheunicorn.config.models import FineTunedModelConfig
+
+        with caplog.at_level(logging.WARNING):
+            config = FineTunedModelConfig(provider="unknown-provider")
+        assert config.provider == "unknown-provider"
+        assert "Unknown fine-tuned model provider" in caplog.text
+
+    def test_invalid_slot_rejected(self) -> None:
+        from franktheunicorn.config.models import FineTunedModelConfig
+
+        with pytest.raises(ValidationError, match="slot"):
+            FineTunedModelConfig(slot="invalid-slot")
+
+    def test_project_config_has_fine_tuned_model(self) -> None:
+        config = ProjectConfig(owner="apache", repo="spark")
+        assert config.fine_tuned_model.enabled is False
+
+    def test_project_config_from_dict(self) -> None:
+        config = ProjectConfig(
+            owner="apache",
+            repo="spark",
+            fine_tuned_model={
+                "enabled": True,
+                "provider": "ollama",
+                "model": "franktheunicorn-spark-v1",
+            },
+        )
+        assert config.fine_tuned_model.enabled is True
+        assert config.fine_tuned_model.model == "franktheunicorn-spark-v1"
+
+
+class TestMergeQueueConfig:
+    def test_defaults(self) -> None:
+        from franktheunicorn.config.models import MergeQueueConfig
+
+        config = MergeQueueConfig()
+        assert config.enabled is False
+        assert config.required_approvals == 1
+        assert config.require_ci_pass is True
+        assert config.require_no_conflicts is True
+        assert config.merge_script == ""
+        assert config.auto_merge is False
+        assert config.merge_method == "merge"
+
+    def test_configured_with_merge_script(self) -> None:
+        from franktheunicorn.config.models import MergeQueueConfig
+
+        config = MergeQueueConfig(
+            enabled=True,
+            required_approvals=2,
+            merge_script="/path/to/merge_spark_pr.py",
+            merge_method="squash",
+        )
+        assert config.enabled is True
+        assert config.required_approvals == 2
+        assert config.merge_script == "/path/to/merge_spark_pr.py"
+        assert config.merge_method == "squash"
+
+    def test_negative_approvals_rejected(self) -> None:
+        from franktheunicorn.config.models import MergeQueueConfig
+
+        with pytest.raises(ValidationError, match="required_approvals"):
+            MergeQueueConfig(required_approvals=-1)
+
+    def test_zero_approvals_accepted(self) -> None:
+        from franktheunicorn.config.models import MergeQueueConfig
+
+        config = MergeQueueConfig(required_approvals=0)
+        assert config.required_approvals == 0
+
+    def test_invalid_merge_method(self) -> None:
+        from franktheunicorn.config.models import MergeQueueConfig
+
+        with pytest.raises(ValidationError, match="merge_method"):
+            MergeQueueConfig(merge_method="fast-forward")
+
+    def test_project_config_has_merge_queue(self) -> None:
+        config = ProjectConfig(owner="apache", repo="spark")
+        assert config.merge_queue.enabled is False
+
+    def test_project_config_from_dict(self) -> None:
+        config = ProjectConfig(
+            owner="apache",
+            repo="spark",
+            merge_queue={
+                "enabled": True,
+                "required_approvals": 2,
+                "merge_script": "/opt/merge_spark_pr.py",
+            },
+        )
+        assert config.merge_queue.enabled is True
+        assert config.merge_queue.merge_script == "/opt/merge_spark_pr.py"
