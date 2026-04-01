@@ -12,6 +12,7 @@ from franktheunicorn.review.antipattern import check_against_anti_patterns, reco
 from franktheunicorn.review.backends.base import ReviewFinding
 from franktheunicorn.review.drafter import (
     _extract_code_context,
+    _maybe_inject_fine_tuned_model,
     create_drafts_from_findings,
     draft_review,
 )
@@ -130,6 +131,52 @@ class TestAntiPattern:
         )
         matches = check_against_anti_patterns("Great improvement!", db_project)
         assert len(matches) == 0
+
+
+class TestFineTunedModelInjection:
+    def test_no_injection_when_disabled(self) -> None:
+        from franktheunicorn.config.models import LLMBackendConfig
+
+        backends = [LLMBackendConfig(provider="stub")]
+        config = ProjectConfig(owner="x", repo="y")
+
+        result = _maybe_inject_fine_tuned_model(backends, config)
+        assert len(result) == 1
+        assert result[0].provider == "stub"
+
+    def test_injects_when_enabled(self) -> None:
+        from franktheunicorn.config.models import FineTunedModelConfig, LLMBackendConfig
+
+        backends = [LLMBackendConfig(provider="claude")]
+        config = ProjectConfig(
+            owner="x",
+            repo="y",
+            fine_tuned_model=FineTunedModelConfig(
+                enabled=True,
+                provider="ollama",
+                model="franktheunicorn-spark-v1",
+                endpoint="http://localhost:11434",
+            ),
+        )
+
+        result = _maybe_inject_fine_tuned_model(backends, config)
+        assert len(result) == 2
+        assert result[0].provider == "ollama"
+        assert result[0].model == "franktheunicorn-spark-v1"
+        assert result[1].provider == "claude"
+
+    def test_no_injection_without_model_name(self) -> None:
+        from franktheunicorn.config.models import FineTunedModelConfig, LLMBackendConfig
+
+        backends = [LLMBackendConfig(provider="stub")]
+        config = ProjectConfig(
+            owner="x",
+            repo="y",
+            fine_tuned_model=FineTunedModelConfig(enabled=True, model=""),
+        )
+
+        result = _maybe_inject_fine_tuned_model(backends, config)
+        assert len(result) == 1  # not injected
 
 
 class TestExtractCodeContext:
