@@ -28,3 +28,39 @@ frequent_contributors:
   - "viirya"
 
 enabled: true
+
+# --- v1.5 features ---
+
+# JIRA integration — fetch ticket context for PRs referencing SPARK-xxxxx
+jira:
+  enabled: true
+  server: "https://issues.apache.org/jira"
+  project_prefix: "SPARK"
+
+# Community context sources
+community_sources:
+  - type: mailing-list
+    name: "Spark dev@"
+    archive_url: "https://lists.apache.org/list.html?dev@spark.apache.org"
+    timeout_seconds: 30
+    cache_ttl_days: 7
+    niceness_delay_seconds: 2.0
+  # - type: discourse
+  #   name: "Spark Forum"
+  #   base_url: "https://forum.spark.example.com"
+  # - type: discord
+  #   name: "Spark Discord"
+  #   guild_id: "YOUR_GUILD_ID"
+  #   bot_token_env: "DISCORD_BOT_TOKEN"
+
+# Cross-project downstream detection
+downstream:
+  - project: "spark-testing-base"
+    repo: "holdenk/spark-testing-base"
+    tracked_apis_file: "~/.review-agent/cache/downstream/spark-testing-base-imports.json"
+
+# Posting mode — draft-only (default) or confidence-gated auto-posting
+posting:
+  mode: draft-only  # Change to "confidence-gated" to enable auto-posting
+  confidence_threshold: 0.85
+  bot_token_env: "GITHUB_TOKEN_BOT"

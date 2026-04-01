@@ -1,0 +1,31 @@
+{
+  "messages": [
+    [
+      {
+        "id": "1100001",
+        "channel_id": "900001",
+        "channel_name": "dev-discussion",
+        "content": "Has anyone looked at the mapInArrow implementation for Connect?",
+        "author": {
+          "id": "200001",
+          "username": "holdenk"
+        },
+        "timestamp": "2025-11-10T09:15:00Z"
+      }
+    ],
+    [
+      {
+        "id": "1100002",
+        "channel_id": "900002",
+        "channel_name": "spark-core",
+        "content": "The Arrow batching PR looks good, just needs a rebase.",
+        "author": {
+          "id": "200002",
+          "username": "spark_reviewer"
+        },
+        "timestamp": "2025-11-09T16:45:00Z"
+      }
+    ]
+  ],
+  "total_results": 2
+}

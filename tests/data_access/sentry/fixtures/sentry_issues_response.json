@@ -1,0 +1,24 @@
+[
+  {
+    "id": "1001",
+    "shortId": "PROJ-A1",
+    "title": "TypeError: Cannot read property 'map' of undefined",
+    "culprit": "src/utils/transform.py in apply_map",
+    "count": 42,
+    "userCount": 15,
+    "firstSeen": "2024-01-10T08:00:00Z",
+    "lastSeen": "2024-01-20T12:00:00Z",
+    "status": "unresolved"
+  },
+  {
+    "id": "1002",
+    "shortId": "PROJ-B2",
+    "title": "ValueError: Schema mismatch in Arrow conversion",
+    "culprit": "src/utils/transform.py in convert_schema",
+    "count": 18,
+    "userCount": 7,
+    "firstSeen": "2024-01-12T10:00:00Z",
+    "lastSeen": "2024-01-19T16:00:00Z",
+    "status": "unresolved"
+  }
+]

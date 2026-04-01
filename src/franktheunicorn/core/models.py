@@ -92,6 +92,12 @@ class PullRequest(models.Model):
     # Merge status (fetched from single-PR endpoint)
     mergeable = models.BooleanField(null=True, blank=True)
 
+    # Cached context (v1.5)
+    jira_ticket_id = models.CharField(max_length=50, blank=True, default="")
+    jira_cache = models.JSONField(null=True, blank=True)
+    community_context_cache = models.JSONField(null=True, blank=True)
+    sentry_context_cache = models.JSONField(null=True, blank=True)
+
     # Queue routing (§2.2)
     queue = models.CharField(max_length=50, choices=QUEUE_CHOICES, default="review")
 

@@ -1,0 +1,18 @@
+{
+  "id": "cmpl-def456",
+  "model": "sonar",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "The mapInArrow API requires PyArrow >= 4.0.0. Known issue: schema mismatches when return type differs from input. Deprecation notice: mapInPandas will eventually be replaced by mapInArrow for better performance."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "citations": [
+    "https://arrow.apache.org/docs/python/api.html",
+    "https://spark.apache.org/docs/latest/sql-pyspark-pandas-with-arrow.html"
+  ]
+}

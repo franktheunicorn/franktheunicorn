@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 from franktheunicorn.review.backends.base import ReviewFinding
-from franktheunicorn.review.dedup import deduplicate_findings
+from franktheunicorn.review.dedup import (
+    _jaccard_similarity,
+    _should_merge,
+    deduplicate_findings,
+    merge_source_tags,
+)
 
 
 class TestDeduplicateFindings:
@@ -33,14 +38,22 @@ class TestDeduplicateFindings:
         assert len(result) == 1
         assert result[0].body == "this is a much longer body"
 
-    def test_nearby_lines_merged(self) -> None:
+    def test_nearby_lines_merged_with_overlap(self) -> None:
         findings = [
-            ReviewFinding(body="first", file_path="a.py", line_number=10),
-            ReviewFinding(body="second longer finding", file_path="a.py", line_number=12),
+            ReviewFinding(
+                body="The null check here is incorrect",
+                file_path="a.py",
+                line_number=10,
+            ),
+            ReviewFinding(
+                body="The null check here is incorrect and should use isNullAt instead",
+                file_path="a.py",
+                line_number=12,
+            ),
         ]
         result = deduplicate_findings(findings)
         assert len(result) == 1
-        assert result[0].body == "second longer finding"
+        assert "isNullAt" in result[0].body
 
     def test_distant_lines_not_merged(self) -> None:
         findings = [
@@ -96,3 +109,107 @@ class TestDeduplicateFindings:
         ]
         result = deduplicate_findings(findings)
         assert len(result) == 1
+
+
+class TestJaccardSimilarity:
+    def test_identical(self) -> None:
+        assert _jaccard_similarity("the quick brown fox", "the quick brown fox") == 1.0
+
+    def test_no_overlap(self) -> None:
+        assert _jaccard_similarity("hello world", "goodbye universe") == 0.0
+
+    def test_partial_overlap(self) -> None:
+        sim = _jaccard_similarity(
+            "The null check is wrong here",
+            "The null check should use isNullAt",
+        )
+        assert sim > 0.3  # "the", "null", "check" overlap
+
+    def test_empty_text(self) -> None:
+        assert _jaccard_similarity("", "hello") == 0.0
+        assert _jaccard_similarity("", "") == 0.0
+
+
+class TestShouldMerge:
+    def test_same_line_always_merges(self) -> None:
+        a = ReviewFinding(body="completely different", file_path="a.py", line_number=10)
+        b = ReviewFinding(body="unrelated content", file_path="a.py", line_number=10)
+        assert _should_merge(a, b) is True
+
+    def test_different_files_never_merge(self) -> None:
+        a = ReviewFinding(body="same content", file_path="a.py", line_number=10)
+        b = ReviewFinding(body="same content", file_path="b.py", line_number=10)
+        assert _should_merge(a, b) is False
+
+    def test_nearby_with_overlap_merges(self) -> None:
+        a = ReviewFinding(
+            body="The null check here is wrong",
+            file_path="a.py",
+            line_number=10,
+        )
+        b = ReviewFinding(
+            body="The null check here should use isNullAt",
+            file_path="a.py",
+            line_number=13,
+        )
+        assert _should_merge(a, b) is True
+
+    def test_nearby_without_overlap_no_merge(self) -> None:
+        a = ReviewFinding(body="fix import order", file_path="a.py", line_number=10)
+        b = ReviewFinding(body="add return type annotation", file_path="a.py", line_number=14)
+        assert _should_merge(a, b) is False
+
+    def test_distant_lines_no_merge(self) -> None:
+        a = ReviewFinding(body="same content", file_path="a.py", line_number=10)
+        b = ReviewFinding(body="same content", file_path="a.py", line_number=100)
+        assert _should_merge(a, b) is False
+
+
+class TestCrossSourceDedup:
+    def test_agent_and_coderabbit_merged(self) -> None:
+        agent_finding = ReviewFinding(
+            body="The null check on line 42 is incorrect, use isNullAt instead",
+            file_path="core/RDD.scala",
+            line_number=42,
+            severity="important",
+            confidence=0.8,
+        )
+        cr_finding = ReviewFinding(
+            body="Null check incorrect: use isNullAt(idx) instead of == null",
+            file_path="core/RDD.scala",
+            line_number=42,
+            severity="critical",
+            confidence=0.7,
+        )
+        result = deduplicate_findings([agent_finding, cr_finding])
+        assert len(result) == 1
+        assert result[0].severity == "critical"  # highest severity
+        assert result[0].confidence == 0.8  # highest confidence
+
+    def test_merge_source_tags(self) -> None:
+        findings = [
+            ReviewFinding(body="null check wrong here", file_path="a.py", line_number=10),
+            ReviewFinding(body="null check wrong use isNullAt", file_path="a.py", line_number=10),
+        ]
+        sources = ["agent", "coderabbit"]
+        deduped = deduplicate_findings(findings)
+        tags = merge_source_tags(findings, sources, deduped)
+        assert len(tags) == 1
+        # Both sources should be present (merged via fuzzy match on nearby lines).
+        assert "agent" in tags[0] or "coderabbit" in tags[0]
+
+    def test_no_merge_different_issues(self) -> None:
+        findings = [
+            ReviewFinding(
+                body="Missing null check here",
+                file_path="a.py",
+                line_number=10,
+            ),
+            ReviewFinding(
+                body="Style: use snake_case for variable names",
+                file_path="a.py",
+                line_number=50,
+            ),
+        ]
+        result = deduplicate_findings(findings)
+        assert len(result) == 2

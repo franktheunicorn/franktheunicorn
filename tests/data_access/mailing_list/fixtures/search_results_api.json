@@ -1,0 +1,27 @@
+{
+  "emails": [
+    {
+      "subject": "[DISCUSS] Add DataFrame.mapInArrow for Connect",
+      "from": "Huaxin Gao",
+      "date": "2026-03-15T10:00:00Z",
+      "body": "Hi all,\n\nI'd like to propose adding mapInArrow support to the Connect API. This would allow users to apply Arrow-based UDFs directly through the Connect interface, mirroring the existing mapInPandas functionality.\n\nThe main benefits are:\n1. Better performance for large datasets\n2. Consistent API surface between local and Connect modes\n\nThoughts?",
+      "permalink": "https://lists.apache.org/thread/abc123"
+    },
+    {
+      "subject": "Re: [DISCUSS] Add DataFrame.mapInArrow for Connect",
+      "from": "Dongjoon Hyun",
+      "date": "2026-03-16T14:30:00Z",
+      "body": "+1 on this proposal. We should also consider batching for large datasets to avoid memory issues on the Connect server side.",
+      "permalink": "https://lists.apache.org/thread/abc123-reply1"
+    },
+    {
+      "subject": "[VOTE] Release Apache Spark 4.1.0 RC1",
+      "from": "Release Manager",
+      "date": "2026-03-20T08:00:00Z",
+      "body": "Please vote on the release of Apache Spark 4.1.0 RC1.",
+      "permalink": "https://lists.apache.org/thread/def456"
+    }
+  ],
+  "thread": [],
+  "total": 3
+}

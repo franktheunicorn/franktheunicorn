@@ -411,3 +411,50 @@ class TestAgentFeedbackModel:
         AgentFeedbackFactory(pull_request=db_pr)
         AgentFeedbackFactory(pull_request=db_pr)
         assert db_pr.agent_feedbacks.count() == 2
+
+
+@pytest.mark.django_db
+class TestPullRequestV15Fields:
+    """Tests for v1.5 context cache fields on PullRequest."""
+
+    def test_jira_fields_default_empty(self) -> None:
+        pr = PullRequestFactory()
+        assert pr.jira_ticket_id == ""
+        assert pr.jira_cache is None
+        assert pr.community_context_cache is None
+        assert pr.sentry_context_cache is None
+
+    def test_jira_ticket_id(self) -> None:
+        pr = PullRequestFactory(jira_ticket_id="SPARK-12345")
+        assert pr.jira_ticket_id == "SPARK-12345"
+
+    def test_jira_cache_json(self) -> None:
+        pr = PullRequestFactory(
+            jira_cache={
+                "summary": "Add DataFrame.mapInArrow",
+                "status": "Open",
+                "assignee": "huaxin-gao",
+            }
+        )
+        pr.refresh_from_db()
+        assert pr.jira_cache["summary"] == "Add DataFrame.mapInArrow"
+
+    def test_community_context_cache_json(self) -> None:
+        pr = PullRequestFactory(
+            community_context_cache={
+                "sources": [
+                    {"type": "mailing-list", "query": "mapInArrow", "results": []},
+                ]
+            }
+        )
+        pr.refresh_from_db()
+        assert len(pr.community_context_cache["sources"]) == 1
+
+    def test_sentry_context_cache_json(self) -> None:
+        pr = PullRequestFactory(
+            sentry_context_cache={
+                "issues": [{"title": "NullPointerException in RDD.scala", "count": 42}],
+            }
+        )
+        pr.refresh_from_db()
+        assert pr.sentry_context_cache["issues"][0]["count"] == 42

@@ -17,6 +17,123 @@ class CodeRabbitConfig(BaseModel):
     enabled: bool = False
     cli_path: str = "coderabbit"
     extra_args: list[str] = Field(default_factory=list)
+    deduplicate: bool = True
+
+
+class JiraConfig(BaseModel):
+    """Config for JIRA integration (v1.5)."""
+
+    enabled: bool = False
+    server: str = ""
+    project_prefix: str = ""
+
+    @field_validator("server")
+    @classmethod
+    def server_must_be_url(cls, v: str) -> str:
+        v = v.strip().rstrip("/")
+        if v and not v.startswith(("http://", "https://")):
+            msg = "JIRA server must be a URL starting with http:// or https://"
+            raise ValueError(msg)
+        return v
+
+
+KNOWN_COMMUNITY_SOURCE_TYPES: frozenset[str] = frozenset(
+    {"mailing-list", "discourse", "discord", "perplexity", "github-issues", "sentry"}
+)
+
+
+class CommunitySourceConfig(BaseModel):
+    """Config for a single community context source (v1.5)."""
+
+    type: str
+    name: str = ""
+    archive_url: str = ""
+    base_url: str = ""
+    timeout_seconds: int = 30
+    guild_id: str = ""  # Discord-specific
+    bot_token_env: str = ""  # Discord-specific
+    cache_ttl_days: int = 7
+    niceness_delay_seconds: float = 2.0  # delay between requests
+
+    @field_validator("type")
+    @classmethod
+    def type_must_be_known(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in KNOWN_COMMUNITY_SOURCE_TYPES:
+            logger.warning(
+                "Unknown community source type '%s'; known: %s",
+                v,
+                ", ".join(sorted(KNOWN_COMMUNITY_SOURCE_TYPES)),
+            )
+        return v
+
+    @field_validator("timeout_seconds")
+    @classmethod
+    def timeout_must_be_positive(cls, v: int) -> int:
+        if v <= 0:
+            msg = "timeout_seconds must be positive"
+            raise ValueError(msg)
+        return v
+
+
+class DownstreamConfig(BaseModel):
+    """Config for cross-project downstream detection (v1.5)."""
+
+    project: str
+    repo: str
+    tracked_apis_file: str = ""
+
+
+class PostingConfig(BaseModel):
+    """Config for comment posting mode (v1.5)."""
+
+    mode: str = "draft-only"  # draft-only | confidence-gated
+    confidence_threshold: float = 0.85
+    bot_token_env: str = "GITHUB_TOKEN_BOT"
+
+    @field_validator("mode")
+    @classmethod
+    def mode_must_be_valid(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in ("draft-only", "confidence-gated"):
+            msg = "posting mode must be 'draft-only' or 'confidence-gated'"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("confidence_threshold")
+    @classmethod
+    def threshold_in_range(cls, v: float) -> float:
+        if not 0.0 <= v <= 1.0:
+            msg = "confidence_threshold must be between 0.0 and 1.0"
+            raise ValueError(msg)
+        return v
+
+
+class SentryConfig(BaseModel):
+    """Config for Sentry integration (v1.5)."""
+
+    enabled: bool = False
+    auth_token_env: str = "SENTRY_AUTH_TOKEN"
+    org_slug: str = ""
+    project_slug: str = ""
+    score_weight: int = 15
+
+
+class PerplexityConfig(BaseModel):
+    """Config for Perplexity API integration (v1.5)."""
+
+    enabled: bool = False
+    api_key_env: str = "PERPLEXITY_API_KEY"
+    mode: str = "both"  # general | technical | both
+
+    @field_validator("mode")
+    @classmethod
+    def mode_must_be_valid(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in ("general", "technical", "both"):
+            msg = "Perplexity mode must be 'general', 'technical', or 'both'"
+            raise ValueError(msg)
+        return v
 
 
 KNOWN_LLM_PROVIDERS: frozenset[str] = frozenset({"stub", "claude", "openai", "gemini", "ollama"})
@@ -90,6 +207,8 @@ class OperatorConfig(BaseModel):
     workspaces: dict[str, object] = Field(default_factory=dict)
     coderabbit: CodeRabbitConfig = Field(default_factory=CodeRabbitConfig)
     agent_feedback: AgentFeedbackConfig = Field(default_factory=AgentFeedbackConfig)
+    sentry: SentryConfig = Field(default_factory=SentryConfig)
+    perplexity: PerplexityConfig = Field(default_factory=PerplexityConfig)
     # Multiple LLM backends can run in parallel. Each produces findings
     # independently; results are combined and deduped via anti-patterns.
     llm_backends: list[LLMBackendConfig] = Field(default_factory=list)
@@ -145,6 +264,12 @@ class ProjectConfig(BaseModel):
     committers: list[str] = Field(default_factory=list)
     new_contributor_addendum: str = ""
     enabled: bool = True
+
+    # v1.5 features
+    jira: JiraConfig = Field(default_factory=JiraConfig)
+    community_sources: list[CommunitySourceConfig] = Field(default_factory=list)
+    downstream: list[DownstreamConfig] = Field(default_factory=list)
+    posting: PostingConfig = Field(default_factory=PostingConfig)
 
     # Copy-pasta detection
     copypasta_enabled: bool = False

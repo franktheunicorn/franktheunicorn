@@ -36,6 +36,10 @@ def build_pr_context(
     pr: PullRequest,
     project_config: ProjectConfig,
     operator_config: OperatorConfig,
+    *,
+    community_context: str = "",
+    jira_context: str = "",
+    sentry_context: str = "",
 ) -> PRContext:
     """Bundle PR + config data into a PRContext for the LLM."""
     anti_patterns: list[str] = []
@@ -69,6 +73,9 @@ def build_pr_context(
         personality_internal_voice=personality.internal_voice if personality else "",
         personality_external_voice=personality.external_voice if personality else "",
         personality_review_philosophy=(personality.review_philosophy if personality else ""),
+        community_context=community_context,
+        jira_context=jira_context,
+        sentry_context=sentry_context,
     )
 
 

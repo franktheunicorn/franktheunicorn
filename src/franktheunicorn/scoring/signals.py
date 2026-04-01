@@ -25,6 +25,8 @@ WEIGHTS: dict[str, int] = {
     "committer_is_on_it": -25,
     "updated_since_operator_review": 25,
     "pending_response": 20,
+    "downstream_impact": 20,
+    "sentry_errors": 15,
 }
 
 MAX_SCORE: int = 100

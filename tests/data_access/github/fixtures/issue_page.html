@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+<head><title>Support mapInArrow for Spark Connect - Issue #42 - apache/spark</title></head>
+<body>
+  <div class="gh-header">
+    <span class="State State--open">Open</span>
+    <h1>
+      <bdi class="js-issue-title">Support mapInArrow for Spark Connect</bdi>
+      <span class="gh-header-number">#42</span>
+    </h1>
+  </div>
+
+  <div class="sidebar-labels">
+    <a class="IssueLabel" data-name="enhancement">enhancement</a>
+    <a class="IssueLabel" data-name="spark-connect">spark-connect</a>
+  </div>
+
+  <div class="timeline-comment">
+    <a class="author" href="/huaxingao">huaxingao</a>
+    <td class="comment-body">
+      We should add support for mapInArrow in the Spark Connect API.
+      This would allow users to apply Arrow-based UDFs through the Connect interface.
+      Related to #40 and #41.
+    </td>
+  </div>
+
+  <div class="timeline-comment">
+    <a class="author" href="/dongjoon-hyun">dongjoon-hyun</a>
+    <td class="comment-body">
+      This looks like a good idea. We should consider batching for performance.
+    </td>
+  </div>
+
+  <div class="timeline-comment">
+    <a class="author" href="/holdenk">holdenk</a>
+    <td class="comment-body">
+      Agreed, let's also make sure we handle schema evolution correctly.
+    </td>
+  </div>
+</body>
+</html>
