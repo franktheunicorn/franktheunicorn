@@ -404,7 +404,6 @@ class TestAgentFeedbackViews:
 
 
 @pytest.mark.django_db
-<<<<<<< HEAD
 class TestRejectionProbabilityDisplay:
     """Tests for v1.75 rejection probability display in dashboard."""
 
