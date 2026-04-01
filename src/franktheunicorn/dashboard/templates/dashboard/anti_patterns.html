@@ -1,4 +1,5 @@
 {% extends "dashboard/base.html" %}
+{% load static %}
 {% block title %}Anti-Patterns — franktheunicorn{% endblock %}
 {% block content %}
 <h2>Anti-Pattern Manager</h2>
@@ -49,7 +50,10 @@
         {% for ap in anti_patterns %}
         {% include "dashboard/_anti_pattern_row.html" %}
         {% empty %}
-        <tr><td colspan="6" class="empty-state">No anti-patterns yet.</td></tr>
+        <tr><td colspan="6" class="empty-state">
+            <img src="{% static 'dashboard/img/bathtub.svg' %}" alt="" width="80" height="52">
+            <p>No anti-patterns yet.</p>
+        </td></tr>
         {% endfor %}
     </tbody>
 </table>

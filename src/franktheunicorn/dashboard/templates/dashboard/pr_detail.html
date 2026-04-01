@@ -1,4 +1,5 @@
 {% extends "dashboard/base.html" %}
+{% load static %}
 {% block title %}PR #{{ pr.number }} — franktheunicorn{% endblock %}
 {% block content %}
 <a href="{% url 'dashboard:index' %}" class="back-link">&larr; Back to list</a>
@@ -112,7 +113,10 @@
     {% endfor %}
 </div>
 {% else %}
-<p class="empty-state">No review findings yet.</p>
+<div class="empty-state">
+    <img src="{% static 'dashboard/img/rubber-duck.svg' %}" alt="" width="80" height="64">
+    <p>No review findings yet.</p>
+</div>
 {% endif %}
 
 {% if suppressed_drafts %}
