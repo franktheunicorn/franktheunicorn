@@ -22,6 +22,9 @@ $(VENV)/bin/python:
 venv: $(VENV)/bin/python ## Create virtual environment if it doesn't exist
 
 setup: venv ## One-time local development setup (creates venv + installs deps)
+	@if [ ! -f .env ]; then \
+		echo "\033[33mWarning: .env file not found. Run 'cp .env.example .env' and edit it.\033[0m"; \
+	fi
 	$(PIP) install -e ".[dev]"
 	$(PYTHON) manage.py migrate
 

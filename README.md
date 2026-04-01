@@ -13,17 +13,31 @@ This is (roughly) my 3rd attempt at building something like this (now that LLMs 
 
 ## Quick Start
 
+### Docker Compose (no Python needed)
+
 ```bash
 git clone https://github.com/franktheunicorn/franktheunicorn.git
 cd franktheunicorn
-cp .env.example .env
-# Edit .env: set GITHUB_TOKEN and ANTHROPIC_API_KEY
-
-docker compose up
-# Dashboard: http://localhost:8000
+cp .env.example .env          # edit to set FRANK_GITHUB_TOKEN + ANTHROPIC_API_KEY
+docker compose up              # dashboard: http://localhost:8000
 ```
 
-Two env vars. One command. Working dashboard.
+### Make (local development)
+
+```bash
+git clone https://github.com/franktheunicorn/franktheunicorn.git
+cd franktheunicorn
+cp .env.example .env          # edit to set FRANK_GITHUB_TOKEN + ANTHROPIC_API_KEY
+make setup                     # creates venv, installs deps, runs migrations
+make serve                     # dashboard: http://localhost:8000
+# In a separate terminal:
+make worker                    # background PR poller
+```
+
+Both paths default to **mock mode** — fixture data, no API keys needed.
+Set `FRANK_MOCK_MODE=false` in `.env` with real tokens for live PR ingestion.
+
+For project configuration and workspaces, see the **[Install Guide](docs/install.md)**.
 
 ## What It Does
 
@@ -51,6 +65,7 @@ Two env vars. One command. Working dashboard.
 
 ## Documentation
 
+- **[Install Guide](docs/install.md)** — full setup, project configuration, and workspace setup
 - **[Master Design Document](docs/franktheunicorn-master-design.md)** — the full architecture, all decisions, implementation phases
 - **[Security Design](docs/security-design.md)** — threat model, trust boundaries, attack surfaces, CI trust rules, and hardening checklist
 - **[CLAUDE.md](CLAUDE.md)** — instructions for Claude Code working on this repo
