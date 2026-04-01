@@ -13,6 +13,18 @@ This is (roughly) my 3rd attempt at building something like this (now that LLMs 
 
 ## Quick Start
 
+### Guided setup (recommended)
+
+```bash
+git clone https://github.com/franktheunicorn/franktheunicorn.git
+cd franktheunicorn
+./scripts/dev_setup.sh
+```
+
+The setup script walks you through prerequisites, environment configuration,
+API keys, and LLM backend selection. It supports both Docker and local
+development. Run `./scripts/dev_setup.sh --help` for flags.
+
 ### Docker Compose (no Python needed)
 
 ```bash
