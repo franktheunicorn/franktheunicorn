@@ -107,19 +107,20 @@ The anti-pattern list is the primary feedback mechanism — not a side feature. 
 ## Running the Project
 
 ```bash
-# Development
+# Guided setup (recommended for first time)
+./scripts/dev_setup.sh
+
+# Or manual setup
 cp .env.example .env  # set GITHUB_TOKEN + ANTHROPIC_API_KEY
-pip install -e ".[dev]"
-python manage.py migrate
-python manage.py runserver          # dashboard
-python manage.py run_worker         # worker (separate terminal)
+make setup                          # creates venv, installs deps, migrates
+make serve                          # dashboard
+make worker                         # worker (separate terminal)
 
 # Tests
-pytest                              # all tests, coverage enforced
+make check                          # lint + typecheck + tests
+make test                           # tests only
 pytest tests/scoring/               # specific module
 pytest -k "test_blame"              # specific test pattern
-ruff check .
-mypy .
 
 # Docker
 docker compose up                   # dashboard + worker
