@@ -453,6 +453,11 @@ def stats(request: HttpRequest) -> HttpResponse:
     total_drafts = ReviewDraft.objects.count()
     posted_drafts = ReviewDraft.objects.filter(status="posted").count()
 
+    # Merge queue stats (v2).
+    merge_eligible_count = PullRequest.objects.filter(
+        state="open", merge_queue_eligible=True
+    ).count()
+
     # Rejection predictor stats (v1.75).
     suppressed_count = ReviewDraft.objects.filter(is_auto_suppressed=True).count()
     scored_count = ReviewDraft.objects.filter(rejection_probability__isnull=False).count()
@@ -483,5 +488,85 @@ def stats(request: HttpRequest) -> HttpResponse:
             "shepherd_total": shepherd_total,
             "shepherd_rejected": shepherd_rejected,
             "shepherd_rejection_rate": shepherd_rejection_rate,
+            "merge_eligible_count": merge_eligible_count,
         },
+    )
+
+
+# --- Merge Queue (v2) ---
+
+
+def merge_queue_view(request: HttpRequest) -> HttpResponse:
+    """Show PRs eligible for merging."""
+    from django.conf import settings
+
+    from franktheunicorn.config.loader import load_project_configs
+    from franktheunicorn.worker.merge_queue import evaluate_merge_eligibility
+
+    eligible_prs = PullRequest.objects.filter(
+        state="open", is_operator_pr=True
+    ).select_related("project").order_by("-interest_score")[:50]
+
+    pr_data: list[dict[str, object]] = []
+    for pr in eligible_prs:
+        # Load merge queue config for this project.
+        try:
+            configs = load_project_configs(
+                getattr(settings, "FRANK_PROJECTS_DIR", "")
+            )
+            pc = next(
+                (c for c in configs if c.owner == pr.project.owner and c.repo == pr.project.repo),
+                None,
+            )
+            if pc and pc.merge_queue.enabled:
+                eligibility = evaluate_merge_eligibility(pr, pc.merge_queue)
+                pr_data.append({
+                    "pr": pr,
+                    "eligible": eligibility.eligible,
+                    "ci_pass": eligibility.ci_pass,
+                    "approvals_met": eligibility.approvals_met,
+                    "no_conflicts": eligibility.no_conflicts,
+                    "details": eligibility.details,
+                })
+        except Exception:
+            logger.debug("Error loading merge config for %s", pr.project.full_name)
+
+    return render(
+        request,
+        "dashboard/merge_queue.html",
+        {"pr_data": pr_data},
+    )
+
+
+@require_POST
+def merge_pr(request: HttpRequest, pr_id: int) -> HttpResponse:
+    """Execute a merge for a PR."""
+    from django.conf import settings
+
+    from franktheunicorn.config.loader import load_project_configs
+    from franktheunicorn.worker.merge_queue import execute_merge
+
+    pr = get_object_or_404(PullRequest, pk=pr_id)
+
+    configs = load_project_configs(getattr(settings, "FRANK_PROJECTS_DIR", ""))
+    pc = next(
+        (c for c in configs if c.owner == pr.project.owner and c.repo == pr.project.repo),
+        None,
+    )
+    if not pc or not pc.merge_queue.enabled:
+        return HttpResponse(
+            '<div class="merge-result" style="color: #c00;">'
+            "Merge queue not enabled for this project.</div>"
+        )
+
+    result = execute_merge(pr, pc.merge_queue)
+
+    if result.success:
+        return HttpResponse(
+            f'<div class="merge-result" style="color: #2e7d32;">'
+            f"Merged PR #{pr.number} via {result.method}.</div>"
+        )
+    return HttpResponse(
+        f'<div class="merge-result" style="color: #c00;">'
+        f"Merge failed: {result.error}</div>"
     )

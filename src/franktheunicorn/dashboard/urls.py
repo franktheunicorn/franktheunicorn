@@ -29,4 +29,7 @@ urlpatterns = [
     ),
     # Stats
     path("stats/", views.stats, name="stats"),
+    # Merge queue (v2)
+    path("merge-queue/", views.merge_queue_view, name="merge_queue"),
+    path("pr/<int:pr_id>/merge/", views.merge_pr, name="merge_pr"),
 ]

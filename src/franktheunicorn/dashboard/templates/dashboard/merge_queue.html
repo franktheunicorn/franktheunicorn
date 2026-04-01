@@ -1,0 +1,49 @@
+{% extends "dashboard/base.html" %}
+{% block title %}Merge Queue — franktheunicorn{% endblock %}
+{% block content %}
+<h1>Merge Queue</h1>
+<p>PRs that are tracked for merge readiness.</p>
+
+{% if pr_data %}
+<table class="merge-queue-table">
+  <thead>
+    <tr>
+      <th>PR</th>
+      <th>CI</th>
+      <th>Approvals</th>
+      <th>Conflicts</th>
+      <th>Status</th>
+      <th>Action</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for item in pr_data %}
+    <tr>
+      <td>
+        <a href="{% url 'dashboard:pr_detail' item.pr.pk %}">
+          {{ item.pr.project.full_name }}#{{ item.pr.number }}
+        </a>
+        <br><small>{{ item.pr.title|truncatechars:60 }}</small>
+      </td>
+      <td>{% if item.ci_pass %}✓{% else %}✗{% endif %}</td>
+      <td>{% if item.approvals_met %}✓{% else %}✗{% endif %}</td>
+      <td>{% if item.no_conflicts %}✓{% else %}✗{% endif %}</td>
+      <td>{% if item.eligible %}<strong style="color: #2e7d32;">Ready</strong>{% else %}Not ready{% endif %}</td>
+      <td>
+        {% if item.eligible %}
+        <form hx-post="{% url 'dashboard:merge_pr' item.pr.pk %}" hx-swap="outerHTML">
+          {% csrf_token %}
+          <button type="submit">Merge</button>
+        </form>
+        {% else %}
+        <small>{{ item.details|join:", " }}</small>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p>No PRs in the merge queue. Enable merge_queue in your project config to track PRs here.</p>
+{% endif %}
+{% endblock %}
