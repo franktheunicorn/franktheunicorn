@@ -162,7 +162,7 @@ class TestAiGenerated:
     def test_bot(self) -> None:
         result = score_ai_generated("dependabot[bot]")
         assert result == WEIGHTS["ai_generated"]
-        assert result is not None and result < 0
+        assert result is not None and result > 0
 
     def test_configured_agent(self) -> None:
         assert score_ai_generated("codex-bot", ai_agents=["codex-bot"]) == WEIGHTS["ai_generated"]
