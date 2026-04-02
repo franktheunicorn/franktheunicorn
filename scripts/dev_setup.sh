@@ -188,7 +188,9 @@ if [ "$MODE" = "docker" ]; then
         esac
     fi
 
-    if [ "$MOCK_MODE" = "false" ]; then
+    if [ "$MOCK_MODE" = "true" ]; then
+        set_env "FRANK_MOCK_MODE" "true"
+    else
         echo ""
         info "For real PR ingestion, you need a GitHub personal access token."
         info "Create one at: https://github.com/settings/tokens"
@@ -197,7 +199,6 @@ if [ "$MODE" = "docker" ]; then
         token=$(ask "GitHub token (or press Enter to skip):" "")
         if [ -n "$token" ]; then
             set_env "FRANK_GITHUB_TOKEN" "$token"
-            set_env "FRANK_MOCK_MODE" "false"
             ok "Saved token to .env"
         fi
     fi
