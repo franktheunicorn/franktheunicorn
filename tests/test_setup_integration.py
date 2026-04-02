@@ -113,8 +113,8 @@ class TestWizardEndToEnd:
             "1,4",  # claude + ollama
             "claude-sonnet-4-20250514",  # claude model
             "0.3",  # claude temperature
-            "qwen2.5-coder:14b",  # ollama model
-            "http://localhost:11434",  # ollama base_url
+            "http://localhost:11434",  # ollama base_url (asked first)
+            "qwen2.5-coder:14b",  # ollama model (asked second, after discovery)
             "n",  # coderabbit: no
         ]
         with (
@@ -124,6 +124,10 @@ class TestWizardEndToEnd:
             patch(
                 "franktheunicorn.review.backends.ollama_backend.recommend_local_model",
                 return_value=("qwen2.5-coder:14b", "12GB VRAM available"),
+            ),
+            patch(
+                "franktheunicorn.core.management.commands.setup_llm.discover_models",
+                return_value=[],
             ),
         ):
             call_command("setup_llm", output=str(output_path))

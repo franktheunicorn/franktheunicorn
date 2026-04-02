@@ -162,7 +162,7 @@ class JiraFetcher(DataFetcher[JiraTicketResult]):
                 JiraComment(
                     author=author_el.get_text(strip=True) if author_el else "",
                     body=body_el.get_text(strip=True) if body_el else "",
-                    created=date_el.get("datetime", "") if date_el else "",
+                    created=str(date_el.get("datetime", "")) if date_el else "",
                 )
             )
 

@@ -181,7 +181,7 @@ class MailingListFetcher(DataFetcher[MailingListSearchResult]):
             if query.lower() not in link_text.lower():
                 continue
             href = link.get("href", "")
-            thread_url = urljoin(archive_url, href) if href else ""
+            thread_url = urljoin(archive_url, str(href)) if href else ""
 
             # Try to find date and author from surrounding elements.
             parent = link.find_parent("li") or link.find_parent("tr")

@@ -34,6 +34,16 @@ ask() {
     echo "${answer:-$default}"
 }
 
+set_env() {
+    # Safely set a key=value in .env without sed pattern injection.
+    local key="$1" value="$2" file="${3:-.env}"
+    local tmpfile
+    tmpfile=$(mktemp "${file}.XXXXXX")
+    grep -v "^${key}=" "$file" > "$tmpfile" 2>/dev/null || true
+    printf '%s=%s\n' "$key" "$value" >> "$tmpfile"
+    mv "$tmpfile" "$file"
+}
+
 # --- Parse flags ------------------------------------------------------------
 
 MODE=""
@@ -186,8 +196,8 @@ if [ "$MODE" = "docker" ]; then
         echo ""
         token=$(ask "GitHub token (or press Enter to skip):" "")
         if [ -n "$token" ]; then
-            sed -i "s/^FRANK_GITHUB_TOKEN=.*/FRANK_GITHUB_TOKEN=$token/" .env
-            sed -i "s/^FRANK_MOCK_MODE=.*/FRANK_MOCK_MODE=false/" .env
+            set_env "FRANK_GITHUB_TOKEN" "$token"
+            set_env "FRANK_MOCK_MODE" "false"
             ok "Saved token to .env"
         fi
     fi
@@ -274,29 +284,107 @@ if [ -z "$MOCK_MODE" ]; then
 fi
 
 if [ "$MOCK_MODE" = "false" ]; then
-    sed -i "s/^FRANK_MOCK_MODE=.*/FRANK_MOCK_MODE=false/" .env
+    set_env "FRANK_MOCK_MODE" "false"
 
-    # GitHub token
+    # ------------------------------------------------------------------
+    # Scan environment for existing credentials
+    # ------------------------------------------------------------------
     echo ""
-    info "GitHub Personal Access Token"
-    info "Create one at: https://github.com/settings/tokens"
-    info "Required scopes: repo, read:org"
+    info "Scanning environment for LLM credentials..."
     echo ""
 
+    detected_count=0
+    default_provider=""
+
+    # Tier 1: native provider keys
+    for var in ANTHROPIC_API_KEY OPENAI_API_KEY GOOGLE_API_KEY; do
+        val="${!var:-}"
+        if [ -n "$val" ]; then
+            preview="${val:0:4}****"
+            ok "  Found $var = $preview"
+            # Write into .env
+            set_env "$var" "$val"
+            detected_count=$((detected_count + 1))
+            case "$var" in
+                ANTHROPIC_API_KEY) [ -z "$default_provider" ] && default_provider="1" ;;
+                OPENAI_API_KEY)    [ -z "$default_provider" ] && default_provider="2" ;;
+                GOOGLE_API_KEY)    [ -z "$default_provider" ] && default_provider="3" ;;
+            esac
+        fi
+    done
+
+    # GitHub tokens
+    existing_gh_token=$(grep "^FRANK_GITHUB_TOKEN=" .env | cut -d= -f2-)
+    if [ -z "$existing_gh_token" ]; then
+        for var in GITHUB_TOKEN GH_TOKEN; do
+            val="${!var:-}"
+            if [ -n "$val" ]; then
+                preview="${val:0:4}****"
+                ok "  Found $var = $preview (usable for GitHub integration)"
+                set_env "FRANK_GITHUB_TOKEN" "$val"
+                ok "  Auto-populated FRANK_GITHUB_TOKEN from $var"
+                break
+            fi
+        done
+    fi
+
+    # Tier 2: known third-party LLM providers
+    for var in MISTRAL_API_KEY DEEPSEEK_API_KEY GROQ_API_KEY TOGETHER_API_KEY \
+               TOGETHER_AI_API_KEY FIREWORKS_API_KEY REPLICATE_API_TOKEN \
+               COHERE_API_KEY AI21_API_KEY AZURE_OPENAI_API_KEY HF_TOKEN \
+               HUGGING_FACE_HUB_TOKEN; do
+        val="${!var:-}"
+        if [ -n "$val" ]; then
+            preview="${val:0:4}****"
+            info "  Found $var = $preview (OpenAI-compatible backend possible)"
+            detected_count=$((detected_count + 1))
+        fi
+    done
+
+    # Tier 3: fuzzy endpoint detection
+    while IFS='=' read -r name value; do
+        # Skip empty or already-handled vars
+        [ -z "$value" ] && continue
+        case "$name" in
+            *_URL|*_BASE_URL|*_ENDPOINT|*_HOST|*_BASE)
+                if echo "$value" | grep -qE '(/api/.*(/v1|/chat/completions)|/v1(/|$)|/chat/completions)'; then
+                    preview="${value:0:20}****"
+                    info "  Possible LLM endpoint: $name = $preview"
+                    detected_count=$((detected_count + 1))
+                fi
+                ;;
+        esac
+    done < <(env)
+
+    if [ "$detected_count" -gt 0 ]; then
+        echo ""
+        ok "  Detected $detected_count credential(s) in environment."
+    fi
+
+    # ------------------------------------------------------------------
+    # GitHub token (manual entry if not detected)
+    # ------------------------------------------------------------------
     existing_token=$(grep "^FRANK_GITHUB_TOKEN=" .env | cut -d= -f2-)
-    if [ -n "$existing_token" ]; then
-        ok "GitHub token already set in .env"
-    else
+    if [ -z "$existing_token" ]; then
+        echo ""
+        info "GitHub Personal Access Token"
+        info "Create one at: https://github.com/settings/tokens"
+        info "Required scopes: repo, read:org"
+        echo ""
         token=$(ask "GitHub token (paste here):" "")
         if [ -n "$token" ]; then
-            sed -i "s/^FRANK_GITHUB_TOKEN=.*/FRANK_GITHUB_TOKEN=$token/" .env
+            set_env "FRANK_GITHUB_TOKEN" "$token"
             ok "Saved GitHub token to .env"
         else
             warn "Skipped. Set FRANK_GITHUB_TOKEN in .env later for real PR ingestion."
         fi
+    else
+        ok "GitHub token set in .env"
     fi
 
-    # LLM API key
+    # ------------------------------------------------------------------
+    # LLM API key selection
+    # ------------------------------------------------------------------
     echo ""
     info "LLM API Key"
     info "franktheunicorn supports Anthropic Claude, OpenAI, Google Gemini, and Ollama."
@@ -313,19 +401,19 @@ if [ "$MOCK_MODE" = "false" ]; then
         echo "  4. Ollama (local, no key needed)"
         echo "  5. Skip for now"
         echo ""
-        provider_choice=$(ask "Which provider?" "1")
+        provider_choice=$(ask "Which provider?" "${default_provider:-1}")
         case "$provider_choice" in
             1)
                 key=$(ask "Anthropic API key:" "")
-                [ -n "$key" ] && sed -i "s/^ANTHROPIC_API_KEY=.*/ANTHROPIC_API_KEY=$key/" .env && ok "Saved to .env"
+                [ -n "$key" ] && set_env "ANTHROPIC_API_KEY" "$key" && ok "Saved to .env"
                 ;;
             2)
                 key=$(ask "OpenAI API key:" "")
-                [ -n "$key" ] && sed -i "s/^OPENAI_API_KEY=.*/OPENAI_API_KEY=$key/" .env && ok "Saved to .env"
+                [ -n "$key" ] && set_env "OPENAI_API_KEY" "$key" && ok "Saved to .env"
                 ;;
             3)
                 key=$(ask "Google API key:" "")
-                [ -n "$key" ] && sed -i "s/^GOOGLE_API_KEY=.*/GOOGLE_API_KEY=$key/" .env && ok "Saved to .env"
+                [ -n "$key" ] && set_env "GOOGLE_API_KEY" "$key" && ok "Saved to .env"
                 ;;
             4)
                 info "No API key needed for Ollama. Make sure it's running locally."
@@ -336,7 +424,7 @@ if [ "$MOCK_MODE" = "false" ]; then
         esac
     fi
 else
-    sed -i "s/^FRANK_MOCK_MODE=.*/FRANK_MOCK_MODE=true/" .env
+    set_env "FRANK_MOCK_MODE" "true"
 fi
 
 echo ""
