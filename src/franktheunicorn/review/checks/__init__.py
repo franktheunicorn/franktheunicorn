@@ -47,10 +47,12 @@ class BaseCheck(ABC):
 def _get_registry() -> dict[str, type[BaseCheck]]:
     """Lazy registry to avoid circular imports at module level."""
     from franktheunicorn.review.checks.coverage import CoverageCheck
+    from franktheunicorn.review.checks.issue_link import IssueLinkCheck
     from franktheunicorn.review.checks.security import SecurityCheck
 
     return {
         "coverage": CoverageCheck,
+        "issue-link": IssueLinkCheck,
         "security": SecurityCheck,
     }
 
@@ -79,6 +81,11 @@ def run_enabled_checks(
 
     registry = _get_registry()
     pr_context = build_pr_context(pr, project_config, operator_config)
+
+    if "issue-link" in enabled and not pr_context.linked_issues_context:
+        from franktheunicorn.review.drafter import fetch_linked_issues_context
+
+        pr_context.linked_issues_context = fetch_linked_issues_context(pr)
 
     # Use first configured backend (or stub fallback).
     backend_configs = operator_config.llm_backends or [LLMBackendConfig()]
