@@ -1,0 +1,11 @@
+# E2E test: monitor own repo with stub LLM.
+
+owner: "franktheunicorn"
+repo: "franktheunicorn"
+review_context: "e2e self-test"
+governance: "standard"
+tone: "direct"
+watched_paths: []
+ignore_paths: []
+frequent_contributors: []
+enabled: true

@@ -1,0 +1,89 @@
+name: E2E Setup Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  e2e-setup:
+    runs-on: ubuntu-latest
+    env:
+      # Point at the committed E2E configs so the running app uses stub
+      # LLM and monitors franktheunicorn/franktheunicorn.
+      FRANK_OPERATOR_CONFIG: config/e2e/operator.yaml
+      FRANK_PROJECTS_DIR: config/e2e/projects
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      # Pre-create the operator config at ~/.review-agent/ so that
+      # `manage.py init_project` (called by setup.sh) skips its
+      # interactive prompts — it checks `if operator_path.exists()`.
+      - name: Pre-create operator config (bypass interactive prompts)
+        run: |
+          mkdir -p ~/.review-agent/projects
+          cp config/e2e/operator.yaml ~/.review-agent/config.yaml
+
+      - name: Run setup.sh --local --mock
+        run: ./scripts/setup.sh --local --mock
+
+      - name: Verify setup artifacts
+        run: |
+          source .venv/bin/activate
+          python -c "import franktheunicorn; print('package import OK')"
+          python manage.py showmigrations --plan | grep '\[X\]'
+          grep 'FRANK_MOCK_MODE=true' .env
+          test -f config/e2e/projects/franktheunicorn-franktheunicorn.yaml
+
+      - name: Start web server and verify HTTP 200
+        run: |
+          source .venv/bin/activate
+          python manage.py runserver 0.0.0.0:8000 &
+          WEB_PID=$!
+
+          for i in $(seq 1 30); do
+            status=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/ 2>/dev/null || echo "000")
+            if [ "$status" = "200" ]; then
+              echo "Dashboard returned HTTP 200"
+              kill $WEB_PID 2>/dev/null || true
+              exit 0
+            fi
+            echo "Waiting for web server... ($i/30, status=$status)"
+            sleep 2
+          done
+
+          echo "Web server did not return HTTP 200 within 60s"
+          kill $WEB_PID 2>/dev/null || true
+          exit 1
+
+      - name: Run worker for one cycle
+        run: |
+          source .venv/bin/activate
+          # Worker loops forever; run under timeout so CI doesn't hang.
+          # A successful first cycle takes a few seconds in mock mode.
+          timeout 60 python -m franktheunicorn.worker.runner || code=$?
+          # timeout exits 124 when it kills the process — that's success
+          # (worker ran without crashing until we stopped it).
+          if [ "${code:-0}" -eq 124 ]; then
+            echo "Worker ran for 60s without errors (killed by timeout) — OK"
+            exit 0
+          elif [ "${code:-0}" -eq 0 ]; then
+            echo "Worker exited cleanly — OK"
+            exit 0
+          else
+            echo "Worker failed with exit code ${code}"
+            exit 1
+          fi
