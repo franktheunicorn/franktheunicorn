@@ -140,7 +140,7 @@ if [ -z "$MODE" ]; then
     echo "How would you like to set up franktheunicorn?"
     echo ""
     echo "  1. Docker (recommended for trying it out)"
-    echo "     Runs in containers. Mock mode by default — no API keys needed."
+    echo "     Runs in containers. Configure API keys for live PR ingestion."
     echo ""
     echo "  2. Local development"
     echo "     Python virtualenv, editable install, full guided configuration."
@@ -181,14 +181,16 @@ if [ "$MODE" = "docker" ]; then
         echo "Mock mode uses fixture data so you can explore the dashboard"
         echo "without a GitHub token or API keys."
         echo ""
-        use_mock=$(ask "Start in mock mode? (Y/n):" "y")
+        use_mock=$(ask "Start in mock mode? (y/N):" "n")
         case "$use_mock" in
-            [nN]*) MOCK_MODE="false" ;;
-            *)     MOCK_MODE="true" ;;
+            [yY]*) MOCK_MODE="true" ;;
+            *)     MOCK_MODE="false" ;;
         esac
     fi
 
-    if [ "$MOCK_MODE" = "false" ]; then
+    if [ "$MOCK_MODE" = "true" ]; then
+        set_env "FRANK_MOCK_MODE" "true"
+    else
         echo ""
         info "For real PR ingestion, you need a GitHub personal access token."
         info "Create one at: https://github.com/settings/tokens"
@@ -197,7 +199,6 @@ if [ "$MODE" = "docker" ]; then
         token=$(ask "GitHub token (or press Enter to skip):" "")
         if [ -n "$token" ]; then
             set_env "FRANK_GITHUB_TOKEN" "$token"
-            set_env "FRANK_MOCK_MODE" "false"
             ok "Saved token to .env"
         fi
     fi
@@ -270,16 +271,16 @@ if [ -z "$MOCK_MODE" ]; then
     echo ""
     echo "franktheunicorn can run in two modes:"
     echo ""
-    echo "  Mock mode  — uses fixture data, no API keys needed."
-    echo "               Great for exploring the dashboard and running tests."
-    echo ""
     echo "  Real mode  — connects to GitHub and an LLM provider."
     echo "               Requires a GitHub token and at least one API key."
     echo ""
-    use_mock=$(ask "Start in mock mode? (Y/n):" "y")
+    echo "  Mock mode  — uses fixture data, no API keys needed."
+    echo "               Great for exploring the dashboard and running tests."
+    echo ""
+    use_mock=$(ask "Start in mock mode? (y/N):" "n")
     case "$use_mock" in
-        [nN]*) MOCK_MODE="false" ;;
-        *)     MOCK_MODE="true" ;;
+        [yY]*) MOCK_MODE="true" ;;
+        *)     MOCK_MODE="false" ;;
     esac
 fi
 
