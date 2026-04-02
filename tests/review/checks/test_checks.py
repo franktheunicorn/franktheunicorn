@@ -21,6 +21,10 @@ class TestRegistry:
         registry = _get_registry()
         assert "coverage" in registry
 
+    def test_security_registered(self) -> None:
+        registry = _get_registry()
+        assert "security" in registry
+
     def test_registry_values_are_base_check_subclasses(self) -> None:
         registry = _get_registry()
         for cls in registry.values():
@@ -102,6 +106,45 @@ class TestRunEnabledChecks:
         assert "check:coverage" in drafts[0].sources
         assert drafts[0].file_path == "src/main.py"
         assert drafts[0].category == "test-coverage"
+
+    def test_security_check_produces_drafts_with_stub(
+        self,
+        db_pr: PullRequest,
+    ) -> None:
+        """Security check with stub backend should produce drafts via _call_api."""
+        config = ProjectConfig(
+            owner="apache",
+            repo="spark",
+            llm_checks=["security"],
+        )
+        op_config = OperatorConfig(
+            llm_backends=[LLMBackendConfig(provider="stub")],
+        )
+
+        with patch(
+            "franktheunicorn.review.checks._run_single_check",
+            return_value=[
+                ReviewFinding(
+                    file_path="src/auth.py",
+                    line_number=42,
+                    title="security: hardcoded secret",
+                    body="API key is hardcoded.",
+                    confidence=0.9,
+                    severity="critical",
+                ),
+            ],
+        ):
+            drafts = run_enabled_checks(
+                db_pr,
+                "+++ b/src/auth.py\n+API_KEY = 'sk-1234'",
+                project_config=config,
+                operator_config=op_config,
+            )
+
+        assert len(drafts) == 1
+        assert "check:security" in drafts[0].sources
+        assert drafts[0].file_path == "src/auth.py"
+        assert drafts[0].category == "security"
 
     def test_check_findings_go_through_antipattern_gating(
         self,
