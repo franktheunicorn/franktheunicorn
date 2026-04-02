@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _fetch_linked_issues_context(pr: PullRequest) -> str:
+def fetch_linked_issues_context(pr: PullRequest) -> str:
     """Extract issue references from PR title/body and fetch their content.
 
     Returns formatted issue context or empty string on failure or no refs.
