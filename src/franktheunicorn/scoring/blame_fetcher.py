@@ -150,8 +150,14 @@ def _get_changed_lines_for_file(
         if result.returncode != 0:
             return None
         return _parse_diff_changed_lines(result.stdout)
+    except subprocess.TimeoutExpired:
+        logger.warning("git diff timed out for %s", file_path)
+        return None
+    except subprocess.CalledProcessError as exc:
+        logger.info("git diff failed for %s (exit %s)", file_path, exc.returncode)
+        return None
     except Exception:
-        logger.debug("git diff failed for %s", file_path, exc_info=True)
+        logger.debug("Unexpected error in git diff for %s", file_path, exc_info=True)
         return None
 
 

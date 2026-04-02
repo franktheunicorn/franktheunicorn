@@ -12,6 +12,7 @@ This is the main loop for the worker service. It:
 
 from __future__ import annotations
 
+import fcntl
 import logging
 import os
 import sys
@@ -48,6 +49,18 @@ def run_worker() -> None:
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     )
 
+    # Acquire instance lock to prevent duplicate workers.
+    data_dir = Path(getattr(settings, "DATA_DIR", Path.home() / ".review-agent"))
+    data_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = data_dir / "worker.lock"
+    lock_fd = open(lock_path, "w")  # noqa: SIM115
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        logger.error("Another worker instance is already running (lock: %s). Exiting.", lock_path)
+        lock_fd.close()
+        sys.exit(1)
+
     operator_config = load_operator_config(settings.FRANK_OPERATOR_CONFIG)
     project_configs = load_project_configs(settings.FRANK_PROJECTS_DIR)
 
@@ -79,6 +92,8 @@ def run_worker() -> None:
         logger.info("Worker shutting down.")
     finally:
         client.close()
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        lock_fd.close()
 
 
 def _run_cycle(

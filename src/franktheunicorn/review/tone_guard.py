@@ -91,7 +91,7 @@ def apply_tone_guard(
             backend._resolve_api_key(),
         )
     except Exception:
-        logger.debug("Tone guard LLM call failed; returning original finding.", exc_info=True)
+        logger.warning("Tone guard LLM call failed; returning original finding.", exc_info=True)
         return finding
 
     rewritten = rewritten.strip()

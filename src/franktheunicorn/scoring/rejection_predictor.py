@@ -16,6 +16,8 @@ Thresholds:
 from __future__ import annotations
 
 import fcntl
+import hashlib
+import hmac
 import logging
 import pickle
 import re
@@ -292,7 +294,7 @@ class RejectionPredictor:
             return {}
 
     def save(self, path: Path) -> None:
-        """Serialize the predictor to a pickle file."""
+        """Serialize the predictor to a pickle file with HMAC signature."""
         path.parent.mkdir(parents=True, exist_ok=True)
         data = {
             "model": self.model,
@@ -300,20 +302,42 @@ class RejectionPredictor:
             "trained": self._trained,
             "last_action_count": self._last_action_count,
         }
+        payload = pickle.dumps(data)
+        sig = _compute_hmac(payload)
         with open(path, "wb") as f:
-            pickle.dump(data, f)
+            f.write(payload)
+        sig_path = path.with_suffix(".sig")
+        sig_path.write_text(sig)
 
     @classmethod
     def load(cls, path: Path) -> RejectionPredictor:
-        """Load a predictor from a pickle file."""
+        """Load a predictor from a signed pickle file.
+
+        Raises ValueError if the HMAC signature is missing or invalid.
+        """
+        sig_path = path.with_suffix(".sig")
+        if not sig_path.exists():
+            raise ValueError(f"Missing signature file for model at {path}")
+        payload = path.read_bytes()
+        expected_sig = sig_path.read_text().strip()
+        actual_sig = _compute_hmac(payload)
+        if not hmac.compare_digest(expected_sig, actual_sig):
+            raise ValueError(f"HMAC signature mismatch for model at {path}")
+        data = pickle.loads(payload)  # verified by HMAC above
         predictor = cls()
-        with open(path, "rb") as f:
-            data = pickle.load(f)
         predictor.model = data["model"]
         predictor._approval_rates = data["approval_rates"]
         predictor._trained = data["trained"]
         predictor._last_action_count = data.get("last_action_count", 0)
         return predictor
+
+
+def _compute_hmac(payload: bytes) -> str:
+    """Compute HMAC-SHA256 of *payload* using the Django SECRET_KEY."""
+    from django.conf import settings
+
+    key = settings.SECRET_KEY.encode()
+    return hmac.new(key, payload, hashlib.sha256).hexdigest()
 
 
 def model_path_for_project(project_owner: str, project_repo: str) -> Path:

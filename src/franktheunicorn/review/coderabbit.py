@@ -16,7 +16,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from franktheunicorn.core.models import ReviewDraft
-from franktheunicorn.review.antipattern import check_against_anti_patterns
+from franktheunicorn.review.antipattern import (
+    check_against_anti_patterns,
+    record_anti_pattern_matches,
+)
 
 if TYPE_CHECKING:
     from franktheunicorn.config.models import CodeRabbitConfig
@@ -193,6 +196,7 @@ def create_drafts_from_coderabbit(
         # Anti-pattern gate.
         matches = check_against_anti_patterns(finding.body, project)
         if matches:
+            record_anti_pattern_matches(matches)
             logger.info(
                 "Suppressed CodeRabbit finding '%s' — matched anti-pattern(s): %s",
                 finding.title,
