@@ -37,7 +37,7 @@ Each finding must match this schema:
 {schema}
 
 Set severity to one of: critical, important, nit, informational.
-Set category to "security" in the title field of every finding.
+Prefix the title of every finding with "security:" (for example, "security: hardcoded API key").
 If you have no findings, return: {{"findings": []}}
 """
 

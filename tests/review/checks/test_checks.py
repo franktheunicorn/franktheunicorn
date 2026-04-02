@@ -71,7 +71,7 @@ class TestRunEnabledChecks:
         self,
         db_pr: PullRequest,
     ) -> None:
-        """Coverage check with stub backend should produce drafts via _call_api."""
+        """Coverage check should produce correctly categorized drafts from findings."""
         config = ProjectConfig(
             owner="apache",
             repo="spark",
@@ -111,7 +111,7 @@ class TestRunEnabledChecks:
         self,
         db_pr: PullRequest,
     ) -> None:
-        """Security check with stub backend should produce drafts via _call_api."""
+        """Security check should produce correctly categorized drafts from findings."""
         config = ProjectConfig(
             owner="apache",
             repo="spark",
