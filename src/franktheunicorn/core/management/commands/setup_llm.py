@@ -265,8 +265,6 @@ class Command(BaseCommand):
         env_vars_needed: list[str],
     ) -> list[dict[str, object]]:
         """Offer to configure Tier 2/3 detections as OpenAI-compatible backends."""
-        providers_already_configured = {str(b.get("provider", "")) for b in llm_backends}
-
         # Group by provider to avoid duplicate offers.
         seen_providers: set[str] = set()
         candidates: list[tuple[str, str, str]] = []  # (provider, env_var, endpoint)
@@ -297,9 +295,6 @@ class Command(BaseCommand):
             return llm_backends
 
         for prov, env_var, endpoint in candidates:
-            if "openai" in providers_already_configured:
-                # Use a distinct entry with base_url.
-                pass
             self.stdout.write(f"\n--- Configuring {prov} (OpenAI-compatible) ---\n")
             compat_config: dict[str, object] = {"provider": "openai"}
             compat_config["api_key_env"] = env_var
