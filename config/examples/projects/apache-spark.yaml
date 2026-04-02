@@ -77,11 +77,11 @@ posting:
 #   refine_with: "primary"   # which backend refines the first-pass output
 
 # Merge queue — track and merge PRs meeting configurable criteria
-# merge_queue:
-#   enabled: true
-#   required_approvals: 2
-#   require_ci_pass: true
-#   require_no_conflicts: true
-#   merge_script: "/path/to/merge_spark_pr.py"  # custom merge script
-#   auto_merge: false
-#   merge_method: "merge"    # merge | squash | rebase
+merge_queue:
+  enabled: true
+  required_approvals: 2
+  require_ci_pass: true
+  require_no_conflicts: true
+  merge_script: "dev/merge_spark_pr.py"  # custom merge script
+  auto_merge: false
+  merge_method: "merge"    # merge | squash | rebase

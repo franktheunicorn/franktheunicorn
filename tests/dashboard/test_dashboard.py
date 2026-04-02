@@ -624,3 +624,131 @@ class TestDashboardV15:
         assert response.context["jira_context"] is None
         assert response.context["community_context"] is None
         assert response.context["sentry_context"] is None
+
+
+@pytest.mark.django_db
+class TestMergeQueueView:
+    """Tests for merge queue copy-command vs merge button behaviour."""
+
+    def _make_eligible_pr(self) -> PullRequest:
+        from tests.factories import ProjectFactory
+
+        project = ProjectFactory(owner="apache", repo="spark")
+        return PullRequestFactory(
+            project=project,
+            number=42,
+            state="open",
+            is_operator_pr=True,
+            ci_status="pass",
+            approval_count=2,
+            interest_score=1.0,
+        )
+
+    def test_copy_button_shown_when_merge_script_configured(self, client: Client) -> None:
+        from unittest.mock import patch
+
+        from franktheunicorn.config.models import MergeQueueConfig, ProjectConfig
+        from franktheunicorn.worker.merge_queue import MergeEligibility
+
+        self._make_eligible_pr()
+        pc = ProjectConfig(
+            owner="apache",
+            repo="spark",
+            review_context="ASF",
+            merge_queue=MergeQueueConfig(
+                enabled=True,
+                merge_script="dev/merge_spark_pr.py",
+                required_approvals=2,
+            ),
+        )
+        eligibility = MergeEligibility(
+            eligible=True, ci_pass=True, approvals_met=True, no_conflicts=True
+        )
+
+        with (
+            patch("franktheunicorn.config.loader.load_project_configs", return_value=[pc]),
+            patch(
+                "franktheunicorn.worker.merge_queue.evaluate_merge_eligibility",
+                return_value=eligibility,
+            ),
+        ):
+            response = client.get("/merge-queue/")
+
+        assert response.status_code == 200
+        assert b"Copy PR #" in response.content
+        assert b'data-command="42"' in response.content
+        assert b'<button type="submit">Merge</button>' not in response.content
+
+    def test_merge_button_shown_when_no_script(self, client: Client) -> None:
+        from unittest.mock import patch
+
+        from franktheunicorn.config.models import MergeQueueConfig, ProjectConfig
+        from franktheunicorn.worker.merge_queue import MergeEligibility
+
+        self._make_eligible_pr()
+        pc = ProjectConfig(
+            owner="apache",
+            repo="spark",
+            review_context="ASF",
+            merge_queue=MergeQueueConfig(enabled=True, required_approvals=2),
+        )
+        eligibility = MergeEligibility(
+            eligible=True, ci_pass=True, approvals_met=True, no_conflicts=True
+        )
+
+        with (
+            patch("franktheunicorn.config.loader.load_project_configs", return_value=[pc]),
+            patch(
+                "franktheunicorn.worker.merge_queue.evaluate_merge_eligibility",
+                return_value=eligibility,
+            ),
+        ):
+            response = client.get("/merge-queue/")
+
+        assert response.status_code == 200
+        assert b"Merge</button>" in response.content
+        assert b"Copy PR #" not in response.content
+
+    def test_blockers_shown_when_not_eligible(self, client: Client) -> None:
+        from unittest.mock import patch
+
+        from franktheunicorn.config.models import MergeQueueConfig, ProjectConfig
+        from franktheunicorn.worker.merge_queue import MergeEligibility
+
+        self._make_eligible_pr()
+        pc = ProjectConfig(
+            owner="apache",
+            repo="spark",
+            review_context="ASF",
+            merge_queue=MergeQueueConfig(enabled=True, required_approvals=2),
+        )
+        eligibility = MergeEligibility(
+            eligible=False,
+            ci_pass=False,
+            approvals_met=True,
+            no_conflicts=True,
+            details=["CI status: fail (requires pass)"],
+        )
+
+        with (
+            patch("franktheunicorn.config.loader.load_project_configs", return_value=[pc]),
+            patch(
+                "franktheunicorn.worker.merge_queue.evaluate_merge_eligibility",
+                return_value=eligibility,
+            ),
+        ):
+            response = client.get("/merge-queue/")
+
+        assert response.status_code == 200
+        assert b"CI status: fail" in response.content
+        assert b"Copy PR #" not in response.content
+        assert b"Merge</button>" not in response.content
+
+    def test_empty_queue(self, client: Client) -> None:
+        from unittest.mock import patch
+
+        with patch("franktheunicorn.config.loader.load_project_configs", return_value=[]):
+            response = client.get("/merge-queue/")
+
+        assert response.status_code == 200
+        assert b"No PRs in the merge queue" in response.content
