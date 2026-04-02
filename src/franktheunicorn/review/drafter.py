@@ -287,6 +287,10 @@ def draft_review(
     pr: PullRequest,
     project_config: ProjectConfig,
     operator_config: OperatorConfig | None = None,
+    *,
+    community_context: str = "",
+    jira_context: str = "",
+    sentry_context: str = "",
 ) -> list[ReviewDraft]:
     """Generate review drafts for a PR using all configured LLM backends.
 
@@ -304,7 +308,14 @@ def draft_review(
 
         operator_config = DefaultOperatorConfig()
 
-    pr_context = build_pr_context(pr, project_config, operator_config)
+    pr_context = build_pr_context(
+        pr,
+        project_config,
+        operator_config,
+        community_context=community_context,
+        jira_context=jira_context,
+        sentry_context=sentry_context,
+    )
     diff = _get_pr_diff(pr)
 
     # Resolve which backends to run.
