@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from franktheunicorn.review.backends.base import ReviewFinding
 from franktheunicorn.review.checks import BaseCheck
 from franktheunicorn.review.prompt import build_user_message, finding_schema_json
 
@@ -73,7 +72,3 @@ class IssueLinkCheck(BaseCheck):
         user_message = build_user_message(diff, pr_context)
 
         return system_prompt, user_message
-
-    def parse_response(self, raw_text: str) -> list[ReviewFinding]:
-        """Parse LLM output, returning empty list when no issues are linked."""
-        return super().parse_response(raw_text)

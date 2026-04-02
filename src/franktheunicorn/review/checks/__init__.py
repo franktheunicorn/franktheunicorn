@@ -82,6 +82,11 @@ def run_enabled_checks(
     registry = _get_registry()
     pr_context = build_pr_context(pr, project_config, operator_config)
 
+    if "issue-link" in enabled and not pr_context.linked_issues_context:
+        from franktheunicorn.review.drafter import _fetch_linked_issues_context
+
+        pr_context.linked_issues_context = _fetch_linked_issues_context(pr)
+
     # Use first configured backend (or stub fallback).
     backend_configs = operator_config.llm_backends or [LLMBackendConfig()]
     backend_config = backend_configs[0]

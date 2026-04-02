@@ -79,9 +79,6 @@ def build_pr_context(
 
     personality = load_personality(operator_config.personality)
 
-    # Fetch linked GitHub issues from PR title/body references.
-    linked_issues_context = _fetch_linked_issues_context(pr)
-
     return PRContext(
         pr_title=pr.title,
         pr_body=pr.body or "",
@@ -98,7 +95,6 @@ def build_pr_context(
         personality_internal_voice=personality.internal_voice if personality else "",
         personality_external_voice=personality.external_voice if personality else "",
         personality_review_philosophy=(personality.review_philosophy if personality else ""),
-        linked_issues_context=linked_issues_context,
         community_context=community_context,
         jira_context=jira_context,
         sentry_context=sentry_context,
