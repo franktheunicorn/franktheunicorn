@@ -4,7 +4,7 @@ This guide walks you through getting franktheunicorn running and configured.
 For the impatient, the [README](../README.md) has a quick start that gets you a
 dashboard in under a minute using mock data.
 
-**Prefer a guided experience?** Run `./scripts/dev_setup.sh` — it walks you
+**Prefer a guided experience?** Run `./scripts/setup.sh` — it walks you
 through prerequisites, mode selection (Docker or local), API key configuration,
 and project initialization interactively. The steps below are the same things
 the script does, documented for reference.

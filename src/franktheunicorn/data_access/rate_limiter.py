@@ -46,7 +46,7 @@ class GitHubRateLimiter:
             db_path=str(self._db_path),
             create_new_table=True,
         )
-        self._limiter = Limiter(bucket, max_delay=Duration.SECOND * 30)
+        self._limiter = Limiter(bucket)
 
     def acquire(self) -> None:
         """Block until a request slot is available.
