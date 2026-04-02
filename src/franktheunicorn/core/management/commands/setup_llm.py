@@ -186,7 +186,7 @@ class Command(BaseCommand):
             if 0 <= idx < len(models):
                 return models[idx].model_id
         except ValueError:
-            pass
+            pass  # Non-numeric input treated as a direct model name
 
         return choice
 

@@ -125,15 +125,6 @@ def list_models_ollama(
         return []
 
 
-# Maps provider name → discovery function + kwargs builder
-_DISCOVERY_FUNCTIONS: dict[str, str] = {
-    "claude": "list_models_anthropic",
-    "openai": "list_models_openai",
-    "gemini": "list_models_gemini",
-    "ollama": "list_models_ollama",
-}
-
-
 def discover_models(
     provider: str,
     api_key_env: str = "",
