@@ -140,7 +140,7 @@ if [ -z "$MODE" ]; then
     echo "How would you like to set up franktheunicorn?"
     echo ""
     echo "  1. Docker (recommended for trying it out)"
-    echo "     Runs in containers. Mock mode by default — no API keys needed."
+    echo "     Runs in containers. Configure API keys for live PR ingestion."
     echo ""
     echo "  2. Local development"
     echo "     Python virtualenv, editable install, full guided configuration."
@@ -181,10 +181,10 @@ if [ "$MODE" = "docker" ]; then
         echo "Mock mode uses fixture data so you can explore the dashboard"
         echo "without a GitHub token or API keys."
         echo ""
-        use_mock=$(ask "Start in mock mode? (Y/n):" "y")
+        use_mock=$(ask "Start in mock mode? (y/N):" "n")
         case "$use_mock" in
-            [nN]*) MOCK_MODE="false" ;;
-            *)     MOCK_MODE="true" ;;
+            [yY]*) MOCK_MODE="true" ;;
+            *)     MOCK_MODE="false" ;;
         esac
     fi
 
@@ -270,16 +270,16 @@ if [ -z "$MOCK_MODE" ]; then
     echo ""
     echo "franktheunicorn can run in two modes:"
     echo ""
-    echo "  Mock mode  — uses fixture data, no API keys needed."
-    echo "               Great for exploring the dashboard and running tests."
-    echo ""
     echo "  Real mode  — connects to GitHub and an LLM provider."
     echo "               Requires a GitHub token and at least one API key."
     echo ""
-    use_mock=$(ask "Start in mock mode? (Y/n):" "y")
+    echo "  Mock mode  — uses fixture data, no API keys needed."
+    echo "               Great for exploring the dashboard and running tests."
+    echo ""
+    use_mock=$(ask "Start in mock mode? (y/N):" "n")
     case "$use_mock" in
-        [nN]*) MOCK_MODE="false" ;;
-        *)     MOCK_MODE="true" ;;
+        [yY]*) MOCK_MODE="true" ;;
+        *)     MOCK_MODE="false" ;;
     esac
 fi
 
