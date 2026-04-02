@@ -20,6 +20,13 @@ class Project(models.Model):
     owner = models.CharField(max_length=255)
     repo = models.CharField(max_length=255)
     review_context = models.TextField(default="general open-source")
+    name = models.CharField(max_length=255, blank=True, default="")
+    project_type = models.CharField(
+        max_length=20,
+        choices=[("asf", "ASF"), ("personal", "Personal"), ("org", "Organization")],
+        default="personal",
+    )
+    config_yaml = models.TextField(blank=True, default="")
     enabled = models.BooleanField(default=True)
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
@@ -83,6 +90,7 @@ class PullRequest(models.Model):
     is_new_contributor = models.BooleanField(default=False)
     is_low_context = models.BooleanField(default=False)
     is_likely_unowned = models.BooleanField(default=False)
+    has_test_coverage = models.BooleanField(null=True, blank=True)
 
     # Agent session tracking (v1.25 — direct feedback channel)
     ai_agent_source = models.CharField(max_length=100, blank=True, default="")

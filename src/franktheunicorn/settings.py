@@ -8,6 +8,8 @@ All persistent state lives under DATA_DIR, which defaults to ./data/.
 import os
 from pathlib import Path
 
+import dj_database_url
+
 
 def _env_bool(key: str, default: str = "true") -> bool:
     """Parse a boolean from an environment variable."""
@@ -75,13 +77,17 @@ TEMPLATES = [
 
 WSGI_APPLICATION = "franktheunicorn.wsgi.application"
 
-# SQLite — the only database. Local-first, no Postgres.
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": str(DATA_DIR / "frank.sqlite3"),
+# Database: honours DATABASE_URL when set, otherwise SQLite (local-first default).
+_DATABASE_URL = os.environ.get("DATABASE_URL")
+if _DATABASE_URL:
+    DATABASES = {"default": dj_database_url.parse(_DATABASE_URL)}
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": str(DATA_DIR / "frank.sqlite3"),
+        }
     }
-}
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 

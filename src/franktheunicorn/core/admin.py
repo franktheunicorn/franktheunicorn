@@ -18,7 +18,7 @@ from franktheunicorn.core.models import (
 class ProjectAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
     """Admin for monitored GitHub projects."""
 
-    list_display = ("owner", "repo", "enabled", "review_context", "created_at")
+    list_display = ("owner", "repo", "project_type", "enabled", "review_context", "created_at")
     list_filter = ("enabled",)
     search_fields = ("owner", "repo")
     readonly_fields = ("created_at", "updated_at")
