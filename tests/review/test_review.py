@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from franktheunicorn.config.models import OperatorConfig, ProjectConfig
-from franktheunicorn.core.models import AntiPattern, Project, PullRequest, ReviewDraft
+from franktheunicorn.core.models import Project, PullRequest, ReviewDraft
 from franktheunicorn.review.antipattern import check_against_anti_patterns, record_anti_pattern
 from franktheunicorn.review.backends.base import ReviewFinding
 from franktheunicorn.review.drafter import (
@@ -16,6 +16,7 @@ from franktheunicorn.review.drafter import (
     create_drafts_from_findings,
     draft_review,
 )
+from tests.factories import AntiPatternFactory
 
 
 @pytest.mark.django_db
@@ -117,7 +118,7 @@ class TestAntiPattern:
         assert ap.times_triggered == 1
 
     def test_check_matches(self, db_project: Project) -> None:
-        AntiPattern.objects.create(
+        AntiPatternFactory(
             pattern_text="nit:",
             project=db_project,
         )
@@ -125,7 +126,7 @@ class TestAntiPattern:
         assert len(matches) == 1
 
     def test_check_no_match(self, db_project: Project) -> None:
-        AntiPattern.objects.create(
+        AntiPatternFactory(
             pattern_text="nit:",
             project=db_project,
         )

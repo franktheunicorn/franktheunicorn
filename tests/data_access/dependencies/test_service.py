@@ -95,10 +95,10 @@ class TestDetectAndFetchChangelogs:
         github_release_requests_json: dict[str, Any],
     ) -> None:
         """Should not re-fetch changelogs for already-recorded dependencies."""
-        from franktheunicorn.core.models import DependencyChange
+        from tests.factories import DependencyChangeFactory
 
         # Pre-create a dependency change
-        DependencyChange.objects.create(
+        DependencyChangeFactory(
             pull_request=db_pr,
             package_name="requests",
             ecosystem="python",

@@ -118,7 +118,7 @@ def make_pr(db_project: Project):
             "changed_files": ["README.md"],
         }
         defaults.update(kwargs)
-        return PullRequest.objects.create(
+        return PullRequestFactory(
             project=db_project,
             number=number,
             author=author,

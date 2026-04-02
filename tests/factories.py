@@ -10,6 +10,7 @@ from franktheunicorn.core.models import (
     AgentFeedback,
     AntiPattern,
     CostRecord,
+    DependencyChange,
     OperatorAction,
     Project,
     PullRequest,
@@ -133,6 +134,26 @@ class CostRecordFactory(factory.django.DjangoModelFactory):  # type: ignore[misc
     tokens_out = 500
     estimated_cost_usd = Decimal("0.0150")
     duration_seconds = 2.5
+
+
+class DependencyChangeFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
+    """Factory for DependencyChange model instances."""
+
+    class Meta:
+        model = DependencyChange
+
+    pull_request = factory.SubFactory(PullRequestFactory)
+    package_name = factory.Sequence(lambda n: f"package-{n}")
+    ecosystem = "python"
+    old_version = "1.0.0"
+    new_version = "2.0.0"
+    source_file = "requirements.txt"
+    changelog_url = ""
+    changelog_text = ""
+    repository_url = ""
+    breaking_changes_detected = False
+    deprecations_detected = False
+    changelog_fetch_error = ""
 
 
 class TestRunFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]

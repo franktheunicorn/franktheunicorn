@@ -10,13 +10,14 @@ from unittest.mock import patch
 import pytest
 
 from franktheunicorn.config.models import CodeRabbitConfig
-from franktheunicorn.core.models import AntiPattern, Project, PullRequest
+from franktheunicorn.core.models import Project, PullRequest
 from franktheunicorn.review.coderabbit import (
     CodeRabbitFinding,
     create_drafts_from_coderabbit,
     parse_prompt_only_output,
     run_coderabbit_review,
 )
+from tests.factories import AntiPatternFactory
 
 FIXTURES_DIR = Path(__file__).parent.parent / "fixtures"
 
@@ -160,7 +161,7 @@ class TestCreateDraftsFromCodeRabbit:
         assert confidences == [0.9, 0.8, 0.6, 0.3, 0.5]
 
     def test_anti_pattern_suppression(self, db_pr: PullRequest, db_project: Project) -> None:
-        AntiPattern.objects.create(
+        AntiPatternFactory(
             pattern_text="nit:",
             project=db_project,
         )
@@ -176,7 +177,7 @@ class TestCreateDraftsFromCodeRabbit:
     def test_anti_pattern_actually_suppresses(
         self, db_pr: PullRequest, db_project: Project
     ) -> None:
-        AntiPattern.objects.create(
+        AntiPatternFactory(
             pattern_text="spacing issue",
             project=db_project,
         )
