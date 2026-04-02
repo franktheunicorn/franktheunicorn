@@ -173,6 +173,24 @@ class TestTrainRejectionModelCommand:
 
 
 @pytest.mark.django_db
+class TestWorkerStatusCommand:
+    def test_runs_without_error(self) -> None:
+        out = StringIO()
+        call_command("worker_status", stdout=out)
+        output = out.getvalue()
+        assert "Open PRs" in output
+
+
+@pytest.mark.django_db
+class TestCheckRateLimitsCommand:
+    def test_no_token(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("FRANK_GITHUB_TOKEN", raising=False)
+        out = StringIO()
+        call_command("check_rate_limits", stdout=out)
+        assert "not set" in out.getvalue()
+
+
+@pytest.mark.django_db
 class TestExportTrainingDataCommand:
     def _create_actions(self, project: Project, count: int) -> None:
         for _ in range(count):

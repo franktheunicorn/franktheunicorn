@@ -1,0 +1,17 @@
+owner: "your-org"
+repo: "your-repo"
+review_context: "Team project with CI/CD"
+governance: "standard"
+tone: "constructive"
+watched_paths: ["src/"]
+ignore_paths: ["docs/"]
+frequent_contributors: []
+enabled: true
+llm_checks: ["coverage"]
+
+# v1.5+ features (uncomment when ready):
+# jira:
+#   enabled: false
+#   server: ""
+#   project_prefix: ""
+# community_sources: []

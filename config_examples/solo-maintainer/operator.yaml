@@ -1,0 +1,14 @@
+github_username: ""
+review_style: "direct but kind"
+auto_post: false
+poll_interval_seconds: 600
+digest_email: ""
+digest_enabled: false
+
+llm_backends:
+  - provider: stub
+
+# workspaces:
+#   all:
+#     projects: "*"
+#     description: "All projects"
