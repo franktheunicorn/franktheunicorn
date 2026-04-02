@@ -123,7 +123,7 @@ Compared: all source files, tests, config, and infrastructure against `docs/fran
 | 54 | **No example configs for personas** | CLAUDE.md and design doc 15.1 both reference example configs for solo-maintainer and team-lead personas. None exist in the repo. |
 | 55 | **`.env.example` missing SMTP vars** | Design doc 12.3 lists `REVIEW_AGENT_SMTP_HOST`, `REVIEW_AGENT_SMTP_PORT`, `REVIEW_AGENT_SMTP_USER`, `REVIEW_AGENT_SMTP_PASS`, `REVIEW_AGENT_EMAIL_FROM`. Not in `.env.example` (though settings.py reads them). |
 | 56 | **`.env.example` missing `DATABASE_URL`** | Design doc mentions Postgres via `DATABASE_URL`. Not in `.env.example`. |
-| 57 | **`dev_setup.sh` needs verification** | `scripts/dev_setup.sh` exists. Should verify it works end-to-end with the current codebase state. |
+| 57 | **`setup.sh` needs verification** | `scripts/setup.sh` exists. Should verify it works end-to-end with the current codebase state. |
 
 ---
 

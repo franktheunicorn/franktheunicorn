@@ -2,12 +2,12 @@
 # Guided setup script for franktheunicorn.
 #
 # Usage:
-#   ./scripts/dev_setup.sh             # Interactive guided setup
-#   ./scripts/dev_setup.sh --docker    # Skip to Docker setup
-#   ./scripts/dev_setup.sh --local     # Skip to local dev setup
-#   ./scripts/dev_setup.sh --mock      # Local setup in mock/demo mode (no API keys)
+#   ./scripts/setup.sh             # Interactive guided setup
+#   ./scripts/setup.sh --docker    # Skip to Docker setup
+#   ./scripts/setup.sh --local     # Skip to local dev setup
+#   ./scripts/setup.sh --mock      # Local setup in mock/demo mode (no API keys)
 
-set -euo pipefail
+set -exuo pipefail
 
 # --- Helpers ----------------------------------------------------------------
 
@@ -97,7 +97,7 @@ fi
 PYTHON_CMD=""
 for cmd in python3.12 python3.11 python3; do
     if command -v "$cmd" &>/dev/null; then
-        py_version=$("$cmd" --version 2>&1 | grep -oP '\d+\.\d+' | head -1)
+        py_version=$("$cmd" --version 2>&1 | sed -n 's/.*Python \([0-9]*\.[0-9]*\).*/\1/p')
         py_major=$(echo "$py_version" | cut -d. -f1)
         py_minor=$(echo "$py_version" | cut -d. -f2)
         if [ "$py_major" -ge 3 ] && [ "$py_minor" -ge 11 ]; then
@@ -503,7 +503,7 @@ echo ""
 if [ "$MOCK_MODE" = "true" ]; then
     echo "  ${BOLD}Switch to real mode later:${NC}"
     echo "    Edit .env: set FRANK_MOCK_MODE=false and add your API keys"
-    echo "    Re-run: ./scripts/dev_setup.sh --local"
+    echo "    Re-run: ./scripts/setup.sh --local"
     echo ""
 fi
 echo "  ${BOLD}Configure projects and workspaces:${NC}"

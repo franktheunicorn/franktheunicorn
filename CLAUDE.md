@@ -108,7 +108,7 @@ The anti-pattern list is the primary feedback mechanism — not a side feature. 
 
 ```bash
 # Guided setup (recommended for first time)
-./scripts/dev_setup.sh
+./scripts/setup.sh
 
 # Or manual setup
 cp .env.example .env  # set GITHUB_TOKEN + ANTHROPIC_API_KEY
