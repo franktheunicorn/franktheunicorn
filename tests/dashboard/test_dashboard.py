@@ -8,7 +8,6 @@ from django.test import Client
 from franktheunicorn.core.models import (
     AgentFeedback,
     AntiPattern,
-    DependencyChange,
     OperatorAction,
     PullRequest,
     ReviewDraft,
@@ -16,6 +15,7 @@ from franktheunicorn.core.models import (
 from tests.factories import (
     AntiPatternFactory,
     CostRecordFactory,
+    DependencyChangeFactory,
     PullRequestFactory,
     ReviewDraftFactory,
     TestRunFactory,
@@ -83,7 +83,7 @@ class TestDashboardViews:
         assert b"Closed PR should not appear" not in response.content
 
     def test_pr_detail_with_dependency_changes(self, client: Client, db_pr: PullRequest) -> None:
-        DependencyChange.objects.create(
+        DependencyChangeFactory(
             pull_request=db_pr,
             package_name="httpx",
             ecosystem="python",

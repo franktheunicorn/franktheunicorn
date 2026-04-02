@@ -7,13 +7,14 @@ from unittest.mock import patch
 import pytest
 
 from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig, ProjectConfig
-from franktheunicorn.core.models import AntiPattern, PullRequest
+from franktheunicorn.core.models import PullRequest
 from franktheunicorn.review.backends.base import ReviewFinding
 from franktheunicorn.review.checks import (
     BaseCheck,
     _get_registry,
     run_enabled_checks,
 )
+from tests.factories import AntiPatternFactory
 
 
 class TestRegistry:
@@ -108,7 +109,7 @@ class TestRunEnabledChecks:
         db_pr: PullRequest,
     ) -> None:
         """Findings that match an anti-pattern should be suppressed."""
-        AntiPattern.objects.create(
+        AntiPatternFactory(
             pattern_text="No test for new function",
             project=db_pr.project,
         )

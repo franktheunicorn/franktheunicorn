@@ -269,14 +269,14 @@ class TestReEngagementFromModel:
         """score_pull_request_from_model auto-computes operator_review_posted_at."""
         from datetime import UTC, datetime
 
-        from franktheunicorn.core.models import ReviewDraft
+        from tests.factories import ReviewDraftFactory
 
         pr = make_pr(
             author="alice",
             changed_files=["README.md"],
             github_updated_at=datetime(2026, 3, 30, 12, 0, tzinfo=UTC),
         )
-        ReviewDraft.objects.create(
+        ReviewDraftFactory(
             pull_request=pr,
             comment_body="LGTM",
             status="posted",
