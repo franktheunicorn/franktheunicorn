@@ -18,7 +18,7 @@ from franktheunicorn.review.coderabbit import (
     run_coderabbit_review,
 )
 
-FIXTURES_DIR = Path(__file__).parent / "fixtures"
+FIXTURES_DIR = Path(__file__).parent.parent / "fixtures"
 
 
 # ---------------------------------------------------------------------------
