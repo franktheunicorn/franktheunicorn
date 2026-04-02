@@ -31,10 +31,18 @@
       <td>{% if item.eligible %}<strong style="color: #2e7d32;">Ready</strong>{% else %}Not ready{% endif %}</td>
       <td>
         {% if item.eligible %}
-        <form hx-post="{% url 'dashboard:merge_pr' item.pr.pk %}" hx-swap="outerHTML">
-          {% csrf_token %}
-          <button type="submit">Merge</button>
-        </form>
+          {% if item.merge_command %}
+          <button type="button" class="action-btn copy-cmd-btn"
+                  data-command="{{ item.merge_command }}"
+                  onclick="copyMergeCommand(this)">
+            Copy command
+          </button>
+          {% else %}
+          <form hx-post="{% url 'dashboard:merge_pr' item.pr.pk %}" hx-swap="outerHTML">
+            {% csrf_token %}
+            <button type="submit">Merge</button>
+          </form>
+          {% endif %}
         {% else %}
         <small>{{ item.details|join:", " }}</small>
         {% endif %}
@@ -43,6 +51,17 @@
     {% endfor %}
   </tbody>
 </table>
+
+<script>
+function copyMergeCommand(btn) {
+  var cmd = btn.getAttribute("data-command");
+  navigator.clipboard.writeText(cmd).then(function() {
+    var orig = btn.textContent;
+    btn.textContent = "Copied!";
+    setTimeout(function() { btn.textContent = orig; }, 1500);
+  });
+}
+</script>
 {% else %}
 <p>No PRs in the merge queue. Enable merge_queue in your project config to track PRs here.</p>
 {% endif %}

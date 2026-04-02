@@ -555,6 +555,10 @@ def merge_queue_view(request: HttpRequest) -> HttpResponse:
             pc = config_by_project.get(f"{pr.project.owner}/{pr.project.repo}")
             if pc and pc.merge_queue.enabled:
                 eligibility = evaluate_merge_eligibility(pr, pc.merge_queue)
+                merge_script = pc.merge_queue.merge_script
+                merge_command = (
+                    f"{merge_script} {pr.number} {pr.project.full_name}" if merge_script else ""
+                )
                 pr_data.append(
                     {
                         "pr": pr,
@@ -563,6 +567,7 @@ def merge_queue_view(request: HttpRequest) -> HttpResponse:
                         "approvals_met": eligibility.approvals_met,
                         "no_conflicts": eligibility.no_conflicts,
                         "details": eligibility.details,
+                        "merge_command": merge_command,
                     }
                 )
         except Exception:
