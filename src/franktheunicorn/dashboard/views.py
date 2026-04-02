@@ -556,9 +556,7 @@ def merge_queue_view(request: HttpRequest) -> HttpResponse:
             if pc and pc.merge_queue.enabled:
                 eligibility = evaluate_merge_eligibility(pr, pc.merge_queue)
                 merge_script = pc.merge_queue.merge_script
-                merge_command = (
-                    f"{merge_script} {pr.number} {pr.project.full_name}" if merge_script else ""
-                )
+                merge_command = str(pr.number) if merge_script else ""
                 pr_data.append(
                     {
                         "pr": pr,

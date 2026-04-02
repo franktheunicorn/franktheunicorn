@@ -35,7 +35,7 @@
           <button type="button" class="action-btn copy-cmd-btn"
                   data-command="{{ item.merge_command }}"
                   onclick="copyMergeCommand(this)">
-            Copy command
+            Copy PR #
           </button>
           {% else %}
           <form hx-post="{% url 'dashboard:merge_pr' item.pr.pk %}" hx-swap="outerHTML">

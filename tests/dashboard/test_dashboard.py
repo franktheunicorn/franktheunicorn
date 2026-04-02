@@ -675,8 +675,8 @@ class TestMergeQueueView:
             response = client.get("/merge-queue/")
 
         assert response.status_code == 200
-        assert b"Copy command" in response.content
-        assert b"dev/merge_spark_pr.py 42 apache/spark" in response.content
+        assert b"Copy PR #" in response.content
+        assert b'data-command="42"' in response.content
         assert b'<button type="submit">Merge</button>' not in response.content
 
     def test_merge_button_shown_when_no_script(self, client: Client) -> None:
@@ -707,7 +707,7 @@ class TestMergeQueueView:
 
         assert response.status_code == 200
         assert b"Merge</button>" in response.content
-        assert b"Copy command" not in response.content
+        assert b"Copy PR #" not in response.content
 
     def test_blockers_shown_when_not_eligible(self, client: Client) -> None:
         from unittest.mock import patch
@@ -741,7 +741,7 @@ class TestMergeQueueView:
 
         assert response.status_code == 200
         assert b"CI status: fail" in response.content
-        assert b"Copy command" not in response.content
+        assert b"Copy PR #" not in response.content
         assert b"Merge</button>" not in response.content
 
     def test_empty_queue(self, client: Client) -> None:
