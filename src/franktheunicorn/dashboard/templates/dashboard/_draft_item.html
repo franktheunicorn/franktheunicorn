@@ -1,6 +1,6 @@
 <div class="draft-item {{ draft.status }}" id="draft-{{ draft.pk }}" data-draft-id="{{ draft.pk }}">
     <strong>{{ draft.file_path }}{% if draft.line_number %}:{{ draft.line_number }}{% endif %}{% if draft.line_end %}-{{ draft.line_end }}{% endif %}</strong>
-    {% if draft.source == "coderabbit" %}
+    {% if "coderabbit" in draft.sources %}
     <span class="source-badge source-coderabbit">CodeRabbit</span>
     {% else %}
     <span class="source-badge source-agent">Agent</span>

@@ -596,9 +596,9 @@ class TestDashboardV15:
 
     def test_pr_detail_coderabbit_drafts_separated(self, client: Client) -> None:
         pr = PullRequestFactory()
-        ReviewDraftFactory(pull_request=pr, source="agent")
-        ReviewDraftFactory(pull_request=pr, source="coderabbit")
-        ReviewDraftFactory(pull_request=pr, source="agent,coderabbit")
+        ReviewDraftFactory(pull_request=pr, sources=["agent"])
+        ReviewDraftFactory(pull_request=pr, sources=["coderabbit"])
+        ReviewDraftFactory(pull_request=pr, sources=["agent", "coderabbit"])
         response = client.get(f"/pr/{pr.pk}/")
         assert response.status_code == 200
         assert len(response.context["agent_drafts"]) == 1

@@ -220,7 +220,7 @@ def create_drafts_from_findings(
             tone_guard_applied=tone_guard_applied,
             backend_used=source,
             status="pending",
-            source=source,
+            sources=[source],
             code_context=code_context,
             rejection_probability=rejection_probability,
             is_auto_suppressed=is_auto_suppressed,

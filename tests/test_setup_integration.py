@@ -60,7 +60,7 @@ class TestWizardEndToEnd:
         drafts = draft_review(db_pr, spark_project_config, config)
         assert len(drafts) > 0
         assert all(d.status == "pending" for d in drafts)
-        assert all(d.source == "agent" for d in drafts)
+        assert all("agent" in d.sources for d in drafts)
 
     def test_single_backend_wizard_generates_working_config(
         self,

@@ -210,7 +210,7 @@ def create_drafts_from_coderabbit(
             suggestion=finding.suggestion,
             confidence=confidence,
             status="pending",
-            source="coderabbit",
+            sources=["coderabbit"],
         )
         drafts.append(draft)
 

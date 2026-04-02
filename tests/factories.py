@@ -82,7 +82,7 @@ class ReviewDraftFactory(factory.django.DjangoModelFactory):  # type: ignore[mis
     comment_body = factory.Faker("paragraph")
     suggestion = ""
     confidence = 0.5
-    source = "agent"
+    sources = factory.LazyFunction(lambda: ["agent"])
     category = "other"
     severity = "nit"
     rejection_probability = None

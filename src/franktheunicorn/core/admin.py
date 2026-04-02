@@ -57,13 +57,13 @@ class ReviewDraftAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
     list_display = (
         "pull_request",
         "file_path",
-        "source",
+        "sources",
         "status",
         "severity",
         "confidence",
         "created_at",
     )
-    list_filter = ("status", "source", "severity", "category", "tone_guard_applied")
+    list_filter = ("status", "severity", "category", "tone_guard_applied")
     search_fields = ("file_path", "comment_body")
     readonly_fields = ("created_at", "updated_at")
 

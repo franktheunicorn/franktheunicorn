@@ -158,8 +158,8 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
     personality_name = get_operator_config().personality
 
     # v1.5: Separate CodeRabbit-sourced findings.
-    coderabbit_drafts = [d for d in drafts if "coderabbit" in (d.source or "")]
-    agent_drafts = [d for d in drafts if "coderabbit" not in (d.source or "")]
+    coderabbit_drafts = [d for d in drafts if any("coderabbit" in s for s in (d.sources or []))]
+    agent_drafts = [d for d in drafts if not any("coderabbit" in s for s in (d.sources or []))]
 
     # v1.5: External context (JIRA, community, Sentry).
     jira_context = pr.jira_cache if pr.jira_cache else None
@@ -191,7 +191,7 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
 
 def _action_type_for_draft(draft: ReviewDraft, action: str) -> str:
     """Return the appropriate action type based on draft source."""
-    if draft.source == "shepherding":
+    if "shepherding" in (draft.sources or []):
         return f"{action}_shepherd"
     return f"{action}_draft"
 

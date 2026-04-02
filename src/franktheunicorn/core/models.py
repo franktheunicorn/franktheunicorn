@@ -172,7 +172,7 @@ class ReviewDraft(models.Model):
     confidence = models.FloatField(
         default=0.5, validators=[MinValueValidator(0.0), MaxValueValidator(1.0)]
     )
-    source = models.CharField(max_length=50, default="agent")
+    sources = models.JSONField(default=list)
 
     # Finding metadata (§3.2)
     category = models.CharField(max_length=50, choices=CATEGORY_CHOICES, default="other")

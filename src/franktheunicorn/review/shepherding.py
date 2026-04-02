@@ -83,7 +83,7 @@ def generate_shepherd_drafts(
 ) -> list[ReviewDraft]:
     """Generate draft responses to reviewer comments on operator's own PRs.
 
-    Returns ReviewDraft objects with source="shepherding".
+    Returns ReviewDraft objects with sources=["shepherding"].
     """
     from franktheunicorn.review.backends import get_backend
 
@@ -139,7 +139,7 @@ def generate_shepherd_drafts(
             line_number=comment.line_number,
             comment_body=response_text,
             confidence=0.6,
-            source="shepherding",
+            sources=["shepherding"],
             category="other",
             severity="informational",
             reasoning_trace=f"Response to @{comment.author}: {comment.body[:100]}",
@@ -164,7 +164,7 @@ def _generate_condition_alerts(pr: PullRequest) -> list[ReviewDraft]:
         reasoning = "Detected mergeable=False from GitHub API"
         alert, _created = ReviewDraft.objects.get_or_create(
             pull_request=pr,
-            source="shepherding",
+            sources=["shepherding"],
             reasoning_trace=reasoning,
             defaults={
                 "comment_body": "This PR has merge conflicts and needs a rebase.",
@@ -183,7 +183,7 @@ def _generate_condition_alerts(pr: PullRequest) -> list[ReviewDraft]:
             reasoning = f"PR inactive for {age.days} days"
             alert, _created = ReviewDraft.objects.get_or_create(
                 pull_request=pr,
-                source="shepherding",
+                sources=["shepherding"],
                 reasoning_trace=reasoning,
                 defaults={
                     "comment_body": (
