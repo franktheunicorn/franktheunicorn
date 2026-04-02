@@ -47,9 +47,11 @@ class BaseCheck(ABC):
 def _get_registry() -> dict[str, type[BaseCheck]]:
     """Lazy registry to avoid circular imports at module level."""
     from franktheunicorn.review.checks.coverage import CoverageCheck
+    from franktheunicorn.review.checks.security import SecurityCheck
 
     return {
         "coverage": CoverageCheck,
+        "security": SecurityCheck,
     }
 
 
