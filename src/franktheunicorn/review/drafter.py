@@ -32,6 +32,28 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _fetch_linked_issues_context(pr: PullRequest) -> str:
+    """Extract issue references from PR title/body and fetch their content.
+
+    Returns formatted issue context or empty string on failure or no refs.
+    """
+    text = f"{pr.title} {pr.body or ''}"
+    if "#" not in text:
+        return ""
+
+    try:
+        from franktheunicorn.data_access.github.issue_fetcher import IssueFetcher
+
+        fetcher = IssueFetcher()
+        issues = fetcher.fetch_linked_issues(pr.project.owner, pr.project.repo, text)
+        if not issues:
+            return ""
+        return "\n\n".join(issue.to_prompt_context() for issue in issues)
+    except Exception:
+        logger.debug("Could not fetch linked issues for PR #%d", pr.number, exc_info=True)
+        return ""
+
+
 def build_pr_context(
     pr: PullRequest,
     project_config: ProjectConfig,
@@ -57,6 +79,9 @@ def build_pr_context(
 
     personality = load_personality(operator_config.personality)
 
+    # Fetch linked GitHub issues from PR title/body references.
+    linked_issues_context = _fetch_linked_issues_context(pr)
+
     return PRContext(
         pr_title=pr.title,
         pr_body=pr.body or "",
@@ -73,6 +98,7 @@ def build_pr_context(
         personality_internal_voice=personality.internal_voice if personality else "",
         personality_external_voice=personality.external_voice if personality else "",
         personality_review_philosophy=(personality.review_philosophy if personality else ""),
+        linked_issues_context=linked_issues_context,
         community_context=community_context,
         jira_context=jira_context,
         sentry_context=sentry_context,
@@ -169,6 +195,7 @@ def create_drafts_from_findings(
             "naming",
             "suggested-change",
             "moderation",
+            "issue-link",
         ):
             if cat in (finding.title or "").lower():
                 category = cat

@@ -173,6 +173,7 @@ def make_pr_context(**overrides: Any) -> PRContext:
         "personality_internal_voice": "",
         "personality_external_voice": "",
         "personality_review_philosophy": "",
+        "linked_issues_context": "",
     }
     defaults.update(overrides)
     return PRContext(**defaults)
