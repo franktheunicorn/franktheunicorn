@@ -18,7 +18,7 @@ from franktheunicorn.review.coderabbit import (
     run_coderabbit_review,
 )
 
-FIXTURES_DIR = Path(__file__).parent / "fixtures"
+FIXTURES_DIR = Path(__file__).parent.parent / "fixtures"
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +139,7 @@ class TestCreateDraftsFromCodeRabbit:
         ]
         drafts = create_drafts_from_coderabbit(db_pr, findings)
         assert len(drafts) == 1
-        assert drafts[0].source == "coderabbit"
+        assert "coderabbit" in drafts[0].sources
         assert "Bug found" in drafts[0].comment_body
         assert (
             "[CodeRabbit]" not in drafts[0].comment_body
@@ -228,5 +228,9 @@ class TestWorkerCodeRabbitIntegration:
         with patch("franktheunicorn.worker.runner.Path.home", return_value=tmp_path):
             _run_coderabbit_for_pr(db_pr, config)
 
-        cr_drafts = ReviewDraft.objects.filter(pull_request=db_pr, source="coderabbit")
-        assert cr_drafts.count() == 3
+        cr_drafts = [
+            d
+            for d in ReviewDraft.objects.filter(pull_request=db_pr)
+            if "coderabbit" in (d.sources or [])
+        ]
+        assert len(cr_drafts) == 3

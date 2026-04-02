@@ -1,0 +1,19 @@
+github_username: ""
+review_style: "thorough and constructive"
+auto_post: false
+poll_interval_seconds: 300
+digest_email: ""
+digest_enabled: true
+
+llm_backends:
+  - provider: claude
+    model: "claude-sonnet-4-20250514"
+    api_key_env: "ANTHROPIC_API_KEY"
+
+# workspaces:
+#   work:
+#     projects: []
+#     description: "Work projects"
+#   personal:
+#     projects: []
+#     description: "Personal projects"

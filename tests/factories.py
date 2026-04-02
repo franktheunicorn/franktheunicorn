@@ -27,6 +27,9 @@ class ProjectFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
     owner = factory.Sequence(lambda n: f"org-{n}")
     repo = factory.Sequence(lambda n: f"repo-{n}")
     review_context = "general open-source"
+    name = factory.LazyAttribute(lambda o: f"{o.owner}-{o.repo}")
+    project_type = "personal"
+    config_yaml = ""
     enabled = True
 
 
@@ -60,6 +63,7 @@ class PullRequestFactory(factory.django.DjangoModelFactory):  # type: ignore[mis
     is_new_contributor = False
     is_low_context = False
     is_likely_unowned = False
+    has_test_coverage = None
     ai_agent_source = ""
     agent_session_url = ""
     agent_task_id = ""
@@ -78,7 +82,7 @@ class ReviewDraftFactory(factory.django.DjangoModelFactory):  # type: ignore[mis
     comment_body = factory.Faker("paragraph")
     suggestion = ""
     confidence = 0.5
-    source = "agent"
+    sources = factory.LazyFunction(lambda: ["agent"])
     category = "other"
     severity = "nit"
     rejection_probability = None

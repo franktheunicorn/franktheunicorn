@@ -561,6 +561,19 @@ class TestAllCorePageTemplatesRender:
 
 
 @pytest.mark.django_db
+class TestRecallDraft:
+    def test_recall_not_posted(self, client: Client, review_draft: ReviewDraft) -> None:
+        response = client.post(f"/draft/{review_draft.pk}/recall/")
+        assert response.status_code == 200
+        assert b"Cannot recall" in response.content
+
+    def test_recall_no_comment_id(self, client: Client, db_pr: PullRequest) -> None:
+        draft = ReviewDraftFactory(pull_request=db_pr, status="posted", github_comment_id=None)
+        response = client.post(f"/draft/{draft.pk}/recall/")
+        assert b"Cannot recall" in response.content
+
+
+@pytest.mark.django_db
 class TestDashboardV15:
     """Tests for v1.5 dashboard additions."""
 
@@ -596,9 +609,9 @@ class TestDashboardV15:
 
     def test_pr_detail_coderabbit_drafts_separated(self, client: Client) -> None:
         pr = PullRequestFactory()
-        ReviewDraftFactory(pull_request=pr, source="agent")
-        ReviewDraftFactory(pull_request=pr, source="coderabbit")
-        ReviewDraftFactory(pull_request=pr, source="agent,coderabbit")
+        ReviewDraftFactory(pull_request=pr, sources=["agent"])
+        ReviewDraftFactory(pull_request=pr, sources=["coderabbit"])
+        ReviewDraftFactory(pull_request=pr, sources=["agent", "coderabbit"])
         response = client.get(f"/pr/{pr.pk}/")
         assert response.status_code == 200
         assert len(response.context["agent_drafts"]) == 1

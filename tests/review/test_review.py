@@ -58,7 +58,7 @@ class TestDraftReview:
             assert d.comment_body != ""
             assert d.status == "pending"
             assert 0.0 <= d.confidence <= 1.0
-            assert d.source == "agent"
+            assert d.sources == ["agent"]
 
     def test_backwards_compatible_without_operator_config(
         self,
@@ -68,7 +68,7 @@ class TestDraftReview:
         """draft_review should work without operator_config for backwards compatibility."""
         drafts = draft_review(db_pr, spark_project_config)
         assert len(drafts) > 0
-        assert all(d.source == "agent" for d in drafts)
+        assert all(d.sources == ["agent"] for d in drafts)
 
     def test_multiple_backends_combine_findings(
         self,

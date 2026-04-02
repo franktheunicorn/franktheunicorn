@@ -126,7 +126,7 @@ class TestExportTrainingData:
                 pull_request=pr,
                 comment_body="Great structure. Consider adding a test.",
                 code_context="+ def new_function():\n+     pass",
-                source=source,
+                sources=[source],
             )
             action = OperatorActionFactory(
                 action_type=action_type,
@@ -262,7 +262,7 @@ class TestExportTrainingData:
         draft = ReviewDraftFactory(
             pull_request=pr,
             comment_body="I'll address this in the next commit.",
-            source="shepherding",
+            sources=["shepherding"],
         )
         OperatorActionFactory(
             action_type="accept_shepherd",
@@ -283,7 +283,7 @@ class TestExportTrainingData:
             pull_request=pr,
             comment_body="Auto-generated response.",
             edited_body="Actually, I think the approach in the next PR is better.",
-            source="shepherding",
+            sources=["shepherding"],
         )
         OperatorActionFactory(
             action_type="edit_shepherd",

@@ -45,7 +45,7 @@ class TestGenerateShepherdDrafts:
             pr, [], OperatorConfig(), ProjectConfig(owner="x", repo="y")
         )
         # No comments, no condition alerts (mergeable is None, not False).
-        assert len(drafts) == 0 or all(d.source == "shepherding" for d in drafts)
+        assert len(drafts) == 0 or all("shepherding" in d.sources for d in drafts)
 
     def test_generates_response_for_comment(self) -> None:
         from franktheunicorn.config.models import OperatorConfig, ProjectConfig
@@ -64,7 +64,7 @@ class TestGenerateShepherdDrafts:
         )
         shepherd_drafts = [d for d in drafts if d.reasoning_trace.startswith("Response to")]
         assert len(shepherd_drafts) == 1
-        assert shepherd_drafts[0].source == "shepherding"
+        assert "shepherding" in shepherd_drafts[0].sources
         assert shepherd_drafts[0].status == "pending"
         assert shepherd_drafts[0].comment_body != ""
 
@@ -109,7 +109,7 @@ class TestShepherdingFeedbackLoop:
     def test_approve_shepherd_creates_correct_action(self) -> None:
         from franktheunicorn.dashboard.views import _action_type_for_draft
 
-        draft = ReviewDraft(source="shepherding")
+        draft = ReviewDraft(sources=["shepherding"])
         assert _action_type_for_draft(draft, "accept") == "accept_shepherd"
         assert _action_type_for_draft(draft, "reject") == "reject_shepherd"
         assert _action_type_for_draft(draft, "edit") == "edit_shepherd"
@@ -117,7 +117,7 @@ class TestShepherdingFeedbackLoop:
     def test_regular_draft_creates_regular_action(self) -> None:
         from franktheunicorn.dashboard.views import _action_type_for_draft
 
-        draft = ReviewDraft(source="agent")
+        draft = ReviewDraft(sources=["agent"])
         assert _action_type_for_draft(draft, "accept") == "accept_draft"
         assert _action_type_for_draft(draft, "reject") == "reject_draft"
         assert _action_type_for_draft(draft, "edit") == "edit_draft"

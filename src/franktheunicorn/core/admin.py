@@ -18,7 +18,7 @@ from franktheunicorn.core.models import (
 class ProjectAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
     """Admin for monitored GitHub projects."""
 
-    list_display = ("owner", "repo", "enabled", "review_context", "created_at")
+    list_display = ("owner", "repo", "project_type", "enabled", "review_context", "created_at")
     list_filter = ("enabled",)
     search_fields = ("owner", "repo")
     readonly_fields = ("created_at", "updated_at")
@@ -57,13 +57,13 @@ class ReviewDraftAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
     list_display = (
         "pull_request",
         "file_path",
-        "source",
+        "sources",
         "status",
         "severity",
         "confidence",
         "created_at",
     )
-    list_filter = ("status", "source", "severity", "category", "tone_guard_applied")
+    list_filter = ("status", "severity", "category", "tone_guard_applied")
     search_fields = ("file_path", "comment_body")
     readonly_fields = ("created_at", "updated_at")
 

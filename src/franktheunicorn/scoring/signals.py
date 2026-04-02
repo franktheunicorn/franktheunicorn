@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timedelta
+from fnmatch import fnmatch
 
 WEIGHTS: dict[str, int] = {
     "path_overlap": 30,
@@ -16,11 +17,11 @@ WEIGHTS: dict[str, int] = {
     "recently_updated": 20,
     "prior_review_history": 15,
     "collaborator": 15,
-    "touches_operator_code": 15,
+    "touches_operator_code": 20,
     "merge_conflict": -15,
     "new_human_contributor": 10,
     "keyword_match": 10,
-    "ai_generated": -10,
+    "ai_generated": 10,
     "llm_interest": 20,
     "committer_is_on_it": -25,
     "updated_since_operator_review": 25,
@@ -57,11 +58,24 @@ def is_ai_agent(author: str, ai_agents: list[str]) -> bool:
     return author.lower() in _lowered(ai_agents) if ai_agents else False
 
 
+def _path_matches(file_path: str, pattern: str) -> bool:
+    """Check if a file path matches a watch pattern (glob or prefix).
+
+    Supports both glob patterns (``python/pyspark/**``) and simple prefix
+    patterns (``sql/catalyst/``).  If the pattern contains glob characters
+    (``*``, ``?``, ``[``), :func:`fnmatch` is used; otherwise a prefix
+    check is performed for backward compatibility with existing configs.
+    """
+    if any(c in pattern for c in "*?["):
+        return fnmatch(file_path, pattern)
+    return file_path.startswith(pattern)
+
+
 def path_overlap_fraction(changed_files: list[str], watched_paths: list[str]) -> float:
-    """Fraction of changed_files matching any watched-path prefix (0.0-1.0)."""
+    """Fraction of changed_files matching any watched-path pattern (0.0-1.0)."""
     if not changed_files:
         return 0.0
-    matches = sum(1 for f in changed_files if any(f.startswith(wp) for wp in watched_paths))
+    matches = sum(1 for f in changed_files if any(_path_matches(f, wp) for wp in watched_paths))
     return matches / len(changed_files)
 
 
@@ -140,7 +154,7 @@ def score_keyword_match(title: str, body: str, keywords: list[str]) -> int | Non
 
 
 def score_ai_generated(author: str, ai_agents: list[str] | None = None) -> int | None:
-    """Penalty when PR author is a bot or configured AI agent."""
+    """Boost when PR author is a bot or configured AI agent (routes to AI queue for extra review)."""
     if is_ai_agent(author, ai_agents or []):
         return WEIGHTS["ai_generated"]
     return None
@@ -169,7 +183,7 @@ def score_committer_is_on_it(
     if (
         watched_paths
         and changed_files
-        and any(f.startswith(tuple(watched_paths)) for f in changed_files)
+        and any(_path_matches(f, wp) for f in changed_files for wp in watched_paths)
     ):
         return None
 

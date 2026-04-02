@@ -1,0 +1,16 @@
+owner: "your-org"
+repo: "your-repo"
+review_context: "general open-source"
+governance: "standard"
+tone: "direct"
+watched_paths: []
+ignore_paths: []
+frequent_contributors: []
+enabled: true
+
+# v1.5+ features (uncomment when ready):
+# jira:
+#   enabled: false
+#   server: ""
+#   project_prefix: ""
+# community_sources: []

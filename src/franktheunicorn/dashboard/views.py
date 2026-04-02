@@ -158,8 +158,8 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
     personality_name = get_operator_config().personality
 
     # v1.5: Separate CodeRabbit-sourced findings.
-    coderabbit_drafts = [d for d in drafts if "coderabbit" in (d.source or "")]
-    agent_drafts = [d for d in drafts if "coderabbit" not in (d.source or "")]
+    coderabbit_drafts = [d for d in drafts if any("coderabbit" in s for s in (d.sources or []))]
+    agent_drafts = [d for d in drafts if not any("coderabbit" in s for s in (d.sources or []))]
 
     # v1.5: External context (JIRA, community, Sentry).
     jira_context = pr.jira_cache if pr.jira_cache else None
@@ -191,7 +191,7 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
 
 def _action_type_for_draft(draft: ReviewDraft, action: str) -> str:
     """Return the appropriate action type based on draft source."""
-    if draft.source == "shepherding":
+    if "shepherding" in (draft.sources or []):
         return f"{action}_shepherd"
     return f"{action}_draft"
 
@@ -257,6 +257,42 @@ def edit_draft(request: HttpRequest, draft_id: int) -> HttpResponse:
             pull_request=draft.pull_request,
         )
     return render(request, "dashboard/_draft_item.html", {"draft": draft})
+
+
+@require_POST
+def recall_draft(request: HttpRequest, draft_id: int) -> HttpResponse:
+    """Recall (delete) a posted comment from GitHub within the recall window."""
+    draft = get_object_or_404(ReviewDraft, pk=draft_id)
+    if draft.status != "posted" or not draft.github_comment_id:
+        return HttpResponse(
+            '<div class="recall-result" style="color: #c00;">Cannot recall: not posted.</div>'
+        )
+    try:
+        from django.conf import settings
+
+        from franktheunicorn.github.client import GitHubClient
+        from franktheunicorn.github.poster import GitHubPoster
+
+        token = getattr(settings, "FRANK_GITHUB_TOKEN", "")
+        if not token:
+            return HttpResponse(
+                '<div class="recall-result" style="color: #c00;">Cannot recall: no token.</div>'
+            )
+        client = GitHubClient(token=token)
+        try:
+            poster = GitHubPoster(client)
+            success = poster.recall_comment(draft)
+        finally:
+            client.close()
+        if success:
+            return render(request, "dashboard/_draft_item.html", {"draft": draft})
+        return HttpResponse(
+            '<div class="recall-result" style="color: #c00;">'
+            "Recall failed (outside 24h window or API error).</div>"
+        )
+    except Exception:
+        logger.exception("Failed to recall draft %d", draft.pk)
+        return HttpResponse('<div class="recall-result" style="color: #c00;">Recall failed.</div>')
 
 
 @require_POST

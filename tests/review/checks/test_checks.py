@@ -99,7 +99,7 @@ class TestRunEnabledChecks:
             )
 
         assert len(drafts) == 1
-        assert drafts[0].source == "check:coverage"
+        assert "check:coverage" in drafts[0].sources
         assert drafts[0].file_path == "src/main.py"
         assert drafts[0].category == "test-coverage"
 

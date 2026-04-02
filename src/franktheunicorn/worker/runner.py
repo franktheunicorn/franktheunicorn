@@ -143,7 +143,44 @@ def _run_cycle(
 
                 # Only draft reviews for PRs without existing drafts
                 if not pr.review_drafts.exists():
-                    drafts = draft_review(pr, pc, operator_config=operator_config)
+                    # Fetch external context (v1.5) for the review pipeline.
+                    community_ctx = ""
+                    jira_ctx = ""
+                    sentry_ctx = ""
+                    try:
+                        from franktheunicorn.data_access.context_orchestrator import (
+                            fetch_community_context,
+                            fetch_jira_context,
+                            fetch_sentry_context,
+                        )
+
+                        jira_ctx = fetch_jira_context(pr, pc, http_client=diff_http)
+                        community_ctx = fetch_community_context(
+                            pr,
+                            pc,
+                            operator_config,
+                            http_client=diff_http,
+                        )
+                        sentry_ctx = fetch_sentry_context(
+                            pr,
+                            operator_config,
+                            http_client=diff_http,
+                        )
+                    except Exception:
+                        logger.debug(
+                            "External context fetch failed for PR #%d",
+                            pr.number,
+                            exc_info=True,
+                        )
+
+                    drafts = draft_review(
+                        pr,
+                        pc,
+                        operator_config=operator_config,
+                        community_context=community_ctx,
+                        jira_context=jira_ctx,
+                        sentry_context=sentry_ctx,
+                    )
                     logger.info(
                         "  PR #%d: score=%.2f, %d drafts generated",
                         pr.number,

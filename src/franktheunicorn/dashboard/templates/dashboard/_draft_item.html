@@ -1,6 +1,6 @@
 <div class="draft-item {{ draft.status }}" id="draft-{{ draft.pk }}" data-draft-id="{{ draft.pk }}">
     <strong>{{ draft.file_path }}{% if draft.line_number %}:{{ draft.line_number }}{% endif %}{% if draft.line_end %}-{{ draft.line_end }}{% endif %}</strong>
-    {% if draft.source == "coderabbit" %}
+    {% if "coderabbit" in draft.sources %}
     <span class="source-badge source-coderabbit">CodeRabbit</span>
     {% else %}
     <span class="source-badge source-agent">Agent</span>
@@ -57,6 +57,17 @@
     <div style="margin-top: 0.25rem; font-size: 0.75rem; color: var(--green);">
         Posted {{ draft.posted_at|timesince }} ago
         {% if draft.github_comment_id %}(#{{ draft.github_comment_id }}){% endif %}
+        {% if draft.github_comment_id %}
+        <button class="action-btn recall"
+                hx-post="{% url 'dashboard:recall_draft' draft.pk %}"
+                hx-target="#draft-{{ draft.pk }}"
+                hx-swap="outerHTML"
+                style="margin-left: 0.5rem; font-size: 0.75rem;">Recall</button>
+        {% endif %}
+    </div>
+    {% elif draft.status == "recalled" %}
+    <div style="margin-top: 0.25rem; font-size: 0.75rem; color: var(--orange, #e65100);">
+        Recalled
     </div>
     {% endif %}
 </div>
