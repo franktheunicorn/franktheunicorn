@@ -300,7 +300,7 @@ if [ "$MOCK_MODE" = "false" ]; then
     for var in ANTHROPIC_API_KEY OPENAI_API_KEY GOOGLE_API_KEY; do
         val="${!var:-}"
         if [ -n "$val" ]; then
-            preview="${val:0:6}****"
+            preview="${val:0:4}****"
             ok "  Found $var = $preview"
             # Write into .env
             set_env "$var" "$val"
@@ -319,7 +319,7 @@ if [ "$MOCK_MODE" = "false" ]; then
         for var in GITHUB_TOKEN GH_TOKEN; do
             val="${!var:-}"
             if [ -n "$val" ]; then
-                preview="${val:0:6}****"
+                preview="${val:0:4}****"
                 ok "  Found $var = $preview (usable for GitHub integration)"
                 set_env "FRANK_GITHUB_TOKEN" "$val"
                 ok "  Auto-populated FRANK_GITHUB_TOKEN from $var"

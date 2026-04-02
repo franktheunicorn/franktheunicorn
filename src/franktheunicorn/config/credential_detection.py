@@ -331,7 +331,7 @@ def format_detections(detections: list[DetectedCredential]) -> str:
         "low": [],
     }
     for d in detections:
-        by_confidence.setdefault(d.confidence, []).append(d)
+        by_confidence[d.confidence].append(d)
 
     if by_confidence["high"]:
         lines.append("  Found:")
