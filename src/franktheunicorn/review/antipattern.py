@@ -22,10 +22,13 @@ def check_against_anti_patterns(
     project: Project | None = None,
 ) -> list[AntiPattern]:
     """
-    Check a draft comment against known anti-patterns.
+    Check a draft comment against known anti-patterns (read-only).
 
     Returns matching anti-patterns, ordered by weight.
     Matches are simple case-insensitive substring checks for now.
+
+    Call :func:`record_anti_pattern_matches` separately to update
+    trigger counts and timestamps.
     """
     queryset = AntiPattern.objects.filter(is_active=True)
     if project is not None:
@@ -34,15 +37,22 @@ def check_against_anti_patterns(
 
     matches: list[AntiPattern] = []
     comment_lower = comment_body.lower()
-    now = timezone.now()
     for ap in queryset:
         if ap.pattern_text.lower() in comment_lower:
             matches.append(ap)
-            ap.times_triggered += 1
-            ap.last_matched_at = now
-            ap.save(update_fields=["times_triggered", "last_matched_at"])
 
     return matches
+
+
+def record_anti_pattern_matches(matches: list[AntiPattern]) -> None:
+    """Update trigger counts and timestamps for matched anti-patterns."""
+    if not matches:
+        return
+    now = timezone.now()
+    for ap in matches:
+        ap.times_triggered += 1
+        ap.last_matched_at = now
+        ap.save(update_fields=["times_triggered", "last_matched_at"])
 
 
 def record_anti_pattern(

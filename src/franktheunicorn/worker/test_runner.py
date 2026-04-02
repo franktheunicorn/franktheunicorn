@@ -145,6 +145,7 @@ class TestRunner:
         test_cmd = " ".join(test_files)
         command = f"python -m pytest {test_cmd} --tb=short -q"
 
+        container = None
         try:
             container = docker.containers.run(
                 image,
@@ -163,6 +164,7 @@ class TestRunner:
             stdout = container.logs(stdout=True, stderr=False).decode("utf-8", errors="replace")
             stderr = container.logs(stdout=False, stderr=True).decode("utf-8", errors="replace")
             container.remove(force=True)
+            container = None
 
             return {
                 "exit_code": result.get("StatusCode", -1),
@@ -179,6 +181,12 @@ class TestRunner:
                     "timed_out": True,
                 }
             raise
+        finally:
+            if container is not None:
+                try:
+                    container.remove(force=True)
+                except Exception:
+                    logger.warning("Failed to remove Docker container after error", exc_info=True)
 
     def _compute_verdict(
         self,
@@ -195,9 +203,19 @@ class TestRunner:
         pr_pass = pr_result.get("exit_code") == 0
         base_pass = base_result.get("exit_code") == 0
 
-        # Check for infra issues on base (import errors, setup failures).
+        # Check for infra issues on base (import errors, setup failures, collection errors).
         base_stderr = base_result.get("stderr", "")
-        if not base_pass and ("ImportError" in base_stderr or "ModuleNotFoundError" in base_stderr):
+        infra_patterns = (
+            "No module named ",
+            "ModuleNotFoundError:",
+            "ImportError:",
+            "E   ModuleNotFoundError",
+            "E   ImportError",
+            "CollectionError",
+            "SetupError",
+            "ERRORS during collection",
+        )
+        if not base_pass and any(p in base_stderr for p in infra_patterns):
             return "infra"
 
         if pr_pass and not base_pass:

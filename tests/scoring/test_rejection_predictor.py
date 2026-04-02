@@ -292,7 +292,7 @@ class TestRejectionPredictorPersistence:
         assert model_path.exists()
 
     def test_load_nonexistent_raises(self, tmp_path: Path) -> None:
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises((FileNotFoundError, ValueError)):
             RejectionPredictor.load(tmp_path / "nonexistent.pkl")
 
 

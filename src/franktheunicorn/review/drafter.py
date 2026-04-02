@@ -13,7 +13,10 @@ import logging
 from typing import TYPE_CHECKING
 
 from franktheunicorn.core.models import ReviewDraft
-from franktheunicorn.review.antipattern import check_against_anti_patterns
+from franktheunicorn.review.antipattern import (
+    check_against_anti_patterns,
+    record_anti_pattern_matches,
+)
 from franktheunicorn.review.backends import get_backend
 from franktheunicorn.review.backends.base import PRContext, ReviewFinding
 from franktheunicorn.review.dedup import deduplicate_findings
@@ -160,7 +163,12 @@ def create_drafts_from_findings(
 
     Gates through anti-pattern checks, scores with rejection predictor,
     and auto-suppresses high-P(rejection) findings.
+
+    All drafts are created inside a single transaction to avoid partial state
+    on worker crash.
     """
+    from django.db import transaction
+
     drafts: list[ReviewDraft] = []
 
     # Try to load the rejection predictor for this project.
@@ -168,87 +176,89 @@ def create_drafts_from_findings(
     if project is not None:
         predictor = load_predictor_for_project(project.owner, project.repo)
 
-    for finding in findings:
-        # Anti-pattern gate.
-        matches = check_against_anti_patterns(finding.body, project)
-        if matches:
-            logger.info(
-                "Suppressed %s finding '%s' — matched anti-pattern(s): %s",
-                source,
-                finding.title[:40],
-                ", ".join(ap.pattern_text[:40] for ap in matches),
-            )
-            continue
+    with transaction.atomic():
+        for finding in findings:
+            # Anti-pattern gate.
+            matches = check_against_anti_patterns(finding.body, project)
+            if matches:
+                record_anti_pattern_matches(matches)
+                logger.info(
+                    "Suppressed %s finding '%s' — matched anti-pattern(s): %s",
+                    source,
+                    finding.title[:40],
+                    ", ".join(ap.pattern_text[:40] for ap in matches),
+                )
+                continue
 
-        # Map severity string to a valid category if present in the finding title.
-        category = "other"
-        for cat in (
-            "correctness",
-            "style",
-            "security",
-            "test-coverage",
-            "architectural",
-            "naming",
-            "suggested-change",
-            "moderation",
-            "issue-link",
-        ):
-            if cat in (finding.title or "").lower():
-                category = cat
-                break
+            # Map severity string to a valid category if present in the finding title.
+            category = "other"
+            for cat in (
+                "correctness",
+                "style",
+                "security",
+                "test-coverage",
+                "architectural",
+                "naming",
+                "suggested-change",
+                "moderation",
+                "issue-link",
+            ):
+                if cat in (finding.title or "").lower():
+                    category = cat
+                    break
 
-        # Extract code context from the diff.
-        code_context = _extract_code_context(diff, finding.file_path, finding.line_number)
+            # Extract code context from the diff.
+            code_context = _extract_code_context(diff, finding.file_path, finding.line_number)
 
-        # Rejection predictor scoring (v1.75).
-        rejection_probability: float | None = None
-        is_auto_suppressed = False
-        if predictor is not None:
-            features = predictor.extract_features(
-                category=category,
+            # Rejection predictor scoring (v1.75).
+            rejection_probability: float | None = None
+            is_auto_suppressed = False
+            if predictor is not None:
+                features = predictor.extract_features(
+                    category=category,
+                    severity=finding.severity
+                    if finding.severity in ("critical", "important", "nit", "informational")
+                    else "nit",
+                    file_path=finding.file_path,
+                    comment_body=finding.body,
+                    code_context=code_context,
+                    governance=governance,
+                    is_new_contributor=pr.is_new_contributor,
+                    is_ai_pr=pr.likely_ai_generated,
+                    additions=pr.additions,
+                    deletions=pr.deletions,
+                    project_id=pr.project_id,
+                )
+                rejection_probability = predictor.predict_rejection(features)
+                if rejection_probability > SUPPRESS_THRESHOLD:
+                    is_auto_suppressed = True
+                    logger.info(
+                        "Auto-suppressed finding '%s' — P(rejection)=%.2f",
+                        finding.title[:40],
+                        rejection_probability,
+                    )
+
+            draft = ReviewDraft.objects.create(
+                pull_request=pr,
+                file_path=finding.file_path,
+                line_number=finding.line_number,
+                comment_body=finding.body,
+                suggestion=finding.suggestion,
+                confidence=finding.confidence,
                 severity=finding.severity
                 if finding.severity in ("critical", "important", "nit", "informational")
                 else "nit",
-                file_path=finding.file_path,
-                comment_body=finding.body,
+                category=category,
+                reasoning_trace=finding.title,  # original body before tone guard
+                tone_guard_applied=tone_guard_applied,
+                backend_used=source,
+                status="pending",
+                sources=[source],
                 code_context=code_context,
-                governance=governance,
-                is_new_contributor=pr.is_new_contributor,
-                is_ai_pr=pr.likely_ai_generated,
-                additions=pr.additions,
-                deletions=pr.deletions,
-                project_id=pr.project_id,
+                rejection_probability=rejection_probability,
+                is_auto_suppressed=is_auto_suppressed,
             )
-            rejection_probability = predictor.predict_rejection(features)
-            if rejection_probability > SUPPRESS_THRESHOLD:
-                is_auto_suppressed = True
-                logger.info(
-                    "Auto-suppressed finding '%s' — P(rejection)=%.2f",
-                    finding.title[:40],
-                    rejection_probability,
-                )
-
-        draft = ReviewDraft.objects.create(
-            pull_request=pr,
-            file_path=finding.file_path,
-            line_number=finding.line_number,
-            comment_body=finding.body,
-            suggestion=finding.suggestion,
-            confidence=finding.confidence,
-            severity=finding.severity
-            if finding.severity in ("critical", "important", "nit", "informational")
-            else "nit",
-            category=category,
-            reasoning_trace=finding.title,  # original body before tone guard
-            tone_guard_applied=tone_guard_applied,
-            backend_used=source,
-            status="pending",
-            sources=[source],
-            code_context=code_context,
-            rejection_probability=rejection_probability,
-            is_auto_suppressed=is_auto_suppressed,
-        )
-        drafts.append(draft)
+            drafts.append(draft)
 
     # Auto-retrain check (v1.75).
     if project is not None:

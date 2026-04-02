@@ -137,12 +137,16 @@ def execute_merge_api(
     pr: PullRequest,
     config: MergeQueueConfig,
     github_client: object,
+    *,
+    operator_username: str = "franktheunicorn",
 ) -> MergeResult:
     """Execute a merge via the GitHub API.
 
     Uses the configured merge method (merge, squash, rebase).
     """
     try:
+        from django.db import transaction
+
         from franktheunicorn.github.client import GitHubClient
 
         if not isinstance(github_client, GitHubClient):
@@ -157,10 +161,11 @@ def execute_merge_api(
             json={"merge_method": config.merge_method},
         )
         if response.status_code == 200:
-            pr.state = "merged"
-            pr.merged_at = timezone.now()
-            pr.merged_by = "franktheunicorn"
-            pr.save(update_fields=["state", "merged_at", "merged_by", "updated_at"])
+            with transaction.atomic():
+                pr.state = "merged"
+                pr.merged_at = timezone.now()
+                pr.merged_by = operator_username
+                pr.save(update_fields=["state", "merged_at", "merged_by", "updated_at"])
             return MergeResult(
                 success=True,
                 method=config.merge_method,
