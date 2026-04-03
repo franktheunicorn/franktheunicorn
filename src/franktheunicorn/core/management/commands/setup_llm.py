@@ -34,6 +34,8 @@ _PROVIDERS: dict[str, tuple[str, str, str, str]] = {
     "2": ("openai", "OpenAI", "gpt-4o", "OPENAI_API_KEY"),
     "3": ("gemini", "Google Gemini", "gemini-2.5-flash", "GOOGLE_API_KEY"),
     "4": ("ollama", "Local model (Ollama)", "qwen2.5-coder:14b", ""),
+    "5": ("llama-cpp", "Local model (llama.cpp)", "", ""),
+    "6": ("vllm", "Local model (vLLM)", "", ""),
 }
 
 
@@ -76,7 +78,7 @@ class Command(BaseCommand):
         self.stdout.write("\nSelect LLM providers for code review (you can enable multiple):\n")
         for key, (_, label, _, _) in _PROVIDERS.items():
             self.stdout.write(f"  {key}. {label}\n")
-        self.stdout.write("  5. Skip — use stub/demo mode\n")
+        self.stdout.write("  7. Skip — use stub/demo mode\n")
 
         choices_raw = self._ask(
             "Enter choices (comma-separated, e.g. '1,4' for Claude + Ollama): ",
@@ -87,8 +89,10 @@ class Command(BaseCommand):
         llm_backends: list[dict[str, object]] = []
         env_vars_needed: list[str] = []
 
+        skipped = False
         for key in chosen_keys:
-            if key == "5":
+            if key == "7":
+                skipped = True
                 continue
             if key not in _PROVIDERS:
                 self.stdout.write(self.style.WARNING(f"  Skipping unknown choice '{key}'\n"))
@@ -103,6 +107,10 @@ class Command(BaseCommand):
                 env_vars_needed.append(api_key_env)
             elif provider == "ollama":
                 llm_config = self._configure_ollama(llm_config)
+            elif provider == "llama-cpp":
+                llm_config = self._configure_llama_cpp(llm_config)
+            elif provider == "vllm":
+                llm_config = self._configure_vllm(llm_config)
 
             llm_backends.append(llm_config)
 
@@ -112,6 +120,10 @@ class Command(BaseCommand):
             llm_backends = self._offer_openai_compatible(
                 compat_detections, llm_backends, env_vars_needed
             )
+
+        # --- Fallback: custom endpoint prompt when nothing configured ---
+        if not llm_backends and not skipped:
+            llm_backends = self._configure_custom_endpoint(llm_backends, env_vars_needed)
 
         if llm_backends:
             config["llm_backends"] = llm_backends
@@ -257,6 +269,133 @@ class Command(BaseCommand):
         self.stdout.write(f"\n  To download the model, run:\n    ollama pull {model}\n")
 
         return llm_config
+
+    def _configure_llama_cpp(self, llm_config: dict[str, object]) -> dict[str, object]:
+        """Configure llama.cpp server as an OpenAI-compatible backend."""
+        if not shutil.which("llama-server"):
+            self.stdout.write(
+                self.style.WARNING(
+                    "\n  llama-server not found on PATH.\n"
+                    "  Install: brew install llama.cpp (macOS)"
+                    " or sudo apt-get install llama.cpp (Ubuntu)\n"
+                    "  Or via Docker: docker compose --profile inference up llama-cpp\n"
+                )
+            )
+
+        base_url = self._ask("  llama.cpp server URL: ", default="http://localhost:8080/v1")
+        # llama.cpp exposes an OpenAI-compatible API, so use the openai provider.
+        llm_config["provider"] = "openai"
+        llm_config["base_url"] = base_url
+
+        model = self._discover_and_choose_model(
+            provider="openai",
+            default_model="",
+            base_url=base_url,
+        )
+        llm_config["model"] = model
+
+        self.stdout.write(
+            "\n  To start the server, run:\n"
+            "    llama-server -m <path-to-model.gguf> --port 8080\n"
+            "  Or via Docker:\n"
+            "    docker compose --profile inference up llama-cpp\n"
+        )
+
+        return llm_config
+
+    def _configure_vllm(self, llm_config: dict[str, object]) -> dict[str, object]:
+        """Configure vLLM server as an OpenAI-compatible backend."""
+        has_vllm = shutil.which("vllm")
+        if not has_vllm:
+            self.stdout.write(
+                self.style.WARNING(
+                    "\n  vllm not found on PATH.\n"
+                    "  Install: pip install vllm\n"
+                    "  Or via Docker: docker compose --profile inference up vllm\n"
+                )
+            )
+
+        base_url = self._ask("  vLLM server URL: ", default="http://localhost:8000/v1")
+        # vLLM exposes an OpenAI-compatible API, so use the openai provider.
+        llm_config["provider"] = "openai"
+        llm_config["base_url"] = base_url
+
+        model = self._discover_and_choose_model(
+            provider="openai",
+            default_model="",
+            base_url=base_url,
+        )
+        llm_config["model"] = model
+
+        self.stdout.write(
+            "\n  To start the server, run:\n"
+            f"    vllm serve {model}\n"
+            "  Or via Docker:\n"
+            "    docker compose --profile inference up vllm\n"
+        )
+
+        return llm_config
+
+    def _configure_custom_endpoint(
+        self,
+        llm_backends: list[dict[str, object]],
+        env_vars_needed: list[str],
+    ) -> list[dict[str, object]]:
+        """Prompt for a custom OpenAI-compatible endpoint when nothing else was configured."""
+        self.stdout.write("\nNo LLM backend configured.\n")
+        self.stdout.write("You can specify a custom OpenAI-compatible endpoint.\n\n")
+
+        endpoint = self._ask(
+            "  Endpoint URL or env var name (Enter to skip): ",
+        )
+        if not endpoint:
+            return llm_backends
+
+        # Resolve: if it looks like a URL use directly, else read from env.
+        if endpoint.startswith(("http://", "https://")):
+            resolved_url = endpoint
+        else:
+            resolved_url = os.environ.get(endpoint, "")
+            if resolved_url:
+                self.stdout.write(f"  Resolved {endpoint} = {resolved_url[:30]}...\n")
+            else:
+                self.stdout.write(
+                    self.style.WARNING(f"  {endpoint} not found in environment, using as-is.\n")
+                )
+                resolved_url = endpoint
+
+        token_input = self._ask(
+            "  API token or env var name (Enter if none needed): ",
+        )
+
+        api_key_env = ""
+        if token_input:
+            # If it looks like a raw token (long, starts with key prefix), suggest
+            # setting an env var; otherwise treat it as an env var name.
+            key_prefixes = ("sk-", "key-", "pk-", "rk-", "gsk_", "xai-", "pplx-")
+            if token_input.startswith(key_prefixes) or len(token_input) > 40:
+                self.stdout.write(
+                    "\n  Tip: store your token in an env var instead of config:\n"
+                    "    export FRANK_LLM_API_KEY=<your-token>\n"
+                )
+                api_key_env = "FRANK_LLM_API_KEY"
+                os.environ["FRANK_LLM_API_KEY"] = token_input
+            else:
+                api_key_env = token_input
+                env_vars_needed.append(token_input)
+
+        model = self._ask("  Model name: ", default="")
+
+        custom_config: dict[str, object] = {
+            "provider": "openai",
+            "base_url": resolved_url,
+            "model": model,
+        }
+        if api_key_env:
+            custom_config["api_key_env"] = api_key_env
+
+        llm_backends.append(custom_config)
+        return llm_backends
 
     def _offer_openai_compatible(
         self,

@@ -314,7 +314,7 @@ def suggest_provider_choices(detections: list[DetectedCredential]) -> str:
             key = _PROVIDER_TO_MENU_KEY[d.provider]
             if key not in keys:
                 keys.append(key)
-    return ",".join(keys) if keys else "5"
+    return ",".join(keys) if keys else "7"
 
 
 def format_detections(detections: list[DetectedCredential]) -> str:
@@ -366,7 +366,7 @@ def get_openai_compatible_detections(
         d
         for d in detections
         if d.confidence in ("medium", "low")
-        and d.credential_type in ("api_key", "token")
+        and d.credential_type in ("api_key", "token", "endpoint")
         and d.provider not in native_providers
     ]
 

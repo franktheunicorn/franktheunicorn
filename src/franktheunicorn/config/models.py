@@ -136,7 +136,9 @@ class PerplexityConfig(BaseModel):
         return v
 
 
-KNOWN_LLM_PROVIDERS: frozenset[str] = frozenset({"stub", "claude", "openai", "gemini", "ollama"})
+KNOWN_LLM_PROVIDERS: frozenset[str] = frozenset(
+    {"stub", "claude", "openai", "gemini", "ollama", "llama-cpp", "vllm"}
+)
 
 
 class LLMBackendConfig(BaseModel):

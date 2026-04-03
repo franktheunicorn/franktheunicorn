@@ -55,3 +55,51 @@ services:
     depends_on:
       web:
         condition: service_healthy
+
+  # --- Optional local LLM inference (start with --profile inference) --------
+  # Usage: docker compose --profile inference up ollama
+
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["inference"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    # Uncomment for GPU support:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  llama-cpp:
+    image: ghcr.io/ggerganov/llama.cpp:server
+    profiles: ["inference"]
+    ports:
+      - "8080:8080"
+    volumes:
+      - llama-models:/models
+    # Mount your GGUF model and uncomment:
+    # command: -m /models/your-model.gguf --host 0.0.0.0 --port 8080
+
+  vllm:
+    image: vllm/vllm-openai:latest
+    profiles: ["inference"]
+    ports:
+      - "8000:8000"
+    # Requires GPU — uncomment and set model:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    # command: --model <model-name> --host 0.0.0.0
+
+volumes:
+  ollama-models:
+  llama-models:

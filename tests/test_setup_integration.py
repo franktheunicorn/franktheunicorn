@@ -39,7 +39,7 @@ class TestWizardEndToEnd:
         inputs = [
             "holdenk",  # github_username
             "direct but kind",  # review_style
-            "5",  # provider: stub
+            "7",  # provider: skip/stub
             "n",  # coderabbit: no
         ]
         with patch("builtins.input", side_effect=inputs):
