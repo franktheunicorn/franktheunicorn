@@ -1,0 +1,12 @@
+# Operator config for E2E setup test.
+# Uses stub LLM backend (no API keys) and short poll interval.
+
+github_username: "franktheunicorn"
+review_style: "direct but kind"
+auto_post: false
+poll_interval_seconds: 10
+digest_email: ""
+digest_enabled: false
+
+llm_backends:
+  - provider: stub
