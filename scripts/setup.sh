@@ -34,6 +34,171 @@ ask() {
     echo "${answer:-$default}"
 }
 
+DOCKER_OLLAMA=false
+DOCKER_LLAMA_CPP=false
+DOCKER_VLLM=false
+
+offer_install() {
+    local tool="$1"
+    local os_type
+    os_type="$(uname -s)"
+
+    case "$tool" in
+        ollama)
+            echo ""
+            local install_method=""
+            if [ "$os_type" = "Darwin" ]; then
+                echo "  Install options for Ollama:"
+                echo "    1. Homebrew (brew install ollama)"
+                echo "    2. Docker (ollama/ollama container)"
+                echo "    3. Skip"
+                local choice
+                choice=$(ask "  Choose [1/2/3]:" "3")
+                case "$choice" in
+                    1) install_method="brew" ;;
+                    2) install_method="docker" ;;
+                    *) return 1 ;;
+                esac
+            elif command -v apt-get &>/dev/null; then
+                echo "  Install options for Ollama:"
+                echo "    1. Official installer (curl -fsSL https://ollama.com/install.sh | sh)"
+                echo "    2. Docker (ollama/ollama container)"
+                echo "    3. Skip"
+                local choice
+                choice=$(ask "  Choose [1/2/3]:" "3")
+                case "$choice" in
+                    1) install_method="curl" ;;
+                    2) install_method="docker" ;;
+                    *) return 1 ;;
+                esac
+            else
+                echo "  Install options for Ollama:"
+                echo "    1. Docker (ollama/ollama container)"
+                echo "    2. Skip"
+                local choice
+                choice=$(ask "  Choose [1/2]:" "2")
+                case "$choice" in
+                    1) install_method="docker" ;;
+                    *) return 1 ;;
+                esac
+            fi
+
+            case "$install_method" in
+                brew)
+                    info "  Installing Ollama via Homebrew..."
+                    brew install ollama
+                    ;;
+                curl)
+                    info "  Installing Ollama via official installer..."
+                    curl -fsSL https://ollama.com/install.sh | sh
+                    ;;
+                docker)
+                    info "  Ollama will run via Docker."
+                    info "  Start with: docker compose --profile inference up ollama"
+                    DOCKER_OLLAMA=true
+                    return 0
+                    ;;
+            esac
+
+            if command -v ollama &>/dev/null; then
+                ok "  Ollama installed successfully"
+                return 0
+            else
+                warn "  Installation may require restarting your shell"
+                return 1
+            fi
+            ;;
+
+        llama-server)
+            echo ""
+            local install_method=""
+            if [ "$os_type" = "Darwin" ]; then
+                echo "  Install options for llama.cpp:"
+                echo "    1. Homebrew (brew install llama.cpp)"
+                echo "    2. Docker (ghcr.io/ggerganov/llama.cpp:server)"
+                echo "    3. Skip"
+                local choice
+                choice=$(ask "  Choose [1/2/3]:" "3")
+                case "$choice" in
+                    1) install_method="brew" ;;
+                    2) install_method="docker" ;;
+                    *) return 1 ;;
+                esac
+            elif command -v apt-get &>/dev/null; then
+                echo "  Install options for llama.cpp:"
+                echo "    1. APT package (sudo apt-get install llama.cpp)"
+                echo "    2. Docker (ghcr.io/ggerganov/llama.cpp:server)"
+                echo "    3. Skip"
+                local choice
+                choice=$(ask "  Choose [1/2/3]:" "3")
+                case "$choice" in
+                    1) install_method="apt" ;;
+                    2) install_method="docker" ;;
+                    *) return 1 ;;
+                esac
+            else
+                echo "  Install options for llama.cpp:"
+                echo "    1. Docker (ghcr.io/ggerganov/llama.cpp:server)"
+                echo "    2. Skip"
+                local choice
+                choice=$(ask "  Choose [1/2]:" "2")
+                case "$choice" in
+                    1) install_method="docker" ;;
+                    *) return 1 ;;
+                esac
+            fi
+
+            case "$install_method" in
+                brew)
+                    info "  Installing llama.cpp via Homebrew..."
+                    brew install llama.cpp
+                    ;;
+                apt)
+                    info "  Installing llama.cpp via APT..."
+                    sudo apt-get update -qq && sudo apt-get install -y llama.cpp
+                    ;;
+                docker)
+                    info "  llama.cpp will run via Docker."
+                    info "  Start with: docker compose --profile inference up llama-cpp"
+                    DOCKER_LLAMA_CPP=true
+                    return 0
+                    ;;
+            esac
+
+            if command -v llama-server &>/dev/null; then
+                ok "  llama.cpp installed successfully"
+                return 0
+            else
+                warn "  Installation may require restarting your shell"
+                return 1
+            fi
+            ;;
+
+        vllm)
+            echo ""
+            echo "  Install options for vLLM:"
+            echo "    1. pip install (pip install vllm)"
+            echo "    2. Docker (vllm/vllm-openai container)"
+            echo "    3. Skip"
+            local choice
+            choice=$(ask "  Choose [1/2/3]:" "3")
+            case "$choice" in
+                1)
+                    info "  Installing vLLM via pip..."
+                    pip install vllm
+                    ;;
+                2)
+                    info "  vLLM will run via Docker."
+                    info "  Start with: docker compose --profile inference up vllm"
+                    DOCKER_VLLM=true
+                    return 0
+                    ;;
+                *) return 1 ;;
+            esac
+            ;;
+    esac
+}
+
 set_env() {
     # Safely set a key=value in .env without sed pattern injection.
     local key="$1" value="$2" file="${3:-.env}"
@@ -124,7 +289,16 @@ fi
 if command -v ollama &>/dev/null; then
     ok "  ollama: found (optional, for local LLM)"
 else
-    info "  ollama: not found (optional, for local LLM — https://ollama.com)"
+    info "  ollama: not found (optional, for local LLM)"
+    offer_install ollama || true
+fi
+
+# llama.cpp
+if command -v llama-server &>/dev/null; then
+    ok "  llama.cpp: found (optional, for local LLM)"
+else
+    info "  llama.cpp: not found (optional, for local LLM)"
+    offer_install llama-server || true
 fi
 
 echo ""
@@ -193,7 +367,7 @@ if [ "$MODE" = "docker" ]; then
     else
         echo ""
         info "For real PR ingestion, you need a GitHub personal access token."
-        info "Create one at: https://github.com/settings/tokens"
+        info "Create one at: https://github.com/settings/tokens/new"
         info "Required scopes: repo, read:org"
         echo ""
         token=$(ask "GitHub token (or press Enter to skip):" "")
@@ -369,7 +543,7 @@ if [ "$MOCK_MODE" = "false" ]; then
     if [ -z "$existing_token" ]; then
         echo ""
         info "GitHub Personal Access Token"
-        info "Create one at: https://github.com/settings/tokens"
+        info "Create one at: https://github.com/settings/tokens/new"
         info "Required scopes: repo, read:org"
         echo ""
         token=$(ask "GitHub token (paste here):" "")
@@ -400,29 +574,82 @@ if [ "$MOCK_MODE" = "false" ]; then
         echo "  2. OpenAI"
         echo "  3. Google (Gemini)"
         echo "  4. Ollama (local, no key needed)"
-        echo "  5. Skip for now"
+        echo "  5. llama.cpp (local, no key needed)"
+        echo "  6. vLLM (local, no key needed)"
+        echo "  7. Skip for now"
         echo ""
         provider_choice=$(ask "Which provider?" "${default_provider:-1}")
+        llm_configured=false
         case "$provider_choice" in
             1)
                 key=$(ask "Anthropic API key:" "")
-                [ -n "$key" ] && set_env "ANTHROPIC_API_KEY" "$key" && ok "Saved to .env"
+                [ -n "$key" ] && set_env "ANTHROPIC_API_KEY" "$key" && ok "Saved to .env" && llm_configured=true
                 ;;
             2)
                 key=$(ask "OpenAI API key:" "")
-                [ -n "$key" ] && set_env "OPENAI_API_KEY" "$key" && ok "Saved to .env"
+                [ -n "$key" ] && set_env "OPENAI_API_KEY" "$key" && ok "Saved to .env" && llm_configured=true
                 ;;
             3)
                 key=$(ask "Google API key:" "")
-                [ -n "$key" ] && set_env "GOOGLE_API_KEY" "$key" && ok "Saved to .env"
+                [ -n "$key" ] && set_env "GOOGLE_API_KEY" "$key" && ok "Saved to .env" && llm_configured=true
                 ;;
             4)
                 info "No API key needed for Ollama. Make sure it's running locally."
+                info "Or start via Docker: docker compose --profile inference up ollama"
+                llm_configured=true
                 ;;
             5)
+                info "No API key needed for llama.cpp."
+                info "Start the server: llama-server -m <model.gguf> --port 8080"
+                info "Or via Docker: docker compose --profile inference up llama-cpp"
+                llm_configured=true
+                ;;
+            6)
+                info "No API key needed for vLLM."
+                info "Start the server: vllm serve <model-name>"
+                info "Or via Docker: docker compose --profile inference up vllm"
+                llm_configured=true
+                ;;
+            7)
                 warn "Skipped. Set an API key in .env before using real mode."
+                llm_configured=true  # explicit skip, don't offer fallback
                 ;;
         esac
+
+        # Fallback: offer custom endpoint if nothing was configured
+        if [ "$llm_configured" = false ]; then
+            echo ""
+            info "No LLM configuration detected."
+            info "You can specify a custom OpenAI-compatible endpoint."
+            echo ""
+            endpoint=$(ask "LLM API endpoint URL (or env var name, Enter to skip):" "")
+            if [ -n "$endpoint" ]; then
+                case "$endpoint" in
+                    http://*)  set_env "FRANK_LLM_ENDPOINT" "$endpoint" ;;
+                    https://*) set_env "FRANK_LLM_ENDPOINT" "$endpoint" ;;
+                    *)         set_env "FRANK_LLM_ENDPOINT_ENV" "$endpoint" ;;
+                esac
+                ok "Saved endpoint to .env"
+
+                token=$(ask "LLM API token (or env var name, Enter if none):" "")
+                if [ -n "$token" ]; then
+                    # Heuristic: raw tokens are long or start with known prefixes
+                    case "$token" in
+                        sk-*|key-*|pk-*|rk-*|gsk_*|xai-*|pplx-*)
+                            set_env "FRANK_LLM_API_KEY" "$token"
+                            ;;
+                        *)
+                            if [ "${#token}" -gt 40 ]; then
+                                set_env "FRANK_LLM_API_KEY" "$token"
+                            else
+                                set_env "FRANK_LLM_API_KEY_ENV" "$token"
+                            fi
+                            ;;
+                    esac
+                    ok "Saved token to .env"
+                fi
+            fi
+        fi
     fi
 else
     set_env "FRANK_MOCK_MODE" "true"
@@ -451,14 +678,16 @@ echo ""
 
 # --- LLM backend configuration ---------------------------------------------
 
-if [ "$MOCK_MODE" = "false" ]; then
-    echo ""
+echo ""
+if [ "$MOCK_MODE" = "true" ]; then
+    info "You can pre-configure LLM backends now for when you switch to real mode."
+else
     info "Configuring LLM backends..."
-    echo "This wizard sets up which AI models to use for code review."
-    echo ""
-    python manage.py setup_llm
-    echo ""
 fi
+echo "This wizard sets up which AI models to use for code review."
+echo ""
+python manage.py setup_llm
+echo ""
 
 # --- Verification -----------------------------------------------------------
 

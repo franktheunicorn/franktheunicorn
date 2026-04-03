@@ -23,7 +23,7 @@ class TestSetupLLMCommand:
         inputs = [
             "testuser",  # github_username
             "direct",  # review_style
-            "5",  # provider: stub
+            "7",  # provider: skip/stub
             "n",  # coderabbit: no
         ]
         with patch("builtins.input", side_effect=inputs), _NO_DISCOVERY:
@@ -118,7 +118,7 @@ class TestSetupLLMCommand:
         inputs = [
             "testuser",  # github_username
             "direct",  # review_style
-            "5",  # provider: stub
+            "7",  # provider: skip/stub
             "y",  # coderabbit: yes
         ]
         with (
@@ -189,12 +189,12 @@ class TestCredentialDetectionIntegration:
         assert providers == {"claude", "openai"}
 
     def test_no_keys_defaults_to_skip(self, tmp_path: Path) -> None:
-        """When no LLM keys in env, default is '5' (skip)."""
+        """When no LLM keys in env, default is '7' (skip)."""
         output_path = tmp_path / "operator.yaml"
         inputs = [
             "testuser",  # github_username
             "direct",  # review_style
-            "",  # accept default (should be "5")
+            "",  # accept default (should be "7")
             "n",  # coderabbit: no
         ]
         # Clear all known LLM env vars to ensure clean state.
@@ -219,7 +219,7 @@ class TestCredentialDetectionIntegration:
         inputs = [
             "testuser",  # github_username
             "direct",  # review_style
-            "5",  # skip native providers
+            "7",  # skip native providers
             # Wizard should detect GROQ_API_KEY and offer OpenAI-compatible
             "y",  # yes, configure as OpenAI-compatible
             "https://api.groq.com/openai/v1",  # base_url

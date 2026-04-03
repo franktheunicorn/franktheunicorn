@@ -306,19 +306,19 @@ class TestSuggestProviderChoices:
         assert suggest_provider_choices(detections) == "1,2"
 
     def test_no_detections(self) -> None:
-        assert suggest_provider_choices([]) == "5"
+        assert suggest_provider_choices([]) == "7"
 
     def test_only_medium_confidence_returns_skip(self) -> None:
         detections = [
             DetectedCredential("GROQ_API_KEY", "gsk_****", "groq", "medium", "api_key", ""),
         ]
-        assert suggest_provider_choices(detections) == "5"
+        assert suggest_provider_choices(detections) == "7"
 
     def test_only_low_confidence_returns_skip(self) -> None:
         detections = [
             DetectedCredential("MY_URL", "http****", "", "low", "endpoint", ""),
         ]
-        assert suggest_provider_choices(detections) == "5"
+        assert suggest_provider_choices(detections) == "7"
 
 
 class TestFormatDetections:
@@ -375,12 +375,13 @@ class TestGetOpenaiCompatibleDetections:
         compat = get_openai_compatible_detections(detections)
         assert len(compat) == 1
 
-    def test_excludes_endpoints(self) -> None:
+    def test_includes_endpoints(self) -> None:
         detections = [
             DetectedCredential("MY_URL", "http****", "", "low", "endpoint", ""),
         ]
         compat = get_openai_compatible_detections(detections)
-        assert len(compat) == 0
+        assert len(compat) == 1
+        assert compat[0].credential_type == "endpoint"
 
 
 class TestNoCredentials:
