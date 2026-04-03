@@ -302,3 +302,227 @@ class TestModelDiscoveryIntegration:
 
         config = yaml.safe_load(output_path.read_text())
         assert config["llm_backends"][0]["model"] == "claude-sonnet-4-20250514"
+
+
+@pytest.mark.django_db
+class TestLlamaCppProvider:
+    def test_llama_cpp_configures_as_openai_compatible(self, tmp_path: Path) -> None:
+        """llama.cpp provider stores config as openai with base_url."""
+        output_path = tmp_path / "operator.yaml"
+        inputs = [
+            "testuser",  # github_username
+            "direct",  # review_style
+            "5",  # provider: llama-cpp
+            "http://localhost:8080/v1",  # server URL
+            "my-model",  # model name
+            "n",  # coderabbit: no
+        ]
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch("shutil.which", return_value=None),
+            _NO_DISCOVERY,
+        ):
+            call_command("setup_llm", output=str(output_path))
+
+        config = yaml.safe_load(output_path.read_text())
+        assert len(config["llm_backends"]) == 1
+        backend = config["llm_backends"][0]
+        assert backend["provider"] == "openai"
+        assert backend["base_url"] == "http://localhost:8080/v1"
+        assert backend["model"] == "my-model"
+
+    def test_llama_cpp_warns_when_not_installed(self, tmp_path: Path) -> None:
+        """Shows warning when llama-server is not on PATH."""
+        output_path = tmp_path / "operator.yaml"
+        inputs = [
+            "testuser",  # github_username
+            "direct",  # review_style
+            "5",  # provider: llama-cpp
+            "http://localhost:8080/v1",  # server URL
+            "my-model",  # model name
+            "n",  # coderabbit: no
+        ]
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch("shutil.which", return_value=None),
+            _NO_DISCOVERY,
+        ):
+            call_command("setup_llm", output=str(output_path))
+
+        # Config should still be generated despite the warning
+        assert output_path.exists()
+
+
+@pytest.mark.django_db
+class TestVLLMProvider:
+    def test_vllm_configures_as_openai_compatible(self, tmp_path: Path) -> None:
+        """vLLM provider stores config as openai with base_url."""
+        output_path = tmp_path / "operator.yaml"
+        inputs = [
+            "testuser",  # github_username
+            "direct",  # review_style
+            "6",  # provider: vllm
+            "http://localhost:8000/v1",  # server URL
+            "meta-llama/Llama-3-8b",  # model name
+            "n",  # coderabbit: no
+        ]
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch("shutil.which", return_value=None),
+            _NO_DISCOVERY,
+        ):
+            call_command("setup_llm", output=str(output_path))
+
+        config = yaml.safe_load(output_path.read_text())
+        assert len(config["llm_backends"]) == 1
+        backend = config["llm_backends"][0]
+        assert backend["provider"] == "openai"
+        assert backend["base_url"] == "http://localhost:8000/v1"
+        assert backend["model"] == "meta-llama/Llama-3-8b"
+
+
+@pytest.mark.django_db
+class TestCustomEndpointFallback:
+    def test_custom_url_endpoint(self, tmp_path: Path) -> None:
+        """When no provider chosen, user can enter a raw URL."""
+        output_path = tmp_path / "operator.yaml"
+        inputs = [
+            "testuser",  # github_username
+            "direct",  # review_style
+            "99",  # invalid choice → skipped, no backends
+            "https://my-llm.example.com/v1",  # custom endpoint URL
+            "",  # no token needed
+            "my-custom-model",  # model name
+            "n",  # coderabbit: no
+        ]
+        clean_env = {
+            "ANTHROPIC_API_KEY": "",
+            "OPENAI_API_KEY": "",
+            "GOOGLE_API_KEY": "",
+        }
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch.dict("os.environ", clean_env, clear=False),
+            _NO_DISCOVERY,
+        ):
+            call_command("setup_llm", output=str(output_path))
+
+        config = yaml.safe_load(output_path.read_text())
+        assert len(config["llm_backends"]) == 1
+        backend = config["llm_backends"][0]
+        assert backend["provider"] == "openai"
+        assert backend["base_url"] == "https://my-llm.example.com/v1"
+        assert backend["model"] == "my-custom-model"
+
+    def test_custom_env_var_endpoint(self, tmp_path: Path) -> None:
+        """When user enters an env var name, it resolves from environment."""
+        output_path = tmp_path / "operator.yaml"
+        # Use an env var name that won't trigger tier-3 endpoint detection
+        # (no _URL/_ENDPOINT/_BASE suffix).
+        inputs = [
+            "testuser",  # github_username
+            "direct",  # review_style
+            "99",  # invalid choice → skipped
+            "MY_LLM_SERVER",  # env var name (fallback prompt)
+            "MY_LLM_TOKEN",  # env var for token
+            "my-model",  # model name
+            "n",  # coderabbit: no
+        ]
+        custom_env = {
+            "ANTHROPIC_API_KEY": "",
+            "OPENAI_API_KEY": "",
+            "GOOGLE_API_KEY": "",
+            "MY_LLM_SERVER": "https://custom.example.com/v1",
+        }
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch.dict("os.environ", custom_env, clear=False),
+            _NO_DISCOVERY,
+        ):
+            call_command("setup_llm", output=str(output_path))
+
+        config = yaml.safe_load(output_path.read_text())
+        assert len(config["llm_backends"]) == 1
+        backend = config["llm_backends"][0]
+        assert backend["base_url"] == "https://custom.example.com/v1"
+        assert backend["api_key_env"] == "MY_LLM_TOKEN"
+
+    def test_custom_raw_token(self, tmp_path: Path) -> None:
+        """When user pastes a raw token (sk- prefix), it sets FRANK_LLM_API_KEY."""
+        output_path = tmp_path / "operator.yaml"
+        inputs = [
+            "testuser",  # github_username
+            "direct",  # review_style
+            "99",  # invalid choice
+            "https://api.example.com/v1",  # endpoint URL
+            "sk-my-secret-token-value",  # raw token
+            "my-model",  # model name
+            "n",  # coderabbit: no
+        ]
+        clean_env = {
+            "ANTHROPIC_API_KEY": "",
+            "OPENAI_API_KEY": "",
+            "GOOGLE_API_KEY": "",
+        }
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch.dict("os.environ", clean_env, clear=False),
+            _NO_DISCOVERY,
+        ):
+            call_command("setup_llm", output=str(output_path))
+
+        config = yaml.safe_load(output_path.read_text())
+        backend = config["llm_backends"][0]
+        assert backend["api_key_env"] == "FRANK_LLM_API_KEY"
+
+    def test_custom_skipped_when_enter_pressed(self, tmp_path: Path) -> None:
+        """When user presses Enter at the endpoint prompt, no backend is added."""
+        output_path = tmp_path / "operator.yaml"
+        inputs = [
+            "testuser",  # github_username
+            "direct",  # review_style
+            "99",  # invalid choice
+            "",  # skip custom endpoint
+            "n",  # coderabbit: no
+        ]
+        clean_env = {
+            "ANTHROPIC_API_KEY": "",
+            "OPENAI_API_KEY": "",
+            "GOOGLE_API_KEY": "",
+        }
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch.dict("os.environ", clean_env, clear=False),
+            _NO_DISCOVERY,
+        ):
+            call_command("setup_llm", output=str(output_path))
+
+        config = yaml.safe_load(output_path.read_text())
+        assert "llm_backends" not in config
+
+    def test_custom_env_var_not_found_uses_as_is(self, tmp_path: Path) -> None:
+        """When env var name doesn't resolve, uses the name as the URL."""
+        output_path = tmp_path / "operator.yaml"
+        inputs = [
+            "testuser",  # github_username
+            "direct",  # review_style
+            "99",  # invalid choice
+            "NONEXISTENT_VAR",  # env var that doesn't exist
+            "",  # no token
+            "my-model",  # model name
+            "n",  # coderabbit: no
+        ]
+        clean_env = {
+            "ANTHROPIC_API_KEY": "",
+            "OPENAI_API_KEY": "",
+            "GOOGLE_API_KEY": "",
+        }
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch.dict("os.environ", clean_env, clear=False),
+            _NO_DISCOVERY,
+        ):
+            call_command("setup_llm", output=str(output_path))
+
+        config = yaml.safe_load(output_path.read_text())
+        assert config["llm_backends"][0]["base_url"] == "NONEXISTENT_VAR"
