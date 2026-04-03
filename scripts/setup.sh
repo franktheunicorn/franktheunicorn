@@ -7,7 +7,7 @@
 #   ./scripts/setup.sh --local     # Skip to local dev setup
 #   ./scripts/setup.sh --mock      # Local setup in mock/demo mode (no API keys)
 
-set -exuo pipefail
+set -euo pipefail
 
 # --- Helpers ----------------------------------------------------------------
 
@@ -26,9 +26,9 @@ err()   { printf "${RED}%s${NC}\n" "$*" >&2; }
 ask() {
     local prompt="$1" default="${2:-}"
     if [ -n "$default" ]; then
-        printf "${BOLD}%s${NC} [%s] " "$prompt" "$default"
+        printf "${BOLD}%s${NC} [%s] " "$prompt" "$default" > /dev/tty
     else
-        printf "${BOLD}%s${NC} " "$prompt"
+        printf "${BOLD}%s${NC} " "$prompt" > /dev/tty
     fi
     read -r answer
     echo "${answer:-$default}"
@@ -98,6 +98,10 @@ offer_install() {
                     DOCKER_OLLAMA=true
                     return 0
                     ;;
+                *)
+                    err "  Unrecognized install method: '$install_method'"
+                    return 1
+                    ;;
             esac
 
             if command -v ollama &>/dev/null; then
@@ -162,6 +166,10 @@ offer_install() {
                     info "  Start with: docker compose --profile inference up llama-cpp"
                     DOCKER_LLAMA_CPP=true
                     return 0
+                    ;;
+                *)
+                    err "  Unrecognized install method: '$install_method'"
+                    return 1
                     ;;
             esac
 
@@ -413,29 +421,42 @@ fi
 
 # --- Virtualenv + dependencies via Make ------------------------------------
 
-if [ -f Makefile ]; then
-    info "Running 'make setup' (creates venv, installs deps, runs migrations)..."
-    make setup
-    ok "make setup complete"
-    # shellcheck disable=SC1091
-    source .venv/bin/activate
-else
-    # Fallback if Makefile doesn't exist
-    if [ ! -d ".venv" ]; then
-        info "Creating virtualenv with $PYTHON_CMD..."
-        "$PYTHON_CMD" -m venv .venv
-        ok "Created .venv"
+do_install=$(ask "Install dependencies now? (Y/n):" "y")
+if [[ "$do_install" =~ ^[yY] ]] || [ -z "$do_install" ]; then
+    if [ -f Makefile ]; then
+        info "Running 'make setup' (creates venv, installs deps, runs migrations)..."
+        set -x
+        make setup
+        set +x
+        ok "make setup complete"
+        # shellcheck disable=SC1091
+        source .venv/bin/activate
     else
-        ok "Virtualenv .venv already exists"
+        # Fallback if Makefile doesn't exist
+        if [ ! -d ".venv" ]; then
+            info "Creating virtualenv with $PYTHON_CMD..."
+            "$PYTHON_CMD" -m venv .venv
+            ok "Created .venv"
+        else
+            ok "Virtualenv .venv already exists"
+        fi
+
+        # shellcheck disable=SC1091
+        source .venv/bin/activate
+        ok "Activated virtualenv"
+
+        info "Installing dependencies (this may take a minute)..."
+        set -x
+        pip install -e ".[dev]" --quiet
+        set +x
+        ok "Dependencies installed"
     fi
-
-    # shellcheck disable=SC1091
-    source .venv/bin/activate
-    ok "Activated virtualenv"
-
-    info "Installing dependencies (this may take a minute)..."
-    pip install -e ".[dev]" --quiet
-    ok "Dependencies installed"
+else
+    warn "Skipping dependency install. Run 'make setup' manually later."
+    if [ -d ".venv" ]; then
+        # shellcheck disable=SC1091
+        source .venv/bin/activate
+    fi
 fi
 echo ""
 
@@ -663,7 +684,9 @@ mkdir -p data
 if [ ! -f Makefile ]; then
     # Only run migrations if make setup didn't already handle it
     info "Setting up database..."
+    set -x
     python manage.py migrate --verbosity 0
+    set +x
     ok "Database ready"
 fi
 echo ""
@@ -673,7 +696,9 @@ echo ""
 info "Initializing configuration..."
 echo "This creates your operator config at ~/.review-agent/"
 echo ""
+set -x
 python manage.py init_project
+set +x
 echo ""
 
 # --- LLM backend configuration ---------------------------------------------
@@ -686,7 +711,9 @@ else
 fi
 echo "This wizard sets up which AI models to use for code review."
 echo ""
+set -x
 python manage.py setup_llm
+set +x
 echo ""
 
 # --- Verification -----------------------------------------------------------
@@ -695,6 +722,7 @@ echo ""
 info "Verifying setup..."
 
 # Quick import check
+set -x
 if python -c "import franktheunicorn" 2>/dev/null; then
     ok "  Package imports successfully"
 else
@@ -707,6 +735,7 @@ if python manage.py showmigrations --plan 2>/dev/null | grep -q '\[X\]'; then
 else
     warn "  Some migrations may be pending"
 fi
+set +x
 
 echo ""
 
