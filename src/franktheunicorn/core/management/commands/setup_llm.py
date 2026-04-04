@@ -3,7 +3,7 @@
 Usage::
 
     python manage.py setup_llm
-    python manage.py setup_llm --output ~/.review-agent/operator.yaml
+    python manage.py setup_llm --output config/active/operator.yaml
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ class Command(BaseCommand):
         parser.add_argument(
             "--output",
             default="",
-            help="Path to write operator.yaml (default: ~/.review-agent/operator.yaml)",
+            help="Path to write operator.yaml (default: config/active/operator.yaml)",
         )
 
     def handle(self, *args, **options):  # type: ignore[no-untyped-def]
