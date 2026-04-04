@@ -268,9 +268,9 @@ class Command(BaseCommand):
 
         self.stdout.write(f"\n  To download the model, run:\n    ollama pull {model}\n")
 
-        # Generate Docker Compose override so `docker compose -f compose.yaml
-        # -f compose.ollama.yaml up` works out of the box.
-        self._generate_ollama_compose(model)
+        generate = self._ask("  Generate Docker Compose override for Ollama? (y/N): ", default="n")
+        if generate.lower() in ("y", "yes"):
+            self._generate_ollama_compose(model)
 
         return llm_config
 
@@ -286,9 +286,15 @@ class Command(BaseCommand):
             self.stdout.write(self.style.WARNING(f"\n  Template not found: {template_path}\n"))
             return
 
-        content = template_path.read_text(encoding="utf-8")
-        content = content.replace("{{MODEL}}", model)
-        output_path.write_text(content, encoding="utf-8")
+        try:
+            content = template_path.read_text(encoding="utf-8")
+            content = content.replace("{{MODEL}}", model)
+            output_path.write_text(content, encoding="utf-8")
+        except OSError as exc:
+            self.stdout.write(
+                self.style.WARNING(f"\n  Could not generate compose.ollama.yaml: {exc}\n")
+            )
+            return
 
         self.stdout.write(
             self.style.SUCCESS(f"\n  Generated {output_path.name} (model: {model})\n")

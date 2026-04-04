@@ -115,6 +115,7 @@ class TestWizardEndToEnd:
             "0.3",  # claude temperature
             "http://localhost:11434",  # ollama base_url (asked first)
             "qwen2.5-coder:14b",  # ollama model (asked second, after discovery)
+            "n",  # generate Docker Compose: no
             "n",  # coderabbit: no
         ]
         with (

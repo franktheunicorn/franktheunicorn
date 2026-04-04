@@ -30,7 +30,7 @@ ask() {
     else
         printf "${BOLD}%s${NC} " "$prompt" > /dev/tty
     fi
-    read -r answer
+    read -r answer < /dev/tty || answer=""
     echo "${answer:-$default}"
 }
 
@@ -47,7 +47,9 @@ generate_ollama_compose() {
         warn "Template not found: $template"
         return 1
     fi
-    sed "s|{{MODEL}}|${model}|g" "$template" > "$output"
+    local escaped_model
+    escaped_model=$(printf '%s\n' "$model" | sed 's/[&/\]/\\&/g')
+    sed "s|{{MODEL}}|${escaped_model}|g" "$template" > "$output"
     ok "  Generated $output (model: $model)"
     info "  Start with: docker compose -f compose.yaml -f compose.ollama.yaml up"
 }
@@ -472,6 +474,13 @@ else
     if [ -d ".venv" ]; then
         # shellcheck disable=SC1091
         source .venv/bin/activate
+        ok "Activated existing virtualenv"
+    else
+        warn "No existing .venv found, so local Python setup steps will be skipped."
+        info "Next steps:"
+        info "  1. Run 'make setup' to create the virtualenv and install dependencies."
+        info "  2. Re-run ./scripts/setup.sh --local (or ./scripts/setup.sh)."
+        exit 0
     fi
 fi
 echo ""

@@ -68,6 +68,7 @@ class TestSetupLLMCommand:
             "0.3",  # claude temperature
             "http://localhost:11434",  # ollama base_url
             "qwen2.5-coder:14b",  # ollama model (from discovery fallback)
+            "n",  # generate Docker Compose: no
             "n",  # coderabbit: no
         ]
         with (
@@ -96,6 +97,7 @@ class TestSetupLLMCommand:
             "4",  # provider: ollama
             "http://localhost:11434",  # base_url
             "qwen2.5-coder:14b",  # model (from discovery fallback)
+            "n",  # generate Docker Compose: no
             "n",  # coderabbit: no
         ]
         with (
@@ -112,6 +114,69 @@ class TestSetupLLMCommand:
         config = yaml.safe_load(output_path.read_text())
         assert config["llm_backends"][0]["provider"] == "ollama"
         assert config["llm_backends"][0]["model"] == "qwen2.5-coder:14b"
+
+    def test_ollama_generates_compose_when_accepted(self, tmp_path: Path) -> None:
+        """When user says 'y' to Docker Compose, compose.ollama.yaml is generated."""
+        output_path = tmp_path / "operator.yaml"
+        template_dir = tmp_path / "docker"
+        template_dir.mkdir()
+        template_path = template_dir / "compose.ollama.yaml.template"
+        template_path.write_text(
+            "services:\n  ollama:\n    image: ollama/ollama:latest\n"
+            "  ollama-pull:\n    entrypoint: ['ollama', 'pull', '{{MODEL}}']\n"
+        )
+        inputs = [
+            "testuser",  # github_username
+            "direct",  # review_style
+            "4",  # provider: ollama
+            "http://localhost:11434",  # base_url
+            "qwen2.5-coder:14b",  # model
+            "y",  # generate Docker Compose: yes
+            "n",  # coderabbit: no
+        ]
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch("shutil.which", return_value="/usr/bin/ollama"),
+            patch(
+                "franktheunicorn.review.backends.ollama_backend.recommend_local_model",
+                return_value=("qwen2.5-coder:14b", "12GB VRAM available"),
+            ),
+            patch("django.conf.settings.BASE_DIR", str(tmp_path)),
+            _NO_DISCOVERY,
+        ):
+            call_command("setup_llm", output=str(output_path))
+
+        compose_output = tmp_path / "compose.ollama.yaml"
+        assert compose_output.exists()
+        content = compose_output.read_text()
+        assert "qwen2.5-coder:14b" in content
+        assert "{{MODEL}}" not in content
+
+    def test_ollama_skips_compose_when_declined(self, tmp_path: Path) -> None:
+        """When user says 'n' to Docker Compose, no compose file is generated."""
+        output_path = tmp_path / "operator.yaml"
+        inputs = [
+            "testuser",  # github_username
+            "direct",  # review_style
+            "4",  # provider: ollama
+            "http://localhost:11434",  # base_url
+            "qwen2.5-coder:14b",  # model
+            "n",  # generate Docker Compose: no
+            "n",  # coderabbit: no
+        ]
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch("shutil.which", return_value="/usr/bin/ollama"),
+            patch(
+                "franktheunicorn.review.backends.ollama_backend.recommend_local_model",
+                return_value=("qwen2.5-coder:14b", "12GB VRAM available"),
+            ),
+            _NO_DISCOVERY,
+        ):
+            call_command("setup_llm", output=str(output_path))
+
+        compose_output = tmp_path / "compose.ollama.yaml"
+        assert not compose_output.exists()
 
     def test_coderabbit_enabled(self, tmp_path: Path) -> None:
         output_path = tmp_path / "operator.yaml"

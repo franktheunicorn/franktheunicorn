@@ -15,6 +15,7 @@
 services:
   ollama:
     image: ollama/ollama:latest
+    profiles: []  # Override base profile gate so ollama starts by default
     ports:
       - "11434:11434"
     volumes:
@@ -36,6 +37,7 @@ services:
 
   ollama-pull:
     image: ollama/ollama:latest
+    profiles: []  # Override base profile gate
     depends_on:
       ollama:
         condition: service_healthy
