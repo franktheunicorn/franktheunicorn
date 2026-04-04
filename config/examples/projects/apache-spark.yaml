@@ -57,7 +57,7 @@ community_sources:
 downstream:
   - project: "spark-testing-base"
     repo: "holdenk/spark-testing-base"
-    tracked_apis_file: "~/.review-agent/cache/downstream/spark-testing-base-imports.json"
+    tracked_apis_file: "data/cache/downstream/spark-testing-base-imports.json"
 
 # Posting mode — draft-only (default) or confidence-gated auto-posting
 posting:

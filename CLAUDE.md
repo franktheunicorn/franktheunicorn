@@ -6,19 +6,19 @@ This file provides context for Claude Code when working on the franktheunicorn c
 
 franktheunicorn is a local-first AI code review assistant for open-source maintainers. It monitors PRs across multiple projects, triages them by relevance, drafts review comments in the operator's voice, and learns from corrections. It's the third generation of a line of review tooling that started with [holdensmagicalunicorn](https://github.com/holdenk/holdensmagicalunicorn) (~2012) and [predict-pr-comments](https://github.com/franktheunicorn/predict-pr-comments) (~2018).
 
-This is **not a hosted service**. It's a tool you clone, configure, and run locally. State lives in SQLite and files under `~/.review-agent/`.
+This is **not a hosted service**. It's a tool you clone, configure, and run locally. State lives in SQLite under `data/` and config YAML in `config/active/`.
 
 ## Architecture Overview
 
 - **Framework:** Django (not FastAPI). Django was chosen for admin interface, ORM, and the operator's familiarity.
 - **Frontend:** htmx + minimal vanilla JS. No SPA frameworks. No React. No npm build step.
-- **Database:** SQLite first-class (`~/.review-agent/db.sqlite3`). Postgres optional via `DATABASE_URL`.
+- **Database:** SQLite first-class (`data/frank.sqlite3`). Postgres optional via `DATABASE_URL`.
 - **Worker:** Separate daemon process that polls GitHub and runs the review pipeline. Communicates with the dashboard via shared SQLite. Resumable — safe to kill and restart.
 - **LLM backends:** Anthropic (primary: Sonnet, reasoning: Opus, fast: Haiku). Pluggable — configured in YAML.
 - **External data:** Dual-path for every source (API + HTML scrape). Both paths implement the same interface, return the same types, and have parallel test suites.
 - **Rate limiting:** `pyrate-limiter` with SQLite bucket backend. Adaptive GitHub client reads `X-RateLimit-Remaining` headers.
 - **Test execution:** Containers (rootless Docker, `--network=none`, resource-capped). Optional Firecracker support.
-- **Config:** YAML files in `~/.review-agent/`. Per-project profiles, global operator config.
+- **Config:** YAML files in `config/active/` (gitignored). Examples in `config/examples/`. Per-project profiles, global operator config.
 
 ## Project Structure
 

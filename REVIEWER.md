@@ -2,7 +2,7 @@
 
 Instructions for franktheunicorn when reviewing PRs to **its own repository**. This file defines the review norms, focus areas, and tone for the franktheunicorn project itself.
 
-This is the project context that would go in `~/.review-agent/projects/franktheunicorn.yaml`. It's maintained as a markdown file in the repo so it's version-controlled and visible to contributors.
+This is the project context that would go in `config/active/projects/franktheunicorn.yaml`. It's maintained as a markdown file in the repo so it's version-controlled and visible to contributors.
 
 ---
 

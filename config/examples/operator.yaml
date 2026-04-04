@@ -12,7 +12,7 @@ review_style: "direct but kind"
 # (dashboard summaries, digest emails, agent feedback).
 # GitHub-posted comments remain professional regardless of personality.
 # Default: "frank" (Frank the Unicorn). Set to "" to disable.
-# Custom personalities: place a markdown file in ~/.review-agent/personalities/
+# Custom personalities: place a markdown file in config/active/personalities/
 personality: "frank"
 
 # Whether to auto-post draft comments to GitHub (default: false, always off in v0)

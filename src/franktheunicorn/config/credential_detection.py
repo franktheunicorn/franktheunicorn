@@ -449,6 +449,17 @@ def build_dynamic_menu_entries(
     # Index by env_var for quick paired lookups.
     by_var: dict[str, DetectedCredential] = {d.env_var: d for d in compat}
 
+    # Pre-group Tier 2 detections by provider so that e.g. AZURE_OPENAI_API_KEY
+    # and AZURE_OPENAI_ENDPOINT (which lack paired_with) are merged.
+    provider_endpoints: dict[str, str] = {}
+    provider_keys: dict[str, str] = {}
+    for d in compat:
+        if d.provider and d.confidence == "medium":
+            if d.credential_type == "endpoint":
+                provider_endpoints.setdefault(d.provider, d.env_var)
+            else:
+                provider_keys.setdefault(d.provider, d.env_var)
+
     seen_labels: set[str] = set()
     seen_vars: set[str] = set()
     entries: list[DynamicMenuEntry] = []
@@ -466,6 +477,10 @@ def build_dynamic_menu_entries(
             if d.paired_with and d.paired_with in by_var:
                 api_key_env = d.paired_with
                 seen_vars.add(d.paired_with)
+            elif d.provider and d.provider in provider_keys:
+                # Tier 2 same-provider pairing (e.g. Azure OpenAI).
+                api_key_env = provider_keys[d.provider]
+                seen_vars.add(api_key_env)
         else:
             # api_key or token
             api_key_env = d.env_var
@@ -474,6 +489,10 @@ def build_dynamic_menu_entries(
                 if paired.credential_type == "endpoint":
                     base_url_env = d.paired_with
                     seen_vars.add(d.paired_with)
+            elif d.provider and d.provider in provider_endpoints:
+                # Tier 2 same-provider pairing.
+                base_url_env = provider_endpoints[d.provider]
+                seen_vars.add(base_url_env)
 
         seen_vars.add(d.env_var)
         label = derive_detection_label(d)

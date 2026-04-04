@@ -428,7 +428,7 @@ class TestDownstreamConfig:
         config = DownstreamConfig(
             project="spark-testing-base",
             repo="holdenk/spark-testing-base",
-            tracked_apis_file="~/.review-agent/cache/spark-testing-base-imports.json",
+            tracked_apis_file="data/cache/spark-testing-base-imports.json",
         )
         assert config.project == "spark-testing-base"
         assert config.repo == "holdenk/spark-testing-base"

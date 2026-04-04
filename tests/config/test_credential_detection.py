@@ -493,6 +493,22 @@ class TestBuildDynamicMenuEntries:
         assert entries[0].api_key_env == "ACME_API_KEY"
         assert entries[0].base_url_env == "ACME_URL"
 
+    def test_azure_openai_pairs_by_provider(self) -> None:
+        """Azure OpenAI has both endpoint and key in Tier 2 without paired_with."""
+        detections = [
+            DetectedCredential(
+                "AZURE_OPENAI_API_KEY", "azure****", "azure-openai", "medium", "api_key", ""
+            ),
+            DetectedCredential(
+                "AZURE_OPENAI_ENDPOINT", "https****", "azure-openai", "medium", "endpoint", ""
+            ),
+        ]
+        entries = build_dynamic_menu_entries(detections)
+        assert len(entries) == 1
+        assert entries[0].label == "azure-openai"
+        assert entries[0].api_key_env == "AZURE_OPENAI_API_KEY"
+        assert entries[0].base_url_env == "AZURE_OPENAI_ENDPOINT"
+
 
 class TestNoCredentials:
     def test_clean_env_returns_empty(self) -> None:

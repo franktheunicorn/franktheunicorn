@@ -31,7 +31,7 @@ def write_dataset(
 ) -> Path:
     """Write curated dataset to JSONL file.
 
-    Output: ``~/.review-agent/voice/{project}/voice_curated.jsonl``
+    Output: ``config/active/voice/{project}/voice_curated.jsonl``
 
     Only decisions with ``decision == "include"`` are written.
     Returns the path to the written file.

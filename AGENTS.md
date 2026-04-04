@@ -45,7 +45,7 @@ These are learned from the operator's review patterns. If you produce findings m
 - **Auto-posting to GitHub without the draft-only gate.** In v1, all comments go through the review queue. No shortcuts.
 - **Mocking in a way that hides bugs.** Don't over-mock. If your test passes but would fail against a real API response, the mock is too permissive. Use VCR cassettes or saved fixtures from `review-agent record-fixtures`.
 - **Huge PRs without test file changes.** If you're changing source code, add tests. If your tests pass on both PR and base branch, they don't test your change.
-- **Modifying `~/.review-agent/` paths in tests.** Use `tmp_path` fixtures. Never touch the real config directory.
+- **Modifying `config/active/` paths in tests.** Use `tmp_path` fixtures. Never touch the real config directory.
 
 ## Coding Patterns to Follow
 
