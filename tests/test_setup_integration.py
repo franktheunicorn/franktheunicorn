@@ -40,6 +40,7 @@ class TestWizardEndToEnd:
             "holdenk",  # github_username
             "direct but kind",  # review_style
             "7",  # provider: skip/stub
+            "",  # projects: skip
             "n",  # coderabbit: no
         ]
         with patch("builtins.input", side_effect=inputs):
@@ -78,6 +79,7 @@ class TestWizardEndToEnd:
             "1",  # claude
             "claude-sonnet-4-20250514",  # model
             "0.3",  # temperature
+            "",  # projects: skip
             "n",  # coderabbit: no
         ]
         with (
@@ -116,6 +118,7 @@ class TestWizardEndToEnd:
             "http://localhost:11434",  # ollama base_url (asked first)
             "qwen2.5-coder:14b",  # ollama model (asked second, after discovery)
             "n",  # generate Docker Compose: no
+            "",  # projects: skip
             "n",  # coderabbit: no
         ]
         with (
@@ -127,8 +130,8 @@ class TestWizardEndToEnd:
                 return_value=("qwen2.5-coder:14b", "12GB VRAM available"),
             ),
             patch(
-                "franktheunicorn.core.management.commands.setup_llm.discover_models",
-                return_value=[],
+                "franktheunicorn.core.management.commands.setup_llm.discover_models_verbose",
+                return_value=([], ""),
             ),
         ):
             call_command("setup_llm", output=str(output_path))
@@ -177,6 +180,7 @@ class TestWizardEndToEnd:
             "1",  # claude
             "claude-sonnet-4-20250514",
             "0.3",
+            "",  # projects: skip
             "y",  # coderabbit: yes
         ]
         with (
