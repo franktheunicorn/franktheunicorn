@@ -194,6 +194,8 @@ cython_debug/
 # franktheunicorn local state
 data/*.sqlite3
 data/*.sqlite3-journal
+data/cache/
+data/repos/
 
 # Generated compose overrides (created by setup.sh / manage.py setup_llm)
 compose.ollama.yaml
