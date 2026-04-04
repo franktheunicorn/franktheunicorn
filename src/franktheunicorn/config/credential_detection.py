@@ -41,6 +41,26 @@ class DetectedCredential:
     """Env var name of a paired credential/endpoint, or ``""``."""
 
 
+@dataclass(frozen=True)
+class DynamicMenuEntry:
+    """A detected credential promoted to a selectable menu entry in the setup wizard."""
+
+    key: str
+    """Menu key, e.g. ``"8"``."""
+
+    label: str
+    """Display label, e.g. ``"groq"`` or ``"preprod-cortex"``."""
+
+    api_key_env: str
+    """Environment variable name for the API key or token."""
+
+    base_url_env: str
+    """Environment variable name for the endpoint URL, or ``""``."""
+
+    provider_hint: str
+    """Original provider field from the detection, or ``""``."""
+
+
 # ---------------------------------------------------------------------------
 # Tier 1: exact match → native providers
 # ---------------------------------------------------------------------------
@@ -369,6 +389,111 @@ def get_openai_compatible_detections(
         and d.credential_type in ("api_key", "token", "endpoint")
         and d.provider not in native_providers
     ]
+
+
+def derive_detection_label(detection: DetectedCredential) -> str:
+    """Derive a human-readable label from a detected credential.
+
+    Uses the provider name when available (Tier 2), otherwise strips the
+    endpoint/credential suffix from the env var name and normalises it.
+
+    Examples::
+
+        GROQ_API_KEY          → "groq"
+        PREPROD_CORTEX_URL    → "preprod-cortex"
+        MY_LLM_BASE_URL       → "my-llm"
+        CUSTOM_AI_API_KEY     → "custom-ai"
+    """
+    if detection.provider:
+        return detection.provider
+
+    name = detection.env_var
+    # Strip suffixes, longest first to avoid partial matches
+    # (e.g. _BASE_URL before _URL).
+    all_suffixes = sorted(
+        ENDPOINT_NAME_SUFFIXES + CREDENTIAL_NAME_SUFFIXES,
+        key=len,
+        reverse=True,
+    )
+    upper = name.upper()
+    for suffix in all_suffixes:
+        if upper.endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+
+    return name.lower().replace("_", "-").strip("-") or detection.env_var.lower()
+
+
+def build_dynamic_menu_entries(
+    detections: list[DetectedCredential],
+    start_key: int = 8,
+) -> list[DynamicMenuEntry]:
+    """Build numbered menu entries for Tier 2/3 detected credentials.
+
+    Groups paired endpoint+credential detections into a single entry and
+    deduplicates by label so each provider appears at most once.
+
+    Parameters
+    ----------
+    detections:
+        Full detection list (all tiers).  Tier 1 is filtered out.
+    start_key:
+        First numeric menu key to assign (default ``8``).
+
+    Returns a list of :class:`DynamicMenuEntry` with sequential keys.
+    """
+    compat = get_openai_compatible_detections(detections)
+    if not compat:
+        return []
+
+    # Index by env_var for quick paired lookups.
+    by_var: dict[str, DetectedCredential] = {d.env_var: d for d in compat}
+
+    seen_labels: set[str] = set()
+    seen_vars: set[str] = set()
+    entries: list[DynamicMenuEntry] = []
+    key = start_key
+
+    for d in compat:
+        if d.env_var in seen_vars:
+            continue
+
+        api_key_env = ""
+        base_url_env = ""
+
+        if d.credential_type == "endpoint":
+            base_url_env = d.env_var
+            if d.paired_with and d.paired_with in by_var:
+                api_key_env = d.paired_with
+                seen_vars.add(d.paired_with)
+        else:
+            # api_key or token
+            api_key_env = d.env_var
+            if d.paired_with and d.paired_with in by_var:
+                paired = by_var[d.paired_with]
+                if paired.credential_type == "endpoint":
+                    base_url_env = d.paired_with
+                    seen_vars.add(d.paired_with)
+
+        seen_vars.add(d.env_var)
+        label = derive_detection_label(d)
+
+        if label in seen_labels:
+            continue
+        seen_labels.add(label)
+
+        entries.append(
+            DynamicMenuEntry(
+                key=str(key),
+                label=label,
+                api_key_env=api_key_env,
+                base_url_env=base_url_env,
+                provider_hint=d.provider,
+            )
+        )
+        key += 1
+
+    return entries
 
 
 # ---------------------------------------------------------------------------

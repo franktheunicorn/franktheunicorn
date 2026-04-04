@@ -10,7 +10,9 @@ import pytest
 
 from franktheunicorn.config.model_discovery import (
     DiscoveredModel,
+    check_endpoint_reachability,
     discover_models,
+    discover_models_verbose,
     format_model_menu,
     list_models_anthropic,
     list_models_gemini,
@@ -284,3 +286,115 @@ class TestFormatModelMenu:
         models = [DiscoveredModel(f"model-{i}", f"model-{i}") for i in range(3)]
         result = format_model_menu(models, max_display=10)
         assert "more" not in result
+
+
+class TestCheckEndpointReachability:
+    def test_resolvable_host_returns_empty(self) -> None:
+        # localhost should always resolve
+        assert check_endpoint_reachability("http://localhost:8080/v1") == ""
+
+    def test_unresolvable_host_returns_diagnostic(self) -> None:
+        result = check_endpoint_reachability("https://this-host-does-not-exist-abc123.example.com")
+        assert "Could not resolve hostname" in result
+        assert "this-host-does-not-exist-abc123.example.com" in result
+
+    def test_missing_hostname_returns_diagnostic(self) -> None:
+        result = check_endpoint_reachability("not-a-url")
+        assert "Could not parse hostname" in result
+
+    def test_empty_url_returns_diagnostic(self) -> None:
+        result = check_endpoint_reachability("")
+        assert result != ""
+
+    def test_network_error_returns_diagnostic(self) -> None:
+        with patch("socket.getaddrinfo", side_effect=OSError("Network unreachable")):
+            result = check_endpoint_reachability("https://api.example.com/v1")
+        assert "Network error" in result
+
+
+class TestDiscoverModelsVerbose:
+    def test_returns_models_on_success(self) -> None:
+        expected = [DiscoveredModel("gpt-4o", "gpt-4o")]
+        with patch(
+            "franktheunicorn.config.model_discovery.discover_models",
+            return_value=expected,
+        ):
+            models, diagnostic = discover_models_verbose("openai")
+        assert models == expected
+        assert diagnostic == ""
+
+    def test_returns_diagnostic_on_failure(self) -> None:
+        with patch(
+            "franktheunicorn.config.model_discovery.discover_models",
+            return_value=[],
+        ):
+            models, diagnostic = discover_models_verbose(
+                "openai",
+                api_key_env="OPENAI_API_KEY",
+                base_url="https://api.openai.com/v1",
+            )
+        assert models == []
+        assert "Attempted: GET" in diagnostic
+
+    def test_dns_failure_diagnostic(self) -> None:
+        with (
+            patch(
+                "franktheunicorn.config.model_discovery.discover_models",
+                return_value=[],
+            ),
+            patch(
+                "franktheunicorn.config.model_discovery.check_endpoint_reachability",
+                return_value="Could not resolve hostname 'bad.host'",
+            ),
+        ):
+            _models, diagnostic = discover_models_verbose(
+                "openai",
+                base_url="https://bad.host/v1",
+            )
+        assert "Could not resolve" in diagnostic
+
+    def test_reachable_but_empty_key_diagnostic(self) -> None:
+        with (
+            patch(
+                "franktheunicorn.config.model_discovery.discover_models",
+                return_value=[],
+            ),
+            patch(
+                "franktheunicorn.config.model_discovery.check_endpoint_reachability",
+                return_value="",
+            ),
+            patch.dict("os.environ", {}, clear=True),
+        ):
+            _models, diagnostic = discover_models_verbose(
+                "openai",
+                api_key_env="OPENAI_API_KEY",
+                base_url="https://api.openai.com/v1",
+            )
+        assert "is empty" in diagnostic
+
+    def test_unknown_provider_no_base_url(self) -> None:
+        with patch(
+            "franktheunicorn.config.model_discovery.discover_models",
+            return_value=[],
+        ):
+            _models, diagnostic = discover_models_verbose("unknown-thing")
+        assert _models == []
+        assert "Unknown provider" in diagnostic
+
+    def test_uses_default_base_url_for_known_provider(self) -> None:
+        with (
+            patch(
+                "franktheunicorn.config.model_discovery.discover_models",
+                return_value=[],
+            ),
+            patch(
+                "franktheunicorn.config.model_discovery.check_endpoint_reachability",
+                return_value="",
+            ),
+            patch.dict("os.environ", {"ANTHROPIC_API_KEY": "sk-test"}),
+        ):
+            _models, diagnostic = discover_models_verbose(
+                "claude",
+                api_key_env="ANTHROPIC_API_KEY",
+            )
+        assert "api.anthropic.com" in diagnostic

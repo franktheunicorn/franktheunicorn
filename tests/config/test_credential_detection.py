@@ -6,6 +6,8 @@ import pytest
 
 from franktheunicorn.config.credential_detection import (
     DetectedCredential,
+    build_dynamic_menu_entries,
+    derive_detection_label,
     detect_llm_credentials,
     format_detections,
     get_openai_compatible_detections,
@@ -382,6 +384,114 @@ class TestGetOpenaiCompatibleDetections:
         compat = get_openai_compatible_detections(detections)
         assert len(compat) == 1
         assert compat[0].credential_type == "endpoint"
+
+
+class TestDeriveDetectionLabel:
+    def test_tier2_uses_provider_name(self) -> None:
+        d = DetectedCredential("GROQ_API_KEY", "gsk_****", "groq", "medium", "api_key", "")
+        assert derive_detection_label(d) == "groq"
+
+    def test_tier2_mistral(self) -> None:
+        d = DetectedCredential("MISTRAL_API_KEY", "key-****", "mistral", "medium", "api_key", "")
+        assert derive_detection_label(d) == "mistral"
+
+    def test_tier3_endpoint_strips_url_suffix(self) -> None:
+        d = DetectedCredential(
+            "PREPROD_CORTEX_URL", "http****", "", "low", "endpoint", "PREPROD_CORTEX_PAT"
+        )
+        assert derive_detection_label(d) == "preprod-cortex"
+
+    def test_tier3_endpoint_strips_base_url_suffix(self) -> None:
+        d = DetectedCredential("MY_LLM_BASE_URL", "http****", "", "low", "endpoint", "")
+        assert derive_detection_label(d) == "my-llm"
+
+    def test_tier3_api_key_strips_suffix(self) -> None:
+        d = DetectedCredential("CUSTOM_AI_API_KEY", "sk-****", "", "low", "api_key", "")
+        assert derive_detection_label(d) == "custom-ai"
+
+    def test_tier3_api_token_strips_suffix(self) -> None:
+        d = DetectedCredential("SVC_API_TOKEN", "key-****", "", "low", "api_key", "")
+        assert derive_detection_label(d) == "svc"
+
+    def test_tier3_endpoint_suffix(self) -> None:
+        d = DetectedCredential("AI_ENDPOINT", "http****", "", "low", "endpoint", "")
+        assert derive_detection_label(d) == "ai"
+
+    def test_empty_provider_no_suffix_match(self) -> None:
+        d = DetectedCredential("SOMETHING", "val****", "", "low", "api_key", "")
+        assert derive_detection_label(d) == "something"
+
+
+class TestBuildDynamicMenuEntries:
+    def test_tier2_creates_entry(self) -> None:
+        detections = [
+            DetectedCredential("GROQ_API_KEY", "gsk_****", "groq", "medium", "api_key", ""),
+        ]
+        entries = build_dynamic_menu_entries(detections)
+        assert len(entries) == 1
+        assert entries[0].key == "8"
+        assert entries[0].label == "groq"
+        assert entries[0].api_key_env == "GROQ_API_KEY"
+        assert entries[0].base_url_env == ""
+        assert entries[0].provider_hint == "groq"
+
+    def test_tier3_paired_creates_single_entry(self) -> None:
+        detections = [
+            DetectedCredential("MY_URL", "http****", "", "low", "endpoint", "MY_API_KEY"),
+            DetectedCredential("MY_API_KEY", "sk-****", "", "low", "api_key", "MY_URL"),
+        ]
+        entries = build_dynamic_menu_entries(detections)
+        assert len(entries) == 1
+        assert entries[0].api_key_env == "MY_API_KEY"
+        assert entries[0].base_url_env == "MY_URL"
+
+    def test_tier1_excluded(self) -> None:
+        detections = [
+            DetectedCredential("ANTHROPIC_API_KEY", "sk-****", "claude", "high", "api_key", ""),
+        ]
+        entries = build_dynamic_menu_entries(detections)
+        assert len(entries) == 0
+
+    def test_multiple_entries_get_sequential_keys(self) -> None:
+        detections = [
+            DetectedCredential("GROQ_API_KEY", "gsk_****", "groq", "medium", "api_key", ""),
+            DetectedCredential("MISTRAL_API_KEY", "key-****", "mistral", "medium", "api_key", ""),
+        ]
+        entries = build_dynamic_menu_entries(detections)
+        assert len(entries) == 2
+        assert entries[0].key == "8"
+        assert entries[1].key == "9"
+
+    def test_deduplicates_by_label(self) -> None:
+        detections = [
+            DetectedCredential("TOGETHER_API_KEY", "key-****", "together", "medium", "api_key", ""),
+            DetectedCredential(
+                "TOGETHER_AI_API_KEY", "key-****", "together", "medium", "api_key", ""
+            ),
+        ]
+        entries = build_dynamic_menu_entries(detections)
+        assert len(entries) == 1
+
+    def test_empty_detections(self) -> None:
+        assert build_dynamic_menu_entries([]) == []
+
+    def test_custom_start_key(self) -> None:
+        detections = [
+            DetectedCredential("GROQ_API_KEY", "gsk_****", "groq", "medium", "api_key", ""),
+        ]
+        entries = build_dynamic_menu_entries(detections, start_key=10)
+        assert entries[0].key == "10"
+
+    def test_paired_credential_from_key_side(self) -> None:
+        """When iterating hits the api_key first (paired with endpoint)."""
+        detections = [
+            DetectedCredential("ACME_API_KEY", "sk-****", "", "low", "api_key", "ACME_URL"),
+            DetectedCredential("ACME_URL", "http****", "", "low", "endpoint", "ACME_API_KEY"),
+        ]
+        entries = build_dynamic_menu_entries(detections)
+        assert len(entries) == 1
+        assert entries[0].api_key_env == "ACME_API_KEY"
+        assert entries[0].base_url_env == "ACME_URL"
 
 
 class TestNoCredentials:
