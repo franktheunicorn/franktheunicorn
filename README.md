@@ -132,3 +132,32 @@ Apache 2.0
 ## Contributing
 
 PRs welcome. Read [AGENTS.md](AGENTS.md) if you're an AI agent, or just follow the patterns in the existing code. All PRs need tests. All data access needs dual-path (API + scrape). Dashboard must work on mobile.
+
+## Similar Tools & Related Projects
+
+franktheunicorn is local-first, operator-in-the-loop, and learns from your corrections. If that's not what you need, there are great alternatives:
+
+### AI Code Review
+
+- [CodeRabbit](https://coderabbit.ai/) — AI code review bot that posts inline comments on PRs
+- [Codium PR-Agent](https://github.com/Codium-ai/pr-agent) — open-source AI PR reviewer (also available as hosted service)
+- [Greptile](https://greptile.com/) — AI code review with codebase context
+- [Sourcery](https://sourcery.ai/) — AI code reviewer focused on Python
+- [Amazon CodeGuru Reviewer](https://aws.amazon.com/codeguru/) — AWS ML-powered code review
+
+### PR Automation & Review Routing
+
+- [Danger](https://danger.systems/) — rule-based PR automation (Ruby/JS/Swift/etc.)
+- [PullApprove](https://www.pullapprove.com/) — code review assignment and policy
+- [CODEOWNERS](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners) — GitHub's built-in review routing
+
+### PR Triage & Dashboards
+
+- [Graphite](https://graphite.dev/) — stacked PRs and review dashboard
+- [spark-pr-dashboard](https://github.com/databricks/spark-pr-dashboard) — Databricks' PR triage dashboard for Apache Spark (inspired some of our down-ranking logic)
+
+### AI Coding Agents
+
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) — Anthropic's CLI coding agent
+- [OpenAI Codex](https://openai.com/index/openai-codex/) — OpenAI's coding agent
+- [Aider](https://github.com/paul-gauthier/aider) — open-source AI pair programming in the terminal
