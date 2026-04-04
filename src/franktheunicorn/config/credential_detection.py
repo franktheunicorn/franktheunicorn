@@ -49,7 +49,7 @@ class DynamicMenuEntry:
     """Menu key, e.g. ``"8"``."""
 
     label: str
-    """Display label, e.g. ``"groq"`` or ``"preprod-cortex"``."""
+    """Display label, e.g. ``"groq"`` or ``"cortex"``."""
 
     api_key_env: str
     """Environment variable name for the API key or token."""
@@ -400,7 +400,7 @@ def derive_detection_label(detection: DetectedCredential) -> str:
     Examples::
 
         GROQ_API_KEY          → "groq"
-        PREPROD_CORTEX_URL    → "preprod-cortex"
+        CORTEX_URL    → "cortex"
         MY_LLM_BASE_URL       → "my-llm"
         CUSTOM_AI_API_KEY     → "custom-ai"
     """
