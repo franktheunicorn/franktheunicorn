@@ -38,6 +38,20 @@ DOCKER_OLLAMA=false
 DOCKER_LLAMA_CPP=false
 DOCKER_VLLM=false
 
+generate_ollama_compose() {
+    # Generate compose.ollama.yaml from the template with the chosen model.
+    local model="$1"
+    local template="docker/compose.ollama.yaml.template"
+    local output="compose.ollama.yaml"
+    if [ ! -f "$template" ]; then
+        warn "Template not found: $template"
+        return 1
+    fi
+    sed "s|{{MODEL}}|${model}|g" "$template" > "$output"
+    ok "  Generated $output (model: $model)"
+    info "  Start with: docker compose -f compose.yaml -f compose.ollama.yaml up"
+}
+
 offer_install() {
     local tool="$1"
     local os_type
@@ -94,7 +108,9 @@ offer_install() {
                     ;;
                 docker)
                     info "  Ollama will run via Docker."
-                    info "  Start with: docker compose --profile inference up ollama"
+                    local ollama_model
+                    ollama_model=$(ask "  Ollama model to pull:" "qwen2.5-coder:14b")
+                    generate_ollama_compose "$ollama_model"
                     DOCKER_OLLAMA=true
                     return 0
                     ;;
