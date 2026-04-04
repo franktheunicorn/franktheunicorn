@@ -30,7 +30,7 @@ SECRET_KEY = os.environ.get(
 DEBUG = _env_bool("DJANGO_DEBUG")
 
 ALLOWED_HOSTS: list[str] = [
-    stripped  # pylint: disable=used-before-assignment
+    stripped
     for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "*").split(",")
     if (stripped := h.lstrip())
 ]

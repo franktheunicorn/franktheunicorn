@@ -40,7 +40,7 @@ class TestRunner:
         if self._docker is not None:
             return self._docker
         try:
-            import docker  # type: ignore[import-untyped,unused-ignore]
+            import docker
 
             self._docker = docker.from_env()  # type: ignore[attr-defined]
             self._docker.ping()
