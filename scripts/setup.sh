@@ -719,7 +719,7 @@ echo ""
 # --- Project initialization -------------------------------------------------
 
 info "Initializing configuration..."
-echo "This creates your operator config at ~/.review-agent/"
+echo "This creates your operator config at config/active/"
 echo ""
 set -x
 python manage.py init_project

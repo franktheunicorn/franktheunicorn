@@ -1,0 +1,7 @@
+# User-specific config files live here — do not commit secrets.
+# Only .gitkeep and this .gitignore are tracked.
+*
+!.gitignore
+!.gitkeep
+!projects/
+!projects/.gitkeep

@@ -30,7 +30,7 @@ class Command(BaseCommand):
             "--output-dir",
             type=str,
             default="",
-            help="Output directory for curated dataset (default: ~/.review-agent/voice)",
+            help="Output directory for curated dataset (default: config/active/voice)",
         )
 
     def handle(self, *args: object, **options: object) -> None:

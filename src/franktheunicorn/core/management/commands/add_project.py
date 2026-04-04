@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import django.conf
 from django.core.management.base import BaseCommand, CommandParser
 
 
@@ -33,9 +34,8 @@ class Command(BaseCommand):
         if output_dir:
             projects_dir = Path(output_dir)
         else:
-            config_dir = Path(
-                os.environ.get("FRANK_CONFIG_DIR", str(Path.home() / ".review-agent"))
-            )
+            base = Path(django.conf.settings.BASE_DIR)
+            config_dir = Path(os.environ.get("FRANK_CONFIG_DIR", str(base / "config" / "active")))
             projects_dir = config_dir / "projects"
 
         projects_dir.mkdir(parents=True, exist_ok=True)

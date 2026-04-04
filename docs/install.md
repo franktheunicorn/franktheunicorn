@@ -97,7 +97,7 @@ To monitor your own repos, create your own operator and project configs.
 python manage.py init_project
 ```
 
-This creates `~/.review-agent/config.yaml` with your GitHub username and review
+This creates `config/active/operator.yaml` with your GitHub username and review
 style. (If using Docker, run commands with `docker compose exec web`.)
 
 ### Add projects
@@ -118,19 +118,19 @@ python manage.py add_project \
   --tone "constructive and thorough"
 ```
 
-This creates YAML files in `~/.review-agent/projects/`. You can also copy and
+This creates YAML files in `config/active/projects/`. You can also copy and
 edit the examples directly:
 
 ```bash
-cp config/examples/projects/personal-django.yaml ~/.review-agent/projects/franktheunicorn-franktheunicorn.yaml
-cp config/examples/projects/apache-spark.yaml ~/.review-agent/projects/apache-spark.yaml
+cp config/examples/projects/personal-django.yaml config/active/projects/franktheunicorn-franktheunicorn.yaml
+cp config/examples/projects/apache-spark.yaml config/active/projects/apache-spark.yaml
 # Edit each file to match your repos
 ```
 
 ### Example: franktheunicorn project config
 
 ```yaml
-# ~/.review-agent/projects/franktheunicorn-franktheunicorn.yaml
+# config/active/projects/franktheunicorn-franktheunicorn.yaml
 owner: "franktheunicorn"
 repo: "franktheunicorn"
 review_context: "personal review assistant — pragmatic, ship it"
@@ -148,7 +148,7 @@ enabled: true
 ### Example: Apache Spark project config
 
 ```yaml
-# ~/.review-agent/projects/apache-spark.yaml
+# config/active/projects/apache-spark.yaml
 owner: "apache"
 repo: "spark"
 review_context: "ASF governance — formal review required for all changes"
@@ -175,7 +175,7 @@ Workspaces let you filter the dashboard by context — e.g., "work" vs "personal
 Add a `workspaces` section to your operator config:
 
 ```yaml
-# ~/.review-agent/config.yaml
+# config/active/operator.yaml
 github_username: "yourname"
 review_style: "direct but kind"
 auto_post: false
@@ -210,7 +210,7 @@ enable multiple backends simultaneously — findings are combined and deduped.
 Or edit the operator config directly:
 
 ```yaml
-# ~/.review-agent/config.yaml (add to existing config)
+# config/active/operator.yaml (add to existing config)
 llm_backends:
   - provider: "claude"
     model: "claude-sonnet-4-20250514"
@@ -233,25 +233,17 @@ llm_backends:
     base_url: "http://localhost:11434"
 ```
 
-## 7. Point services at your config
+## 7. Config location
 
-Update `.env` to use your config instead of the examples:
+All user config lives in `config/active/` (gitignored). The app auto-detects it:
+if `config/active/operator.yaml` exists, it's used; otherwise `config/examples/`
+is used as a fallback.
+
+You can override with environment variables in `.env`:
 
 ```bash
-FRANK_OPERATOR_CONFIG=~/.review-agent/config.yaml
-FRANK_PROJECTS_DIR=~/.review-agent/projects
-```
-
-If using Docker Compose, you can either set these in `.env` (Docker reads it
-automatically) or mount your config directory by editing `compose.yaml`:
-
-```yaml
-volumes:
-  - ./data:/app/data
-  - ~/.review-agent:/app/config/custom
-environment:
-  FRANK_OPERATOR_CONFIG: /app/config/custom/config.yaml
-  FRANK_PROJECTS_DIR: /app/config/custom/projects
+FRANK_OPERATOR_CONFIG=config/active/operator.yaml
+FRANK_PROJECTS_DIR=config/active/projects
 ```
 
 Restart services after config changes.

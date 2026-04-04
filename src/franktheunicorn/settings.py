@@ -96,16 +96,28 @@ STATIC_URL = "static/"
 
 # --- franktheunicorn-specific settings ---
 
-# Path to operator config YAML
+# Path to operator config YAML.
+# Default: config/active/operator.yaml if it exists, else config/examples/operator.yaml.
+_active_operator = BASE_DIR / "config" / "active" / "operator.yaml"
 FRANK_OPERATOR_CONFIG = os.environ.get(
     "FRANK_OPERATOR_CONFIG",
-    str(BASE_DIR / "config" / "examples" / "operator.yaml"),
+    str(
+        _active_operator
+        if _active_operator.exists()
+        else BASE_DIR / "config" / "examples" / "operator.yaml"
+    ),
 )
 
-# Directory containing per-project YAML configs
+# Directory containing per-project YAML configs.
+# Default: config/active/projects/ if populated, else config/examples/projects/.
+_active_projects = BASE_DIR / "config" / "active" / "projects"
 FRANK_PROJECTS_DIR = os.environ.get(
     "FRANK_PROJECTS_DIR",
-    str(BASE_DIR / "config" / "examples" / "projects"),
+    str(
+        _active_projects
+        if any(_active_projects.glob("*.yaml"))
+        else BASE_DIR / "config" / "examples" / "projects"
+    ),
 )
 
 # GitHub API token (optional — mock mode works without it)

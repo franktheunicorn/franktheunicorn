@@ -18,8 +18,8 @@ jobs:
     env:
       # Point at the committed E2E configs so the running app uses stub
       # LLM and monitors franktheunicorn/franktheunicorn.
-      FRANK_OPERATOR_CONFIG: config/e2e/operator.yaml
-      FRANK_PROJECTS_DIR: config/e2e/projects
+      FRANK_OPERATOR_CONFIG: config/examples/e2e/operator.yaml
+      FRANK_PROJECTS_DIR: config/examples/e2e/projects
     steps:
       - uses: actions/checkout@v4
 
@@ -29,13 +29,13 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
 
-      # Pre-create the operator config at ~/.review-agent/ so that
+      # Pre-create the operator config at config/active/ so that
       # `manage.py init_project` (called by setup.sh) skips its
       # interactive prompts — it checks `if operator_path.exists()`.
       - name: Pre-create operator config (bypass interactive prompts)
         run: |
-          mkdir -p ~/.review-agent/projects
-          cp config/e2e/operator.yaml ~/.review-agent/config.yaml
+          mkdir -p config/active/projects
+          cp config/examples/e2e/operator.yaml config/active/operator.yaml
 
       - name: Run setup.sh --local --mock
         run: ./scripts/setup.sh --local --mock
@@ -46,7 +46,7 @@ jobs:
           python -c "import franktheunicorn; print('package import OK')"
           python manage.py showmigrations --plan | grep '\[X\]'
           grep 'FRANK_MOCK_MODE=true' .env
-          test -f config/e2e/projects/franktheunicorn-franktheunicorn.yaml
+          test -f config/examples/e2e/projects/franktheunicorn-franktheunicorn.yaml
 
       - name: Start web server and verify HTTP 200
         run: |

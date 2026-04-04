@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import logging
 import os
+import socket
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +157,91 @@ def discover_models(
     if provider == "ollama":
         return list_models_ollama(base_url=base_url)
     return []
+
+
+# Default base URLs used by each provider's SDK when none is specified.
+_DEFAULT_BASE_URLS: dict[str, str] = {
+    "claude": "https://api.anthropic.com",
+    "openai": "https://api.openai.com/v1",
+    "gemini": "https://generativelanguage.googleapis.com",
+    "ollama": "http://localhost:11434",
+}
+
+
+def check_endpoint_reachability(url: str) -> str:
+    """Check whether the hostname in *url* resolves via DNS.
+
+    Returns an empty string if the host resolves, or a human-readable
+    diagnostic message if it does not.
+    """
+    parsed = urlparse(url)
+    hostname = parsed.hostname
+    if not hostname:
+        return f"Could not parse hostname from URL: {url}"
+
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        socket.getaddrinfo(hostname, port, proto=socket.IPPROTO_TCP)
+    except socket.gaierror:
+        return (
+            f"Could not resolve hostname '{hostname}' \u2014 check your network connection or VPN"
+        )
+    except OSError as exc:
+        return f"Network error resolving '{hostname}': {exc}"
+    return ""
+
+
+def discover_models_verbose(
+    provider: str,
+    api_key_env: str = "",
+    base_url: str = "",
+) -> tuple[list[DiscoveredModel], str]:
+    """Like :func:`discover_models` but returns a diagnostic on failure.
+
+    Returns ``(models, "")`` on success, or ``([], diagnostic)`` when model
+    listing fails.  The diagnostic includes the URL that was attempted and
+    a reachability check of the host.
+    """
+    models = discover_models(provider=provider, api_key_env=api_key_env, base_url=base_url)
+    if models:
+        return models, ""
+
+    # Build diagnostic.
+    effective_url = base_url or _DEFAULT_BASE_URLS.get(provider, "")
+    if not effective_url:
+        return [], "Unknown provider and no base URL specified."
+
+    parts: list[str] = []
+    # Show the URL that was attempted.
+    if provider == "ollama":
+        models_path = "/api/tags"
+    elif provider == "openai":
+        # OpenAI-compatible clients use a base URL already rooted at .../v1
+        # and request /models from there.
+        models_path = "/models"
+    else:
+        models_path = "/v1/models"
+    attempted = effective_url.rstrip("/") + models_path
+    parts.append(f"Attempted: GET {attempted}")
+
+    # Check reachability.
+    reachability = check_endpoint_reachability(effective_url)
+    if reachability:
+        parts.append(reachability)
+    else:
+        api_key = os.environ.get(api_key_env, "") if api_key_env else ""
+        if not api_key and provider != "ollama":
+            parts.append(
+                f"Host is reachable but {api_key_env or 'API key'} is empty"
+                " \u2014 check your API key"
+            )
+        else:
+            parts.append(
+                "Host is reachable but model listing failed"
+                " \u2014 check your API key and endpoint path"
+            )
+
+    return [], "\n".join(parts)
 
 
 def format_model_menu(models: list[DiscoveredModel], max_display: int = 20) -> str:

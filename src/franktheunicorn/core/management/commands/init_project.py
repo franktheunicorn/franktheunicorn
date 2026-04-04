@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import django.conf
 from django.core.management.base import BaseCommand
 
 
@@ -12,12 +13,13 @@ class Command(BaseCommand):
     help = "Initialize franktheunicorn configuration"
 
     def handle(self, *args: object, **options: object) -> None:
-        config_dir = Path(os.environ.get("FRANK_CONFIG_DIR", str(Path.home() / ".review-agent")))
+        base = Path(django.conf.settings.BASE_DIR)
+        config_dir = Path(os.environ.get("FRANK_CONFIG_DIR", str(base / "config" / "active")))
         config_dir.mkdir(parents=True, exist_ok=True)
         projects_dir = config_dir / "projects"
         projects_dir.mkdir(exist_ok=True)
 
-        operator_path = config_dir / "config.yaml"
+        operator_path = config_dir / "operator.yaml"
         if operator_path.exists():
             self.stdout.write(f"Operator config already exists at {operator_path}")
         else:

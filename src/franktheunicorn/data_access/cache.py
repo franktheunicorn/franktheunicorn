@@ -1,6 +1,6 @@
 """File-based JSON cache for community context sources.
 
-Stores cached search results as JSON files under ~/.review-agent/cache/community/.
+Stores cached search results as JSON files under ``data/cache/community/``.
 Each source type gets its own subdirectory. Keys are SHA256 hashes of the query
 parameters. TTL-based expiry with configurable defaults.
 """
@@ -17,7 +17,9 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CACHE_DIR = Path.home() / ".review-agent" / "cache" / "community"
+DEFAULT_CACHE_DIR = (
+    Path(__file__).resolve().parent.parent.parent.parent / "data" / "cache" / "community"
+)
 DEFAULT_TTL_SECONDS = 7 * 24 * 3600  # 7 days
 
 

@@ -11,8 +11,8 @@ from django.core.management import call_command
 
 # Common mock to prevent actual API calls during model discovery.
 _NO_DISCOVERY = patch(
-    "franktheunicorn.core.management.commands.setup_llm.discover_models",
-    return_value=[],
+    "franktheunicorn.core.management.commands.setup_llm.discover_models_verbose",
+    return_value=([], ""),
 )
 
 
@@ -24,6 +24,7 @@ class TestSetupLLMCommand:
             "testuser",  # github_username
             "direct",  # review_style
             "7",  # provider: skip/stub
+            "",  # projects: skip
             "n",  # coderabbit: no
         ]
         with patch("builtins.input", side_effect=inputs), _NO_DISCOVERY:
@@ -43,6 +44,7 @@ class TestSetupLLMCommand:
             "1",  # provider: claude only
             "claude-sonnet-4-20250514",  # model (from discovery fallback prompt)
             "0.3",  # temperature
+            "",  # projects: skip
             "n",  # coderabbit: no
         ]
         with (
@@ -69,6 +71,7 @@ class TestSetupLLMCommand:
             "http://localhost:11434",  # ollama base_url
             "qwen2.5-coder:14b",  # ollama model (from discovery fallback)
             "n",  # generate Docker Compose: no
+            "",  # projects: skip
             "n",  # coderabbit: no
         ]
         with (
@@ -98,6 +101,7 @@ class TestSetupLLMCommand:
             "http://localhost:11434",  # base_url
             "qwen2.5-coder:14b",  # model (from discovery fallback)
             "n",  # generate Docker Compose: no
+            "",  # projects: skip
             "n",  # coderabbit: no
         ]
         with (
@@ -132,6 +136,7 @@ class TestSetupLLMCommand:
             "http://localhost:11434",  # base_url
             "qwen2.5-coder:14b",  # model
             "y",  # generate Docker Compose: yes
+            "",  # projects: skip
             "n",  # coderabbit: no
         ]
         with (
@@ -162,6 +167,7 @@ class TestSetupLLMCommand:
             "http://localhost:11434",  # base_url
             "qwen2.5-coder:14b",  # model
             "n",  # generate Docker Compose: no
+            "",  # projects: skip
             "n",  # coderabbit: no
         ]
         with (
@@ -184,6 +190,7 @@ class TestSetupLLMCommand:
             "testuser",  # github_username
             "direct",  # review_style
             "7",  # provider: skip/stub
+            "",  # projects: skip
             "y",  # coderabbit: yes
         ]
         with (
@@ -210,6 +217,7 @@ class TestCredentialDetectionIntegration:
             "",  # accept default provider choice (should be "1" from detection)
             "claude-sonnet-4-20250514",  # model
             "0.3",  # temperature
+            "",  # projects: skip
             "n",  # coderabbit: no
         ]
         with (
@@ -235,6 +243,7 @@ class TestCredentialDetectionIntegration:
             "0.3",  # claude temperature
             "gpt-4o",  # openai model
             "0.3",  # openai temperature
+            "",  # projects: skip
             "n",  # coderabbit: no
         ]
         with (
@@ -260,6 +269,7 @@ class TestCredentialDetectionIntegration:
             "testuser",  # github_username
             "direct",  # review_style
             "",  # accept default (should be "7")
+            "",  # projects: skip
             "n",  # coderabbit: no
         ]
         # Clear all known LLM env vars to ensure clean state.
@@ -278,18 +288,17 @@ class TestCredentialDetectionIntegration:
         config = yaml.safe_load(output_path.read_text())
         assert "llm_backends" not in config
 
-    def test_tier2_detection_offers_openai_compatible(self, tmp_path: Path) -> None:
-        """When GROQ_API_KEY is detected, wizard offers OpenAI-compatible setup."""
+    def test_tier2_detection_appears_in_menu(self, tmp_path: Path) -> None:
+        """When GROQ_API_KEY is detected, it appears as a dynamic menu entry."""
         output_path = tmp_path / "operator.yaml"
         inputs = [
             "testuser",  # github_username
             "direct",  # review_style
-            "7",  # skip native providers
-            # Wizard should detect GROQ_API_KEY and offer OpenAI-compatible
-            "y",  # yes, configure as OpenAI-compatible
+            "8",  # select detected groq backend (dynamic menu entry)
             "https://api.groq.com/openai/v1",  # base_url
             "llama-3.3-70b-versatile",  # model
             "0.3",  # temperature
+            "",  # projects: skip
             "n",  # coderabbit: no
         ]
         clean_env = {
@@ -328,6 +337,7 @@ class TestModelDiscoveryIntegration:
             "1",  # provider: claude
             "1",  # select first model from discovery menu
             "0.3",  # temperature
+            "",  # projects: skip
             "n",  # coderabbit: no
         ]
         mock_models = [
@@ -338,8 +348,8 @@ class TestModelDiscoveryIntegration:
             patch("builtins.input", side_effect=inputs),
             patch.dict("os.environ", {"ANTHROPIC_API_KEY": "sk-test"}),
             patch(
-                "franktheunicorn.core.management.commands.setup_llm.discover_models",
-                return_value=mock_models,
+                "franktheunicorn.core.management.commands.setup_llm.discover_models_verbose",
+                return_value=(mock_models, ""),
             ),
         ):
             call_command("setup_llm", output=str(output_path))
@@ -356,6 +366,7 @@ class TestModelDiscoveryIntegration:
             "1",  # provider: claude
             "claude-sonnet-4-20250514",  # typed model name
             "0.3",  # temperature
+            "",  # projects: skip
             "n",  # coderabbit: no
         ]
         with (
@@ -380,6 +391,7 @@ class TestLlamaCppProvider:
             "5",  # provider: llama-cpp
             "http://localhost:8080/v1",  # server URL
             "my-model",  # model name
+            "",  # projects: skip
             "n",  # coderabbit: no
         ]
         with (
@@ -405,6 +417,7 @@ class TestLlamaCppProvider:
             "5",  # provider: llama-cpp
             "http://localhost:8080/v1",  # server URL
             "my-model",  # model name
+            "",  # projects: skip
             "n",  # coderabbit: no
         ]
         with (
@@ -429,6 +442,7 @@ class TestVLLMProvider:
             "6",  # provider: vllm
             "http://localhost:8000/v1",  # server URL
             "meta-llama/Llama-3-8b",  # model name
+            "",  # projects: skip
             "n",  # coderabbit: no
         ]
         with (
@@ -458,6 +472,7 @@ class TestCustomEndpointFallback:
             "https://my-llm.example.com/v1",  # custom endpoint URL
             "",  # no token needed
             "my-custom-model",  # model name
+            "",  # projects: skip
             "n",  # coderabbit: no
         ]
         clean_env = {
@@ -491,6 +506,7 @@ class TestCustomEndpointFallback:
             "MY_LLM_SERVER",  # env var name (fallback prompt)
             "MY_LLM_TOKEN",  # env var for token
             "my-model",  # model name
+            "",  # projects: skip
             "n",  # coderabbit: no
         ]
         custom_env = {
@@ -522,6 +538,7 @@ class TestCustomEndpointFallback:
             "https://api.example.com/v1",  # endpoint URL
             "sk-my-secret-token-value",  # raw token
             "my-model",  # model name
+            "",  # projects: skip
             "n",  # coderabbit: no
         ]
         clean_env = {
@@ -548,6 +565,7 @@ class TestCustomEndpointFallback:
             "direct",  # review_style
             "99",  # invalid choice
             "",  # skip custom endpoint
+            "",  # projects: skip
             "n",  # coderabbit: no
         ]
         clean_env = {
@@ -575,6 +593,7 @@ class TestCustomEndpointFallback:
             "NONEXISTENT_VAR",  # env var that doesn't exist
             "",  # no token
             "my-model",  # model name
+            "",  # projects: skip
             "n",  # coderabbit: no
         ]
         clean_env = {

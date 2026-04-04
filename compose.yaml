@@ -18,8 +18,8 @@ x-common: &common
     FRANK_DATA_DIR: /app/data
     FRANK_MOCK_MODE: ${FRANK_MOCK_MODE:-true}
     FRANK_GITHUB_TOKEN: ${FRANK_GITHUB_TOKEN:-}
-    FRANK_OPERATOR_CONFIG: /app/config/examples/operator.yaml
-    FRANK_PROJECTS_DIR: /app/config/examples/projects
+    FRANK_OPERATOR_CONFIG: ${FRANK_OPERATOR_CONFIG:-/app/config/examples/operator.yaml}
+    FRANK_PROJECTS_DIR: ${FRANK_PROJECTS_DIR:-/app/config/examples/projects}
     DJANGO_DEBUG: "true"
 
 services:

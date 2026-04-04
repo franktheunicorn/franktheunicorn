@@ -5,7 +5,7 @@ the agent's voice for different contexts (internal dashboard vs external
 GitHub comments).  The default personality is "frank" (Frank the Unicorn).
 
 Resolution order:
-1. ``~/.review-agent/personalities/{name}.md`` (operator customisation)
+1. ``config/active/personalities/{name}.md`` (operator customisation)
 2. Bundled ``src/franktheunicorn/personalities/{name}.md``
 3. ``None`` (personality disabled — falls back to generic prompt text)
 """
@@ -23,7 +23,9 @@ logger = logging.getLogger(__name__)
 
 _SECTION_RE = re.compile(r"^## (.+)$", re.MULTILINE)
 
-_USER_PERSONALITIES_DIR = Path.home() / ".review-agent" / "personalities"
+_USER_PERSONALITIES_DIR = (
+    Path(__file__).resolve().parent.parent.parent.parent / "config" / "active" / "personalities"
+)
 
 
 @dataclass(frozen=True)
@@ -52,7 +54,7 @@ def _parse_sections(raw: str) -> dict[str, str]:
 
 def _read_personality_file(name: str) -> str | None:
     """Locate and read a personality markdown file by name."""
-    # 1. Operator override in ~/.review-agent/personalities/
+    # 1. Operator override in config/active/personalities/
     user_path = _USER_PERSONALITIES_DIR / f"{name}.md"
     if user_path.is_file():
         try:

@@ -3,7 +3,7 @@
 Usage::
 
     python manage.py setup_llm
-    python manage.py setup_llm --output ~/.review-agent/operator.yaml
+    python manage.py setup_llm --output config/active/operator.yaml
 """
 
 from __future__ import annotations
@@ -16,14 +16,14 @@ import yaml
 from django.core.management.base import BaseCommand
 
 from franktheunicorn.config.credential_detection import (
-    DetectedCredential,
+    DynamicMenuEntry,
+    build_dynamic_menu_entries,
     detect_llm_credentials,
     format_detections,
-    get_openai_compatible_detections,
     suggest_provider_choices,
 )
 from franktheunicorn.config.model_discovery import (
-    discover_models,
+    discover_models_verbose,
     format_model_menu,
 )
 from franktheunicorn.review.backends.ollama_backend import recommend_local_model
@@ -46,7 +46,7 @@ class Command(BaseCommand):
         parser.add_argument(
             "--output",
             default="",
-            help="Path to write operator.yaml (default: ~/.review-agent/operator.yaml)",
+            help="Path to write operator.yaml (default: config/active/operator.yaml)",
         )
 
     def handle(self, *args, **options):  # type: ignore[no-untyped-def]
@@ -74,11 +74,20 @@ class Command(BaseCommand):
 
         default_choice = suggest_provider_choices(detections)
 
+        # Build dynamic menu entries from Tier 2/3 detections.
+        dynamic_entries = build_dynamic_menu_entries(detections)
+        dynamic_lookup = {e.key: e for e in dynamic_entries}
+
         # --- LLM providers (multiple) ---
         self.stdout.write("\nSelect LLM providers for code review (you can enable multiple):\n")
         for key, (_, label, _, _) in _PROVIDERS.items():
             self.stdout.write(f"  {key}. {label}\n")
         self.stdout.write("  7. Skip — use stub/demo mode\n")
+        if dynamic_entries:
+            self.stdout.write("  --- Detected backends ---\n")
+            for entry in dynamic_entries:
+                source = f" (from {entry.base_url_env})" if entry.base_url_env else ""
+                self.stdout.write(f"  {entry.key}. {entry.label}{source} (detected)\n")
 
         choices_raw = self._ask(
             "Enter choices (comma-separated, e.g. '1,4' for Claude + Ollama): ",
@@ -94,32 +103,33 @@ class Command(BaseCommand):
             if key == "7":
                 skipped = True
                 continue
+            if key in dynamic_lookup:
+                entry = dynamic_lookup[key]
+                self.stdout.write(f"\n--- Configuring {entry.label} (detected) ---\n")
+                llm_config = self._configure_detected_backend(entry)
+                llm_backends.append(llm_config)
+                if entry.api_key_env:
+                    env_vars_needed.append(entry.api_key_env)
+                continue
             if key not in _PROVIDERS:
                 self.stdout.write(self.style.WARNING(f"  Skipping unknown choice '{key}'\n"))
                 continue
             provider, provider_label, _default_model, api_key_env = _PROVIDERS[key]
             self.stdout.write(f"\n--- Configuring {provider_label} ---\n")
 
-            llm_config: dict[str, object] = {"provider": provider}
+            llm_config_dict: dict[str, object] = {"provider": provider}
 
             if api_key_env:
-                llm_config = self._configure_cloud_provider(provider, llm_config)
+                llm_config_dict = self._configure_cloud_provider(provider, llm_config_dict)
                 env_vars_needed.append(api_key_env)
             elif provider == "ollama":
-                llm_config = self._configure_ollama(llm_config)
+                llm_config_dict = self._configure_ollama(llm_config_dict)
             elif provider == "llama-cpp":
-                llm_config = self._configure_llama_cpp(llm_config)
+                llm_config_dict = self._configure_llama_cpp(llm_config_dict)
             elif provider == "vllm":
-                llm_config = self._configure_vllm(llm_config)
+                llm_config_dict = self._configure_vllm(llm_config_dict)
 
-            llm_backends.append(llm_config)
-
-        # --- Offer OpenAI-compatible backends for Tier 2/3 detections ---
-        compat_detections = get_openai_compatible_detections(detections)
-        if compat_detections:
-            llm_backends = self._offer_openai_compatible(
-                compat_detections, llm_backends, env_vars_needed
-            )
+            llm_backends.append(llm_config_dict)
 
         # --- Fallback: custom endpoint prompt when nothing configured ---
         if not llm_backends and not skipped:
@@ -128,16 +138,20 @@ class Command(BaseCommand):
         if llm_backends:
             config["llm_backends"] = llm_backends
 
+        # --- Initial projects ---
+        output_path = options.get("output") or ""
+        if not output_path:
+            import django.conf
+
+            base = Path(django.conf.settings.BASE_DIR)
+            output_path = str(base / "config" / "active" / "operator.yaml")
+        output_path_obj = Path(output_path)
+        self._configure_initial_projects(output_path_obj)
+
         # --- CodeRabbit ---
         cr_config = self._configure_coderabbit()
         if cr_config:
             config["coderabbit"] = cr_config
-
-        # --- Write config ---
-        output_path = options.get("output") or ""
-        if not output_path:
-            output_path = str(Path.home() / ".review-agent" / "operator.yaml")
-        output_path_obj = Path(output_path)
 
         self.stdout.write(f"\nConfig will be written to: {output_path_obj}\n")
 
@@ -178,13 +192,17 @@ class Command(BaseCommand):
     ) -> str:
         """Try to list models from the API and let the user pick one."""
         self.stdout.write("\n  Discovering available models...\n")
-        models = discover_models(
+        models, diagnostic = discover_models_verbose(
             provider=provider,
             api_key_env=api_key_env,
             base_url=base_url,
         )
         if not models:
-            self.stdout.write("  Could not list models (SDK missing or API error).\n")
+            if diagnostic:
+                for line in diagnostic.splitlines():
+                    self.stdout.write(self.style.WARNING(f"  {line}\n"))
+            else:
+                self.stdout.write("  Could not list models (SDK missing or API error).\n")
             return self._ask("  Model name: ", default=default_model)
 
         menu = format_model_menu(models)
@@ -430,78 +448,95 @@ class Command(BaseCommand):
         llm_backends.append(custom_config)
         return llm_backends
 
-    def _offer_openai_compatible(
-        self,
-        compat_detections: list[DetectedCredential],
-        llm_backends: list[dict[str, object]],
-        env_vars_needed: list[str],
-    ) -> list[dict[str, object]]:
-        """Offer to configure Tier 2/3 detections as OpenAI-compatible backends."""
-        # Group by provider to avoid duplicate offers.
-        seen_providers: set[str] = set()
-        candidates: list[tuple[str, str, str]] = []  # (provider, env_var, endpoint)
-        for d in compat_detections:
-            if d.provider in seen_providers:
-                continue
-            seen_providers.add(d.provider)
-            endpoint = ""
-            if d.credential_type == "endpoint":
-                endpoint = d.env_var
-            elif d.paired_with:
-                endpoint = d.paired_with
-            candidates.append((d.provider or "unknown", d.env_var, endpoint))
+    def _configure_detected_backend(self, entry: DynamicMenuEntry) -> dict[str, object]:
+        """Configure a Tier 2/3 detected credential as an OpenAI-compatible backend."""
+        config: dict[str, object] = {"provider": "openai"}
+        if entry.api_key_env:
+            config["api_key_env"] = entry.api_key_env
 
-        if not candidates:
-            return llm_backends
-
-        self.stdout.write("\n--- Additional LLM Providers Detected ---\n")
-        for prov, env_var, endpoint in candidates:
-            extra = f" (endpoint: {endpoint})" if endpoint else ""
-            self.stdout.write(f"  {prov}: {env_var}{extra}\n")
-
-        enable = self._ask(
-            "\nConfigure as OpenAI-compatible backend(s)? (y/N): ",
-            default="n",
-        )
-        if enable.lower() not in ("y", "yes"):
-            return llm_backends
-
-        for prov, env_var, endpoint in candidates:
-            self.stdout.write(f"\n--- Configuring {prov} (OpenAI-compatible) ---\n")
-            compat_config: dict[str, object] = {"provider": "openai"}
-            compat_config["api_key_env"] = env_var
-
-            if endpoint:
-                endpoint_val = os.environ.get(endpoint, "")
-                if endpoint_val:
-                    compat_config["base_url"] = endpoint_val
-                    self.stdout.write(f"  Using endpoint from {endpoint}\n")
+        if entry.base_url_env:
+            endpoint_val = os.environ.get(entry.base_url_env, "")
+            if endpoint_val:
+                config["base_url"] = endpoint_val
+                self.stdout.write(f"  Using endpoint from {entry.base_url_env}\n")
             else:
                 base_url = self._ask(
                     "  Base URL (e.g. https://api.groq.com/openai/v1): ", default=""
                 )
                 if base_url:
-                    compat_config["base_url"] = base_url
+                    config["base_url"] = base_url
+        else:
+            base_url = self._ask("  Base URL (e.g. https://api.groq.com/openai/v1): ", default="")
+            if base_url:
+                config["base_url"] = base_url
 
-            # Try model discovery on the compatible endpoint.
-            model = self._discover_and_choose_model(
-                provider="openai",
-                default_model="",
-                api_key_env=env_var,
-                base_url=str(compat_config.get("base_url", "")),
+        model = self._discover_and_choose_model(
+            provider="openai",
+            default_model="",
+            api_key_env=entry.api_key_env,
+            base_url=str(config.get("base_url", "")),
+        )
+        config["model"] = model
+
+        temp = self._ask("  Temperature (0.0-2.0): ", default="0.3")
+        try:
+            config["temperature"] = float(temp)
+        except ValueError:
+            config["temperature"] = 0.3
+
+        return config
+
+    def _configure_initial_projects(self, operator_path: Path) -> None:
+        """Prompt for initial GitHub repositories to monitor."""
+        self.stdout.write("\n--- Projects to Monitor ---\n")
+        self.stdout.write(
+            "  Add GitHub repositories you want to review.\n"
+            "  You can add more later with: python manage.py add_project --repo owner/repo\n\n"
+        )
+        repos_raw = self._ask(
+            "  Repos (comma-separated, e.g. 'apache/spark,myorg/myrepo'): ",
+            default="",
+        )
+        if not repos_raw:
+            return
+
+        projects_dir = operator_path.parent / "projects"
+        projects_dir.mkdir(parents=True, exist_ok=True)
+
+        for repo_raw in repos_raw.split(","):
+            repo = repo_raw.strip()
+            if not repo:
+                continue
+            parts = repo.split("/", 1)
+            if len(parts) != 2 or not parts[0] or not parts[1]:
+                self.stdout.write(
+                    self.style.WARNING(f"  Skipping '{repo}' — expected owner/repo format\n")
+                )
+                continue
+            owner, repo_name = parts
+
+            governance = self._ask(
+                f"  Governance for {repo} (standard/asf/personal): ",
+                default="standard",
             )
-            compat_config["model"] = model
+            if governance not in ("standard", "asf", "personal"):
+                governance = "standard"
 
-            temp = self._ask("  Temperature (0.0-2.0): ", default="0.3")
-            try:
-                compat_config["temperature"] = float(temp)
-            except ValueError:
-                compat_config["temperature"] = 0.3
-
-            llm_backends.append(compat_config)
-            env_vars_needed.append(env_var)
-
-        return llm_backends
+            filename = f"{owner}-{repo_name}.yaml"
+            filepath = projects_dir / filename
+            yaml_content = (
+                f'owner: "{owner}"\n'
+                f'repo: "{repo_name}"\n'
+                f'review_context: "general open-source"\n'
+                f'governance: "{governance}"\n'
+                f'tone: "direct"\n'
+                f"watched_paths: []\n"
+                f"ignore_paths: []\n"
+                f"frequent_contributors: []\n"
+                f"enabled: true\n"
+            )
+            filepath.write_text(yaml_content, encoding="utf-8")
+            self.stdout.write(self.style.SUCCESS(f"  Created {filepath}\n"))
 
     def _configure_coderabbit(self) -> dict[str, object] | None:
         """Optionally configure CodeRabbit CLI integration."""
