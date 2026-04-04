@@ -13,37 +13,44 @@ This is (roughly) my 3rd attempt at building something like this (now that LLMs 
 
 ## Quick Start
 
-### Guided setup (recommended — fastest way to start)
+### 1. Clone and configure
 
 ```bash
 git clone https://github.com/franktheunicorn/franktheunicorn.git
 cd franktheunicorn
+cp .env.example .env          # edit to set FRANK_GITHUB_TOKEN + API keys
+```
+
+### 2. Set up your config
+
+Copy the example config and edit it for your repos:
+
+```bash
+cp config/examples/operator.yaml config/active/operator.yaml
+cp -r config/examples/projects/ config/active/projects/
+# Edit config/active/operator.yaml — set github_username, llm_backends, etc.
+# Edit/add project files in config/active/projects/
+```
+
+All config lives in `config/active/` (gitignored). Examples in `config/examples/`.
+
+### 3. Run it
+
+**Guided setup** (recommended for first time):
+```bash
 ./scripts/setup.sh
 ```
 
-The setup script walks you through prerequisites, environment configuration,
-API keys, and LLM backend selection. It supports both Docker and local
-development. Run `./scripts/setup.sh --help` for flags.
-
-### Docker Compose (no Python needed)
-
+**Docker Compose** (no Python needed):
 ```bash
-git clone https://github.com/franktheunicorn/franktheunicorn.git
-cd franktheunicorn
-cp .env.example .env          # edit to set FRANK_GITHUB_TOKEN + ANTHROPIC_API_KEY
 docker compose up              # dashboard: http://localhost:8000
 ```
 
-### Make (local development)
-
+**Make** (local development):
 ```bash
-git clone https://github.com/franktheunicorn/franktheunicorn.git
-cd franktheunicorn
-cp .env.example .env          # edit to set FRANK_GITHUB_TOKEN + ANTHROPIC_API_KEY
 make setup                     # creates venv, installs deps, runs migrations
 make serve                     # dashboard: http://localhost:8000
-# In a separate terminal:
-make worker                    # background PR poller
+make worker                    # background PR poller (separate terminal)
 ```
 
 Both paths default to **mock mode** — fixture data, no API keys needed.

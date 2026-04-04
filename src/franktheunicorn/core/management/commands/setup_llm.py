@@ -141,7 +141,10 @@ class Command(BaseCommand):
         # --- Initial projects ---
         output_path = options.get("output") or ""
         if not output_path:
-            output_path = str(Path.home() / ".review-agent" / "operator.yaml")
+            import django.conf
+
+            base = Path(django.conf.settings.BASE_DIR)
+            output_path = str(base / "config" / "active" / "operator.yaml")
         output_path_obj = Path(output_path)
         self._configure_initial_projects(output_path_obj)
 
