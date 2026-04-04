@@ -1,0 +1,50 @@
+# franktheunicorn — Ollama inference compose override
+#
+# Generated from this template by:
+#   ./scripts/setup.sh   (interactive setup)
+#   python manage.py setup_llm   (LLM configuration wizard)
+#
+# Usage:
+#   docker compose -f compose.yaml -f compose.ollama.yaml up
+#
+# The "ollama-pull" service is a one-shot sidecar that pulls the configured
+# model after the Ollama server starts.  It exits once the pull is complete;
+# subsequent "docker compose up" invocations are fast because the model is
+# already cached in the ollama-models volume.
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    profiles: []  # Override base profile gate so ollama starts by default
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    # Uncomment for GPU support:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  ollama-pull:
+    image: ollama/ollama:latest
+    profiles: []  # Override base profile gate
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: ["ollama", "pull", "{{MODEL}}"]
+    environment:
+      OLLAMA_HOST: "http://ollama:11434"
+
+volumes:
+  ollama-models:

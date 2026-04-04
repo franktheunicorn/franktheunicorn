@@ -195,6 +195,9 @@ cython_debug/
 data/*.sqlite3
 data/*.sqlite3-journal
 
+# Generated compose overrides (created by setup.sh / manage.py setup_llm)
+compose.ollama.yaml
+
 # PyPI configuration file
 .pypirc
 

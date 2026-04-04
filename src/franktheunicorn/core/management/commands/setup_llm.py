@@ -268,7 +268,40 @@ class Command(BaseCommand):
 
         self.stdout.write(f"\n  To download the model, run:\n    ollama pull {model}\n")
 
+        generate = self._ask("  Generate Docker Compose override for Ollama? (y/N): ", default="n")
+        if generate.lower() in ("y", "yes"):
+            self._generate_ollama_compose(model)
+
         return llm_config
+
+    def _generate_ollama_compose(self, model: str) -> None:
+        """Generate compose.ollama.yaml from the template with the chosen model."""
+        import django.conf
+
+        base_dir = Path(django.conf.settings.BASE_DIR)
+        template_path = base_dir / "docker" / "compose.ollama.yaml.template"
+        output_path = base_dir / "compose.ollama.yaml"
+
+        if not template_path.exists():
+            self.stdout.write(self.style.WARNING(f"\n  Template not found: {template_path}\n"))
+            return
+
+        try:
+            content = template_path.read_text(encoding="utf-8")
+            content = content.replace("{{MODEL}}", model)
+            output_path.write_text(content, encoding="utf-8")
+        except OSError as exc:
+            self.stdout.write(
+                self.style.WARNING(f"\n  Could not generate compose.ollama.yaml: {exc}\n")
+            )
+            return
+
+        self.stdout.write(
+            self.style.SUCCESS(f"\n  Generated {output_path.name} (model: {model})\n")
+        )
+        self.stdout.write(
+            "  Run with Docker:\n    docker compose -f compose.yaml -f compose.ollama.yaml up\n"
+        )
 
     def _configure_llama_cpp(self, llm_config: dict[str, object]) -> dict[str, object]:
         """Configure llama.cpp server as an OpenAI-compatible backend."""
