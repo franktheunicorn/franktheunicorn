@@ -213,7 +213,14 @@ def discover_models_verbose(
 
     parts: list[str] = []
     # Show the URL that was attempted.
-    models_path = "/v1/models" if provider != "ollama" else "/api/tags"
+    if provider == "ollama":
+        models_path = "/api/tags"
+    elif provider == "openai":
+        # OpenAI-compatible clients use a base URL already rooted at .../v1
+        # and request /models from there.
+        models_path = "/models"
+    else:
+        models_path = "/v1/models"
     attempted = effective_url.rstrip("/") + models_path
     parts.append(f"Attempted: GET {attempted}")
 
