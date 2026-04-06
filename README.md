@@ -18,21 +18,22 @@ This is (roughly) my 3rd attempt at building something like this (now that LLMs 
 ```bash
 git clone https://github.com/franktheunicorn/franktheunicorn.git
 cd franktheunicorn
-cp .env.example .env          # edit to set FRANK_GITHUB_TOKEN + API keys
 ```
 
 ### 2. Set up your config
 
-Copy the example config and edit it for your repos:
+All configuration lives in `config/active/operator.yaml` (the single source of truth).
+Secrets (API keys) go in `.env` and are referenced via `${VAR}` syntax in YAML.
 
 ```bash
+# Config
 cp config/examples/operator.yaml config/active/operator.yaml
 cp -r config/examples/projects/ config/active/projects/
-# Edit config/active/operator.yaml — set github_username, llm_backends, etc.
-# Edit/add project files in config/active/projects/
-```
+# Edit config/active/operator.yaml — set github_username, llm_backends, mock_mode, etc.
 
-All config lives in `config/active/` (gitignored). Examples in `config/examples/`.
+# Secrets
+cp .env.example .env           # add API keys here
+```
 
 ### 3. Run it
 
@@ -54,7 +55,7 @@ make worker                    # background PR poller (separate terminal)
 ```
 
 Both paths default to **mock mode** — fixture data, no API keys needed.
-Set `FRANK_MOCK_MODE=false` in `.env` with real tokens for live PR ingestion.
+Set `mock_mode: false` in `config/active/operator.yaml` with real tokens in `.env` for live PR ingestion.
 
 For project configuration and workspaces, see the **[Install Guide](docs/install.md)**.
 

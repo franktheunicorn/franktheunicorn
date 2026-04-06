@@ -335,6 +335,29 @@ class AgentFeedbackConfig(BaseModel):
     supported_agents: list[SupportedAgentConfig] = Field(default_factory=list)
 
 
+class EmailConfig(BaseModel):
+    """Config for email digest delivery.
+
+    Secret fields (``smtp_pass``) should use ``${ENV_VAR}`` syntax in
+    YAML so the actual secret is never stored in config files.
+    """
+
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_pass: str = ""  # typically "${REVIEW_AGENT_SMTP_PASS}"
+    from_address: str = "frank@localhost"
+    use_tls: bool = True
+
+    @field_validator("smtp_port")
+    @classmethod
+    def port_must_be_positive(cls, v: int) -> int:
+        if v <= 0:
+            msg = "smtp_port must be positive"
+            raise ValueError(msg)
+        return v
+
+
 class OperatorConfig(BaseModel):
     """Top-level operator config loaded from operator.yaml."""
 
@@ -358,6 +381,17 @@ class OperatorConfig(BaseModel):
     # Legacy single-backend field — still accepted for backwards compat.
     # If set and llm_backends is empty, it is promoted into llm_backends.
     llm: LLMBackendConfig | None = Field(default=None, exclude=True)
+
+    # --- Unified config fields (formerly in .env) ---
+    # These make operator.yaml the single source of truth.
+    # Secret values should use ${ENV_VAR} syntax.
+    mock_mode: bool = False
+    data_dir: str = ""  # empty = default (BASE_DIR/data)
+    fixtures_dir: str = ""  # empty = default (config/fixtures)
+    repos_dir: str = ""  # empty = default (data/repos)
+    projects_dir: str = ""  # empty = default (config/active/projects)
+    github_token: str = ""  # typically "${FRANK_GITHUB_TOKEN}"
+    email: EmailConfig = Field(default_factory=EmailConfig)
 
     @model_validator(mode="after")
     def migrate_legacy_llm(self) -> OperatorConfig:

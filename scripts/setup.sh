@@ -367,12 +367,21 @@ if [ "$MODE" = "docker" ]; then
 
     info "Setting up with Docker Compose..."
 
-    # Create .env if missing
+    # Create .env for secrets if missing
     if [ ! -f .env ]; then
         cp .env.example .env
-        ok "Created .env from .env.example"
+        ok "Created .env from .env.example (secrets only)"
     else
         ok ".env already exists, keeping it"
+    fi
+
+    # Create operator config if missing
+    mkdir -p config/active/projects
+    if [ ! -f config/active/operator.yaml ]; then
+        cp config/examples/operator.yaml config/active/operator.yaml
+        ok "Created config/active/operator.yaml from examples"
+    else
+        ok "config/active/operator.yaml already exists, keeping it"
     fi
 
     # Ask about mock mode
@@ -389,7 +398,8 @@ if [ "$MODE" = "docker" ]; then
     fi
 
     if [ "$MOCK_MODE" = "true" ]; then
-        set_env "FRANK_MOCK_MODE" "true"
+        sed -i 's/^mock_mode: false/mock_mode: true/' config/active/operator.yaml
+        ok "Set mock_mode: true in config/active/operator.yaml"
     else
         echo ""
         info "For real PR ingestion, you need a GitHub personal access token."
@@ -399,7 +409,7 @@ if [ "$MODE" = "docker" ]; then
         token=$(ask "GitHub token (or press Enter to skip):" "")
         if [ -n "$token" ]; then
             set_env "FRANK_GITHUB_TOKEN" "$token"
-            ok "Saved token to .env"
+            ok "Saved token to .env (referenced as \${FRANK_GITHUB_TOKEN} in operator.yaml)"
         fi
     fi
 
@@ -409,6 +419,9 @@ if [ "$MODE" = "docker" ]; then
     echo ""
     info "The dashboard will be available at: http://localhost:8000"
     info "Press Ctrl+C to stop."
+    echo ""
+    info "Configuration: config/active/operator.yaml"
+    info "Secrets: .env"
     echo ""
     ok "Setup complete! Run 'docker compose up' to start."
     echo ""
@@ -428,11 +441,11 @@ fi
 info "Setting up local development environment..."
 echo ""
 
-# --- Environment file (before make setup, so it doesn't warn) ---------------
+# --- Secrets file (before make setup, so it doesn't warn) ------------------
 
 if [ ! -f .env ]; then
     cp .env.example .env
-    ok "Created .env from .env.example"
+    ok "Created .env from .env.example (secrets only)"
 else
     ok ".env already exists, keeping it"
 fi
@@ -505,7 +518,6 @@ if [ -z "$MOCK_MODE" ]; then
 fi
 
 if [ "$MOCK_MODE" = "false" ]; then
-    set_env "FRANK_MOCK_MODE" "false"
 
     # ------------------------------------------------------------------
     # Scan environment for existing credentials
@@ -697,9 +709,8 @@ if [ "$MOCK_MODE" = "false" ]; then
             fi
         fi
     fi
-else
-    set_env "FRANK_MOCK_MODE" "true"
 fi
+# mock_mode is written into operator.yaml by init_project / setup_llm below.
 
 echo ""
 
@@ -785,7 +796,8 @@ echo "    make test                          # tests only"
 echo ""
 if [ "$MOCK_MODE" = "true" ]; then
     echo "  ${BOLD}Switch to real mode later:${NC}"
-    echo "    Edit .env: set FRANK_MOCK_MODE=false and add your API keys"
+    echo "    Edit config/active/operator.yaml: set mock_mode: false"
+    echo "    Add API keys to .env (referenced via \${VAR} in operator.yaml)"
     echo "    Re-run: ./scripts/setup.sh --local"
     echo ""
 fi

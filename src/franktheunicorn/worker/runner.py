@@ -80,7 +80,7 @@ def run_worker() -> None:
         logger.info("Running with live GitHub API")
         client = GitHubClient(token=settings.FRANK_GITHUB_TOKEN)
 
-    poll_interval = operator_config.poll_interval_seconds or settings.FRANK_POLL_INTERVAL
+    poll_interval = settings.FRANK_POLL_INTERVAL
     logger.info("Worker starting. Poll interval: %ds", poll_interval)
 
     try:

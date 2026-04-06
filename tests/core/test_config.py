@@ -122,6 +122,75 @@ class TestAgentFeedbackConfig:
         assert len(config.agent_feedback.supported_agents) == 1
 
 
+class TestEmailConfig:
+    def test_defaults(self) -> None:
+        from franktheunicorn.config.models import EmailConfig
+
+        config = EmailConfig()
+        assert config.smtp_host == ""
+        assert config.smtp_port == 587
+        assert config.smtp_user == ""
+        assert config.smtp_pass == ""
+        assert config.from_address == "frank@localhost"
+        assert config.use_tls is True
+
+    def test_configured(self) -> None:
+        from franktheunicorn.config.models import EmailConfig
+
+        config = EmailConfig(
+            smtp_host="smtp.example.com",
+            smtp_port=465,
+            smtp_user="user@example.com",
+            smtp_pass="secret",
+            from_address="frank@example.com",
+            use_tls=False,
+        )
+        assert config.smtp_host == "smtp.example.com"
+        assert config.smtp_port == 465
+        assert config.from_address == "frank@example.com"
+
+    def test_invalid_port_rejected(self) -> None:
+        from franktheunicorn.config.models import EmailConfig
+
+        with pytest.raises(ValidationError, match="smtp_port"):
+            EmailConfig(smtp_port=0)
+
+
+class TestOperatorConfigUnifiedFields:
+    def test_unified_defaults(self) -> None:
+        config = OperatorConfig()
+        assert config.mock_mode is False
+        assert config.data_dir == ""
+        assert config.fixtures_dir == ""
+        assert config.repos_dir == ""
+        assert config.projects_dir == ""
+        assert config.github_token == ""
+        assert config.email.smtp_host == ""
+
+    def test_mock_mode(self) -> None:
+        config = OperatorConfig(mock_mode=True)
+        assert config.mock_mode is True
+
+    def test_github_token(self) -> None:
+        config = OperatorConfig(github_token="ghp_test123")
+        assert config.github_token == "ghp_test123"
+
+    def test_data_dir(self) -> None:
+        config = OperatorConfig(data_dir="/custom/data")
+        assert config.data_dir == "/custom/data"
+
+    def test_email_from_dict(self) -> None:
+        config = OperatorConfig(
+            email={
+                "smtp_host": "smtp.example.com",
+                "smtp_port": 465,
+                "from_address": "frank@example.com",
+            },
+        )
+        assert config.email.smtp_host == "smtp.example.com"
+        assert config.email.smtp_port == 465
+
+
 class TestProjectConfig:
     def test_defaults(self) -> None:
         config = ProjectConfig(owner="apache", repo="spark")

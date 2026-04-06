@@ -45,7 +45,7 @@ jobs:
           source .venv/bin/activate
           python -c "import franktheunicorn; print('package import OK')"
           python manage.py showmigrations --plan | grep '\[X\]'
-          grep 'FRANK_MOCK_MODE=true' .env
+          grep 'mock_mode: true' config/active/operator.yaml
           test -f config/examples/e2e/projects/franktheunicorn-franktheunicorn.yaml
 
       - name: Start web server and verify HTTP 200

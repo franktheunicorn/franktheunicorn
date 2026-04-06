@@ -15,11 +15,13 @@ x-common: &common
     - ./data:/app/data
     - ./config:/app/config
   environment: &common-env
-    FRANK_DATA_DIR: /app/data
-    FRANK_MOCK_MODE: ${FRANK_MOCK_MODE:-true}
+    # Secrets — referenced via ${VAR} in operator.yaml
     FRANK_GITHUB_TOKEN: ${FRANK_GITHUB_TOKEN:-}
-    FRANK_OPERATOR_CONFIG: ${FRANK_OPERATOR_CONFIG:-/app/config/examples/operator.yaml}
-    FRANK_PROJECTS_DIR: ${FRANK_PROJECTS_DIR:-/app/config/examples/projects}
+    ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+    REVIEW_AGENT_SMTP_PASS: ${REVIEW_AGENT_SMTP_PASS:-}
+    # Django infrastructure
     DJANGO_DEBUG: "true"
 
 services:
@@ -50,7 +52,6 @@ services:
       target: worker
     environment:
       <<: *common-env
-      FRANK_POLL_INTERVAL: ${FRANK_POLL_INTERVAL:-300}
     command: python -m franktheunicorn.worker.runner
     depends_on:
       web:
