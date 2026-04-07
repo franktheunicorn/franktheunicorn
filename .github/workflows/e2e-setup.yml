@@ -15,11 +15,6 @@ env:
 jobs:
   e2e-setup:
     runs-on: ubuntu-latest
-    env:
-      # Point at the committed E2E configs so the running app uses stub
-      # LLM and monitors franktheunicorn/franktheunicorn.
-      FRANK_OPERATOR_CONFIG: config/examples/e2e/operator.yaml
-      FRANK_PROJECTS_DIR: config/examples/e2e/projects
     steps:
       - uses: actions/checkout@v4
 

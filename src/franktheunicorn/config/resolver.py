@@ -12,6 +12,7 @@ fully configured, avoiding circular imports.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from franktheunicorn.config.loader import load_operator_config
@@ -19,11 +20,14 @@ from franktheunicorn.config.models import OperatorConfig
 
 
 def resolve_operator_config_path(base_dir: Path) -> str:
-    """Determine the operator.yaml path by convention.
+    """Determine the operator.yaml path.
 
-    Checks ``config/active/operator.yaml`` first, then falls back to
-    ``config/examples/operator.yaml``.
+    Precedence: ``FRANK_OPERATOR_CONFIG`` env var → ``config/active/operator.yaml``
+    → ``config/examples/operator.yaml``.
     """
+    env_override = os.environ.get("FRANK_OPERATOR_CONFIG")
+    if env_override:
+        return env_override
     active = base_dir / "config" / "active" / "operator.yaml"
     if active.exists():
         return str(active)
@@ -32,6 +36,9 @@ def resolve_operator_config_path(base_dir: Path) -> str:
 
 def _resolve_projects_dir(base_dir: Path, oc: OperatorConfig) -> str:
     """Determine the projects directory, applying the same fallback as before."""
+    env_override = os.environ.get("FRANK_PROJECTS_DIR")
+    if env_override:
+        return env_override
     if oc.projects_dir:
         return oc.projects_dir
     active_projects = base_dir / "config" / "active" / "projects"

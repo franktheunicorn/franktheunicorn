@@ -398,9 +398,16 @@ if [ "$MODE" = "docker" ]; then
     fi
 
     if [ "$MOCK_MODE" = "true" ]; then
-        sed -i 's/^mock_mode: false/mock_mode: true/' config/active/operator.yaml
+        if grep -q '^mock_mode:' config/active/operator.yaml 2>/dev/null; then
+            sed -i 's/^mock_mode: .*/mock_mode: true/' config/active/operator.yaml
+        else
+            sed -i '1i mock_mode: true' config/active/operator.yaml
+        fi
         ok "Set mock_mode: true in config/active/operator.yaml"
     else
+        if grep -q '^mock_mode:' config/active/operator.yaml 2>/dev/null; then
+            sed -i 's/^mock_mode: .*/mock_mode: false/' config/active/operator.yaml
+        fi
         echo ""
         info "For real PR ingestion, you need a GitHub personal access token."
         info "Create one at: https://github.com/settings/tokens/new"
@@ -710,7 +717,9 @@ if [ "$MOCK_MODE" = "false" ]; then
         fi
     fi
 fi
-# mock_mode is written into operator.yaml by init_project / setup_llm below.
+
+# --- Write mock_mode into operator.yaml (after init_project creates it) ------
+# Deferred to after init_project below so the file exists.
 
 echo ""
 
@@ -736,6 +745,16 @@ set -x
 python manage.py init_project
 set +x
 echo ""
+
+# Now that operator.yaml exists, persist the mock_mode choice.
+if [ "$MOCK_MODE" = "true" ]; then
+    if grep -q '^mock_mode:' config/active/operator.yaml 2>/dev/null; then
+        sed -i 's/^mock_mode: .*/mock_mode: true/' config/active/operator.yaml
+    else
+        sed -i '1i mock_mode: true' config/active/operator.yaml
+    fi
+    ok "Set mock_mode: true in config/active/operator.yaml"
+fi
 
 # --- LLM backend configuration ---------------------------------------------
 
