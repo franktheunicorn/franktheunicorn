@@ -225,6 +225,15 @@ offer_install() {
     esac
 }
 
+portable_sed_i() {
+    # macOS BSD sed requires -i '' while GNU sed uses -i alone.
+    if sed --version 2>/dev/null | grep -q 'GNU'; then
+        sed -i "$@"
+    else
+        sed -i '' "$@"
+    fi
+}
+
 set_env() {
     # Safely set a key=value in .env without sed pattern injection.
     local key="$1" value="$2" file="${3:-.env}"
@@ -399,14 +408,14 @@ if [ "$MODE" = "docker" ]; then
 
     if [ "$MOCK_MODE" = "true" ]; then
         if grep -q '^mock_mode:' config/active/operator.yaml 2>/dev/null; then
-            sed -i 's/^mock_mode: .*/mock_mode: true/' config/active/operator.yaml
+            portable_sed_i 's/^mock_mode: .*/mock_mode: true/' config/active/operator.yaml
         else
-            sed -i '1i mock_mode: true' config/active/operator.yaml
+            portable_sed_i '1i mock_mode: true' config/active/operator.yaml
         fi
         ok "Set mock_mode: true in config/active/operator.yaml"
     else
         if grep -q '^mock_mode:' config/active/operator.yaml 2>/dev/null; then
-            sed -i 's/^mock_mode: .*/mock_mode: false/' config/active/operator.yaml
+            portable_sed_i 's/^mock_mode: .*/mock_mode: false/' config/active/operator.yaml
         fi
         echo ""
         info "For real PR ingestion, you need a GitHub personal access token."
@@ -749,9 +758,9 @@ echo ""
 # Now that operator.yaml exists, persist the mock_mode choice.
 if [ "$MOCK_MODE" = "true" ]; then
     if grep -q '^mock_mode:' config/active/operator.yaml 2>/dev/null; then
-        sed -i 's/^mock_mode: .*/mock_mode: true/' config/active/operator.yaml
+        portable_sed_i 's/^mock_mode: .*/mock_mode: true/' config/active/operator.yaml
     else
-        sed -i '1i mock_mode: true' config/active/operator.yaml
+        portable_sed_i '1i mock_mode: true' config/active/operator.yaml
     fi
     ok "Set mock_mode: true in config/active/operator.yaml"
 fi
