@@ -5,30 +5,42 @@
 #   python manage.py setup_llm   (LLM configuration wizard)
 #
 # Usage:
-#   # Ensure COMPOSE_PROFILES=inference is set in .env (setup.sh does this)
 #   docker compose -f compose.yaml -f compose.ollama.yaml up
 #
 # The "ollama-pull" service is a one-shot sidecar that pulls the configured
 # model after the Ollama server starts.  It exits once the pull is complete;
 # subsequent "docker compose up" invocations are fast because the model is
 # already cached in the ollama-models volume.
+#
+# This file fully redefines the ollama service (the base compose.yaml gates
+# it behind profiles: ["inference"], and Docker Compose cannot reliably clear
+# profiles via an override).  Using -f with this file activates ollama
+# unconditionally — no --profile flag or COMPOSE_PROFILES needed.
 
 services:
-  # The base compose.yaml gates ollama behind profiles: ["inference"].
-  # This override adds a healthcheck so ollama-pull can wait for readiness.
-  # Activate the profile by setting COMPOSE_PROFILES=inference in .env
-  # (setup.sh does this automatically when you choose Docker Ollama).
   ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 5s
       timeout: 3s
       retries: 10
       start_period: 5s
+    # Uncomment for GPU support:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
 
   ollama-pull:
     image: ollama/ollama:latest
-    profiles: ["inference"]
     depends_on:
       ollama:
         condition: service_healthy

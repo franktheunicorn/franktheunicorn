@@ -440,7 +440,7 @@ class TestVLLMProvider:
             "testuser",  # github_username
             "direct",  # review_style
             "6",  # provider: vllm
-            "http://localhost:8000/v1",  # server URL
+            "http://localhost:8081/v1",  # server URL
             "meta-llama/Llama-3-8b",  # model name
             "",  # projects: skip
             "n",  # coderabbit: no
@@ -456,7 +456,7 @@ class TestVLLMProvider:
         assert len(config["llm_backends"]) == 1
         backend = config["llm_backends"][0]
         assert backend["provider"] == "openai"
-        assert backend["base_url"] == "http://localhost:8000/v1"
+        assert backend["base_url"] == "http://localhost:8081/v1"
         assert backend["model"] == "meta-llama/Llama-3-8b"
 
 

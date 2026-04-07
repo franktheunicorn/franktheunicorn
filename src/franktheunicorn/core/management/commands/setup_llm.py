@@ -325,9 +325,7 @@ class Command(BaseCommand):
             self.style.SUCCESS(f"\n  Generated {output_path.name} (model: {model})\n")
         )
         self.stdout.write(
-            "  Run with Docker:\n"
-            "    # Set COMPOSE_PROFILES=inference in .env first\n"
-            "    docker compose -f compose.yaml -f compose.ollama.yaml up\n"
+            "  Run with Docker:\n    docker compose -f compose.yaml -f compose.ollama.yaml up\n"
         )
 
     def _configure_llama_cpp(self, llm_config: dict[str, object]) -> dict[str, object]:
@@ -375,7 +373,7 @@ class Command(BaseCommand):
                 )
             )
 
-        base_url = self._ask("  vLLM server URL: ", default="http://localhost:8000/v1")
+        base_url = self._ask("  vLLM server URL: ", default="http://localhost:8081/v1")
         # vLLM exposes an OpenAI-compatible API, so use the openai provider.
         llm_config["provider"] = "openai"
         llm_config["base_url"] = base_url
