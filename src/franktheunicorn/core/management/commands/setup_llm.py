@@ -155,9 +155,16 @@ class Command(BaseCommand):
 
         self.stdout.write(f"\nConfig will be written to: {output_path_obj}\n")
 
+        # Merge with existing config so we don't clobber fields managed
+        # elsewhere (e.g. mock_mode, projects_dir, email).
         output_path_obj.parent.mkdir(parents=True, exist_ok=True)
+        existing: dict[str, object] = {}
+        if output_path_obj.exists():
+            with output_path_obj.open(encoding="utf-8") as f:
+                existing = yaml.safe_load(f) or {}
+        existing.update(config)
         with output_path_obj.open("w", encoding="utf-8") as f:
-            yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+            yaml.dump(existing, f, default_flow_style=False, sort_keys=False)
 
         self.stdout.write(self.style.SUCCESS(f"\nConfig saved to {output_path_obj}"))
         self.stdout.write("\nTo use this config, set:\n")
