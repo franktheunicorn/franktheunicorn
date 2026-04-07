@@ -1,6 +1,9 @@
 # Operator config for E2E setup test.
 # Uses stub LLM backend (no API keys) and short poll interval.
 
+mock_mode: true
+projects_dir: "config/examples/e2e/projects"
+
 github_username: "franktheunicorn"
 review_style: "direct but kind"
 auto_post: false

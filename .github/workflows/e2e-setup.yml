@@ -15,11 +15,6 @@ env:
 jobs:
   e2e-setup:
     runs-on: ubuntu-latest
-    env:
-      # Point at the committed E2E configs so the running app uses stub
-      # LLM and monitors franktheunicorn/franktheunicorn.
-      FRANK_OPERATOR_CONFIG: config/examples/e2e/operator.yaml
-      FRANK_PROJECTS_DIR: config/examples/e2e/projects
     steps:
       - uses: actions/checkout@v4
 
@@ -45,7 +40,7 @@ jobs:
           source .venv/bin/activate
           python -c "import franktheunicorn; print('package import OK')"
           python manage.py showmigrations --plan | grep '\[X\]'
-          grep 'FRANK_MOCK_MODE=true' .env
+          grep 'mock_mode: true' config/active/operator.yaml
           test -f config/examples/e2e/projects/franktheunicorn-franktheunicorn.yaml
 
       - name: Start web server and verify HTTP 200

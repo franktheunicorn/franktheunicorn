@@ -28,6 +28,8 @@ class Command(BaseCommand):
             style = input("Review style [direct but kind]: ").strip() or "direct but kind"
 
             operator_path.write_text(
+                f"mock_mode: false\n"
+                f'github_token: "${{FRANK_GITHUB_TOKEN}}"\n'
                 f'github_username: "{username}"\n'
                 f'review_style: "{style}"\n'
                 f"auto_post: false\n"

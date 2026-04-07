@@ -16,19 +16,26 @@ the script does, documented for reference.
 - **GitHub personal access token** — for real PR ingestion (not needed in mock mode)
 - **LLM API key** — Anthropic, OpenAI, Google, or a local Ollama install (not needed in mock mode)
 
-## 1. Clone and configure environment
+## 1. Clone and configure
 
 ```bash
 git clone https://github.com/franktheunicorn/franktheunicorn.git
 cd franktheunicorn
+
+# Config (single source of truth)
+cp config/examples/operator.yaml config/active/operator.yaml
+
+# Secrets (API keys, tokens — referenced via ${VAR} in operator.yaml)
 cp .env.example .env
 ```
 
-Edit `.env`. For a quick demo with fixture data, the defaults work as-is
-(`FRANK_MOCK_MODE=true`). For real PR ingestion, set:
+Edit `config/active/operator.yaml`. For a quick demo with fixture data, the
+defaults work as-is (`mock_mode: false` but no token needed in mock mode).
+For real PR ingestion, set `mock_mode: false` in `operator.yaml` and add
+your secrets to `.env`:
 
 ```bash
-FRANK_MOCK_MODE=false
+# .env (secrets only)
 FRANK_GITHUB_TOKEN=ghp_your_token_here
 ANTHROPIC_API_KEY=sk-ant-your-key-here   # or OPENAI_API_KEY / GOOGLE_API_KEY
 ```
@@ -67,7 +74,7 @@ make serve    # terminal 1 — dashboard at http://localhost:8000
 make worker   # terminal 2 — background poller
 ```
 
-`make setup` will warn you if `.env` doesn't exist yet.
+`make setup` creates the virtualenv and installs dependencies.
 
 Other useful targets:
 
@@ -235,27 +242,29 @@ llm_backends:
 
 ## 7. Config location
 
-All user config lives in `config/active/` (gitignored). The app auto-detects it:
-if `config/active/operator.yaml` exists, it's used; otherwise `config/examples/`
-is used as a fallback.
+All configuration lives in `config/active/operator.yaml` — the single source of
+truth.  Secrets (API keys, tokens) go in `.env` and are referenced via `${VAR}`
+syntax in the YAML config.
 
-You can override with environment variables in `.env`:
+The app auto-detects it: if `config/active/operator.yaml` exists, it's used;
+otherwise `config/examples/` is used as a fallback.
 
-```bash
-FRANK_OPERATOR_CONFIG=config/active/operator.yaml
-FRANK_PROJECTS_DIR=config/active/projects
+String values in YAML support `${ENV_VAR}` expansion, e.g.:
+```yaml
+github_token: "${FRANK_GITHUB_TOKEN}"
+data_dir: "${HOME}/frank-data"
 ```
 
 Restart services after config changes.
 
 ## Mock mode vs real mode
 
-| | Mock mode (`FRANK_MOCK_MODE=true`) | Real mode (`FRANK_MOCK_MODE=false`) |
+| | Mock mode (`mock_mode: true`) | Real mode (`mock_mode: false`) |
 |---|---|---|
-| **Tokens needed** | None | `FRANK_GITHUB_TOKEN` + LLM API key |
+| **Tokens needed** | None | `FRANK_GITHUB_TOKEN` + LLM API key (in `.env`) |
 | **Data source** | Fixture JSON in `config/fixtures/` | Live GitHub API |
 | **Good for** | Demo, development, testing | Actual PR review |
-| **Default** | Yes | No |
+| **Default** | No (set `mock_mode: true` in operator.yaml) | Yes |
 
 Mock mode is the default so you can try the dashboard immediately without any
 API keys.
@@ -266,9 +275,9 @@ API keys.
 service or change the port: `python manage.py runserver 8001` (or edit
 `compose.yaml` ports).
 
-**Worker not picking up PRs** — Check that `FRANK_MOCK_MODE=false` and
-`FRANK_GITHUB_TOKEN` is set. The worker polls every `FRANK_POLL_INTERVAL`
-seconds (default 300). Restart the worker to trigger an immediate poll.
+**Worker not picking up PRs** — Check that `mock_mode: false` in `operator.yaml`
+and `FRANK_GITHUB_TOKEN` is set in `.env`. The worker polls every
+`poll_interval_seconds` (default 300). Restart the worker to trigger an immediate poll.
 
 **`make setup` fails on missing Python** — You need Python 3.11+. Check with
 `python3 --version`. On macOS: `brew install python@3.12`. On Ubuntu:

@@ -1,6 +1,34 @@
 # franktheunicorn operator config
-# This is the top-level config for the person running this tool.
+# This is the single source of truth for all app configuration.
 # Run `python manage.py setup_llm` for interactive setup.
+#
+# String values support ${ENV_VAR} expansion — use this for secrets
+# so they never appear in config files.  Example:
+#   github_token: "${FRANK_GITHUB_TOKEN}"
+
+# --- App Settings ---
+
+# Enable mock/demo mode with fixture data (no tokens needed).
+mock_mode: false
+
+# GitHub personal access token.  Use ${ENV_VAR} to read from environment.
+github_token: "${FRANK_GITHUB_TOKEN}"
+
+# Directory for persistent state (SQLite database, repos, etc.).
+# Leave empty to use the default (./data).
+# data_dir: ""
+
+# Directory containing fixture JSON for mock mode.
+# fixtures_dir: ""
+
+# Directory containing local clones of monitored repos.
+# repos_dir: ""
+
+# Directory containing per-project YAML configs.
+# Leave empty to auto-detect config/active/projects/ or config/examples/projects/.
+# projects_dir: ""
+
+# --- Operator Identity ---
 
 # Your GitHub username — used for "operator is author" scoring and review attribution
 github_username: "holdenk"
@@ -21,9 +49,16 @@ auto_post: false
 # How often the worker polls GitHub for new PRs (in seconds)
 poll_interval_seconds: 300
 
-# Email for daily digest (stub — not yet implemented)
+# --- Email Digest ---
 digest_email: ""
 digest_enabled: false
+# email:
+#   smtp_host: "smtp.gmail.com"
+#   smtp_port: 587
+#   smtp_user: "you@gmail.com"
+#   smtp_pass: "${REVIEW_AGENT_SMTP_PASS}"
+#   from_address: "frank@example.com"
+#   use_tls: true
 
 # --- LLM Backend Configuration ---
 # Multiple backends can run simultaneously. Each produces findings

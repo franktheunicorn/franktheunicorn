@@ -3,6 +3,10 @@ Django settings for franktheunicorn.
 
 Local-first: SQLite is the default and only supported database.
 All persistent state lives under DATA_DIR, which defaults to ./data/.
+
+App configuration lives in ``operator.yaml`` — this file reads it via
+the config resolver.  Only Django-infrastructure settings (secret key,
+debug flag, allowed hosts, database URL) are still read from env vars.
 """
 
 import os
@@ -10,30 +14,32 @@ from pathlib import Path
 
 import dj_database_url
 
-
-def _env_bool(key: str, default: str = "true") -> bool:
-    """Parse a boolean from an environment variable."""
-    return os.environ.get(key, default).lower() in ("true", "1", "yes")
-
+from franktheunicorn.config.resolver import resolve_config
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
-# Local state directory — mounted as a volume in Docker.
-DATA_DIR = Path(os.environ.get("FRANK_DATA_DIR", str(BASE_DIR / "data")))
-DATA_DIR.mkdir(parents=True, exist_ok=True)
+# --- Django infrastructure (env vars) ---
 
 SECRET_KEY = os.environ.get(
     "DJANGO_SECRET_KEY",
     "dev-insecure-key-change-me-in-production",
 )
 
-DEBUG = _env_bool("DJANGO_DEBUG")
+DEBUG = os.environ.get("DJANGO_DEBUG", "true").lower() in ("true", "1", "yes")
 
 ALLOWED_HOSTS: list[str] = [
-    stripped  # pylint: disable=used-before-assignment
+    stripped
     for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "*").split(",")
     if (stripped := h.lstrip())
 ]
+
+# --- Load unified config from operator.yaml ---
+
+_operator_config, _resolved = resolve_config(BASE_DIR)
+
+# Local state directory — mounted as a volume in Docker.
+DATA_DIR = Path(str(_resolved["data_dir"]))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -94,58 +100,24 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # Static files (CSS, JavaScript, Images)
 STATIC_URL = "static/"
 
-# --- franktheunicorn-specific settings ---
+# --- franktheunicorn-specific settings (from operator.yaml) ---
 
-# Path to operator config YAML.
-# Default: config/active/operator.yaml if it exists, else config/examples/operator.yaml.
-_active_operator = BASE_DIR / "config" / "active" / "operator.yaml"
-FRANK_OPERATOR_CONFIG = os.environ.get(
-    "FRANK_OPERATOR_CONFIG",
-    str(
-        _active_operator
-        if _active_operator.exists()
-        else BASE_DIR / "config" / "examples" / "operator.yaml"
-    ),
-)
-
-# Directory containing per-project YAML configs.
-# Default: config/active/projects/ if populated, else config/examples/projects/.
-_active_projects = BASE_DIR / "config" / "active" / "projects"
-FRANK_PROJECTS_DIR = os.environ.get(
-    "FRANK_PROJECTS_DIR",
-    str(
-        _active_projects
-        if any(_active_projects.glob("*.yaml"))
-        else BASE_DIR / "config" / "examples" / "projects"
-    ),
-)
-
-# GitHub API token (optional — mock mode works without it)
-FRANK_GITHUB_TOKEN = os.environ.get("FRANK_GITHUB_TOKEN", "")
-
-# Enable mock/demo mode with fixture data instead of real GitHub API
-FRANK_MOCK_MODE = _env_bool("FRANK_MOCK_MODE")
-
-# Directory containing fixture JSON for mock mode
-FRANK_FIXTURES_DIR = os.environ.get(
-    "FRANK_FIXTURES_DIR",
-    str(BASE_DIR / "config" / "fixtures"),
-)
-
-# Directory containing local clones of monitored repos (for copy-pasta scanning)
-FRANK_REPOS_DIR = Path(os.environ.get("FRANK_REPOS_DIR", str(DATA_DIR / "repos")))
-
-# Worker polling interval in seconds
-FRANK_POLL_INTERVAL = int(os.environ.get("FRANK_POLL_INTERVAL", "300"))
+FRANK_OPERATOR_CONFIG: str = str(_resolved["config_path"])
+FRANK_PROJECTS_DIR: str = str(_resolved["projects_dir"])
+FRANK_GITHUB_TOKEN: str = str(_resolved["github_token"])
+FRANK_MOCK_MODE: bool = bool(_resolved["mock_mode"])
+FRANK_FIXTURES_DIR: str = str(_resolved["fixtures_dir"])
+FRANK_REPOS_DIR = Path(str(_resolved["repos_dir"]))
+FRANK_POLL_INTERVAL: int = int(_resolved["poll_interval"])
+FRANK_DIGEST_EMAIL: str = str(_resolved["digest_email"])
 
 # Email settings for digest (optional — skip silently if not configured)
-EMAIL_HOST = os.environ.get("REVIEW_AGENT_SMTP_HOST", "")
-EMAIL_PORT = int(os.environ.get("REVIEW_AGENT_SMTP_PORT", "587"))
-EMAIL_HOST_USER = os.environ.get("REVIEW_AGENT_SMTP_USER", "")
-EMAIL_HOST_PASSWORD = os.environ.get("REVIEW_AGENT_SMTP_PASS", "")
-EMAIL_USE_TLS = True
-DEFAULT_FROM_EMAIL = os.environ.get("REVIEW_AGENT_EMAIL_FROM", "frank@localhost")
-FRANK_DIGEST_EMAIL = os.environ.get("FRANK_DIGEST_EMAIL", "")
+EMAIL_HOST: str = str(_resolved["email_host"])
+EMAIL_PORT: int = int(_resolved["email_port"])
+EMAIL_HOST_USER: str = str(_resolved["email_host_user"])
+EMAIL_HOST_PASSWORD: str = str(_resolved["email_host_password"])
+EMAIL_USE_TLS: bool = bool(_resolved["email_use_tls"])
+DEFAULT_FROM_EMAIL: str = str(_resolved["email_from"])
 
 USE_TZ = True
 TIME_ZONE = "UTC"

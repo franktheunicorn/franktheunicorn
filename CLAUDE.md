@@ -111,7 +111,8 @@ The anti-pattern list is the primary feedback mechanism — not a side feature. 
 ./scripts/setup.sh
 
 # Or manual setup
-cp .env.example .env  # set GITHUB_TOKEN + ANTHROPIC_API_KEY
+cp config/examples/operator.yaml config/active/operator.yaml
+cp .env.example .env  # secrets only (API keys)
 make setup                          # creates venv, installs deps, migrates
 make serve                          # dashboard
 make worker                         # worker (separate terminal)

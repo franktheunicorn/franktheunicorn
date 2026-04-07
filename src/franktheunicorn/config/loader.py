@@ -1,9 +1,18 @@
-"""Load operator and project configs from YAML files on disk."""
+"""Load operator and project configs from YAML files on disk.
+
+String values support ``${VAR_NAME}`` env-var expansion.  After
+``yaml.safe_load()`` the parsed data is walked recursively and every
+``${…}`` reference is replaced with ``os.environ.get(name, "")``.
+Partial substitution works too (e.g. ``"${HOME}/frank-data"``).
+"""
 
 from __future__ import annotations
 
 import logging
+import os
+import re
 from pathlib import Path
+from typing import Any
 
 import yaml
 from django.conf import settings
@@ -13,6 +22,19 @@ from franktheunicorn.config.models import OperatorConfig, ProjectConfig
 
 logger = logging.getLogger(__name__)
 
+_ENV_VAR_RE = re.compile(r"\$\{([^}]+)\}")
+
+
+def _expand_env_vars(data: Any) -> Any:
+    """Recursively expand ``${VAR}`` patterns in string values."""
+    if isinstance(data, str):
+        return _ENV_VAR_RE.sub(lambda m: os.environ.get(m.group(1), ""), data)
+    if isinstance(data, dict):
+        return {k: _expand_env_vars(v) for k, v in data.items()}
+    if isinstance(data, list):
+        return [_expand_env_vars(item) for item in data]
+    return data
+
 
 def load_operator_config(path: str | Path) -> OperatorConfig:
     """Load operator config from a YAML file. Returns defaults if file doesn't exist."""
@@ -20,6 +42,7 @@ def load_operator_config(path: str | Path) -> OperatorConfig:
     try:
         with p.open(encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
+        data = _expand_env_vars(data)
         return OperatorConfig(**data)
     except FileNotFoundError:
         logger.debug("Operator config not found at %s, using defaults", p)
@@ -42,6 +65,7 @@ def load_project_configs(directory: str | Path) -> list[ProjectConfig]:
         try:
             with yaml_file.open(encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
+            data = _expand_env_vars(data)
             configs.append(ProjectConfig(**data))
         except yaml.YAMLError:
             logger.exception("Invalid YAML in project config: %s", yaml_file)
