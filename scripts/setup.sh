@@ -52,6 +52,7 @@ generate_ollama_compose() {
     sed "s|{{MODEL}}|${escaped_model}|g" "$template" > "$output"
     ok "  Generated $output (model: $model)"
     info "  Start with: docker compose -f compose.yaml -f compose.ollama.yaml up"
+    info "  (Requires COMPOSE_PROFILES=inference in .env — set automatically during setup)"
 }
 
 offer_install() {
@@ -110,9 +111,19 @@ offer_install() {
                     ;;
                 docker)
                     info "  Ollama will run via Docker."
+                    echo "  Model sizes (pick based on your RAM):"
+                    echo "    qwen2.5-coder:3b   ~2GB  (8GB RAM / MacBook Air base)"
+                    echo "    qwen2.5-coder:7b   ~5GB  (16GB RAM)"
+                    echo "    qwen2.5-coder:14b  ~9GB  (32GB RAM)"
+                    echo "    qwen2.5-coder:32b  ~20GB (48GB+ RAM / dedicated GPU)"
                     local ollama_model
                     ollama_model=$(ask "  Ollama model to pull:" "qwen2.5-coder:14b")
                     generate_ollama_compose "$ollama_model"
+                    # Activate the inference profile so 'docker compose up' starts ollama.
+                    if [ -f .env ]; then
+                        set_env "COMPOSE_PROFILES" "inference"
+                        ok "  Set COMPOSE_PROFILES=inference in .env"
+                    fi
                     DOCKER_OLLAMA=true
                     return 0
                     ;;

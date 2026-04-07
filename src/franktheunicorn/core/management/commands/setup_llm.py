@@ -325,7 +325,9 @@ class Command(BaseCommand):
             self.style.SUCCESS(f"\n  Generated {output_path.name} (model: {model})\n")
         )
         self.stdout.write(
-            "  Run with Docker:\n    docker compose -f compose.yaml -f compose.ollama.yaml up\n"
+            "  Run with Docker:\n"
+            "    # Set COMPOSE_PROFILES=inference in .env first\n"
+            "    docker compose -f compose.yaml -f compose.ollama.yaml up\n"
         )
 
     def _configure_llama_cpp(self, llm_config: dict[str, object]) -> dict[str, object]:
