@@ -253,11 +253,7 @@ if [ "$MODE" = "docker" ]; then
         esac
     fi
 
-    if [ "$MOCK_MODE" = "true" ]; then
-        set_yaml_value "mock_mode" "true" config/active/operator.yaml
-        ok "Set mock_mode: true in config/active/operator.yaml"
-    else
-        set_yaml_value "mock_mode" "false" config/active/operator.yaml
+    if [ "$MOCK_MODE" != "true" ]; then
 
         # Check for existing FRANK_GITHUB_TOKEN in .env
         existing_gh_token=$(grep "^FRANK_GITHUB_TOKEN=" .env 2>/dev/null | cut -d= -f2-) || true
@@ -300,18 +296,72 @@ if [ "$MODE" = "docker" ]; then
         fi
     fi
 
+    # --- Persist environment LLM keys to .env (survive across sessions) --------
+
+    # Source .env so docker compose can resolve ${VAR} references and
+    # setup_llm can detect API keys.
+    if [ -f .env ]; then
+        set -a
+        # shellcheck disable=SC1091
+        source .env
+        set +a
+    fi
+
+    for var in ANTHROPIC_API_KEY OPENAI_API_KEY GOOGLE_API_KEY; do
+        val="${!var:-}"
+        existing_val=$(grep "^${var}=" .env 2>/dev/null | cut -d= -f2-)
+        if [ -n "$val" ] && [ -z "$existing_val" ]; then
+            set_env "$var" "$val"
+        fi
+    done
+
+    # --- LLM backend configuration (via Docker container) ---------------------
+
     echo ""
-    info "Starting containers..."
-    echo "  docker compose up"
+    if [ "$MOCK_MODE" = "true" ]; then
+        info "You can pre-configure LLM backends now for when you switch to real mode."
+    else
+        info "Configuring LLM backends..."
+    fi
+    echo "This wizard sets up which AI models to use for code review."
     echo ""
-    info "The dashboard will be available at: http://localhost:8000"
-    info "Press Ctrl+C to stop."
+
+    info "Building Docker image (this may take a minute on first run)..."
+    docker compose build web
+
+    docker compose run --rm -v "$(pwd)/.env:/app/.env" web python manage.py setup_llm
     echo ""
-    info "Configuration: config/active/operator.yaml"
-    info "Secrets: .env"
+
+    # Persist the mock_mode choice into operator.yaml (created/updated by setup_llm above).
+    if [ "$MOCK_MODE" = "true" ]; then
+        set_yaml_value "mock_mode" "true" config/active/operator.yaml
+        ok "Set mock_mode: true in config/active/operator.yaml"
+    else
+        set_yaml_value "mock_mode" "false" config/active/operator.yaml
+    fi
+
     echo ""
-    ok "Setup complete! Run 'docker compose up' to start."
+    echo "================================================================"
+    ok "Setup complete!"
+    echo "================================================================"
     echo ""
+    echo "Next steps:"
+    echo ""
+    echo "  ${BOLD}Start the services:${NC}"
+    echo "    docker compose up"
+    echo "    # Dashboard: http://localhost:8000"
+    echo ""
+    echo "  ${BOLD}Configuration:${NC}"
+    echo "    config/active/operator.yaml  (app config, LLM backends)"
+    echo "    .env                         (API keys, secrets)"
+    echo ""
+    if [ "$MOCK_MODE" = "true" ]; then
+        echo "  ${BOLD}Switch to real mode later:${NC}"
+        echo "    Edit config/active/operator.yaml: set mock_mode: false"
+        echo "    Add API keys to .env"
+        echo "    Re-run: ./scripts/setup.sh --docker"
+        echo ""
+    fi
     exit 0
 fi
 
