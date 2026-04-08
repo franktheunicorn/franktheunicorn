@@ -1,0 +1,46 @@
+# franktheunicorn — llama.cpp inference compose override
+#
+# Generated from this template by:
+#   ./scripts/setup.sh   (interactive setup, Docker mode)
+#   python manage.py setup_llm --docker
+#
+# Usage:
+#   docker compose -f compose.yaml -f compose.llama-cpp.yaml up
+#   # or simply: ./scripts/launch.sh
+#
+# llama.cpp serves GGUF model files from the llama-models volume.
+# You must place your .gguf file in the volume before starting:
+#
+#   # Copy a GGUF file into the Docker volume:
+#   docker run --rm -v llama-models:/models -v $(pwd):/src alpine \
+#     cp /src/your-model.gguf /models/
+#
+# This file fully redefines the llama-cpp service (the base compose.yaml
+# gates it behind profiles: ["inference"]).  Using -f with this file
+# activates llama-cpp unconditionally — no --profile flag needed.
+
+services:
+  llama-cpp:
+    image: ghcr.io/ggerganov/llama.cpp:server
+    ports:
+      - "8080:8080"
+    volumes:
+      - llama-models:/models
+    command: -m /models/{{MODEL}} --host 0.0.0.0 --port 8080
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    # Uncomment for GPU support:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+volumes:
+  llama-models:

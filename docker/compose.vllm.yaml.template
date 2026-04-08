@@ -1,0 +1,42 @@
+# franktheunicorn — vLLM inference compose override
+#
+# Generated from this template by:
+#   ./scripts/setup.sh   (interactive setup, Docker mode)
+#   python manage.py setup_llm --docker
+#
+# Usage:
+#   docker compose -f compose.yaml -f compose.vllm.yaml up
+#   # or simply: ./scripts/launch.sh
+#
+# vLLM auto-downloads models from HuggingFace on first start.
+# The model is cached in the vllm-cache volume across restarts.
+#
+# This file fully redefines the vllm service (the base compose.yaml
+# gates it behind profiles: ["inference"]).  Using -f with this file
+# activates vllm unconditionally — no --profile flag needed.
+
+services:
+  vllm:
+    image: vllm/vllm-openai:latest
+    ports:
+      - "8081:8000"
+    volumes:
+      - vllm-cache:/root/.cache/huggingface
+    command: ["--model", "{{MODEL}}", "--host", "0.0.0.0"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    # GPU required for vLLM
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  vllm-cache:
