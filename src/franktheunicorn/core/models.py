@@ -28,6 +28,8 @@ class Project(models.Model):
     )
     config_yaml = models.TextField(blank=True, default="")
     enabled = models.BooleanField(default=True)
+    repo_health_snapshot = models.JSONField(default=dict, blank=True)
+    repo_health_analyzed_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
 

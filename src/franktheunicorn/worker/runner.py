@@ -96,6 +96,72 @@ def run_worker() -> None:
         lock_fd.close()
 
 
+_HEALTH_STALE_DAYS = 7
+
+
+def _maybe_refresh_repo_health(
+    pc: object,
+    repo_path: Path | None,
+) -> None:
+    """Run repo health analysis if the snapshot is missing or stale (>7 days)."""
+    if repo_path is None:
+        return
+    try:
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        from franktheunicorn.config.models import ProjectConfig
+        from franktheunicorn.core.models import Project
+        from franktheunicorn.worker.repo_health import analyze_repo_health, snapshot_to_dict
+
+        if not isinstance(pc, ProjectConfig):
+            return
+
+        project = Project.objects.filter(owner=pc.owner, repo=pc.repo).first()
+        if project is None:
+            return
+
+        cutoff = timezone.now() - timedelta(days=_HEALTH_STALE_DAYS)
+        if project.repo_health_analyzed_at and project.repo_health_analyzed_at >= cutoff:
+            return
+
+        logger.info("Running repo health analysis for %s/%s ...", pc.owner, pc.repo)
+        snapshot = analyze_repo_health(repo_path)
+        project.repo_health_snapshot = snapshot_to_dict(snapshot)
+        project.repo_health_analyzed_at = timezone.now()
+        project.save(update_fields=["repo_health_snapshot", "repo_health_analyzed_at"])
+        logger.info(
+            "Repo health analysis complete for %s/%s: %d churn files, %d contributors",
+            pc.owner,
+            pc.repo,
+            len(snapshot.high_churn_files),
+            len(snapshot.contributors),
+        )
+    except Exception:
+        logger.debug(
+            "Repo health analysis failed for %s/%s",
+            getattr(pc, "owner", "?"),
+            getattr(pc, "repo", "?"),
+            exc_info=True,
+        )
+
+
+def _build_repo_health_context(pr: object) -> str:
+    """Format repo health context for a PR's changed files."""
+    try:
+        from franktheunicorn.worker.repo_health import format_health_for_review, snapshot_from_dict
+
+        snapshot_data = pr.project.repo_health_snapshot  # type: ignore[attr-defined]
+        if not snapshot_data:
+            return ""
+        snapshot = snapshot_from_dict(snapshot_data)
+        changed_files: list[str] = pr.changed_files or []  # type: ignore[attr-defined]
+        return format_health_for_review(snapshot, changed_files)
+    except Exception:
+        return ""
+
+
 def _run_cycle(
     client: object,
     project_configs: Sequence[object],
@@ -146,6 +212,9 @@ def _run_cycle(
                     exc_info=True,
                 )
 
+            # Repo health analysis: run (or refresh) when stale or missing.
+            _maybe_refresh_repo_health(pc, repo_path)
+
             prs = poll_project(
                 client=client,  # type: ignore[arg-type]
                 project_config=pc,
@@ -188,10 +257,14 @@ def _run_cycle(
                             exc_info=True,
                         )
 
+                    # Build repo health context for this PR's changed files.
+                    health_ctx = _build_repo_health_context(pr)
+
                     drafts = draft_review(
                         pr,
                         pc,
                         operator_config=operator_config,
+                        repo_health_context=health_ctx,
                         community_context=community_ctx,
                         jira_context=jira_ctx,
                         sentry_context=sentry_ctx,

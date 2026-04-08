@@ -56,3 +56,7 @@ class Command(BaseCommand):
 
         filepath.write_text(yaml_content)
         self.stdout.write(self.style.SUCCESS(f"Created {filepath}"))
+        self.stdout.write(
+            f"Run 'python manage.py analyze_repo --repo {repo}' "
+            f"to bootstrap codebase context from git history."
+        )
