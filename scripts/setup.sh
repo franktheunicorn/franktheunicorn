@@ -249,7 +249,7 @@ set_yaml_value() {
         local tmpfile
         tmpfile=$(mktemp "${file}.XXXXXX")
         printf '%s: %s\n' "$key" "$value" > "$tmpfile"
-        cat "$file" >> "$tmpfile"
+        cat "$file" >> "$tmpfile" 2>/dev/null || true
         mv "$tmpfile" "$file"
     fi
 }
@@ -438,6 +438,8 @@ if [ "$MODE" = "docker" ]; then
         if [ -n "$token" ]; then
             set_env "FRANK_GITHUB_TOKEN" "$token"
             ok "Saved token to .env (referenced as \${FRANK_GITHUB_TOKEN} in operator.yaml)"
+        else
+            warn "Skipped. Set FRANK_GITHUB_TOKEN in .env before starting containers."
         fi
     fi
 
