@@ -34,208 +34,27 @@ ask() {
     echo "${answer:-$default}"
 }
 
-DOCKER_OLLAMA=false
-DOCKER_LLAMA_CPP=false
-DOCKER_VLLM=false
-
-generate_ollama_compose() {
-    # Generate compose.ollama.yaml from the template with the chosen model.
-    local model="$1"
-    local template="docker/compose.ollama.yaml.template"
-    local output="compose.ollama.yaml"
-    if [ ! -f "$template" ]; then
-        warn "Template not found: $template"
-        return 1
-    fi
-    local escaped_model
-    escaped_model=$(printf '%s\n' "$model" | sed 's/[&/\]/\\&/g')
-    sed "s|{{MODEL}}|${escaped_model}|g" "$template" > "$output"
-    ok "  Generated $output (model: $model)"
-    info "  Start with: docker compose -f compose.yaml -f compose.ollama.yaml up"
-}
-
-offer_install() {
-    local tool="$1"
-    local os_type
-    os_type="$(uname -s)"
-
-    case "$tool" in
-        ollama)
-            echo ""
-            local install_method=""
-            if [ "$os_type" = "Darwin" ]; then
-                echo "  Install options for Ollama:"
-                echo "    1. Homebrew (brew install ollama)"
-                echo "    2. Docker (ollama/ollama container)"
-                echo "    3. Skip"
-                local choice
-                choice=$(ask "  Choose [1/2/3]:" "3")
-                case "$choice" in
-                    1) install_method="brew" ;;
-                    2) install_method="docker" ;;
-                    *) return 1 ;;
-                esac
-            elif command -v apt-get &>/dev/null; then
-                echo "  Install options for Ollama:"
-                echo "    1. Official installer (curl -fsSL https://ollama.com/install.sh | sh)"
-                echo "    2. Docker (ollama/ollama container)"
-                echo "    3. Skip"
-                local choice
-                choice=$(ask "  Choose [1/2/3]:" "3")
-                case "$choice" in
-                    1) install_method="curl" ;;
-                    2) install_method="docker" ;;
-                    *) return 1 ;;
-                esac
-            else
-                echo "  Install options for Ollama:"
-                echo "    1. Docker (ollama/ollama container)"
-                echo "    2. Skip"
-                local choice
-                choice=$(ask "  Choose [1/2]:" "2")
-                case "$choice" in
-                    1) install_method="docker" ;;
-                    *) return 1 ;;
-                esac
-            fi
-
-            case "$install_method" in
-                brew)
-                    info "  Installing Ollama via Homebrew..."
-                    brew install ollama
-                    ;;
-                curl)
-                    info "  Installing Ollama via official installer..."
-                    curl -fsSL https://ollama.com/install.sh | sh
-                    ;;
-                docker)
-                    info "  Ollama will run via Docker."
-                    echo "  Model sizes (pick based on your RAM):"
-                    echo "    qwen2.5-coder:3b   ~2GB  (8GB RAM / MacBook Air base)"
-                    echo "    qwen2.5-coder:7b   ~5GB  (16GB RAM)"
-                    echo "    qwen2.5-coder:14b  ~9GB  (32GB RAM)"
-                    echo "    qwen2.5-coder:32b  ~20GB (48GB+ RAM / dedicated GPU)"
-                    local ollama_model
-                    ollama_model=$(ask "  Ollama model to pull:" "qwen2.5-coder:14b")
-                    generate_ollama_compose "$ollama_model"
-                    DOCKER_OLLAMA=true
-                    return 0
-                    ;;
-                *)
-                    err "  Unrecognized install method: '$install_method'"
-                    return 1
-                    ;;
-            esac
-
-            if command -v ollama &>/dev/null; then
-                ok "  Ollama installed successfully"
-                return 0
-            else
-                warn "  Installation may require restarting your shell"
-                return 1
-            fi
-            ;;
-
-        llama-server)
-            echo ""
-            local install_method=""
-            if [ "$os_type" = "Darwin" ]; then
-                echo "  Install options for llama.cpp:"
-                echo "    1. Homebrew (brew install llama.cpp)"
-                echo "    2. Docker (ghcr.io/ggerganov/llama.cpp:server)"
-                echo "    3. Skip"
-                local choice
-                choice=$(ask "  Choose [1/2/3]:" "3")
-                case "$choice" in
-                    1) install_method="brew" ;;
-                    2) install_method="docker" ;;
-                    *) return 1 ;;
-                esac
-            elif command -v apt-get &>/dev/null; then
-                echo "  Install options for llama.cpp:"
-                echo "    1. APT package (sudo apt-get install llama.cpp)"
-                echo "    2. Docker (ghcr.io/ggerganov/llama.cpp:server)"
-                echo "    3. Skip"
-                local choice
-                choice=$(ask "  Choose [1/2/3]:" "3")
-                case "$choice" in
-                    1) install_method="apt" ;;
-                    2) install_method="docker" ;;
-                    *) return 1 ;;
-                esac
-            else
-                echo "  Install options for llama.cpp:"
-                echo "    1. Docker (ghcr.io/ggerganov/llama.cpp:server)"
-                echo "    2. Skip"
-                local choice
-                choice=$(ask "  Choose [1/2]:" "2")
-                case "$choice" in
-                    1) install_method="docker" ;;
-                    *) return 1 ;;
-                esac
-            fi
-
-            case "$install_method" in
-                brew)
-                    info "  Installing llama.cpp via Homebrew..."
-                    brew install llama.cpp
-                    ;;
-                apt)
-                    info "  Installing llama.cpp via APT..."
-                    sudo apt-get update -qq && sudo apt-get install -y llama.cpp
-                    ;;
-                docker)
-                    info "  llama.cpp will run via Docker."
-                    info "  Start with: docker compose --profile inference up llama-cpp"
-                    DOCKER_LLAMA_CPP=true
-                    return 0
-                    ;;
-                *)
-                    err "  Unrecognized install method: '$install_method'"
-                    return 1
-                    ;;
-            esac
-
-            if command -v llama-server &>/dev/null; then
-                ok "  llama.cpp installed successfully"
-                return 0
-            else
-                warn "  Installation may require restarting your shell"
-                return 1
-            fi
-            ;;
-
-        vllm)
-            echo ""
-            echo "  Install options for vLLM:"
-            echo "    1. pip install (pip install vllm)"
-            echo "    2. Docker (vllm/vllm-openai container)"
-            echo "    3. Skip"
-            local choice
-            choice=$(ask "  Choose [1/2/3]:" "3")
-            case "$choice" in
-                1)
-                    info "  Installing vLLM via pip..."
-                    pip install vllm
-                    ;;
-                2)
-                    info "  vLLM will run via Docker."
-                    info "  Start with: docker compose --profile inference up vllm"
-                    DOCKER_VLLM=true
-                    return 0
-                    ;;
-                *) return 1 ;;
-            esac
-            ;;
-    esac
-}
-
 portable_sed_i() {
     # macOS BSD sed requires -i '' while GNU sed uses -i alone.
     if sed --version 2>/dev/null | grep -q 'GNU'; then
         sed -i "$@"
     else
         sed -i '' "$@"
+    fi
+}
+
+set_yaml_value() {
+    # Set a top-level key in a YAML file, portable across GNU and BSD sed.
+    # Uses a temp-file approach for inserts to avoid BSD sed '1i' incompatibility.
+    local key="$1" value="$2" file="$3"
+    if grep -q "^${key}:" "$file" 2>/dev/null; then
+        portable_sed_i "s/^${key}: .*/${key}: ${value}/" "$file"
+    else
+        local tmpfile
+        tmpfile=$(mktemp "${file}.XXXXXX")
+        printf '%s: %s\n' "$key" "$value" > "$tmpfile"
+        cat "$file" >> "$tmpfile" 2>/dev/null || true
+        mv "$tmpfile" "$file"
     fi
 }
 
@@ -330,7 +149,6 @@ if command -v ollama &>/dev/null; then
     ok "  ollama: found (optional, for local LLM)"
 else
     info "  ollama: not found (optional, for local LLM)"
-    offer_install ollama || true
 fi
 
 # llama.cpp
@@ -338,7 +156,6 @@ if command -v llama-server &>/dev/null; then
     ok "  llama.cpp: found (optional, for local LLM)"
 else
     info "  llama.cpp: not found (optional, for local LLM)"
-    offer_install llama-server || true
 fi
 
 echo ""
@@ -412,16 +229,10 @@ if [ "$MODE" = "docker" ]; then
     fi
 
     if [ "$MOCK_MODE" = "true" ]; then
-        if grep -q '^mock_mode:' config/active/operator.yaml 2>/dev/null; then
-            portable_sed_i 's/^mock_mode: .*/mock_mode: true/' config/active/operator.yaml
-        else
-            portable_sed_i '1i mock_mode: true' config/active/operator.yaml
-        fi
+        set_yaml_value "mock_mode" "true" config/active/operator.yaml
         ok "Set mock_mode: true in config/active/operator.yaml"
     else
-        if grep -q '^mock_mode:' config/active/operator.yaml 2>/dev/null; then
-            portable_sed_i 's/^mock_mode: .*/mock_mode: false/' config/active/operator.yaml
-        fi
+        set_yaml_value "mock_mode" "false" config/active/operator.yaml
         echo ""
         info "For real PR ingestion, you need a GitHub personal access token."
         info "Create one at: https://github.com/settings/tokens/new"
@@ -431,6 +242,8 @@ if [ "$MODE" = "docker" ]; then
         if [ -n "$token" ]; then
             set_env "FRANK_GITHUB_TOKEN" "$token"
             ok "Saved token to .env (referenced as \${FRANK_GITHUB_TOKEN} in operator.yaml)"
+        else
+            warn "Skipped. Set FRANK_GITHUB_TOKEN in .env before starting containers."
         fi
     fi
 
@@ -541,34 +354,11 @@ fi
 if [ "$MOCK_MODE" = "false" ]; then
 
     # ------------------------------------------------------------------
-    # Scan environment for existing credentials
+    # GitHub token (auto-detect from environment or prompt)
     # ------------------------------------------------------------------
-    echo ""
-    info "Scanning environment for LLM credentials..."
-    echo ""
 
-    detected_count=0
-    default_provider=""
-
-    # Tier 1: native provider keys
-    for var in ANTHROPIC_API_KEY OPENAI_API_KEY GOOGLE_API_KEY; do
-        val="${!var:-}"
-        if [ -n "$val" ]; then
-            preview="${val:0:4}****"
-            ok "  Found $var = $preview"
-            # Write into .env
-            set_env "$var" "$val"
-            detected_count=$((detected_count + 1))
-            case "$var" in
-                ANTHROPIC_API_KEY) [ -z "$default_provider" ] && default_provider="1" ;;
-                OPENAI_API_KEY)    [ -z "$default_provider" ] && default_provider="2" ;;
-                GOOGLE_API_KEY)    [ -z "$default_provider" ] && default_provider="3" ;;
-            esac
-        fi
-    done
-
-    # GitHub tokens
-    existing_gh_token=$(grep "^FRANK_GITHUB_TOKEN=" .env | cut -d= -f2-)
+    # Check for existing GitHub tokens in environment
+    existing_gh_token=$(grep "^FRANK_GITHUB_TOKEN=" .env 2>/dev/null | cut -d= -f2-)
     if [ -z "$existing_gh_token" ]; then
         for var in GITHUB_TOKEN GH_TOKEN; do
             val="${!var:-}"
@@ -577,49 +367,13 @@ if [ "$MOCK_MODE" = "false" ]; then
                 ok "  Found $var = $preview (usable for GitHub integration)"
                 set_env "FRANK_GITHUB_TOKEN" "$val"
                 ok "  Auto-populated FRANK_GITHUB_TOKEN from $var"
+                existing_gh_token="$val"
                 break
             fi
         done
     fi
 
-    # Tier 2: known third-party LLM providers
-    for var in MISTRAL_API_KEY DEEPSEEK_API_KEY GROQ_API_KEY TOGETHER_API_KEY \
-               TOGETHER_AI_API_KEY FIREWORKS_API_KEY REPLICATE_API_TOKEN \
-               COHERE_API_KEY AI21_API_KEY AZURE_OPENAI_API_KEY HF_TOKEN \
-               HUGGING_FACE_HUB_TOKEN; do
-        val="${!var:-}"
-        if [ -n "$val" ]; then
-            preview="${val:0:4}****"
-            info "  Found $var = $preview (OpenAI-compatible backend possible)"
-            detected_count=$((detected_count + 1))
-        fi
-    done
-
-    # Tier 3: fuzzy endpoint detection
-    while IFS='=' read -r name value; do
-        # Skip empty or already-handled vars
-        [ -z "$value" ] && continue
-        case "$name" in
-            *_URL|*_BASE_URL|*_ENDPOINT|*_HOST|*_BASE)
-                if echo "$value" | grep -qE '(/api/.*(/v1|/chat/completions)|/v1(/|$)|/chat/completions)'; then
-                    preview="${value:0:20}****"
-                    info "  Possible LLM endpoint: $name = $preview"
-                    detected_count=$((detected_count + 1))
-                fi
-                ;;
-        esac
-    done < <(env)
-
-    if [ "$detected_count" -gt 0 ]; then
-        echo ""
-        ok "  Detected $detected_count credential(s) in environment."
-    fi
-
-    # ------------------------------------------------------------------
-    # GitHub token (manual entry if not detected)
-    # ------------------------------------------------------------------
-    existing_token=$(grep "^FRANK_GITHUB_TOKEN=" .env | cut -d= -f2-)
-    if [ -z "$existing_token" ]; then
+    if [ -z "$existing_gh_token" ]; then
         echo ""
         info "GitHub Personal Access Token"
         info "Create one at: https://github.com/settings/tokens/new"
@@ -636,104 +390,16 @@ if [ "$MOCK_MODE" = "false" ]; then
         ok "GitHub token set in .env"
     fi
 
-    # ------------------------------------------------------------------
-    # LLM API key selection
-    # ------------------------------------------------------------------
-    echo ""
-    info "LLM API Key"
-    info "franktheunicorn supports Anthropic Claude, OpenAI, Google Gemini, and Ollama."
-    info "You can configure multiple providers. For now, set at least one API key."
-    echo ""
-
-    existing_anthropic=$(grep "^ANTHROPIC_API_KEY=" .env | cut -d= -f2-)
-    if [ -n "$existing_anthropic" ]; then
-        ok "Anthropic API key already set in .env"
-    else
-        echo "  1. Anthropic (Claude) — recommended"
-        echo "  2. OpenAI"
-        echo "  3. Google (Gemini)"
-        echo "  4. Ollama (local, no key needed)"
-        echo "  5. llama.cpp (local, no key needed)"
-        echo "  6. vLLM (local, no key needed)"
-        echo "  7. Skip for now"
-        echo ""
-        provider_choice=$(ask "Which provider?" "${default_provider:-1}")
-        llm_configured=false
-        case "$provider_choice" in
-            1)
-                key=$(ask "Anthropic API key:" "")
-                [ -n "$key" ] && set_env "ANTHROPIC_API_KEY" "$key" && ok "Saved to .env" && llm_configured=true
-                ;;
-            2)
-                key=$(ask "OpenAI API key:" "")
-                [ -n "$key" ] && set_env "OPENAI_API_KEY" "$key" && ok "Saved to .env" && llm_configured=true
-                ;;
-            3)
-                key=$(ask "Google API key:" "")
-                [ -n "$key" ] && set_env "GOOGLE_API_KEY" "$key" && ok "Saved to .env" && llm_configured=true
-                ;;
-            4)
-                info "No API key needed for Ollama. Make sure it's running locally."
-                info "Or start via Docker: docker compose --profile inference up ollama"
-                llm_configured=true
-                ;;
-            5)
-                info "No API key needed for llama.cpp."
-                info "Start the server: llama-server -m <model.gguf> --port 8080"
-                info "Or via Docker: docker compose --profile inference up llama-cpp"
-                llm_configured=true
-                ;;
-            6)
-                info "No API key needed for vLLM."
-                info "Start the server: vllm serve <model-name>"
-                info "Or via Docker: docker compose --profile inference up vllm"
-                llm_configured=true
-                ;;
-            7)
-                warn "Skipped. Set an API key in .env before using real mode."
-                llm_configured=true  # explicit skip, don't offer fallback
-                ;;
-        esac
-
-        # Fallback: offer custom endpoint if nothing was configured
-        if [ "$llm_configured" = false ]; then
-            echo ""
-            info "No LLM configuration detected."
-            info "You can specify a custom OpenAI-compatible endpoint."
-            echo ""
-            endpoint=$(ask "LLM API endpoint URL (or env var name, Enter to skip):" "")
-            if [ -n "$endpoint" ]; then
-                case "$endpoint" in
-                    http://*)  set_env "FRANK_LLM_ENDPOINT" "$endpoint" ;;
-                    https://*) set_env "FRANK_LLM_ENDPOINT" "$endpoint" ;;
-                    *)         set_env "FRANK_LLM_ENDPOINT_ENV" "$endpoint" ;;
-                esac
-                ok "Saved endpoint to .env"
-
-                token=$(ask "LLM API token (or env var name, Enter if none):" "")
-                if [ -n "$token" ]; then
-                    # Heuristic: raw tokens are long or start with known prefixes
-                    case "$token" in
-                        sk-*|key-*|pk-*|rk-*|gsk_*|xai-*|pplx-*)
-                            set_env "FRANK_LLM_API_KEY" "$token"
-                            ;;
-                        *)
-                            if [ "${#token}" -gt 40 ]; then
-                                set_env "FRANK_LLM_API_KEY" "$token"
-                            else
-                                set_env "FRANK_LLM_API_KEY_ENV" "$token"
-                            fi
-                            ;;
-                    esac
-                    ok "Saved token to .env"
-                fi
-            fi
+    # Persist any env-sourced LLM keys (ANTHROPIC_API_KEY etc.) to .env
+    # so they survive across shell sessions.
+    for var in ANTHROPIC_API_KEY OPENAI_API_KEY GOOGLE_API_KEY; do
+        val="${!var:-}"
+        existing_val=$(grep "^${var}=" .env 2>/dev/null | cut -d= -f2-)
+        if [ -n "$val" ] && [ -z "$existing_val" ]; then
+            set_env "$var" "$val"
         fi
-    fi
+    done
 fi
-
-# --- Write mock_mode into operator.yaml (after init_project creates it) ------
-# Deferred to after init_project below so the file exists.
 
 echo ""
 
@@ -743,36 +409,12 @@ mkdir -p data
 if [ ! -f Makefile ]; then
     # Only run migrations if make setup didn't already handle it
     info "Setting up database..."
-    set -x
     python manage.py migrate --verbosity 0
-    set +x
     ok "Database ready"
 fi
 echo ""
 
-# --- Project initialization -------------------------------------------------
-
-info "Initializing configuration..."
-echo "This creates your operator config at config/active/"
-echo ""
-set -x
-python manage.py init_project
-set +x
-echo ""
-
-# Now that operator.yaml exists, persist the mock_mode choice.
-if [ "$MOCK_MODE" = "true" ]; then
-    if grep -q '^mock_mode:' config/active/operator.yaml 2>/dev/null; then
-        portable_sed_i 's/^mock_mode: .*/mock_mode: true/' config/active/operator.yaml
-    else
-        portable_sed_i '1i mock_mode: true' config/active/operator.yaml
-    fi
-    ok "Set mock_mode: true in config/active/operator.yaml"
-fi
-
-# --- LLM backend configuration ---------------------------------------------
-
-echo ""
+# --- LLM backend configuration (single wizard handles everything) ----------
 if [ "$MOCK_MODE" = "true" ]; then
     info "You can pre-configure LLM backends now for when you switch to real mode."
 else
@@ -780,10 +422,23 @@ else
 fi
 echo "This wizard sets up which AI models to use for code review."
 echo ""
-set -x
+
+# Source .env so setup_llm can detect API keys written earlier in this script.
+if [ -f .env ]; then
+    set -a
+    # shellcheck disable=SC1091
+    source .env
+    set +a
+fi
+
 python manage.py setup_llm
-set +x
 echo ""
+
+# Persist the mock_mode choice into operator.yaml (created by setup_llm above).
+if [ "$MOCK_MODE" = "true" ]; then
+    set_yaml_value "mock_mode" "true" config/active/operator.yaml
+    ok "Set mock_mode: true in config/active/operator.yaml"
+fi
 
 # --- Verification -----------------------------------------------------------
 
@@ -791,7 +446,6 @@ echo ""
 info "Verifying setup..."
 
 # Quick import check
-set -x
 if python -c "import franktheunicorn" 2>/dev/null; then
     ok "  Package imports successfully"
 else
@@ -804,7 +458,6 @@ if python manage.py showmigrations --plan 2>/dev/null | grep -q '\[X\]'; then
 else
     warn "  Some migrations may be pending"
 fi
-set +x
 
 echo ""
 
