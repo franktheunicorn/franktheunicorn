@@ -52,18 +52,33 @@ class Command(BaseCommand):
     def handle(self, *args, **options):  # type: ignore[no-untyped-def]
         self.stdout.write(self.style.SUCCESS("\n=== franktheunicorn LLM Setup Wizard ===\n"))
 
+        # Resolve output path early so we can read existing config for defaults.
+        output_path_str = options.get("output") or ""
+        if not output_path_str:
+            import django.conf
+
+            base = Path(django.conf.settings.BASE_DIR)
+            output_path_str = str(base / "config" / "active" / "operator.yaml")
+        self._output_path = Path(output_path_str)
+
+        # Read existing config so returning users keep their previous answers.
+        existing_config: dict[str, object] = {}
+        if self._output_path.exists():
+            with self._output_path.open(encoding="utf-8") as f:
+                existing_config = yaml.safe_load(f) or {}
+
         config: dict[str, object] = {}
 
         # --- GitHub username ---
         config["github_username"] = self._ask(
             "GitHub username (for scoring — leave blank to skip): ",
-            default="",
+            default=str(existing_config.get("github_username", "")),
         )
 
         # --- Review style ---
         config["review_style"] = self._ask(
             "Review style/tone (e.g. 'direct but kind', 'thorough and formal'): ",
-            default="direct but kind",
+            default=str(existing_config.get("review_style", "direct but kind")),
         )
 
         # --- Detect credentials from environment ---
@@ -139,13 +154,7 @@ class Command(BaseCommand):
             config["llm_backends"] = llm_backends
 
         # --- Initial projects ---
-        output_path = options.get("output") or ""
-        if not output_path:
-            import django.conf
-
-            base = Path(django.conf.settings.BASE_DIR)
-            output_path = str(base / "config" / "active" / "operator.yaml")
-        output_path_obj = Path(output_path)
+        output_path_obj = self._output_path
         self._configure_initial_projects(output_path_obj)
 
         # --- CodeRabbit ---
@@ -158,6 +167,7 @@ class Command(BaseCommand):
         # Merge with existing config so we don't clobber fields managed
         # elsewhere (e.g. mock_mode, projects_dir, email).
         output_path_obj.parent.mkdir(parents=True, exist_ok=True)
+        # Re-read in case another process updated the file since we started.
         existing: dict[str, object] = {}
         if output_path_obj.exists():
             with output_path_obj.open(encoding="utf-8") as f:
@@ -167,11 +177,13 @@ class Command(BaseCommand):
             yaml.dump(existing, f, default_flow_style=False, sort_keys=False)
 
         self.stdout.write(self.style.SUCCESS(f"\nConfig saved to {output_path_obj}"))
-        self.stdout.write("\nTo use this config, set:\n")
-        self.stdout.write(f"  export FRANK_OPERATOR_CONFIG={output_path_obj}\n")
 
-        for env_var in env_vars_needed:
-            self.stdout.write(f"  export {env_var}=<your-api-key>\n")
+        # Only show env var reminders for keys not already set.
+        missing_vars = [v for v in env_vars_needed if not os.environ.get(v)]
+        if missing_vars:
+            self.stdout.write("\nStill needed (set in .env or your shell):\n")
+            for env_var in missing_vars:
+                self.stdout.write(f"  export {env_var}=<your-api-key>\n")
 
         self.stdout.write(
             "\nRun the worker with:\n"
@@ -189,6 +201,22 @@ class Command(BaseCommand):
             self.stdout.write("\n")
             value = ""
         return value or default
+
+    def _save_to_dotenv(self, key: str, value: str) -> None:
+        """Append or update a key=value pair in .env."""
+        import django.conf
+
+        env_path = Path(django.conf.settings.BASE_DIR) / ".env"
+        lines: list[str] = []
+        if env_path.exists():
+            lines = [
+                line
+                for line in env_path.read_text(encoding="utf-8").splitlines()
+                if not line.startswith(f"{key}=")
+            ]
+        lines.append(f"{key}={value}")
+        env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.stdout.write(self.style.SUCCESS(f"  Saved {key} to .env\n"))
 
     def _discover_and_choose_model(
         self,
@@ -243,10 +271,17 @@ class Command(BaseCommand):
         if existing_key:
             self.stdout.write(self.style.SUCCESS(f"  Found {env_var} in environment.\n"))
         else:
-            self.stdout.write(
-                f"\n  Set the {env_var} environment variable with your API key.\n"
-                f"  Example: export {env_var}=sk-...\n"
-            )
+            key_input = self._ask(f"  {env_var} (paste key, or Enter to skip): ")
+            if key_input:
+                os.environ[env_var] = key_input
+                self._save_to_dotenv(env_var, key_input)
+                existing_key = key_input
+            else:
+                self.stdout.write(
+                    self.style.WARNING(
+                        f"  Skipped. Set {env_var} in .env before using this provider.\n"
+                    )
+                )
 
         llm_config["api_key_env"] = env_var
 
