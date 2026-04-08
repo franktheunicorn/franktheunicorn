@@ -260,7 +260,7 @@ if [ "$MODE" = "docker" ]; then
         set_yaml_value "mock_mode" "false" config/active/operator.yaml
 
         # Check for existing FRANK_GITHUB_TOKEN in .env
-        existing_gh_token=$(grep "^FRANK_GITHUB_TOKEN=" .env 2>/dev/null | cut -d= -f2-)
+        existing_gh_token=$(grep "^FRANK_GITHUB_TOKEN=" .env 2>/dev/null | cut -d= -f2-) || true
         if [ -z "$existing_gh_token" ]; then
             for var in GITHUB_TOKEN GH_TOKEN; do
                 val="${!var:-}"
@@ -411,7 +411,7 @@ if [ "$MOCK_MODE" = "false" ]; then
     # ------------------------------------------------------------------
 
     # Check for existing GitHub tokens in environment
-    existing_gh_token=$(grep "^FRANK_GITHUB_TOKEN=" .env 2>/dev/null | cut -d= -f2-)
+    existing_gh_token=$(grep "^FRANK_GITHUB_TOKEN=" .env 2>/dev/null | cut -d= -f2-) || true
     if [ -z "$existing_gh_token" ]; then
         for var in GITHUB_TOKEN GH_TOKEN; do
             val="${!var:-}"
