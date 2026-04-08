@@ -34,202 +34,6 @@ ask() {
     echo "${answer:-$default}"
 }
 
-DOCKER_OLLAMA=false
-DOCKER_LLAMA_CPP=false
-DOCKER_VLLM=false
-
-generate_ollama_compose() {
-    # Generate compose.ollama.yaml from the template with the chosen model.
-    local model="$1"
-    local template="docker/compose.ollama.yaml.template"
-    local output="compose.ollama.yaml"
-    if [ ! -f "$template" ]; then
-        warn "Template not found: $template"
-        return 1
-    fi
-    local escaped_model
-    escaped_model=$(printf '%s\n' "$model" | sed 's/[&/\]/\\&/g')
-    sed "s|{{MODEL}}|${escaped_model}|g" "$template" > "$output"
-    ok "  Generated $output (model: $model)"
-    info "  Start with: docker compose -f compose.yaml -f compose.ollama.yaml up"
-}
-
-offer_install() {
-    local tool="$1"
-    local os_type
-    os_type="$(uname -s)"
-
-    case "$tool" in
-        ollama)
-            echo ""
-            local install_method=""
-            if [ "$os_type" = "Darwin" ]; then
-                echo "  Install options for Ollama:"
-                echo "    1. Homebrew (brew install ollama)"
-                echo "    2. Docker (ollama/ollama container)"
-                echo "    3. Skip"
-                local choice
-                choice=$(ask "  Choose [1/2/3]:" "3")
-                case "$choice" in
-                    1) install_method="brew" ;;
-                    2) install_method="docker" ;;
-                    *) return 1 ;;
-                esac
-            elif command -v apt-get &>/dev/null; then
-                echo "  Install options for Ollama:"
-                echo "    1. Official installer (curl -fsSL https://ollama.com/install.sh | sh)"
-                echo "    2. Docker (ollama/ollama container)"
-                echo "    3. Skip"
-                local choice
-                choice=$(ask "  Choose [1/2/3]:" "3")
-                case "$choice" in
-                    1) install_method="curl" ;;
-                    2) install_method="docker" ;;
-                    *) return 1 ;;
-                esac
-            else
-                echo "  Install options for Ollama:"
-                echo "    1. Docker (ollama/ollama container)"
-                echo "    2. Skip"
-                local choice
-                choice=$(ask "  Choose [1/2]:" "2")
-                case "$choice" in
-                    1) install_method="docker" ;;
-                    *) return 1 ;;
-                esac
-            fi
-
-            case "$install_method" in
-                brew)
-                    info "  Installing Ollama via Homebrew..."
-                    brew install ollama
-                    ;;
-                curl)
-                    info "  Installing Ollama via official installer..."
-                    curl -fsSL https://ollama.com/install.sh | sh
-                    ;;
-                docker)
-                    info "  Ollama will run via Docker."
-                    echo "  Model sizes (pick based on your RAM):"
-                    echo "    qwen2.5-coder:3b   ~2GB  (8GB RAM / MacBook Air base)"
-                    echo "    qwen2.5-coder:7b   ~5GB  (16GB RAM)"
-                    echo "    qwen2.5-coder:14b  ~9GB  (32GB RAM)"
-                    echo "    qwen2.5-coder:32b  ~20GB (48GB+ RAM / dedicated GPU)"
-                    local ollama_model
-                    ollama_model=$(ask "  Ollama model to pull:" "qwen2.5-coder:14b")
-                    generate_ollama_compose "$ollama_model"
-                    DOCKER_OLLAMA=true
-                    return 0
-                    ;;
-                *)
-                    err "  Unrecognized install method: '$install_method'"
-                    return 1
-                    ;;
-            esac
-
-            if command -v ollama &>/dev/null; then
-                ok "  Ollama installed successfully"
-                return 0
-            else
-                warn "  Installation may require restarting your shell"
-                return 1
-            fi
-            ;;
-
-        llama-server)
-            echo ""
-            local install_method=""
-            if [ "$os_type" = "Darwin" ]; then
-                echo "  Install options for llama.cpp:"
-                echo "    1. Homebrew (brew install llama.cpp)"
-                echo "    2. Docker (ghcr.io/ggerganov/llama.cpp:server)"
-                echo "    3. Skip"
-                local choice
-                choice=$(ask "  Choose [1/2/3]:" "3")
-                case "$choice" in
-                    1) install_method="brew" ;;
-                    2) install_method="docker" ;;
-                    *) return 1 ;;
-                esac
-            elif command -v apt-get &>/dev/null; then
-                echo "  Install options for llama.cpp:"
-                echo "    1. APT package (sudo apt-get install llama.cpp)"
-                echo "    2. Docker (ghcr.io/ggerganov/llama.cpp:server)"
-                echo "    3. Skip"
-                local choice
-                choice=$(ask "  Choose [1/2/3]:" "3")
-                case "$choice" in
-                    1) install_method="apt" ;;
-                    2) install_method="docker" ;;
-                    *) return 1 ;;
-                esac
-            else
-                echo "  Install options for llama.cpp:"
-                echo "    1. Docker (ghcr.io/ggerganov/llama.cpp:server)"
-                echo "    2. Skip"
-                local choice
-                choice=$(ask "  Choose [1/2]:" "2")
-                case "$choice" in
-                    1) install_method="docker" ;;
-                    *) return 1 ;;
-                esac
-            fi
-
-            case "$install_method" in
-                brew)
-                    info "  Installing llama.cpp via Homebrew..."
-                    brew install llama.cpp
-                    ;;
-                apt)
-                    info "  Installing llama.cpp via APT..."
-                    sudo apt-get update -qq && sudo apt-get install -y llama.cpp
-                    ;;
-                docker)
-                    info "  llama.cpp will run via Docker."
-                    info "  Start with: docker compose --profile inference up llama-cpp"
-                    DOCKER_LLAMA_CPP=true
-                    return 0
-                    ;;
-                *)
-                    err "  Unrecognized install method: '$install_method'"
-                    return 1
-                    ;;
-            esac
-
-            if command -v llama-server &>/dev/null; then
-                ok "  llama.cpp installed successfully"
-                return 0
-            else
-                warn "  Installation may require restarting your shell"
-                return 1
-            fi
-            ;;
-
-        vllm)
-            echo ""
-            echo "  Install options for vLLM:"
-            echo "    1. pip install (pip install vllm)"
-            echo "    2. Docker (vllm/vllm-openai container)"
-            echo "    3. Skip"
-            local choice
-            choice=$(ask "  Choose [1/2/3]:" "3")
-            case "$choice" in
-                1)
-                    info "  Installing vLLM via pip..."
-                    pip install vllm
-                    ;;
-                2)
-                    info "  vLLM will run via Docker."
-                    info "  Start with: docker compose --profile inference up vllm"
-                    DOCKER_VLLM=true
-                    return 0
-                    ;;
-                *) return 1 ;;
-            esac
-            ;;
-    esac
-}
-
 portable_sed_i() {
     # macOS BSD sed requires -i '' while GNU sed uses -i alone.
     if sed --version 2>/dev/null | grep -q 'GNU'; then
@@ -340,14 +144,14 @@ else
     HAS_DOCKER=false
 fi
 
-# Ollama (just report status; interactive install offered later if needed)
+# Ollama
 if command -v ollama &>/dev/null; then
     ok "  ollama: found (optional, for local LLM)"
 else
     info "  ollama: not found (optional, for local LLM)"
 fi
 
-# llama.cpp (just report status; interactive install offered later if needed)
+# llama.cpp
 if command -v llama-server &>/dev/null; then
     ok "  llama.cpp: found (optional, for local LLM)"
 else
@@ -605,20 +409,12 @@ mkdir -p data
 if [ ! -f Makefile ]; then
     # Only run migrations if make setup didn't already handle it
     info "Setting up database..."
-    set -x
     python manage.py migrate --verbosity 0
-    set +x
     ok "Database ready"
 fi
 echo ""
 
 # --- LLM backend configuration (single wizard handles everything) ----------
-# setup_llm handles: credential detection, GitHub username, review style,
-# LLM provider selection, model discovery, API key collection, project setup,
-# and writes operator.yaml.  This replaces the former init_project call and
-# the duplicate credential/provider prompts that were in this script.
-
-echo ""
 if [ "$MOCK_MODE" = "true" ]; then
     info "You can pre-configure LLM backends now for when you switch to real mode."
 else
@@ -635,9 +431,7 @@ if [ -f .env ]; then
     set +a
 fi
 
-set -x
 python manage.py setup_llm
-set +x
 echo ""
 
 # Persist the mock_mode choice into operator.yaml (created by setup_llm above).
@@ -652,7 +446,6 @@ echo ""
 info "Verifying setup..."
 
 # Quick import check
-set -x
 if python -c "import franktheunicorn" 2>/dev/null; then
     ok "  Package imports successfully"
 else
@@ -665,7 +458,6 @@ if python manage.py showmigrations --plan 2>/dev/null | grep -q '\[X\]'; then
 else
     warn "  Some migrations may be pending"
 fi
-set +x
 
 echo ""
 

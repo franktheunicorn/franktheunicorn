@@ -275,7 +275,6 @@ class Command(BaseCommand):
             if key_input:
                 os.environ[env_var] = key_input
                 self._save_to_dotenv(env_var, key_input)
-                existing_key = key_input
             else:
                 self.stdout.write(
                     self.style.WARNING(
