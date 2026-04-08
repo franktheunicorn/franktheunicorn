@@ -233,17 +233,38 @@ if [ "$MODE" = "docker" ]; then
         ok "Set mock_mode: true in config/active/operator.yaml"
     else
         set_yaml_value "mock_mode" "false" config/active/operator.yaml
-        echo ""
-        info "For real PR ingestion, you need a GitHub personal access token."
-        info "Create one at: https://github.com/settings/tokens/new"
-        info "Required scopes: repo, read:org"
-        echo ""
-        token=$(ask "GitHub token (or press Enter to skip):" "")
-        if [ -n "$token" ]; then
-            set_env "FRANK_GITHUB_TOKEN" "$token"
-            ok "Saved token to .env (referenced as \${FRANK_GITHUB_TOKEN} in operator.yaml)"
+
+        # Check for existing FRANK_GITHUB_TOKEN in .env
+        existing_gh_token=$(grep "^FRANK_GITHUB_TOKEN=" .env 2>/dev/null | cut -d= -f2-)
+        if [ -z "$existing_gh_token" ]; then
+            for var in GITHUB_TOKEN GH_TOKEN; do
+                val="${!var:-}"
+                if [ -n "$val" ]; then
+                    preview="${val:0:4}****"
+                    ok "Found $var = $preview (usable for GitHub integration)"
+                    set_env "FRANK_GITHUB_TOKEN" "$val"
+                    ok "Auto-populated FRANK_GITHUB_TOKEN from $var"
+                    existing_gh_token="$val"
+                    break
+                fi
+            done
+        fi
+
+        if [ -z "$existing_gh_token" ]; then
+            echo ""
+            info "For real PR ingestion, you need a GitHub personal access token."
+            info "Create one at: https://github.com/settings/tokens/new"
+            info "Required scopes: repo, read:org"
+            echo ""
+            token=$(ask "GitHub token (or press Enter to skip):" "")
+            if [ -n "$token" ]; then
+                set_env "FRANK_GITHUB_TOKEN" "$token"
+                ok "Saved token to .env (referenced as \${FRANK_GITHUB_TOKEN} in operator.yaml)"
+            else
+                warn "Skipped. Set FRANK_GITHUB_TOKEN in .env before starting containers."
+            fi
         else
-            warn "Skipped. Set FRANK_GITHUB_TOKEN in .env before starting containers."
+            ok "GitHub token already set in .env"
         fi
     fi
 
