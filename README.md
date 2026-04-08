@@ -54,8 +54,8 @@ make serve                     # dashboard: http://localhost:8000
 make worker                    # background PR poller (separate terminal)
 ```
 
-Both paths default to **mock mode** — fixture data, no API keys needed.
-Set `mock_mode: false` in `config/active/operator.yaml` with real tokens in `.env` for live PR ingestion.
+To try it without API keys, set `mock_mode: true` in `config/active/operator.yaml` — this uses fixture data so you can explore the dashboard immediately.
+Set `mock_mode: false` (the default) with real tokens in `.env` for live PR ingestion.
 
 For project configuration and workspaces, see the **[Install Guide](docs/install.md)**.
 

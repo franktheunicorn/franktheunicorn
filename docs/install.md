@@ -16,6 +16,27 @@ the script does, documented for reference.
 - **GitHub personal access token** — for real PR ingestion (not needed in mock mode)
 - **LLM API key** — Anthropic, OpenAI, Google, or a local Ollama install (not needed in mock mode)
 
+### macOS setup
+
+On a fresh Mac (including MacBook Air with Apple Silicon), install these first:
+
+```bash
+# Xcode Command Line Tools (provides git, clang, and system headers)
+xcode-select --install
+
+# Homebrew (package manager) — see https://brew.sh
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+# Python 3.12 (macOS ships with a stub that prompts for Xcode CLT, not a full Python)
+brew install python@3.12
+
+# Docker Desktop (if using the Docker setup path)
+brew install --cask docker
+```
+
+Apple Silicon (M1/M2/M3) Macs are fully supported — all Python dependencies
+install natively and Docker runs via Rosetta or native ARM images.
+
 ## 1. Clone and configure
 
 ```bash
@@ -280,7 +301,8 @@ and `FRANK_GITHUB_TOKEN` is set in `.env`. The worker polls every
 `poll_interval_seconds` (default 300). Restart the worker to trigger an immediate poll.
 
 **`make setup` fails on missing Python** — You need Python 3.11+. Check with
-`python3 --version`. On macOS: `brew install python@3.12`. On Ubuntu:
+`python3 --version`. On macOS: `brew install python@3.12` (you may also need
+`xcode-select --install` first for headers). On Ubuntu:
 `sudo apt install python3.12 python3.12-venv`.
 
 **Docker build fails** — Make sure Docker is running. Try `docker compose build

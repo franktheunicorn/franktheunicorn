@@ -19,10 +19,13 @@ _VRAM_TIERS: list[tuple[float, str]] = [
     (6, "qwen2.5-coder:7b"),
 ]
 
+# Apple Silicon unified memory is shared between GPU and system, so we need
+# more headroom than NVIDIA VRAM.  The 32b model (~20GB loaded) would leave a
+# 32GB MacBook Air thrashing swap; 14b (~9GB) is comfortable there instead.
 _RAM_TIERS: list[tuple[float, str]] = [
-    (32, "qwen2.5-coder:32b"),
-    (16, "qwen2.5-coder:14b"),
-    (8, "qwen2.5-coder:7b"),
+    (48, "qwen2.5-coder:32b"),
+    (32, "qwen2.5-coder:14b"),
+    (16, "qwen2.5-coder:7b"),
 ]
 
 
@@ -68,7 +71,7 @@ def recommend_local_model() -> tuple[str, str]:
 
     if is_apple:
         ram_gb = _get_total_ram_gb()
-        model = _pick_model(_RAM_TIERS, ram_gb) or "qwen2.5-coder:7b"
+        model = _pick_model(_RAM_TIERS, ram_gb) or "qwen2.5-coder:3b"
         return (model, f"Apple Silicon with {ram_gb:.0f}GB unified memory")
 
     nvidia_vram = _get_nvidia_vram_gb()

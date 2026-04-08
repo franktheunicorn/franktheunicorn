@@ -11,11 +11,15 @@
 # model after the Ollama server starts.  It exits once the pull is complete;
 # subsequent "docker compose up" invocations are fast because the model is
 # already cached in the ollama-models volume.
+#
+# This file fully redefines the ollama service (the base compose.yaml gates
+# it behind profiles: ["inference"], and Docker Compose cannot reliably clear
+# profiles via an override).  Using -f with this file activates ollama
+# unconditionally — no --profile flag or COMPOSE_PROFILES needed.
 
 services:
   ollama:
     image: ollama/ollama:latest
-    profiles: []  # Override base profile gate so ollama starts by default
     ports:
       - "11434:11434"
     volumes:
@@ -37,7 +41,6 @@ services:
 
   ollama-pull:
     image: ollama/ollama:latest
-    profiles: []  # Override base profile gate
     depends_on:
       ollama:
         condition: service_healthy

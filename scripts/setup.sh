@@ -110,6 +110,11 @@ offer_install() {
                     ;;
                 docker)
                     info "  Ollama will run via Docker."
+                    echo "  Model sizes (pick based on your RAM):"
+                    echo "    qwen2.5-coder:3b   ~2GB  (8GB RAM / MacBook Air base)"
+                    echo "    qwen2.5-coder:7b   ~5GB  (16GB RAM)"
+                    echo "    qwen2.5-coder:14b  ~9GB  (32GB RAM)"
+                    echo "    qwen2.5-coder:32b  ~20GB (48GB+ RAM / dedicated GPU)"
                     local ollama_model
                     ollama_model=$(ask "  Ollama model to pull:" "qwen2.5-coder:14b")
                     generate_ollama_compose "$ollama_model"
@@ -223,6 +228,15 @@ offer_install() {
             esac
             ;;
     esac
+}
+
+portable_sed_i() {
+    # macOS BSD sed requires -i '' while GNU sed uses -i alone.
+    if sed --version 2>/dev/null | grep -q 'GNU'; then
+        sed -i "$@"
+    else
+        sed -i '' "$@"
+    fi
 }
 
 set_env() {
@@ -399,14 +413,14 @@ if [ "$MODE" = "docker" ]; then
 
     if [ "$MOCK_MODE" = "true" ]; then
         if grep -q '^mock_mode:' config/active/operator.yaml 2>/dev/null; then
-            sed -i 's/^mock_mode: .*/mock_mode: true/' config/active/operator.yaml
+            portable_sed_i 's/^mock_mode: .*/mock_mode: true/' config/active/operator.yaml
         else
-            sed -i '1i mock_mode: true' config/active/operator.yaml
+            portable_sed_i '1i mock_mode: true' config/active/operator.yaml
         fi
         ok "Set mock_mode: true in config/active/operator.yaml"
     else
         if grep -q '^mock_mode:' config/active/operator.yaml 2>/dev/null; then
-            sed -i 's/^mock_mode: .*/mock_mode: false/' config/active/operator.yaml
+            portable_sed_i 's/^mock_mode: .*/mock_mode: false/' config/active/operator.yaml
         fi
         echo ""
         info "For real PR ingestion, you need a GitHub personal access token."
@@ -749,9 +763,9 @@ echo ""
 # Now that operator.yaml exists, persist the mock_mode choice.
 if [ "$MOCK_MODE" = "true" ]; then
     if grep -q '^mock_mode:' config/active/operator.yaml 2>/dev/null; then
-        sed -i 's/^mock_mode: .*/mock_mode: true/' config/active/operator.yaml
+        portable_sed_i 's/^mock_mode: .*/mock_mode: true/' config/active/operator.yaml
     else
-        sed -i '1i mock_mode: true' config/active/operator.yaml
+        portable_sed_i '1i mock_mode: true' config/active/operator.yaml
     fi
     ok "Set mock_mode: true in config/active/operator.yaml"
 fi

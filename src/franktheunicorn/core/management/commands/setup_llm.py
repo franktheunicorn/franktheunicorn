@@ -373,7 +373,7 @@ class Command(BaseCommand):
                 )
             )
 
-        base_url = self._ask("  vLLM server URL: ", default="http://localhost:8000/v1")
+        base_url = self._ask("  vLLM server URL: ", default="http://localhost:8081/v1")
         # vLLM exposes an OpenAI-compatible API, so use the openai provider.
         llm_config["provider"] = "openai"
         llm_config["base_url"] = base_url

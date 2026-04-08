@@ -90,7 +90,7 @@ services:
     image: vllm/vllm-openai:latest
     profiles: ["inference"]
     ports:
-      - "8000:8000"
+      - "8081:8000"
     # Requires GPU — uncomment and set model:
     # deploy:
     #   resources:

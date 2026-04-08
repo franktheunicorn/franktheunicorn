@@ -91,7 +91,9 @@ digest_enabled: false
 # Local models via Ollama (no API key needed):
 #   Install Ollama: https://ollama.com/download
 #   Pull a model:   ollama pull qwen2.5-coder:14b
-#   Model sizes:    3b (CPU), 7b (8GB), 14b (12GB), 32b (24GB)
+#   Model sizes:    3b (~2GB), 7b (~5GB), 14b (~9GB), 32b (~20GB)
+#   Apple Silicon:  8GB→3b, 16GB→7b, 32GB→14b (unified memory shared with OS)
+#   NVIDIA VRAM:    6GB→7b, 12GB→14b, 24GB→32b
 #
 # Legacy single-backend format (still works):
 # llm:
