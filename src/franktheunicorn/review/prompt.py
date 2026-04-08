@@ -94,6 +94,10 @@ def build_user_message(diff: str, ctx: PRContext) -> str:
 
     header_parts.append(f"\nDiff:\n```diff\n{diff}\n```")
 
+    # Repo health context (from git history analysis — trusted, locally generated).
+    if ctx.repo_health_context:
+        header_parts.append(f"\n[Repo health analysis]\n{ctx.repo_health_context}")
+
     # v1.5: inject external context (labeled as untrusted).
     from franktheunicorn.data_access.context_orchestrator import format_context_for_prompt
 

@@ -39,6 +39,8 @@ class PRContext:
     personality_external_voice: str = ""
     personality_review_philosophy: str = ""
     linked_issues_context: str = ""
+    # Repo health context (bootstrapped from git history analysis)
+    repo_health_context: str = ""
     # v1.5 context injection fields
     community_context: str = ""
     jira_context: str = ""
