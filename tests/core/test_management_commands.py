@@ -45,6 +45,16 @@ class TestAddProjectCommand:
         assert "testorg" in content
         assert "testrepo" in content
 
+    def test_shows_analyze_hint(self, tmp_path: Path) -> None:
+        out = StringIO()
+        call_command(
+            "add_project",
+            "--repo=testorg/testrepo",
+            f"--output-dir={tmp_path}",
+            stdout=out,
+        )
+        assert "analyze_repo" in out.getvalue()
+
     def test_invalid_repo_format(self, tmp_path: Path) -> None:
         err = StringIO()
         call_command(
@@ -54,6 +64,100 @@ class TestAddProjectCommand:
             stderr=err,
         )
         assert "owner/repo" in err.getvalue()
+
+
+@pytest.mark.django_db
+class TestAnalyzeRepoCommand:
+    def test_invalid_repo_format(self) -> None:
+        err = StringIO()
+        call_command("analyze_repo", "--repo=invalid", stderr=err)
+        assert "owner/repo" in err.getvalue()
+
+    def test_project_not_found(self) -> None:
+        err = StringIO()
+        call_command("analyze_repo", "--repo=no/such-project", stderr=err)
+        assert "not found" in err.getvalue()
+
+    def test_skips_if_recent_snapshot(self) -> None:
+        from django.utils import timezone
+
+        project = ProjectFactory()
+        project.repo_health_analyzed_at = timezone.now()
+        project.save()
+        out = StringIO()
+        call_command("analyze_repo", f"--repo={project.owner}/{project.repo}", stdout=out)
+        assert "Existing snapshot" in out.getvalue()
+
+    def test_force_re_analyzes(self, tmp_path: Path) -> None:
+        from django.utils import timezone
+
+        from franktheunicorn.worker.repo_health import RepoHealthSnapshot, snapshot_to_dict
+
+        project = ProjectFactory()
+        project.repo_health_analyzed_at = timezone.now()
+        project.repo_health_snapshot = snapshot_to_dict(RepoHealthSnapshot(analyzed_at="old"))
+        project.save()
+
+        # Create a real git repo for ensure_repo to find
+        import subprocess
+
+        repo_path = tmp_path / project.owner / project.repo
+        repo_path.mkdir(parents=True)
+        subprocess.run(["git", "init", str(repo_path)], capture_output=True, check=True)
+        subprocess.run(
+            ["git", "-c", "commit.gpgsign=false", "config", "user.email", "t@t.com"],
+            cwd=str(repo_path),
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-c", "commit.gpgsign=false", "config", "user.name", "Tester"],
+            cwd=str(repo_path),
+            capture_output=True,
+            check=True,
+        )
+        (repo_path / "f.py").write_text("x = 1\n")
+        subprocess.run(
+            ["git", "-c", "commit.gpgsign=false", "add", "."],
+            cwd=str(repo_path),
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-c", "commit.gpgsign=false", "commit", "-m", "init"],
+            cwd=str(repo_path),
+            capture_output=True,
+            check=True,
+        )
+
+        out = StringIO()
+        with patch(
+            "franktheunicorn.worker.repo_manager.ensure_repo",
+            return_value=repo_path,
+        ):
+            call_command(
+                "analyze_repo",
+                f"--repo={project.owner}/{project.repo}",
+                "--force",
+                stdout=out,
+            )
+        output = out.getvalue()
+        assert "Repo health analysis" in output
+        assert "Snapshot saved" in output
+
+    def test_clone_failure(self) -> None:
+        project = ProjectFactory()
+        err = StringIO()
+        with patch(
+            "franktheunicorn.worker.repo_manager.ensure_repo",
+            return_value=None,
+        ):
+            call_command(
+                "analyze_repo",
+                f"--repo={project.owner}/{project.repo}",
+                stderr=err,
+            )
+        assert "Failed to clone" in err.getvalue()
 
 
 @pytest.mark.django_db

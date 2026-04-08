@@ -296,3 +296,48 @@ class TestFormatHealthForReview:
         )
         result = format_health_for_review(snapshot, ["unrelated.py"])
         assert "Files in this PR" not in result
+
+
+class TestSnapshotFromDictEdgeCases:
+    def test_non_list_value_returns_empty(self) -> None:
+        """Cover _raw_list guard when value is not a list."""
+        snapshot = snapshot_from_dict(
+            {
+                "high_churn_files": "not a list",
+                "contributors": 42,
+                "bug_hotspots": None,
+                "monthly_commits": {"wrong": "type"},
+                "emergency_commits": "also not a list",
+                "analyzed_at": "2025-06-01",
+            }
+        )
+        assert snapshot.high_churn_files == []
+        assert snapshot.contributors == []
+        assert snapshot.bug_hotspots == []
+        assert snapshot.monthly_commits == []
+        assert snapshot.emergency_commits == []
+
+    def test_malformed_entries_skipped(self) -> None:
+        """Cover _raw_list filtering non-dict entries."""
+        snapshot = snapshot_from_dict(
+            {
+                "high_churn_files": [{"file_path": "a.py", "commit_count": 5}, "not a dict", 42],
+                "analyzed_at": "2025-06-01",
+            }
+        )
+        assert len(snapshot.high_churn_files) == 1
+
+
+class TestAnalyzeContributorsEdgeCases:
+    def test_handles_malformed_shortlog_lines(self, sample_repo: Path) -> None:
+        """Cover parsing branches: no tab, empty author, ValueError."""
+        from unittest.mock import patch
+
+        # Simulate output with edge cases: blank lines, missing tab, non-numeric count
+        mock_output = "\n\n  10\tAlice\n  notanum\tBob\nno-tab-here\n  5\t\n  3\tCharlie\n"
+        with patch("franktheunicorn.worker.repo_health._run_git", return_value=mock_output):
+            result = analyze_contributors(sample_repo)
+        # Only Alice (10) and Charlie (3) should parse; Bob (bad int), no-tab, empty author skipped
+        assert len(result) == 2
+        assert result[0].author == "Alice"
+        assert result[1].author == "Charlie"
