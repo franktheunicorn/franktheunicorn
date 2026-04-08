@@ -70,9 +70,22 @@ class Command(BaseCommand):
         config: dict[str, object] = {}
 
         # --- GitHub username ---
+        existing_username = str(existing_config.get("github_username", ""))
+        if not existing_username:
+            token = os.environ.get("FRANK_GITHUB_TOKEN", "")
+            if token:
+                from franktheunicorn.github.client import infer_github_username
+
+                inferred = infer_github_username(token)
+                if inferred:
+                    existing_username = inferred
+                    self.stdout.write(
+                        self.style.SUCCESS(f"  Auto-detected GitHub username: {inferred}")
+                    )
+
         config["github_username"] = self._ask(
             "GitHub username (for scoring — leave blank to skip): ",
-            default=str(existing_config.get("github_username", "")),
+            default=existing_username,
         )
 
         # --- Review style ---

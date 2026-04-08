@@ -24,7 +24,23 @@ class Command(BaseCommand):
             self.stdout.write(f"Operator config already exists at {operator_path}")
         else:
             self.stdout.write("Creating operator config...")
-            username = input("GitHub username: ").strip()
+            default_username = ""
+            token = os.environ.get("FRANK_GITHUB_TOKEN", "")
+            if token:
+                from franktheunicorn.github.client import infer_github_username
+
+                default_username = infer_github_username(token)
+                if default_username:
+                    self.stdout.write(
+                        self.style.SUCCESS(f"  Auto-detected GitHub username: {default_username}")
+                    )
+
+            if default_username:
+                username = (
+                    input(f"GitHub username [{default_username}]: ").strip() or default_username
+                )
+            else:
+                username = input("GitHub username: ").strip()
             style = input("Review style [direct but kind]: ").strip() or "direct but kind"
 
             operator_path.write_text(

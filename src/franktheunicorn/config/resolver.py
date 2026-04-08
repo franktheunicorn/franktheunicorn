@@ -58,6 +58,14 @@ def resolve_config(base_dir: Path) -> tuple[OperatorConfig, dict[str, str | int 
     config_path = resolve_operator_config_path(base_dir)
     oc = load_operator_config(config_path)
 
+    # Infer GitHub username from token if not explicitly set.
+    if not oc.github_username and oc.github_token and not oc.mock_mode:
+        from franktheunicorn.github.client import infer_github_username
+
+        inferred = infer_github_username(oc.github_token)
+        if inferred:
+            oc.github_username = inferred
+
     resolved: dict[str, str | int | bool] = {
         "config_path": config_path,
         "mock_mode": oc.mock_mode,

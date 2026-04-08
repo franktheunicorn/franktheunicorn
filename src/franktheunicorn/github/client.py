@@ -114,5 +114,38 @@ class GitHubClient:
         response = self._client.delete(url)
         response.raise_for_status()
 
+    def get_authenticated_user(self) -> dict[str, Any]:
+        """Fetch the authenticated user's profile (GET /user)."""
+        response = self._client.get("/user")
+        response.raise_for_status()
+        result: dict[str, Any] = response.json()
+        return result
+
     def close(self) -> None:
         self._client.close()
+
+
+def infer_github_username(token: str, base_url: str = GITHUB_API_BASE) -> str:
+    """Infer the GitHub username from a personal access token.
+
+    Calls ``GET /user`` and returns the ``login`` field.
+    Returns an empty string if the request fails for any reason
+    (network error, invalid token, insufficient scopes, etc.).
+    """
+    if not token:
+        return ""
+    client = GitHubClient(token=token, base_url=base_url)
+    try:
+        user_data = client.get_authenticated_user()
+        login: str = user_data.get("login", "")
+        if login:
+            logger.info("Inferred GitHub username from token: %s", login)
+        return login
+    except Exception:
+        logger.warning(
+            "Could not infer GitHub username from token (network error or invalid token)",
+            exc_info=True,
+        )
+        return ""
+    finally:
+        client.close()
