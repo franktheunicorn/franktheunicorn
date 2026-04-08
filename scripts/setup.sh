@@ -68,6 +68,31 @@ set_env() {
     mv "$tmpfile" "$file"
 }
 
+validate_github_token() {
+    # Validate a GitHub token by hitting GET /user. Returns 0 on success.
+    local token="$1"
+    if ! command -v curl &>/dev/null; then
+        warn "curl not found — skipping GitHub token validation"
+        return 0
+    fi
+    local http_code
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+        -H "Authorization: token ${token}" \
+        -H "Accept: application/vnd.github+json" \
+        https://api.github.com/user 2>/dev/null) || {
+        warn "Could not reach api.github.com — skipping token validation"
+        return 0
+    }
+    if [ "$http_code" = "200" ]; then
+        ok "GitHub token is valid"
+        return 0
+    else
+        err "GitHub token validation failed (HTTP $http_code)"
+        err "Check that the token is correct and has repo + read:org scopes."
+        return 1
+    fi
+}
+
 # --- Parse flags ------------------------------------------------------------
 
 MODE=""
@@ -233,17 +258,45 @@ if [ "$MODE" = "docker" ]; then
         ok "Set mock_mode: true in config/active/operator.yaml"
     else
         set_yaml_value "mock_mode" "false" config/active/operator.yaml
-        echo ""
-        info "For real PR ingestion, you need a GitHub personal access token."
-        info "Create one at: https://github.com/settings/tokens/new"
-        info "Required scopes: repo, read:org"
-        echo ""
-        token=$(ask "GitHub token (or press Enter to skip):" "")
-        if [ -n "$token" ]; then
-            set_env "FRANK_GITHUB_TOKEN" "$token"
-            ok "Saved token to .env (referenced as \${FRANK_GITHUB_TOKEN} in operator.yaml)"
+
+        # Check for existing FRANK_GITHUB_TOKEN in .env
+        existing_gh_token=$(grep "^FRANK_GITHUB_TOKEN=" .env 2>/dev/null | cut -d= -f2-) || true
+        if [ -z "$existing_gh_token" ]; then
+            for var in GITHUB_TOKEN GH_TOKEN; do
+                val="${!var:-}"
+                if [ -n "$val" ]; then
+                    preview="${val:0:4}****"
+                    ok "Found $var = $preview (usable for GitHub integration)"
+                    set_env "FRANK_GITHUB_TOKEN" "$val"
+                    ok "Auto-populated FRANK_GITHUB_TOKEN from $var"
+                    existing_gh_token="$val"
+                    break
+                fi
+            done
+        fi
+
+        if [ -z "$existing_gh_token" ]; then
+            echo ""
+            info "For real PR ingestion, you need a GitHub personal access token."
+            info "Create one at: https://github.com/settings/tokens/new"
+            info "Required scopes: repo, read:org"
+            echo ""
+            token=$(ask "GitHub token (or press Enter to skip):" "")
+            if [ -n "$token" ]; then
+                set_env "FRANK_GITHUB_TOKEN" "$token"
+                ok "Saved token to .env (referenced as \${FRANK_GITHUB_TOKEN} in operator.yaml)"
+                existing_gh_token="$token"
+            else
+                warn "Skipped. Set FRANK_GITHUB_TOKEN in .env before starting containers."
+            fi
         else
-            warn "Skipped. Set FRANK_GITHUB_TOKEN in .env before starting containers."
+            ok "GitHub token already set in .env"
+        fi
+
+        # Validate the token if we have one
+        if [ -n "$existing_gh_token" ]; then
+            validate_github_token "$existing_gh_token" || \
+                warn "Continuing setup — fix the token in .env before starting containers."
         fi
     fi
 
@@ -358,7 +411,7 @@ if [ "$MOCK_MODE" = "false" ]; then
     # ------------------------------------------------------------------
 
     # Check for existing GitHub tokens in environment
-    existing_gh_token=$(grep "^FRANK_GITHUB_TOKEN=" .env 2>/dev/null | cut -d= -f2-)
+    existing_gh_token=$(grep "^FRANK_GITHUB_TOKEN=" .env 2>/dev/null | cut -d= -f2-) || true
     if [ -z "$existing_gh_token" ]; then
         for var in GITHUB_TOKEN GH_TOKEN; do
             val="${!var:-}"
@@ -383,11 +436,18 @@ if [ "$MOCK_MODE" = "false" ]; then
         if [ -n "$token" ]; then
             set_env "FRANK_GITHUB_TOKEN" "$token"
             ok "Saved GitHub token to .env"
+            existing_gh_token="$token"
         else
             warn "Skipped. Set FRANK_GITHUB_TOKEN in .env later for real PR ingestion."
         fi
     else
         ok "GitHub token set in .env"
+    fi
+
+    # Validate the token if we have one
+    if [ -n "$existing_gh_token" ]; then
+        validate_github_token "$existing_gh_token" || \
+            warn "Continuing setup — fix the token in .env before running the worker."
     fi
 
     # Persist any env-sourced LLM keys (ANTHROPIC_API_KEY etc.) to .env
