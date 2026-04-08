@@ -610,15 +610,6 @@ if [ ! -f Makefile ]; then
 fi
 echo ""
 
-# --- Offer to install local LLM tools if missing ---------------------------
-
-if ! command -v ollama &>/dev/null; then
-    offer_install ollama || true
-fi
-if ! command -v llama-server &>/dev/null; then
-    offer_install llama-server || true
-fi
-
 # --- LLM backend configuration (single wizard handles everything) ----------
 # setup_llm handles: credential detection, GitHub username, review style,
 # LLM provider selection, model discovery, API key collection, project setup,
