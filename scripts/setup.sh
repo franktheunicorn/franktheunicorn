@@ -329,7 +329,7 @@ if [ "$MODE" = "docker" ]; then
     info "Building Docker image (this may take a minute on first run)..."
     docker compose build web
 
-    docker compose run --rm -v "$(pwd)/.env:/app/.env" web python manage.py setup_llm
+    docker compose run --rm web python manage.py setup_llm
     echo ""
 
     # Persist the mock_mode choice into operator.yaml (created/updated by setup_llm above).
