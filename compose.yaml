@@ -14,7 +14,6 @@ x-common: &common
   volumes:
     - ./data:/app/data
     - ./config:/app/config
-    - ./.env:/app/.env
   environment: &common-env
     # Secrets — referenced via ${VAR} in operator.yaml
     FRANK_GITHUB_TOKEN: ${FRANK_GITHUB_TOKEN:-}
