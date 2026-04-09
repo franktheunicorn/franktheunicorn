@@ -1,0 +1,57 @@
+{% extends "dashboard/base.html" %}
+{% load static %}
+{% block title %}Security Reports — franktheunicorn{% endblock %}
+{% block content %}
+<h2>Security Report Triage</h2>
+<p style="font-size: 0.85rem; color: var(--muted); margin-bottom: 1rem;">
+    Triage incoming security vulnerability reports. Paste reports or ingest from email.
+</p>
+
+<div style="margin-bottom: 1rem;">
+    <a href="{% url 'dashboard:security_create' %}" class="action-btn post" style="font-size: 0.85rem; padding: 0.4rem 0.8rem; text-decoration: none;">+ New Report</a>
+</div>
+
+<div class="tab-bar">
+    {% for tab in status_tabs %}
+    <a href="{% url 'dashboard:security_list' %}{% if tab.key != 'all' %}?status={{ tab.key }}{% endif %}"
+       {% if active_status == tab.key %}class="active"{% endif %}>
+        {{ tab.label }}
+        <span class="tab-count">{{ status_counts|default_if_none:0 }}</span>
+    </a>
+    {% endfor %}
+</div>
+
+<ul class="pr-list">
+    {% for report in reports %}
+    <li class="pr-item">
+        <div class="pr-title">
+            <span class="score-badge {% if report.status == 'valid' %}{% elif report.status == 'expected-behavior' or report.status == 'invalid' %}low{% else %}mid{% endif %}"
+                  style="{% if report.status == 'valid' %}background: var(--red-bg); color: var(--red);{% elif report.status == 'duplicate' %}background: var(--orange-bg); color: var(--orange);{% endif %}">
+                {{ report.get_status_display }}
+            </span>
+            <a href="{% url 'dashboard:security_detail' report.pk %}">
+                {{ report.title|default:"Untitled Report" }}
+            </a>
+            {% if report.assessed_severity != "unknown" %}
+            <span class="source-badge" style="background: {% if report.assessed_severity == 'critical' %}var(--red){% elif report.assessed_severity == 'high' %}var(--orange){% elif report.assessed_severity == 'medium' %}#f9a825{% else %}var(--muted){% endif %}; color: #fff;">
+                {{ report.get_assessed_severity_display }}
+            </span>
+            {% endif %}
+        </div>
+        <div class="pr-meta">
+            {{ report.get_source_display }}
+            {% if report.project %} &middot; {{ report.project.full_name }}{% endif %}
+            {% if report.reporter_name %} &middot; from {{ report.reporter_name }}{% endif %}
+            &middot; {{ report.created_at|timesince }} ago
+            {% if report.is_expected_behavior %} &middot; <strong style="color: var(--orange);">Expected Behavior</strong>{% endif %}
+            {% if report.matched_cve_id %} &middot; Dup of {{ report.matched_cve_id }}{% endif %}
+        </div>
+    </li>
+    {% empty %}
+    <li class="empty-state">
+        <p>No security reports yet.</p>
+        <p style="font-size: 0.85rem;"><a href="{% url 'dashboard:security_create' %}">Paste a report</a> to get started.</p>
+    </li>
+    {% endfor %}
+</ul>
+{% endblock %}

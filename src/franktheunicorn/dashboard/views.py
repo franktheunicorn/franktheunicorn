@@ -23,6 +23,7 @@ from franktheunicorn.core.models import (
     Project,
     PullRequest,
     ReviewDraft,
+    SecurityReport,
     TestRun,
 )
 
@@ -629,3 +630,276 @@ def merge_pr(request: HttpRequest, pr_id: int) -> HttpResponse:
     return HttpResponse(
         f'<div class="merge-result" style="color: #c00;">Merge failed: {result.error}</div>'
     )
+
+
+# --- Security Report Triage ---
+
+
+SECURITY_STATUS_TABS: list[dict[str, str]] = [
+    {"key": "all", "label": "All"},
+    {"key": "new", "label": "New"},
+    {"key": "triaging", "label": "Triaging"},
+    {"key": "valid", "label": "Valid"},
+    {"key": "invalid", "label": "Invalid"},
+    {"key": "duplicate", "label": "Duplicate"},
+    {"key": "expected-behavior", "label": "Expected Behavior"},
+]
+
+
+def security_report_list(request: HttpRequest) -> HttpResponse:
+    """List security reports with status tabs."""
+    status_filter = request.GET.get("status", "all")
+    reports = SecurityReport.objects.select_related("project").order_by("-created_at")
+
+    if status_filter != "all":
+        reports = reports.filter(status=status_filter)
+
+    status_counts: dict[str, int] = {}
+    all_reports = SecurityReport.objects.all()
+    status_counts["all"] = all_reports.count()
+    for tab in SECURITY_STATUS_TABS:
+        if tab["key"] != "all":
+            status_counts[tab["key"]] = all_reports.filter(status=tab["key"]).count()
+
+    return render(
+        request,
+        "dashboard/security_list.html",
+        {
+            "reports": reports[:100],
+            "status_tabs": SECURITY_STATUS_TABS,
+            "active_status": status_filter,
+            "status_counts": status_counts,
+        },
+    )
+
+
+def security_report_create(request: HttpRequest) -> HttpResponse:
+    """Paste form for creating a new security report."""
+    if request.method == "POST":
+        raw_text = request.POST.get("raw_text", "").strip()
+        title = request.POST.get("title", "").strip()
+        project_id = request.POST.get("project_id")
+        reporter_name = request.POST.get("reporter_name", "").strip()
+        reporter_email = request.POST.get("reporter_email", "").strip()
+
+        if not raw_text:
+            return HttpResponse("Report text is required.", status=400)
+
+        project = None
+        if project_id:
+            project = Project.objects.filter(pk=project_id).first()
+
+        report = SecurityReport.objects.create(
+            raw_text=raw_text,
+            title=title,
+            project=project,
+            reporter_name=reporter_name,
+            reporter_email=reporter_email,
+            source="paste",
+        )
+
+        # Auto-triage if configured.
+        try:
+            _auto_triage_report(report)
+        except Exception:
+            logger.debug("Auto-triage failed for report %d", report.pk, exc_info=True)
+
+        return redirect("dashboard:security_detail", report_id=report.pk)
+
+    projects = Project.objects.filter(enabled=True).order_by("owner", "repo")
+    return render(
+        request,
+        "dashboard/security_create.html",
+        {"projects": projects},
+    )
+
+
+def security_report_detail(request: HttpRequest, report_id: int) -> HttpResponse:
+    """Detail view for a single security report."""
+    report = get_object_or_404(SecurityReport.objects.select_related("project"), pk=report_id)
+
+    sandbox_enabled = _is_sandbox_enabled()
+
+    return render(
+        request,
+        "dashboard/security_detail.html",
+        {
+            "report": report,
+            "sandbox_enabled": sandbox_enabled,
+        },
+    )
+
+
+@require_POST
+def security_report_triage(request: HttpRequest, report_id: int) -> HttpResponse:
+    """Trigger LLM triage on a security report (htmx)."""
+    report = get_object_or_404(SecurityReport.objects.select_related("project"), pk=report_id)
+
+    try:
+        from franktheunicorn.config.loader import get_operator_config
+
+        operator_config = get_operator_config()
+
+        project_config = None
+        if report.project:
+            from django.conf import settings
+
+            from franktheunicorn.config.loader import load_project_configs
+
+            configs = load_project_configs(getattr(settings, "FRANK_PROJECTS_DIR", ""))
+            project_config = next(
+                (
+                    c
+                    for c in configs
+                    if c.owner == report.project.owner and c.repo == report.project.repo
+                ),
+                None,
+            )
+
+        from franktheunicorn.security.triage import triage_report
+
+        triage_report(report, project_config, operator_config)
+        report.refresh_from_db()
+    except Exception:
+        logger.exception("Triage failed for report %d", report.pk)
+        return HttpResponse(
+            '<div class="triage-result" style="color: #c00;">'
+            "Triage failed. Check LLM backend configuration.</div>"
+        )
+
+    return render(request, "dashboard/_security_triage_result.html", {"report": report})
+
+
+@require_POST
+def security_report_verdict(request: HttpRequest, report_id: int) -> HttpResponse:
+    """Set operator verdict on a security report (htmx)."""
+    report = get_object_or_404(SecurityReport, pk=report_id)
+    new_status = request.POST.get("status", "")
+    notes = request.POST.get("operator_notes", "")
+
+    valid_statuses = {choice[0] for choice in SecurityReport.STATUS_CHOICES}
+    if new_status not in valid_statuses:
+        return HttpResponse("Invalid status.", status=400)
+
+    report.status = new_status
+    report.operator_notes = notes
+    if new_status == "duplicate":
+        report.matched_cve_id = request.POST.get("matched_cve_id", "")
+    report.save(update_fields=["status", "operator_notes", "matched_cve_id", "updated_at"])
+
+    return render(request, "dashboard/_security_verdict.html", {"report": report})
+
+
+@require_POST
+def security_report_sandbox(request: HttpRequest, report_id: int) -> HttpResponse:
+    """Trigger sandbox POC execution (htmx)."""
+    report = get_object_or_404(SecurityReport.objects.select_related("project"), pk=report_id)
+
+    if not _is_sandbox_enabled():
+        return HttpResponse(
+            '<div class="sandbox-result" style="color: #c00;">'
+            "Sandbox execution is not enabled.</div>"
+        )
+
+    try:
+        from franktheunicorn.security.sandbox import run_poc_in_sandbox
+
+        repo_path = None
+        if report.project:
+            from django.conf import settings
+
+            repos_dir = getattr(settings, "FRANK_REPOS_DIR", "")
+            if repos_dir:
+                from pathlib import Path
+
+                candidate = Path(repos_dir) / report.project.owner / report.project.repo
+                if candidate.is_dir():
+                    repo_path = candidate
+
+        result = run_poc_in_sandbox(report, repo_path=repo_path)
+        report.sandbox_requested = True
+        report.sandbox_verdict = result.verdict
+        report.sandbox_result = result.output
+        report.save(
+            update_fields=[
+                "sandbox_requested",
+                "sandbox_verdict",
+                "sandbox_result",
+                "updated_at",
+            ]
+        )
+    except Exception:
+        logger.exception("Sandbox execution failed for report %d", report.pk)
+        return HttpResponse(
+            '<div class="sandbox-result" style="color: #c00;">Sandbox execution failed.</div>'
+        )
+
+    return render(request, "dashboard/_security_sandbox_result.html", {"report": report})
+
+
+@require_POST
+def security_report_cve_check(request: HttpRequest, report_id: int) -> HttpResponse:
+    """Trigger CVE lookup (htmx)."""
+    report = get_object_or_404(SecurityReport, pk=report_id)
+
+    try:
+        from franktheunicorn.config.loader import get_operator_config
+
+        operator_config = get_operator_config()
+
+        keyword = report.parsed_component or report.title
+        if not keyword:
+            return HttpResponse('<div class="cve-result">No component or title to search.</div>')
+
+        from franktheunicorn.security.cve_lookup import search_cves
+
+        api_key_env = operator_config.security_triage.nvd_api_key_env
+        matches = search_cves(keyword, api_key_env=api_key_env)
+        report.cve_matches = [m.to_dict() for m in matches]
+        report.save(update_fields=["cve_matches", "updated_at"])
+    except Exception:
+        logger.exception("CVE check failed for report %d", report.pk)
+        return HttpResponse('<div class="cve-result" style="color: #c00;">CVE lookup failed.</div>')
+
+    return render(request, "dashboard/_security_cve_matches.html", {"report": report})
+
+
+def _auto_triage_report(report: SecurityReport) -> None:
+    """Auto-triage a new report if configured."""
+    from franktheunicorn.config.loader import get_operator_config
+
+    operator_config = get_operator_config()
+    if not operator_config.security_triage.enabled:
+        return
+    if not operator_config.security_triage.auto_triage:
+        return
+
+    project_config = None
+    if report.project:
+        from django.conf import settings
+
+        from franktheunicorn.config.loader import load_project_configs
+
+        configs = load_project_configs(getattr(settings, "FRANK_PROJECTS_DIR", ""))
+        project_config = next(
+            (
+                c
+                for c in configs
+                if c.owner == report.project.owner and c.repo == report.project.repo
+            ),
+            None,
+        )
+
+    from franktheunicorn.security.triage import triage_report
+
+    triage_report(report, project_config, operator_config)
+
+
+def _is_sandbox_enabled() -> bool:
+    """Check if sandbox execution is enabled in operator config."""
+    try:
+        from franktheunicorn.config.loader import get_operator_config
+
+        return get_operator_config().security_triage.sandbox_enabled
+    except Exception:
+        return False

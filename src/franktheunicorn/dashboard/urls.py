@@ -33,4 +33,32 @@ urlpatterns = [
     # Merge queue (v2)
     path("merge-queue/", views.merge_queue_view, name="merge_queue"),
     path("pr/<int:pr_id>/merge/", views.merge_pr, name="merge_pr"),
+    # Security report triage
+    path("security/", views.security_report_list, name="security_list"),
+    path("security/new/", views.security_report_create, name="security_create"),
+    path(
+        "security/<int:report_id>/",
+        views.security_report_detail,
+        name="security_detail",
+    ),
+    path(
+        "security/<int:report_id>/triage/",
+        views.security_report_triage,
+        name="security_triage",
+    ),
+    path(
+        "security/<int:report_id>/verdict/",
+        views.security_report_verdict,
+        name="security_verdict",
+    ),
+    path(
+        "security/<int:report_id>/sandbox/",
+        views.security_report_sandbox,
+        name="security_sandbox",
+    ),
+    path(
+        "security/<int:report_id>/cve-check/",
+        views.security_report_cve_check,
+        name="security_cve_check",
+    ),
 ]

@@ -358,6 +358,48 @@ class EmailConfig(BaseModel):
         return v
 
 
+class SecurityEmailConfig(BaseModel):
+    """Config for security report email inbox (IMAP).
+
+    Secret fields should use ``${ENV_VAR}`` syntax.
+    """
+
+    enabled: bool = False
+    imap_host: str = ""
+    imap_port: int = 993
+    imap_user: str = ""
+    imap_pass: str = ""  # typically "${SECURITY_EMAIL_PASS}"
+    use_ssl: bool = True
+    folder: str = "INBOX"
+    poll_interval_seconds: int = 300
+
+    @field_validator("imap_port")
+    @classmethod
+    def port_must_be_positive(cls, v: int) -> int:
+        if v <= 0:
+            msg = "imap_port must be positive"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("poll_interval_seconds")
+    @classmethod
+    def poll_interval_must_be_positive(cls, v: int) -> int:
+        if v <= 0:
+            msg = "poll_interval_seconds must be positive"
+            raise ValueError(msg)
+        return v
+
+
+class SecurityTriageConfig(BaseModel):
+    """Config for security report triage feature."""
+
+    enabled: bool = False
+    email: SecurityEmailConfig = Field(default_factory=SecurityEmailConfig)
+    nvd_api_key_env: str = ""  # optional, for higher NVD rate limits
+    auto_triage: bool = True  # automatically run LLM triage on new reports
+    sandbox_enabled: bool = False  # allow sandbox POC execution
+
+
 class OperatorConfig(BaseModel):
     """Top-level operator config loaded from operator.yaml."""
 
@@ -374,6 +416,7 @@ class OperatorConfig(BaseModel):
     sentry: SentryConfig = Field(default_factory=SentryConfig)
     perplexity: PerplexityConfig = Field(default_factory=PerplexityConfig)
     fine_tuning: FineTuningConfig = Field(default_factory=FineTuningConfig)
+    security_triage: SecurityTriageConfig = Field(default_factory=SecurityTriageConfig)
     # Multiple LLM backends can run in parallel. Each produces findings
     # independently; results are combined and deduped via anti-patterns.
     llm_backends: list[LLMBackendConfig] = Field(default_factory=list)

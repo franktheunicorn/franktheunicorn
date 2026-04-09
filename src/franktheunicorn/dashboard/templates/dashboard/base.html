@@ -103,6 +103,7 @@
         <nav>
             <a href="{% url 'dashboard:index' %}" {% if request.resolver_match.url_name == 'index' %}class="active"{% endif %}>Inbox</a>
             <a href="{% url 'dashboard:anti_patterns' %}" {% if request.resolver_match.url_name == 'anti_patterns' %}class="active"{% endif %}>Anti-Patterns</a>
+            <a href="{% url 'dashboard:security_list' %}" {% if request.resolver_match.url_name|slice:":8" == 'security' %}class="active"{% endif %}>Security</a>
             <a href="{% url 'dashboard:stats' %}" {% if request.resolver_match.url_name == 'stats' %}class="active"{% endif %}>Stats</a>
         </nav>
     </header>
