@@ -2301,7 +2301,7 @@ cp .env.example .env
 # Edit .env: GITHUB_TOKEN + ANTHROPIC_API_KEY (minimum)
 
 docker compose up
-# Dashboard: http://localhost:8000
+# Dashboard: http://localhost:7742
 # Worker starts polling
 ```
 

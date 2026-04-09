@@ -19,7 +19,7 @@ services:
   vllm:
     image: vllm/vllm-openai:latest
     ports:
-      - "8081:8000"
+      - "7745:8000"
     volumes:
       - vllm-cache:/root/.cache/huggingface
     command: ["--model", "{{MODEL}}", "--host", "0.0.0.0"]

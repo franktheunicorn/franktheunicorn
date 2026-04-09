@@ -44,7 +44,7 @@ cp .env.example .env           # add API keys here
 
 **Docker Compose** (no Python needed):
 ```bash
-docker compose up              # dashboard: http://localhost:8000
+docker compose up              # dashboard: http://localhost:7742
 ```
 
 **Make** (local development):
