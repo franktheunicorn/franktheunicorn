@@ -13,10 +13,8 @@ Checks performed:
 
 from __future__ import annotations
 
-import sys
-
 from django.apps import apps
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError, CommandParser
 from django.db.migrations.autodetector import MigrationAutodetector
 from django.db.migrations.loader import MigrationLoader
 from django.db.migrations.state import ProjectState
@@ -25,10 +23,7 @@ from django.db.migrations.state import ProjectState
 class Command(BaseCommand):
     help = "Detect migration conflicts and unmade migrations across all Django apps"
 
-    def add_arguments(self, parser: object) -> None:
-        from argparse import ArgumentParser
-
-        assert isinstance(parser, ArgumentParser)
+    def add_arguments(self, parser: CommandParser) -> None:
         parser.add_argument(
             "--check-unmade",
             action="store_true",
@@ -71,7 +66,6 @@ class Command(BaseCommand):
         if errors:
             for error in errors:
                 self.stderr.write(self.style.ERROR(error))
-            self.stderr.write(self.style.ERROR(f"\n{len(errors)} migration issue(s) found."))
-            sys.exit(1)
-        else:
-            self.stdout.write(self.style.SUCCESS("No migration conflicts detected."))
+            raise CommandError(f"{len(errors)} migration issue(s) found.")
+
+        self.stdout.write(self.style.SUCCESS("No migration conflicts detected."))
