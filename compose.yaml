@@ -4,7 +4,7 @@
 #   docker compose up
 #
 # This starts:
-#   - web: Django dev server on http://localhost:8000
+#   - web: Django dev server on http://localhost:7742
 #   - worker: Polling worker that ingests PRs on an interval
 #
 # Both services share the same SQLite database via a mounted volume.
@@ -32,7 +32,7 @@ services:
       dockerfile: docker/Dockerfile
       target: web
     ports:
-      - "8000:8000"
+      - "7742:8000"
     # Web runs migrations; worker waits for web to be healthy before starting.
     command: >
       sh -c "python manage.py migrate --run-syncdb &&
@@ -64,7 +64,7 @@ services:
     image: ollama/ollama:latest
     profiles: ["inference"]
     ports:
-      - "11434:11434"
+      - "7743:11434"
     volumes:
       - ollama-models:/root/.ollama
     # Uncomment for GPU support:
@@ -80,7 +80,7 @@ services:
     image: ghcr.io/ggerganov/llama.cpp:server
     profiles: ["inference"]
     ports:
-      - "8080:8080"
+      - "7744:8080"
     volumes:
       - llama-models:/models
     # Mount your GGUF model and uncomment:
@@ -90,7 +90,7 @@ services:
     image: vllm/vllm-openai:latest
     profiles: ["inference"]
     ports:
-      - "8081:8000"
+      - "7745:8000"
     # Requires GPU — uncomment and set model:
     # deploy:
     #   resources:

@@ -74,7 +74,7 @@ docker compose up
 ```
 
 This starts two containers:
-- **web** — Django dashboard at <http://localhost:8000> (runs migrations automatically)
+- **web** — Django dashboard at <http://localhost:7742> (runs migrations automatically)
 - **worker** — background poller that ingests PRs
 
 State is persisted in `./data/` (SQLite) and config is read from `./config/`.
@@ -91,7 +91,7 @@ make setup    # creates venv, installs deps, runs migrations
 Then start both services (in separate terminals, or use a multiplexer):
 
 ```bash
-make serve    # terminal 1 — dashboard at http://localhost:8000
+make serve    # terminal 1 — dashboard at http://localhost:7742
 make worker   # terminal 2 — background poller
 ```
 
@@ -110,7 +110,7 @@ Other useful targets:
 
 ## 3. Verify it works
 
-Open <http://localhost:8000>. In mock mode you'll see fixture PRs immediately.
+Open <http://localhost:7742>. In mock mode you'll see fixture PRs immediately.
 In real mode, the worker needs a polling cycle (default: 5 minutes) to ingest
 PRs — or restart the worker to trigger an immediate poll.
 

@@ -349,7 +349,7 @@ if [ "$MODE" = "docker" ]; then
     info "Building Docker image (this may take a minute on first run)..."
     docker compose build web
 
-    docker compose run --rm -v "$(pwd)/.env:/app/.env" web python manage.py setup_llm
+    docker compose run --rm -v "$(pwd)/.env:/app/.env" web python manage.py setup_llm --docker
     echo ""
 
     # Persist the mock_mode choice into operator.yaml (created/updated by setup_llm above).
@@ -368,8 +368,9 @@ if [ "$MODE" = "docker" ]; then
     echo "Next steps:"
     echo ""
     echo "  ${BOLD}Start the services:${NC}"
-    echo "    docker compose up"
-    echo "    # Dashboard: http://localhost:8000"
+    echo "    ./scripts/launch.sh"
+    echo "    # Dashboard: http://localhost:7742"
+    echo "    # (launch.sh auto-detects local inference compose overrides)"
     echo ""
     echo "  ${BOLD}Configuration:${NC}"
     echo "    config/active/operator.yaml  (app config, LLM backends)"
@@ -606,7 +607,7 @@ echo "Next steps:"
 echo ""
 echo "  ${BOLD}Start the dashboard:${NC}"
 echo "    make serve                         # or: python manage.py runserver"
-echo "    # Open http://localhost:8000"
+echo "    # Open http://localhost:7742"
 echo ""
 echo "  ${BOLD}Start the worker (separate terminal):${NC}"
 echo "    make worker                        # or: python manage.py run_worker"

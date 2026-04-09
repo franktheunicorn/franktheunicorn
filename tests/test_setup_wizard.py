@@ -205,6 +205,168 @@ class TestSetupLLMCommand:
 
 
 @pytest.mark.django_db
+class TestDockerMode:
+    """Tests for --docker mode: skip install checks, use service names, auto-generate compose."""
+
+    def test_ollama_docker_mode_uses_service_url_and_generates_compose(
+        self, tmp_path: Path
+    ) -> None:
+        """In --docker mode, Ollama uses Docker service URL and auto-generates compose."""
+        output_path = tmp_path / "operator.yaml"
+        template_dir = tmp_path / "docker"
+        template_dir.mkdir()
+        template_path = template_dir / "compose.ollama.yaml.template"
+        template_path.write_text(
+            "services:\n  ollama:\n    image: ollama/ollama:latest\n"
+            "  ollama-pull:\n    entrypoint: ['ollama', 'pull', '{{MODEL}}']\n"
+        )
+        inputs = [
+            "testuser",  # github_username
+            "direct",  # review_style
+            "4",  # provider: ollama
+            "",  # model: accept recommended default
+            "",  # projects: skip
+            "n",  # coderabbit: no
+        ]
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch(
+                "franktheunicorn.core.management.commands.setup_llm.recommend_local_model",
+                return_value=("qwen2.5-coder:14b", "12GB VRAM available"),
+            ),
+            patch("django.conf.settings.BASE_DIR", str(tmp_path)),
+            _NO_DISCOVERY,
+        ):
+            call_command("setup_llm", output=str(output_path), docker=True)
+
+        config = yaml.safe_load(output_path.read_text())
+        assert config["llm_backends"][0]["provider"] == "ollama"
+        assert config["llm_backends"][0]["base_url"] == "http://ollama:11434"
+        assert config["llm_backends"][0]["model"] == "qwen2.5-coder:14b"
+
+        # Compose override was auto-generated
+        compose_output = tmp_path / "compose.ollama.yaml"
+        assert compose_output.exists()
+        content = compose_output.read_text()
+        assert "qwen2.5-coder:14b" in content
+        assert "{{MODEL}}" not in content
+
+    def test_llama_cpp_docker_mode_uses_service_url_and_generates_compose(
+        self, tmp_path: Path
+    ) -> None:
+        """In --docker mode, llama-cpp uses Docker service URL and auto-generates compose."""
+        output_path = tmp_path / "operator.yaml"
+        template_dir = tmp_path / "docker"
+        template_dir.mkdir()
+        template_path = template_dir / "compose.llama-cpp.yaml.template"
+        template_path.write_text(
+            "services:\n  llama-cpp:\n    image: ghcr.io/ggerganov/llama.cpp:server\n"
+            "    command: -m /models/{{MODEL}} --host 0.0.0.0 --port 8080\n"
+        )
+        inputs = [
+            "testuser",  # github_username
+            "direct",  # review_style
+            "5",  # provider: llama-cpp
+            "my-model.gguf",  # GGUF filename
+            "",  # projects: skip
+            "n",  # coderabbit: no
+        ]
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch("django.conf.settings.BASE_DIR", str(tmp_path)),
+            _NO_DISCOVERY,
+        ):
+            call_command("setup_llm", output=str(output_path), docker=True)
+
+        config = yaml.safe_load(output_path.read_text())
+        assert config["llm_backends"][0]["provider"] == "openai"
+        assert config["llm_backends"][0]["base_url"] == "http://llama-cpp:8080/v1"
+        assert config["llm_backends"][0]["model"] == "my-model.gguf"
+
+        # Compose override was auto-generated
+        compose_output = tmp_path / "compose.llama-cpp.yaml"
+        assert compose_output.exists()
+        content = compose_output.read_text()
+        assert "my-model.gguf" in content
+        assert "{{MODEL}}" not in content
+
+    def test_vllm_docker_mode_uses_service_url_and_generates_compose(self, tmp_path: Path) -> None:
+        """In --docker mode, vLLM uses Docker service URL and auto-generates compose."""
+        output_path = tmp_path / "operator.yaml"
+        template_dir = tmp_path / "docker"
+        template_dir.mkdir()
+        template_path = template_dir / "compose.vllm.yaml.template"
+        template_path.write_text(
+            "services:\n  vllm:\n    image: vllm/vllm-openai:latest\n"
+            '    command: ["--model", "{{MODEL}}", "--host", "0.0.0.0"]\n'
+        )
+        inputs = [
+            "testuser",  # github_username
+            "direct",  # review_style
+            "6",  # provider: vllm
+            "Qwen/Qwen2.5-Coder-14B",  # HuggingFace model name
+            "",  # projects: skip
+            "n",  # coderabbit: no
+        ]
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch("django.conf.settings.BASE_DIR", str(tmp_path)),
+            _NO_DISCOVERY,
+        ):
+            call_command("setup_llm", output=str(output_path), docker=True)
+
+        config = yaml.safe_load(output_path.read_text())
+        assert config["llm_backends"][0]["provider"] == "openai"
+        assert config["llm_backends"][0]["base_url"] == "http://vllm:8000/v1"
+        assert config["llm_backends"][0]["model"] == "Qwen/Qwen2.5-Coder-14B"
+
+        # Compose override was auto-generated
+        compose_output = tmp_path / "compose.vllm.yaml"
+        assert compose_output.exists()
+        content = compose_output.read_text()
+        assert "Qwen/Qwen2.5-Coder-14B" in content
+        assert "{{MODEL}}" not in content
+
+    def test_ollama_docker_mode_does_not_check_which(self, tmp_path: Path) -> None:
+        """In --docker mode, shutil.which is never called for ollama."""
+        output_path = tmp_path / "operator.yaml"
+        template_dir = tmp_path / "docker"
+        template_dir.mkdir()
+        (template_dir / "compose.ollama.yaml.template").write_text(
+            "services:\n  ollama-pull:\n    entrypoint: ['ollama', 'pull', '{{MODEL}}']\n"
+        )
+        inputs = [
+            "testuser",
+            "direct",
+            "4",  # ollama
+            "",  # accept default model
+            "",  # projects: skip
+            "n",  # coderabbit: no
+        ]
+        # Patch shutil.which at the setup_llm module level — this only covers
+        # the direct which("ollama") call in _configure_ollama, not the one
+        # inside recommend_local_model (which we mock separately).
+        mock_which = patch(
+            "franktheunicorn.core.management.commands.setup_llm.shutil.which",
+            side_effect=AssertionError("should not be called"),
+        )
+        with (
+            patch("builtins.input", side_effect=inputs),
+            mock_which,
+            patch(
+                "franktheunicorn.core.management.commands.setup_llm.recommend_local_model",
+                return_value=("qwen2.5-coder:7b", "CPU mode"),
+            ),
+            patch("django.conf.settings.BASE_DIR", str(tmp_path)),
+            _NO_DISCOVERY,
+        ):
+            # Should not raise — shutil.which is bypassed in docker mode
+            call_command("setup_llm", output=str(output_path), docker=True)
+
+        assert output_path.exists()
+
+
+@pytest.mark.django_db
 class TestCredentialDetectionIntegration:
     """Tests for credential detection integration in the setup wizard."""
 

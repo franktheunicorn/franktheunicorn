@@ -48,8 +48,14 @@ class Command(BaseCommand):
             default="",
             help="Path to write operator.yaml (default: config/active/operator.yaml)",
         )
+        parser.add_argument(
+            "--docker",
+            action="store_true",
+            help="Docker mode: skip install checks, use container service names, auto-generate compose overrides.",
+        )
 
     def handle(self, *args, **options):  # type: ignore[no-untyped-def]
+        self._docker_mode: bool = options.get("docker", False)
         self.stdout.write(self.style.SUCCESS("\n=== franktheunicorn LLM Setup Wizard ===\n"))
 
         # Resolve output path early so we can read existing config for defaults.
@@ -315,8 +321,7 @@ class Command(BaseCommand):
 
     def _configure_ollama(self, llm_config: dict[str, object]) -> dict[str, object]:
         """Configure local Ollama backend with auto-detected model recommendation."""
-        # Check if ollama is installed.
-        if not shutil.which("ollama"):
+        if not self._docker_mode and not shutil.which("ollama"):
             self.stdout.write(
                 self.style.WARNING(
                     "\n  Ollama not found on PATH.\n  Install from: https://ollama.com/download\n"
@@ -327,22 +332,34 @@ class Command(BaseCommand):
         self.stdout.write(f"\n  Hardware detection: {reason}\n")
         self.stdout.write(f"  Recommended model: {recommended_model}\n")
 
-        base_url = self._ask("  Ollama server URL: ", default="http://localhost:11434")
+        if self._docker_mode:
+            base_url = "http://ollama:11434"
+            self.stdout.write(f"  Using Docker service URL: {base_url}\n")
+        else:
+            base_url = self._ask("  Ollama server URL: ", default="http://localhost:11434")
         llm_config["base_url"] = base_url
 
-        # Try to discover available models from the Ollama server.
-        model = self._discover_and_choose_model(
-            provider="ollama",
-            default_model=recommended_model,
-            base_url=base_url,
-        )
+        if self._docker_mode:
+            # Server isn't running yet during setup; use recommended model directly.
+            model = self._ask("  Model name: ", default=recommended_model)
+        else:
+            model = self._discover_and_choose_model(
+                provider="ollama",
+                default_model=recommended_model,
+                base_url=base_url,
+            )
         llm_config["model"] = model
 
-        self.stdout.write(f"\n  To download the model, run:\n    ollama pull {model}\n")
-
-        generate = self._ask("  Generate Docker Compose override for Ollama? (y/N): ", default="n")
-        if generate.lower() in ("y", "yes"):
+        if self._docker_mode:
             self._generate_ollama_compose(model)
+            self.stdout.write("  Model will be pulled automatically by Docker Compose.\n")
+        else:
+            self.stdout.write(f"\n  To download the model, run:\n    ollama pull {model}\n")
+            generate = self._ask(
+                "  Generate Docker Compose override for Ollama? (y/N): ", default="n"
+            )
+            if generate.lower() in ("y", "yes"):
+                self._generate_ollama_compose(model)
 
         return llm_config
 
@@ -372,12 +389,76 @@ class Command(BaseCommand):
             self.style.SUCCESS(f"\n  Generated {output_path.name} (model: {model})\n")
         )
         self.stdout.write(
-            "  Run with Docker:\n    docker compose -f compose.yaml -f compose.ollama.yaml up\n"
+            "  Run with Docker:\n"
+            "    docker compose -f compose.yaml -f compose.ollama.yaml up\n"
+            "    # or: ./scripts/launch.sh\n"
+        )
+
+    def _generate_llama_cpp_compose(self, model: str) -> None:
+        """Generate compose.llama-cpp.yaml from the template with the chosen model."""
+        import django.conf
+
+        base_dir = Path(django.conf.settings.BASE_DIR)
+        template_path = base_dir / "docker" / "compose.llama-cpp.yaml.template"
+        output_path = base_dir / "compose.llama-cpp.yaml"
+
+        if not template_path.exists():
+            self.stdout.write(self.style.WARNING(f"\n  Template not found: {template_path}\n"))
+            return
+
+        try:
+            content = template_path.read_text(encoding="utf-8")
+            content = content.replace("{{MODEL}}", model)
+            output_path.write_text(content, encoding="utf-8")
+        except OSError as exc:
+            self.stdout.write(
+                self.style.WARNING(f"\n  Could not generate compose.llama-cpp.yaml: {exc}\n")
+            )
+            return
+
+        self.stdout.write(
+            self.style.SUCCESS(f"\n  Generated {output_path.name} (model: {model})\n")
+        )
+        self.stdout.write(
+            "  Run with Docker:\n"
+            "    docker compose -f compose.yaml -f compose.llama-cpp.yaml up\n"
+            "    # or: ./scripts/launch.sh\n"
+        )
+
+    def _generate_vllm_compose(self, model: str) -> None:
+        """Generate compose.vllm.yaml from the template with the chosen model."""
+        import django.conf
+
+        base_dir = Path(django.conf.settings.BASE_DIR)
+        template_path = base_dir / "docker" / "compose.vllm.yaml.template"
+        output_path = base_dir / "compose.vllm.yaml"
+
+        if not template_path.exists():
+            self.stdout.write(self.style.WARNING(f"\n  Template not found: {template_path}\n"))
+            return
+
+        try:
+            content = template_path.read_text(encoding="utf-8")
+            content = content.replace("{{MODEL}}", model)
+            output_path.write_text(content, encoding="utf-8")
+        except OSError as exc:
+            self.stdout.write(
+                self.style.WARNING(f"\n  Could not generate compose.vllm.yaml: {exc}\n")
+            )
+            return
+
+        self.stdout.write(
+            self.style.SUCCESS(f"\n  Generated {output_path.name} (model: {model})\n")
+        )
+        self.stdout.write(
+            "  Run with Docker:\n"
+            "    docker compose -f compose.yaml -f compose.vllm.yaml up\n"
+            "    # or: ./scripts/launch.sh\n"
         )
 
     def _configure_llama_cpp(self, llm_config: dict[str, object]) -> dict[str, object]:
         """Configure llama.cpp server as an OpenAI-compatible backend."""
-        if not shutil.which("llama-server"):
+        if not self._docker_mode and not shutil.which("llama-server"):
             self.stdout.write(
                 self.style.WARNING(
                     "\n  llama-server not found on PATH.\n"
@@ -387,31 +468,41 @@ class Command(BaseCommand):
                 )
             )
 
-        base_url = self._ask("  llama.cpp server URL: ", default="http://localhost:8080/v1")
         # llama.cpp exposes an OpenAI-compatible API, so use the openai provider.
         llm_config["provider"] = "openai"
+
+        if self._docker_mode:
+            base_url = "http://llama-cpp:8080/v1"
+            self.stdout.write(f"  Using Docker service URL: {base_url}\n")
+        else:
+            base_url = self._ask("  llama.cpp server URL: ", default="http://localhost:8080/v1")
         llm_config["base_url"] = base_url
 
-        model = self._discover_and_choose_model(
-            provider="openai",
-            default_model="",
-            base_url=base_url,
-        )
+        if self._docker_mode:
+            model = self._ask("  GGUF model filename (e.g. model.gguf): ", default="")
+        else:
+            model = self._discover_and_choose_model(
+                provider="openai",
+                default_model="",
+                base_url=base_url,
+            )
         llm_config["model"] = model
 
-        self.stdout.write(
-            "\n  To start the server, run:\n"
-            "    llama-server -m <path-to-model.gguf> --port 8080\n"
-            "  Or via Docker:\n"
-            "    docker compose --profile inference up llama-cpp\n"
-        )
+        if self._docker_mode:
+            self._generate_llama_cpp_compose(model)
+        else:
+            self.stdout.write(
+                "\n  To start the server, run:\n"
+                "    llama-server -m <path-to-model.gguf> --port 8080\n"
+                "  Or via Docker:\n"
+                "    docker compose --profile inference up llama-cpp\n"
+            )
 
         return llm_config
 
     def _configure_vllm(self, llm_config: dict[str, object]) -> dict[str, object]:
         """Configure vLLM server as an OpenAI-compatible backend."""
-        has_vllm = shutil.which("vllm")
-        if not has_vllm:
+        if not self._docker_mode and not shutil.which("vllm"):
             self.stdout.write(
                 self.style.WARNING(
                     "\n  vllm not found on PATH.\n"
@@ -420,24 +511,37 @@ class Command(BaseCommand):
                 )
             )
 
-        base_url = self._ask("  vLLM server URL: ", default="http://localhost:8081/v1")
         # vLLM exposes an OpenAI-compatible API, so use the openai provider.
         llm_config["provider"] = "openai"
+
+        if self._docker_mode:
+            base_url = "http://vllm:8000/v1"
+            self.stdout.write(f"  Using Docker service URL: {base_url}\n")
+        else:
+            base_url = self._ask("  vLLM server URL: ", default="http://localhost:8081/v1")
         llm_config["base_url"] = base_url
 
-        model = self._discover_and_choose_model(
-            provider="openai",
-            default_model="",
-            base_url=base_url,
-        )
+        if self._docker_mode:
+            model = self._ask(
+                "  HuggingFace model name (e.g. Qwen/Qwen2.5-Coder-14B): ", default=""
+            )
+        else:
+            model = self._discover_and_choose_model(
+                provider="openai",
+                default_model="",
+                base_url=base_url,
+            )
         llm_config["model"] = model
 
-        self.stdout.write(
-            "\n  To start the server, run:\n"
-            f"    vllm serve {model}\n"
-            "  Or via Docker:\n"
-            "    docker compose --profile inference up vllm\n"
-        )
+        if self._docker_mode:
+            self._generate_vllm_compose(model)
+        else:
+            self.stdout.write(
+                "\n  To start the server, run:\n"
+                f"    vllm serve {model}\n"
+                "  Or via Docker:\n"
+                "    docker compose --profile inference up vllm\n"
+            )
 
         return llm_config
 
