@@ -49,11 +49,13 @@ def _get_registry() -> dict[str, type[BaseCheck]]:
     from franktheunicorn.review.checks.coverage import CoverageCheck
     from franktheunicorn.review.checks.issue_link import IssueLinkCheck
     from franktheunicorn.review.checks.security import SecurityCheck
+    from franktheunicorn.review.checks.security_context import SecurityContextCheck
 
     return {
         "coverage": CoverageCheck,
         "issue-link": IssueLinkCheck,
         "security": SecurityCheck,
+        "security-context": SecurityContextCheck,
     }
 
 
