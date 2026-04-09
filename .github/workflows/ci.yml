@@ -95,7 +95,7 @@ jobs:
 
       - name: Verify root page renders
         run: |
-          status=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/)
+          status=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:7742/)
           if [ "$status" != "200" ]; then
             echo "Root page returned HTTP $status, expected 200"
             docker compose logs
