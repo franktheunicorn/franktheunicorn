@@ -8,6 +8,10 @@ from __future__ import annotations
 
 import logging
 from decimal import Decimal
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from franktheunicorn.config.models import ProjectConfig
 
 from django.db.models import Count, Q, Sum
 from django.http import HttpRequest, HttpResponse
@@ -536,7 +540,6 @@ def merge_queue_view(request: HttpRequest) -> HttpResponse:
     from django.conf import settings
 
     from franktheunicorn.config.loader import load_project_configs
-    from franktheunicorn.config.models import ProjectConfig
     from franktheunicorn.worker.merge_queue import evaluate_merge_eligibility
 
     eligible_prs = (
@@ -740,21 +743,7 @@ def security_report_triage(request: HttpRequest, report_id: int) -> HttpResponse
 
         operator_config = get_operator_config()
 
-        project_config = None
-        if report.project:
-            from django.conf import settings
-
-            from franktheunicorn.config.loader import load_project_configs
-
-            configs = load_project_configs(getattr(settings, "FRANK_PROJECTS_DIR", ""))
-            project_config = next(
-                (
-                    c
-                    for c in configs
-                    if c.owner == report.project.owner and c.repo == report.project.repo
-                ),
-                None,
-            )
+        project_config = _find_project_config(report.project) if report.project else None
 
         from franktheunicorn.security.triage import triage_report
 
@@ -874,21 +863,7 @@ def _auto_triage_report(report: SecurityReport) -> None:
     if not operator_config.security_triage.auto_triage:
         return
 
-    project_config = None
-    if report.project:
-        from django.conf import settings
-
-        from franktheunicorn.config.loader import load_project_configs
-
-        configs = load_project_configs(getattr(settings, "FRANK_PROJECTS_DIR", ""))
-        project_config = next(
-            (
-                c
-                for c in configs
-                if c.owner == report.project.owner and c.repo == report.project.repo
-            ),
-            None,
-        )
+    project_config = _find_project_config(report.project) if report.project else None
 
     from franktheunicorn.security.triage import triage_report
 
@@ -903,3 +878,16 @@ def _is_sandbox_enabled() -> bool:
         return get_operator_config().security_triage.sandbox_enabled
     except Exception:
         return False
+
+
+def _find_project_config(project: Project) -> ProjectConfig | None:
+    """Look up the ProjectConfig YAML for a given Project model instance."""
+    from django.conf import settings
+
+    from franktheunicorn.config.loader import load_project_configs
+
+    configs = load_project_configs(getattr(settings, "FRANK_PROJECTS_DIR", ""))
+    return next(
+        (c for c in configs if c.owner == project.owner and c.repo == project.repo),
+        None,
+    )

@@ -14,6 +14,10 @@ from typing import TYPE_CHECKING
 from franktheunicorn.security.cve_lookup import search_cves
 from franktheunicorn.security.prompt import build_parse_prompt, build_triage_prompt
 
+_VALID_SEVERITIES: frozenset[str] = frozenset(
+    {"critical", "high", "medium", "low", "informational"}
+)
+
 if TYPE_CHECKING:
     from franktheunicorn.config.models import OperatorConfig, ProjectConfig
     from franktheunicorn.core.models import SecurityReport
@@ -57,18 +61,6 @@ def triage_report(
     return report
 
 
-def parse_report_only(
-    report: SecurityReport,
-    operator_config: OperatorConfig,
-) -> SecurityReport:
-    """Parse a report without full triage (used during email ingestion)."""
-    backend = _get_triage_backend(operator_config)
-    if backend is None:
-        return report
-    _parse_report(report, backend, operator_config)
-    return report
-
-
 def _get_triage_backend(operator_config: OperatorConfig) -> object | None:
     """Get the first configured LLM backend for triage."""
     if not operator_config.llm_backends:
@@ -106,8 +98,7 @@ def _parse_report(
         report.parsed_poc = str(parsed.get("poc", ""))
         report.parsed_impact = str(parsed.get("impact", ""))
         severity = str(parsed.get("severity", "unknown")).lower()
-        valid_severities = {"critical", "high", "medium", "low", "informational"}
-        report.assessed_severity = severity if severity in valid_severities else "unknown"
+        report.assessed_severity = severity if severity in _VALID_SEVERITIES else "unknown"
 
         if not report.reporter_name and parsed.get("reporter_name"):
             report.reporter_name = str(parsed["reporter_name"])[:255]
@@ -169,17 +160,14 @@ def _analyze_report(
         report.triage_summary = str(analysis.get("triage_summary", ""))
 
         severity = str(analysis.get("assessed_severity", "")).lower()
-        valid_severities = {"critical", "high", "medium", "low", "informational"}
-        if severity in valid_severities:
+        if severity in _VALID_SEVERITIES:
             report.assessed_severity = severity
 
         # Auto-set status based on analysis.
         if report.is_expected_behavior:
             report.status = "expected-behavior"
-        elif report.poc_plausible:
-            report.status = "new"  # keep as new — needs operator review
         else:
-            report.status = "new"
+            report.status = "new"  # needs operator review regardless of POC assessment
 
         report.save(
             update_fields=[
@@ -252,8 +240,9 @@ def _load_project_context(
 
     # Read docs about the component if identifiable.
     if report.parsed_component:
-        component_path = repo_path / report.parsed_component
-        if component_path.is_file():
+        component_path = (repo_path / report.parsed_component).resolve()
+        # Guard against path traversal (parsed_component comes from LLM output).
+        if component_path.is_relative_to(repo_path) and component_path.is_file():
             try:
                 text = component_path.read_text(encoding="utf-8", errors="replace")
                 parts.append(f"### Source: {report.parsed_component}\n{text[:5000]}")
@@ -265,14 +254,14 @@ def _load_project_context(
 
 def _safe_json_parse(raw_text: str) -> dict[str, object] | None:
     """Parse JSON from LLM response, stripping code fences if present."""
-    import re
+    from franktheunicorn.review.backends.base import _CODE_FENCE_RE
 
     raw_text = raw_text.strip()
     if not raw_text:
         return None
 
-    # Strip markdown code fences.
-    fence_match = re.search(r"```(?:json)?\s*\n(.*?)\n```", raw_text, re.DOTALL)
+    # Strip markdown code fences (reuse regex from review backend).
+    fence_match = _CODE_FENCE_RE.search(raw_text)
     if fence_match:
         raw_text = fence_match.group(1)
 
