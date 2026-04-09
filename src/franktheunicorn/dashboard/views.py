@@ -640,12 +640,7 @@ def merge_pr(request: HttpRequest, pr_id: int) -> HttpResponse:
 
 SECURITY_STATUS_TABS: list[dict[str, str]] = [
     {"key": "all", "label": "All"},
-    {"key": "new", "label": "New"},
-    {"key": "triaging", "label": "Triaging"},
-    {"key": "valid", "label": "Valid"},
-    {"key": "invalid", "label": "Invalid"},
-    {"key": "duplicate", "label": "Duplicate"},
-    {"key": "expected-behavior", "label": "Expected Behavior"},
+    *[{"key": k, "label": v} for k, v in SecurityReport.STATUS_CHOICES],
 ]
 
 

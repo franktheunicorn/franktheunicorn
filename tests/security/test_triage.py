@@ -113,6 +113,55 @@ class TestTriageReport:
         assert report.status in ("triaging", "new", "expected-behavior")
 
     @patch("franktheunicorn.security.triage.search_cves")
+    @patch("franktheunicorn.security.triage._get_triage_backend")
+    def test_full_pipeline_with_mock_backend(
+        self,
+        mock_get_backend: MagicMock,
+        mock_cves: MagicMock,
+        db: Any,
+    ) -> None:
+        """Test the full triage pipeline end-to-end with a mock LLM backend."""
+        import json
+
+        from tests.factories import SecurityReportFactory
+
+        mock_cves.return_value = []
+        parse_json = json.dumps(
+            {
+                "title": "XSS in form",
+                "component": "forms.py",
+                "poc": "inject script",
+                "impact": "XSS",
+                "severity": "medium",
+            }
+        )
+        analyze_json = json.dumps(
+            {
+                "poc_plausible": True,
+                "poc_assessment": "Valid XSS.",
+                "is_expected_behavior": False,
+                "expected_behavior_explanation": "",
+                "assessed_severity": "medium",
+                "triage_summary": "Real XSS.",
+            }
+        )
+        backend = _MockLLMBackend(responses=[parse_json, analyze_json])
+        mock_get_backend.return_value = backend
+
+        report = SecurityReportFactory(raw_text="XSS vuln", title="", status="new")
+        config = OperatorConfig(
+            github_username="testuser",
+            llm_backends=[LLMBackendConfig(provider="stub")],
+            security_triage=SecurityTriageConfig(enabled=True),
+        )
+
+        triage_report(report, None, config)
+        report.refresh_from_db()
+        assert report.title == "XSS in form"
+        assert report.poc_plausible is True
+        assert report.status == "new"
+
+    @patch("franktheunicorn.security.triage.search_cves")
     def test_cve_check_populates_matches(
         self,
         mock_search: MagicMock,
@@ -189,9 +238,8 @@ class TestTriageReport:
 
         backend = _MockLLMBackend(responses=[parse_response])
         report = SecurityReportFactory(raw_text="buffer overflow", title="", status="new")
-        config = OperatorConfig(github_username="testuser")
 
-        _parse_report(report, backend, config)
+        _parse_report(report, backend)
 
         report.refresh_from_db()
         assert report.title == "Buffer overflow in parser"
@@ -227,9 +275,8 @@ class TestTriageReport:
             parsed_impact="command execution",
             status="triaging",
         )
-        config = OperatorConfig(github_username="testuser")
 
-        _analyze_report(report, backend, "", config)
+        _analyze_report(report, backend, "")
 
         report.refresh_from_db()
         assert report.is_expected_behavior is True
@@ -260,9 +307,8 @@ class TestTriageReport:
             parsed_component="parser.c",
             status="triaging",
         )
-        config = OperatorConfig(github_username="testuser")
 
-        _analyze_report(report, backend, "", config)
+        _analyze_report(report, backend, "")
 
         report.refresh_from_db()
         assert report.poc_plausible is True
@@ -278,10 +324,9 @@ class TestTriageReport:
         backend._call_api = MagicMock(side_effect=RuntimeError("API down"))  # type: ignore[method-assign]
 
         report = SecurityReportFactory(raw_text="vuln", status="new")
-        config = OperatorConfig(github_username="testuser")
 
         # Should not raise.
-        _parse_report(report, backend, config)
+        _parse_report(report, backend)
 
         report.refresh_from_db()
         assert report.parsed_component == ""  # nothing was parsed
@@ -376,10 +421,9 @@ class TestTriageReport:
             parsed_component="test.py",
             status="triaging",
         )
-        config = OperatorConfig(github_username="testuser")
 
         # Should not raise.
-        _analyze_report(report, backend, "", config)
+        _analyze_report(report, backend, "")
 
         report.refresh_from_db()
         assert report.triage_summary == ""  # nothing was analyzed
