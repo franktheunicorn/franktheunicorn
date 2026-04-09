@@ -657,21 +657,20 @@ def security_report_list(request: HttpRequest) -> HttpResponse:
     if status_filter != "all":
         reports = reports.filter(status=status_filter)
 
-    status_counts: dict[str, int] = {}
     all_reports = SecurityReport.objects.all()
-    status_counts["all"] = all_reports.count()
+    all_count = all_reports.count()
+    tabs_with_counts: list[dict[str, str | int]] = []
     for tab in SECURITY_STATUS_TABS:
-        if tab["key"] != "all":
-            status_counts[tab["key"]] = all_reports.filter(status=tab["key"]).count()
+        count = all_count if tab["key"] == "all" else all_reports.filter(status=tab["key"]).count()
+        tabs_with_counts.append({**tab, "count": count})
 
     return render(
         request,
         "dashboard/security_list.html",
         {
             "reports": reports[:100],
-            "status_tabs": SECURITY_STATUS_TABS,
+            "status_tabs": tabs_with_counts,
             "active_status": status_filter,
-            "status_counts": status_counts,
         },
     )
 
@@ -774,6 +773,8 @@ def security_report_verdict(request: HttpRequest, report_id: int) -> HttpRespons
     report.operator_notes = notes
     if new_status == "duplicate":
         report.matched_cve_id = request.POST.get("matched_cve_id", "")
+    else:
+        report.matched_cve_id = ""
     report.save(update_fields=["status", "operator_notes", "matched_cve_id", "updated_at"])
 
     return render(request, "dashboard/_security_verdict.html", {"report": report})

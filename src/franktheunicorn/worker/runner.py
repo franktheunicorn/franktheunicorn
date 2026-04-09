@@ -475,12 +475,24 @@ def _resolve_base_ref(repo_path: Path, pr: PullRequest) -> str | None:
     return None
 
 
+_last_security_email_poll: float = 0.0
+
+
 def _poll_security_emails(operator_config: OperatorConfig) -> None:
     """Poll security email inbox and create SecurityReport records."""
+    global _last_security_email_poll
+
     if not operator_config.security_triage.enabled:
         return
     if not operator_config.security_triage.email.enabled:
         return
+
+    # Respect the configured poll interval.
+    now = time.monotonic()
+    interval = operator_config.security_triage.email.poll_interval_seconds
+    if now - _last_security_email_poll < interval:
+        return
+    _last_security_email_poll = now
 
     try:
         from franktheunicorn.core.models import SecurityReport

@@ -16,7 +16,7 @@
     <a href="{% url 'dashboard:security_list' %}{% if tab.key != 'all' %}?status={{ tab.key }}{% endif %}"
        {% if active_status == tab.key %}class="active"{% endif %}>
         {{ tab.label }}
-        <span class="tab-count">{{ status_counts|default_if_none:0 }}</span>
+        <span class="tab-count">{{ tab.count }}</span>
     </a>
     {% endfor %}
 </div>

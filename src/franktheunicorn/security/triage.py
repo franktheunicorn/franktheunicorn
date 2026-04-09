@@ -226,7 +226,7 @@ def _load_project_context(
                 text = readme_path.read_text(encoding="utf-8", errors="replace")
                 parts.append(f"### README\n{text[:5000]}")
             except OSError:
-                pass
+                logger.debug("Failed to read %s", readme_path, exc_info=True)
             break
 
     # Read SECURITY.md if present.
@@ -236,7 +236,7 @@ def _load_project_context(
             text = security_md.read_text(encoding="utf-8", errors="replace")
             parts.append(f"### SECURITY.md\n{text[:3000]}")
         except OSError:
-            pass
+            logger.debug("Failed to read %s", security_md, exc_info=True)
 
     # Read docs about the component if identifiable.
     if report.parsed_component:
@@ -247,7 +247,7 @@ def _load_project_context(
                 text = component_path.read_text(encoding="utf-8", errors="replace")
                 parts.append(f"### Source: {report.parsed_component}\n{text[:5000]}")
             except OSError:
-                pass
+                logger.debug("Failed to read %s", component_path, exc_info=True)
 
     return "\n\n".join(parts)
 
