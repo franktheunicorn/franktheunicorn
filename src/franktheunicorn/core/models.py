@@ -148,6 +148,7 @@ class ReviewDraft(models.Model):
         ("correctness", "Correctness"),
         ("style", "Style"),
         ("security", "Security"),
+        ("security-context", "Security Context"),
         ("test-coverage", "Test Coverage"),
         ("architectural", "Architectural"),
         ("naming", "Naming"),

@@ -197,6 +197,7 @@ def create_drafts_from_findings(
             for cat in (
                 "correctness",
                 "style",
+                "security-context",
                 "security",
                 "test-coverage",
                 "architectural",

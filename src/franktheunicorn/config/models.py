@@ -463,7 +463,7 @@ class ProjectConfig(BaseModel):
     @field_validator("llm_checks")
     @classmethod
     def llm_checks_warn_unknown(cls, v: list[str]) -> list[str]:
-        known = {"coverage", "security", "issue-link"}
+        known = {"coverage", "security", "security-context", "issue-link"}
         for name in v:
             if name not in known:
                 logger.warning(

@@ -26,6 +26,10 @@ class TestRegistry:
         registry = _get_registry()
         assert "security" in registry
 
+    def test_security_context_registered(self) -> None:
+        registry = _get_registry()
+        assert "security-context" in registry
+
     def test_registry_values_are_base_check_subclasses(self) -> None:
         registry = _get_registry()
         for cls in registry.values():
@@ -146,6 +150,45 @@ class TestRunEnabledChecks:
         assert "check:security" in drafts[0].sources
         assert drafts[0].file_path == "src/auth.py"
         assert drafts[0].category == "security"
+
+    def test_security_context_check_produces_drafts_with_stub(
+        self,
+        db_pr: PullRequest,
+    ) -> None:
+        """Security-context check should produce drafts with category=security-context."""
+        config = ProjectConfig(
+            owner="apache",
+            repo="spark",
+            llm_checks=["security-context"],
+        )
+        op_config = OperatorConfig(
+            llm_backends=[LLMBackendConfig(provider="stub")],
+        )
+
+        with patch(
+            "franktheunicorn.review.checks._run_single_check",
+            return_value=[
+                ReviewFinding(
+                    file_path="src/middleware.py",
+                    line_number=15,
+                    title="security-context: CSRF middleware removed",
+                    body="Removing CSRF middleware weakens security.",
+                    confidence=0.85,
+                    severity="critical",
+                ),
+            ],
+        ):
+            drafts = run_enabled_checks(
+                db_pr,
+                "+++ b/src/middleware.py\n-CSRF_MIDDLEWARE = True",
+                project_config=config,
+                operator_config=op_config,
+            )
+
+        assert len(drafts) == 1
+        assert "check:security-context" in drafts[0].sources
+        assert drafts[0].file_path == "src/middleware.py"
+        assert drafts[0].category == "security-context"
 
     def test_check_findings_go_through_antipattern_gating(
         self,
