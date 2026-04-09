@@ -627,6 +627,313 @@ class TestDashboardV15:
 
 
 @pytest.mark.django_db
+class TestWorkspaceFiltering:
+    """Tests for workspace project filtering in views."""
+
+    def test_get_workspace_projects_returns_project_list(self, client: Client) -> None:
+        from unittest.mock import MagicMock, patch
+
+        mock_config = MagicMock()
+        mock_config.workspaces = {
+            "work": {"projects": ["apache/spark", "apache/flink"], "description": "Work"},
+        }
+        client.cookies["workspace"] = "work"
+        with patch("franktheunicorn.config.loader.load_operator_config", return_value=mock_config):
+            response = client.get("/")
+        assert response.status_code == 200
+
+    def test_get_workspace_list_includes_configured_workspaces(self, client: Client) -> None:
+        from unittest.mock import MagicMock, patch
+
+        mock_config = MagicMock()
+        mock_config.workspaces = {
+            "team-a": {"description": "Team A Projects", "projects": "*"},
+        }
+        with patch("franktheunicorn.config.loader.load_operator_config", return_value=mock_config):
+            response = client.get("/")
+        assert response.status_code == 200
+        # Workspace list should include "Team A Projects"
+        workspaces = response.context["workspaces"]
+        labels = [w["label"] for w in workspaces]
+        assert "Team A Projects" in labels
+
+    def test_workspace_with_star_projects_does_not_filter(
+        self, client: Client, db_pr: PullRequest
+    ) -> None:
+        from unittest.mock import MagicMock, patch
+
+        mock_config = MagicMock()
+        mock_config.workspaces = {"work": {"projects": "*", "description": "All"}}
+        client.cookies["workspace"] = "work"
+        with patch("franktheunicorn.config.loader.load_operator_config", return_value=mock_config):
+            response = client.get("/")
+        assert response.status_code == 200
+
+    def test_workspace_config_exception_falls_back(
+        self, client: Client, db_pr: PullRequest
+    ) -> None:
+        from unittest.mock import patch
+
+        client.cookies["workspace"] = "nonexistent"
+        with patch(
+            "franktheunicorn.config.loader.load_operator_config",
+            side_effect=Exception("config error"),
+        ):
+            response = client.get("/")
+        assert response.status_code == 200
+
+    def test_index_filters_by_workspace_projects(self, client: Client, db_pr: PullRequest) -> None:
+        from unittest.mock import MagicMock, patch
+
+        mock_config = MagicMock()
+        mock_config.workspaces = {
+            "work": {
+                "projects": [f"{db_pr.project.owner}/{db_pr.project.repo}"],
+                "description": "Work",
+            },
+        }
+        client.cookies["workspace"] = "work"
+        with patch("franktheunicorn.config.loader.load_operator_config", return_value=mock_config):
+            response = client.get("/")
+        assert response.status_code == 200
+
+
+@pytest.mark.django_db
+class TestRecallAndPostWithMock:
+    """Tests for recall_draft and post_review with mocked GitHub client."""
+
+    def test_recall_draft_success(self, client: Client, db_pr: PullRequest) -> None:
+        from datetime import UTC, datetime
+        from unittest.mock import MagicMock, patch
+
+        draft = ReviewDraftFactory(
+            pull_request=db_pr,
+            status="posted",
+            github_comment_id=123,
+            posted_at=datetime.now(tz=UTC),
+        )
+
+        mock_poster = MagicMock()
+        mock_poster.recall_comment.return_value = True
+
+        with (
+            patch("franktheunicorn.github.client.GitHubClient"),
+            patch("franktheunicorn.github.poster.GitHubPoster", return_value=mock_poster),
+            patch("django.conf.settings.FRANK_GITHUB_TOKEN", "test-token", create=True),
+        ):
+            response = client.post(f"/draft/{draft.pk}/recall/")
+
+        assert response.status_code == 200
+
+    def test_recall_draft_no_token(self, client: Client, db_pr: PullRequest) -> None:
+        from datetime import UTC, datetime
+        from unittest.mock import patch
+
+        draft = ReviewDraftFactory(
+            pull_request=db_pr,
+            status="posted",
+            github_comment_id=123,
+            posted_at=datetime.now(tz=UTC),
+        )
+
+        with patch("django.conf.settings.FRANK_GITHUB_TOKEN", "", create=True):
+            response = client.post(f"/draft/{draft.pk}/recall/")
+
+        assert response.status_code == 200
+        assert b"Cannot recall" in response.content
+
+    def test_post_review_success(self, client: Client, db_pr: PullRequest) -> None:
+        from unittest.mock import MagicMock, patch
+
+        ReviewDraftFactory(
+            pull_request=db_pr,
+            status="accepted",
+            comment_body="Good finding.",
+        )
+
+        mock_poster = MagicMock()
+        mock_poster.post_review.return_value = {"id": 1}
+
+        with (
+            patch("franktheunicorn.github.client.GitHubClient"),
+            patch("franktheunicorn.github.poster.GitHubPoster", return_value=mock_poster),
+            patch("django.conf.settings.FRANK_GITHUB_TOKEN", "test-token", create=True),
+        ):
+            response = client.post(f"/pr/{db_pr.pk}/post/")
+
+        assert response.status_code == 200
+        assert b"Posted" in response.content
+
+    def test_post_review_exception(self, client: Client, db_pr: PullRequest) -> None:
+        from unittest.mock import patch
+
+        ReviewDraftFactory(
+            pull_request=db_pr,
+            status="accepted",
+            comment_body="Will fail.",
+        )
+
+        with (
+            patch(
+                "franktheunicorn.github.client.GitHubClient",
+                side_effect=Exception("connection failed"),
+            ),
+            patch("django.conf.settings.FRANK_GITHUB_TOKEN", "test-token", create=True),
+        ):
+            response = client.post(f"/pr/{db_pr.pk}/post/")
+
+        assert response.status_code == 200
+        assert b"Failed to post" in response.content
+
+
+@pytest.mark.django_db
+class TestAntiPatternCreateWithProject:
+    def test_create_with_project_id(self, client: Client, db_project: object) -> None:
+        from franktheunicorn.core.models import Project
+
+        project = Project.objects.first()
+        response = client.post(
+            "/anti-patterns/create/",
+            {"pattern_text": "test pattern", "project_id": str(project.pk)},
+        )
+        assert response.status_code == 200
+        ap = AntiPattern.objects.get(pattern_text="test pattern")
+        assert ap.project == project
+
+
+@pytest.mark.django_db
+class TestMergePRView:
+    """Tests for the merge_pr POST view."""
+
+    def test_merge_pr_not_enabled(self, client: Client) -> None:
+        from unittest.mock import patch
+
+        from franktheunicorn.config.models import MergeQueueConfig, ProjectConfig
+
+        pr = PullRequestFactory()
+        pc = ProjectConfig(
+            owner=pr.project.owner,
+            repo=pr.project.repo,
+            merge_queue=MergeQueueConfig(enabled=False),
+        )
+        with patch("franktheunicorn.config.loader.load_project_configs", return_value=[pc]):
+            response = client.post(f"/pr/{pr.pk}/merge/")
+        assert response.status_code == 200
+        assert b"not enabled" in response.content
+
+    def test_merge_pr_not_eligible(self, client: Client) -> None:
+        from unittest.mock import patch
+
+        from franktheunicorn.config.models import MergeQueueConfig, ProjectConfig
+        from franktheunicorn.worker.merge_queue import MergeEligibility
+
+        pr = PullRequestFactory()
+        pc = ProjectConfig(
+            owner=pr.project.owner,
+            repo=pr.project.repo,
+            merge_queue=MergeQueueConfig(enabled=True),
+        )
+        ineligible = MergeEligibility(eligible=False, details=["CI failing"])
+        with (
+            patch("franktheunicorn.config.loader.load_project_configs", return_value=[pc]),
+            patch(
+                "franktheunicorn.worker.merge_queue.evaluate_merge_eligibility",
+                return_value=ineligible,
+            ),
+        ):
+            response = client.post(f"/pr/{pr.pk}/merge/")
+        assert response.status_code == 200
+        assert b"no longer eligible" in response.content
+
+    def test_merge_pr_no_token(self, client: Client) -> None:
+        from unittest.mock import patch
+
+        from franktheunicorn.config.models import MergeQueueConfig, ProjectConfig
+        from franktheunicorn.worker.merge_queue import MergeEligibility
+
+        pr = PullRequestFactory()
+        pc = ProjectConfig(
+            owner=pr.project.owner,
+            repo=pr.project.repo,
+            merge_queue=MergeQueueConfig(enabled=True),
+        )
+        eligible = MergeEligibility(
+            eligible=True, ci_pass=True, approvals_met=True, no_conflicts=True
+        )
+        with (
+            patch("franktheunicorn.config.loader.load_project_configs", return_value=[pc]),
+            patch(
+                "franktheunicorn.worker.merge_queue.evaluate_merge_eligibility",
+                return_value=eligible,
+            ),
+            patch("django.conf.settings.FRANK_GITHUB_TOKEN", "", create=True),
+        ):
+            response = client.post(f"/pr/{pr.pk}/merge/")
+        assert response.status_code == 200
+        assert b"GITHUB_TOKEN" in response.content
+
+    def test_merge_pr_success(self, client: Client) -> None:
+        from unittest.mock import patch
+
+        from franktheunicorn.config.models import MergeQueueConfig, ProjectConfig
+        from franktheunicorn.worker.merge_queue import MergeEligibility, MergeResult
+
+        pr = PullRequestFactory()
+        pc = ProjectConfig(
+            owner=pr.project.owner,
+            repo=pr.project.repo,
+            merge_queue=MergeQueueConfig(enabled=True),
+        )
+        eligible = MergeEligibility(
+            eligible=True, ci_pass=True, approvals_met=True, no_conflicts=True
+        )
+        success_result = MergeResult(success=True, method="squash")
+        with (
+            patch("franktheunicorn.config.loader.load_project_configs", return_value=[pc]),
+            patch(
+                "franktheunicorn.worker.merge_queue.evaluate_merge_eligibility",
+                return_value=eligible,
+            ),
+            patch("franktheunicorn.worker.merge_queue.execute_merge", return_value=success_result),
+            patch("franktheunicorn.github.client.GitHubClient"),
+            patch("django.conf.settings.FRANK_GITHUB_TOKEN", "test-token", create=True),
+        ):
+            response = client.post(f"/pr/{pr.pk}/merge/")
+        assert response.status_code == 200
+        assert b"Merged" in response.content
+
+    def test_merge_pr_failure(self, client: Client) -> None:
+        from unittest.mock import patch
+
+        from franktheunicorn.config.models import MergeQueueConfig, ProjectConfig
+        from franktheunicorn.worker.merge_queue import MergeEligibility, MergeResult
+
+        pr = PullRequestFactory()
+        pc = ProjectConfig(
+            owner=pr.project.owner,
+            repo=pr.project.repo,
+            merge_queue=MergeQueueConfig(enabled=True),
+        )
+        eligible = MergeEligibility(
+            eligible=True, ci_pass=True, approvals_met=True, no_conflicts=True
+        )
+        fail_result = MergeResult(success=False, error="conflict")
+        with (
+            patch("franktheunicorn.config.loader.load_project_configs", return_value=[pc]),
+            patch(
+                "franktheunicorn.worker.merge_queue.evaluate_merge_eligibility",
+                return_value=eligible,
+            ),
+            patch("franktheunicorn.worker.merge_queue.execute_merge", return_value=fail_result),
+            patch("franktheunicorn.github.client.GitHubClient"),
+            patch("django.conf.settings.FRANK_GITHUB_TOKEN", "test-token", create=True),
+        ):
+            response = client.post(f"/pr/{pr.pk}/merge/")
+        assert response.status_code == 200
+        assert b"Merge failed" in response.content
+
+
+@pytest.mark.django_db
 class TestMergeQueueView:
     """Tests for merge queue copy-command vs merge button behaviour."""
 

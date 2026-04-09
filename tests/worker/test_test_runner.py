@@ -129,3 +129,86 @@ class TestComputeVerdict:
             )
             == "infra"
         )
+
+    def test_regression_verdict(self) -> None:
+        """PR fails, base passes → broken (regression)."""
+        runner = DockerTestRunner()
+        assert (
+            runner._compute_verdict(
+                {"exit_code": 1, "stderr": "AssertionError"},
+                {"exit_code": 0, "stderr": ""},
+            )
+            == "broken"
+        )
+
+
+@pytest.mark.django_db
+class TestTestRunnerContainerPaths:
+    def test_run_container_timeout(self) -> None:
+        runner = DockerTestRunner()
+        mock_docker = MagicMock()
+        mock_container = MagicMock()
+        mock_container.wait.side_effect = Exception("Container timed out waiting")
+        mock_docker.containers.run.return_value = mock_container
+
+        result = runner._run_container(
+            mock_docker, "python:3.12-slim", ["tests/test_main.py"], {"timeout": 10}, "pr_branch"
+        )
+
+        assert result["timed_out"] is True
+        assert result["exit_code"] == -1
+
+    def test_run_container_non_timeout_exception(self) -> None:
+        runner = DockerTestRunner()
+        mock_docker = MagicMock()
+        mock_container = MagicMock()
+        mock_container.wait.side_effect = Exception("OOM killed")
+        mock_docker.containers.run.return_value = mock_container
+
+        with pytest.raises(Exception, match="OOM killed"):
+            runner._run_container(
+                mock_docker,
+                "python:3.12-slim",
+                ["tests/test_main.py"],
+                {"timeout": 10},
+                "pr_branch",
+            )
+
+    def test_differential_test_exception_sets_failed(self) -> None:
+        runner = DockerTestRunner()
+        pr = PullRequestFactory(
+            changed_files=["tests/test_main.py"],
+            body="",
+        )
+
+        mock_docker = MagicMock()
+        mock_docker.ping.return_value = True
+
+        with (
+            patch(
+                "franktheunicorn.worker.test_runner.TestRunner._get_docker",
+                return_value=mock_docker,
+            ),
+            patch(
+                "franktheunicorn.worker.test_runner.TestRunner._run_container",
+                side_effect=RuntimeError("Docker exploded"),
+            ),
+        ):
+            from franktheunicorn.config.models import ProjectConfig
+
+            config = ProjectConfig(owner="test", repo="test")
+            result = runner.run_differential_test(pr, config)
+
+        assert result is not None
+        assert result.status == "failed"
+        assert "Docker exploded" in result.error_log
+
+    def test_skips_when_test_config_disabled(self) -> None:
+        runner = DockerTestRunner()
+        pr = PullRequestFactory(changed_files=["tests/test_main.py"], body="")
+
+        # ProjectConfig uses getattr(config, "test_config", None), so use a mock.
+        mock_config = MagicMock()
+        mock_config.test_config = {"enabled": False}
+        result = runner.run_differential_test(pr, mock_config)
+        assert result is None

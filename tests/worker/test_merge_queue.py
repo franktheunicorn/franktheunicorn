@@ -171,3 +171,101 @@ class TestExecuteMerge:
         result = execute_merge(pr, config)
         assert result.success is False
         assert "No merge method" in result.error
+
+    def test_uses_api_when_no_script(self) -> None:
+        config = MergeQueueConfig(enabled=True)
+        pr = PullRequestFactory(number=42)
+
+        with patch("franktheunicorn.worker.merge_queue.execute_merge_api") as mock_api:
+            mock_api.return_value = MergeResult(success=True, method="merge")
+            result = execute_merge(pr, config, github_client=object())
+
+        assert result.success is True
+        mock_api.assert_called_once()
+
+
+@pytest.mark.django_db
+class TestExecuteMergeScriptTimeout:
+    @patch("franktheunicorn.worker.merge_queue.subprocess.run")
+    def test_script_timeout(self, mock_run: object) -> None:
+        import subprocess as sp
+
+        mock_run.side_effect = sp.TimeoutExpired(cmd="merge.sh", timeout=300)  # type: ignore[attr-defined]
+        pr = PullRequestFactory(number=42)
+
+        result = execute_merge_script(pr, "/path/to/merge.sh")
+        assert result.success is False
+        assert "timed out" in result.error
+
+
+@pytest.mark.django_db
+class TestExecuteMergeAPI:
+    def test_api_success(self) -> None:
+        from unittest.mock import MagicMock
+
+        from franktheunicorn.github.client import GitHubClient
+        from franktheunicorn.worker.merge_queue import execute_merge_api
+
+        pr = PullRequestFactory(number=42)
+        config = MergeQueueConfig(enabled=True, merge_method="squash")
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+
+        client = GitHubClient(token="fake")
+        client._client = MagicMock()
+        client._client.put.return_value = mock_response
+
+        result = execute_merge_api(pr, config, client)
+
+        assert result.success is True
+        assert result.method == "squash"
+
+    def test_api_failure_status(self) -> None:
+        from unittest.mock import MagicMock
+
+        from franktheunicorn.github.client import GitHubClient
+        from franktheunicorn.worker.merge_queue import execute_merge_api
+
+        pr = PullRequestFactory(number=42)
+        config = MergeQueueConfig(enabled=True, merge_method="merge")
+
+        mock_response = MagicMock()
+        mock_response.status_code = 409
+        mock_response.text = "Conflict"
+
+        client = GitHubClient(token="fake")
+        client._client = MagicMock()
+        client._client.put.return_value = mock_response
+
+        result = execute_merge_api(pr, config, client)
+
+        assert result.success is False
+        assert "409" in result.error
+
+    def test_api_not_github_client(self) -> None:
+        from franktheunicorn.worker.merge_queue import execute_merge_api
+
+        pr = PullRequestFactory(number=42)
+        config = MergeQueueConfig(enabled=True)
+
+        result = execute_merge_api(pr, config, object())
+        assert result.success is False
+        assert "not available" in result.error
+
+    def test_api_exception(self) -> None:
+        from unittest.mock import MagicMock
+
+        from franktheunicorn.github.client import GitHubClient
+        from franktheunicorn.worker.merge_queue import execute_merge_api
+
+        pr = PullRequestFactory(number=42)
+        config = MergeQueueConfig(enabled=True)
+
+        client = GitHubClient(token="fake")
+        client._client = MagicMock()
+        client._client.put.side_effect = Exception("network error")
+
+        result = execute_merge_api(pr, config, client)
+
+        assert result.success is False
