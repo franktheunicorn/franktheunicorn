@@ -18,6 +18,10 @@ _VALID_SEVERITIES: frozenset[str] = frozenset(
     {"critical", "high", "medium", "low", "informational"}
 )
 
+# Statuses that can be overwritten by automatic triage analysis.
+# Operator-set statuses (valid, invalid, duplicate) are preserved on re-triage.
+_AUTO_MANAGED_STATUSES: frozenset[str] = frozenset({"new", "triaging"})
+
 if TYPE_CHECKING:
     from franktheunicorn.config.models import OperatorConfig, ProjectConfig
     from franktheunicorn.core.models import SecurityReport
@@ -80,6 +84,15 @@ def _call_llm(
     return _safe_json_parse(raw_response)
 
 
+def _coerce_bool(value: object) -> bool:
+    """Coerce an LLM JSON value to bool, handling string 'true'/'false'."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.lower() == "true"
+    return bool(value)
+
+
 def _parse_report(report: SecurityReport, backend: BaseLLMBackend) -> None:
     """Parse raw report text into structured fields via LLM."""
     system_prompt, user_message = build_parse_prompt(report.raw_text)
@@ -140,9 +153,9 @@ def _analyze_report(
         return
 
     if analysis:
-        report.poc_plausible = bool(analysis.get("poc_plausible", False))
+        report.poc_plausible = _coerce_bool(analysis.get("poc_plausible", False))
         report.poc_assessment = str(analysis.get("poc_assessment", ""))
-        report.is_expected_behavior = bool(analysis.get("is_expected_behavior", False))
+        report.is_expected_behavior = _coerce_bool(analysis.get("is_expected_behavior", False))
         report.expected_behavior_explanation = str(
             analysis.get("expected_behavior_explanation", "")
         )
@@ -152,7 +165,9 @@ def _analyze_report(
         if severity in _VALID_SEVERITIES:
             report.assessed_severity = severity
 
-        report.status = "expected-behavior" if report.is_expected_behavior else "new"
+        # Only auto-set status if operator hasn't already set a manual verdict.
+        if report.status in _AUTO_MANAGED_STATUSES:
+            report.status = "expected-behavior" if report.is_expected_behavior else "new"
 
         report.save(
             update_fields=[
@@ -180,9 +195,9 @@ def _check_cves(report: SecurityReport, operator_config: OperatorConfig) -> None
     api_key_env = operator_config.security_triage.nvd_api_key_env
     matches = search_cves(keyword, api_key_env=api_key_env)
 
-    if matches:
-        report.cve_matches = [m.to_dict() for m in matches]
-        report.save(update_fields=["cve_matches", "updated_at"])
+    # Always save results (even empty) so stale matches are cleared on re-run.
+    report.cve_matches = [m.to_dict() for m in matches]
+    report.save(update_fields=["cve_matches", "updated_at"])
 
 
 def _read_file(path: Path, max_chars: int = 5000) -> str | None:
@@ -204,8 +219,11 @@ def _load_project_context(
 
     from django.conf import settings
 
-    repos_dir = Path(getattr(settings, "FRANK_REPOS_DIR", ""))
-    repo_path = repos_dir / project_config.owner / project_config.repo
+    repos_dir_str = getattr(settings, "FRANK_REPOS_DIR", "")
+    if not repos_dir_str:
+        return ""
+
+    repo_path = Path(repos_dir_str) / project_config.owner / project_config.repo
 
     if not repo_path.is_dir():
         return ""

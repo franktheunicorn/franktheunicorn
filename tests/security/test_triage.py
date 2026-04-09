@@ -87,8 +87,10 @@ class TestTriageReport:
         report.refresh_from_db()
         assert report.status == "triaging"
 
+    @patch("franktheunicorn.security.triage.search_cves", return_value=[])
     def test_triage_with_stub_backend(
         self,
+        mock_cves: MagicMock,
         db: Any,
     ) -> None:
         """Stub backend produces deterministic output; verify pipeline handles it."""

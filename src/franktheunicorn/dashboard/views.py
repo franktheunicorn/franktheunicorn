@@ -737,6 +737,12 @@ def security_report_triage(request: HttpRequest, report_id: int) -> HttpResponse
 
         operator_config = get_operator_config()
 
+        if not operator_config.llm_backends:
+            return HttpResponse(
+                '<div class="triage-result" style="color: #c00;">'
+                "No LLM backend configured. Add one to operator.yaml.</div>"
+            )
+
         project_config = _find_project_config(report.project) if report.project else None
 
         from franktheunicorn.security.triage import triage_report
@@ -831,6 +837,12 @@ def security_report_cve_check(request: HttpRequest, report_id: int) -> HttpRespo
         from franktheunicorn.config.loader import get_operator_config
 
         operator_config = get_operator_config()
+
+        if not operator_config.security_triage.enabled:
+            return HttpResponse(
+                '<div class="cve-result" style="color: #c00;">'
+                "Security triage is not enabled in operator config.</div>"
+            )
 
         keyword = report.parsed_component or report.title
         if not keyword:

@@ -123,5 +123,12 @@
         <p><button onclick="document.getElementById('shortcut-help').style.display='none'">Close</button></p>
     </div>
     <script src="{% static 'dashboard/shortcuts.js' %}"></script>
+    <script>
+        // Configure htmx to send Django CSRF token on every request.
+        document.body.addEventListener('htmx:configRequest', function(event) {
+            var csrfCookie = document.cookie.split(';').map(c => c.trim()).find(c => c.startsWith('csrftoken='));
+            if (csrfCookie) { event.detail.headers['X-CSRFToken'] = csrfCookie.split('=')[1]; }
+        });
+    </script>
 </body>
 </html>

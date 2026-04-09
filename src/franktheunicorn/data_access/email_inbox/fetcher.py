@@ -63,10 +63,10 @@ def fetch_security_emails(config: SecurityEmailConfig) -> list[InboxMessage]:
                 byte_data = raw_bytes if isinstance(raw_bytes, bytes) else str(raw_bytes).encode()
 
                 parsed = parse_email_message(byte_data)
+                # Mark as read so non-security emails aren't re-fetched every cycle.
+                conn.store(msg_id, "+FLAGS", "\\Seen")
                 if parsed.is_security_report:
                     messages.append(parsed)
-                    # Mark as read.
-                    conn.store(msg_id, "+FLAGS", "\\Seen")
             except Exception:
                 logger.exception("Failed to parse email %s", msg_id)
     except Exception:

@@ -492,7 +492,6 @@ def _poll_security_emails(operator_config: OperatorConfig) -> None:
     interval = operator_config.security_triage.email.poll_interval_seconds
     if now - _last_security_email_poll < interval:
         return
-    _last_security_email_poll = now
 
     try:
         from franktheunicorn.core.models import SecurityReport
@@ -526,6 +525,8 @@ def _poll_security_emails(operator_config: OperatorConfig) -> None:
                     triage_report(report, None, operator_config)
                 except Exception:
                     logger.exception("Auto-triage failed for email report %d", report.pk)
+        # Only update timestamp after successful poll so errors retry sooner.
+        _last_security_email_poll = now
     except Exception:
         logger.exception("Error polling security emails")
 

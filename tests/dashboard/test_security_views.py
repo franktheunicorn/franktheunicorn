@@ -189,23 +189,42 @@ class TestSecurityReportTriage:
     def test_triage_endpoint(
         self, mock_config: MagicMock, mock_triage: MagicMock, client: Client, db: Any
     ) -> None:
-        from franktheunicorn.config.models import OperatorConfig
+        from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig
 
-        mock_config.return_value = OperatorConfig(github_username="testuser")
+        mock_config.return_value = OperatorConfig(
+            github_username="testuser",
+            llm_backends=[LLMBackendConfig(provider="stub")],
+        )
         report = SecurityReportFactory(title="Test triage")
 
         response = client.post(f"/security/{report.pk}/triage/")
         assert response.status_code == 200
         mock_triage.assert_called_once()
 
+    @patch("franktheunicorn.config.loader.get_operator_config")
+    def test_triage_no_backend_returns_error(
+        self, mock_config: MagicMock, client: Client, db: Any
+    ) -> None:
+        from franktheunicorn.config.models import OperatorConfig
+
+        mock_config.return_value = OperatorConfig(github_username="testuser")
+        report = SecurityReportFactory()
+
+        response = client.post(f"/security/{report.pk}/triage/")
+        assert response.status_code == 200
+        assert b"No LLM backend configured" in response.content
+
     @patch("franktheunicorn.security.triage.triage_report", side_effect=RuntimeError("boom"))
     @patch("franktheunicorn.config.loader.get_operator_config")
     def test_triage_error_returns_error_html(
         self, mock_config: MagicMock, mock_triage: MagicMock, client: Client, db: Any
     ) -> None:
-        from franktheunicorn.config.models import OperatorConfig
+        from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig
 
-        mock_config.return_value = OperatorConfig(github_username="testuser")
+        mock_config.return_value = OperatorConfig(
+            github_username="testuser",
+            llm_backends=[LLMBackendConfig(provider="stub")],
+        )
         report = SecurityReportFactory()
 
         response = client.post(f"/security/{report.pk}/triage/")
