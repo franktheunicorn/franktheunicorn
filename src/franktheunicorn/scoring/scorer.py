@@ -13,6 +13,7 @@ from franktheunicorn.scoring.signals import (
     WEIGHTS,
     score_ai_generated,
     score_committer_is_on_it,
+    score_cve_file_history,
     score_has_review_request,
     score_keyword_match,
     score_llm_interest,
@@ -57,6 +58,7 @@ def score_pull_request(
     author_replies_after_review: list[str] | None = None,
     downstream_apis: dict[str, list[str]] | None = None,
     sentry_error_count: int | None = None,
+    cve_affected_files: list[str] | None = None,
 ) -> tuple[float, dict[str, float]]:
     """Score a PR for operator interest. Pure function — no Django imports.
 
@@ -142,6 +144,10 @@ def score_pull_request(
             ),
         )
 
+    # CVE file history: boost PRs touching files involved in past CVE fixes.
+    if cve_affected_files is not None:
+        _add("cve_file_history", score_cve_file_history(changed_files, cve_affected_files))
+
     # Committer-is-on-it down-ranking (§2.7)
     if recent_reviews is not None:
         committers = _get_list(project_config_dict, "committers")
@@ -214,6 +220,7 @@ def score_pull_request_from_model(
     author_replies_after_review: list[str] | None = None,
     downstream_apis: dict[str, list[str]] | None = None,
     sentry_error_count: int | None = None,
+    cve_affected_files: list[str] | None = None,
 ) -> tuple[float, dict[str, float]]:
     """Django-aware wrapper: converts models to dicts, resolves known_authors."""
     pr_dict: dict[str, object] = {
@@ -294,4 +301,5 @@ def score_pull_request_from_model(
         author_replies_after_review=author_replies_after_review,
         downstream_apis=downstream_apis,
         sentry_error_count=sentry_error_count,
+        cve_affected_files=cve_affected_files,
     )

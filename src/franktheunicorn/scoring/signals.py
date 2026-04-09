@@ -28,6 +28,7 @@ WEIGHTS: dict[str, int] = {
     "pending_response": 20,
     "downstream_impact": 20,
     "sentry_errors": 15,
+    "cve_file_history": 25,
 }
 
 MAX_SCORE: int = 100
@@ -221,6 +222,30 @@ def score_merge_conflict(mergeable: bool | None) -> int | None:
     if mergeable is None:
         return None  # unknown status, don't penalize
     return WEIGHTS["merge_conflict"] if not mergeable else None
+
+
+def score_cve_file_history(
+    changed_files: list[str],
+    cve_affected_files: list[str],
+) -> int | None:
+    """Boost when PR touches files involved in past CVE/security fixes.
+
+    Proportional to the fraction of changed files overlapping with
+    CVE-affected files. Supports exact match and glob/prefix patterns
+    from manual config.
+    """
+    if not changed_files or not cve_affected_files:
+        return None
+    cve_set = set(cve_affected_files)
+    matches = sum(
+        1
+        for f in changed_files
+        if f in cve_set or any(_path_matches(f, p) for p in cve_affected_files)
+    )
+    if matches == 0:
+        return None
+    fraction = matches / len(changed_files)
+    return round(WEIGHTS["cve_file_history"] * fraction)
 
 
 def score_llm_interest(llm_judgment: str | None) -> int | None:

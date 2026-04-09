@@ -284,3 +284,37 @@ class TestReEngagementFromModel:
         )
         _, bd = score_pull_request_from_model(pr, spark_project_config, "holdenk")
         assert "updated_since_operator_review" in bd
+
+
+class TestCveFileHistoryInScorer:
+    def test_cve_signal_in_breakdown(self) -> None:
+        pr = {**_ALICE_PR, "changed_files": ["src/auth.py"]}
+        _, bd = score_pull_request(pr, {}, "holdenk", cve_affected_files=["src/auth.py"])
+        assert "cve_file_history" in bd
+        assert bd["cve_file_history"] == 25.0
+
+    def test_cve_signal_partial_overlap(self) -> None:
+        pr = {**_ALICE_PR, "changed_files": ["src/auth.py", "src/views.py"]}
+        _, bd = score_pull_request(pr, {}, "holdenk", cve_affected_files=["src/auth.py"])
+        assert "cve_file_history" in bd
+        assert bd["cve_file_history"] == round(25.0 * 0.5)
+
+    def test_cve_signal_no_overlap(self) -> None:
+        pr = {**_ALICE_PR, "changed_files": ["src/views.py"]}
+        _, bd = score_pull_request(pr, {}, "holdenk", cve_affected_files=["src/auth.py"])
+        assert "cve_file_history" not in bd
+
+    def test_cve_signal_skipped_when_none(self) -> None:
+        pr = {**_ALICE_PR, "changed_files": ["src/auth.py"]}
+        _, bd = score_pull_request(pr, {}, "holdenk")
+        assert "cve_file_history" not in bd
+
+    def test_cve_weight_override(self) -> None:
+        pr = {**_ALICE_PR, "changed_files": ["src/auth.py"]}
+        _, bd = score_pull_request(
+            pr,
+            {"scoring_weights": {"cve_file_history": 50}},
+            "holdenk",
+            cve_affected_files=["src/auth.py"],
+        )
+        assert bd["cve_file_history"] == 50.0

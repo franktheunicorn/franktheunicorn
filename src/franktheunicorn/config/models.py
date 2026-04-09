@@ -438,6 +438,7 @@ class ProjectConfig(BaseModel):
     collaborator_scores: dict[str, float | None] = Field(default_factory=dict)
     ai_agents: list[str] = Field(default_factory=list)
     committers: list[str] = Field(default_factory=list)
+    cve_files: list[str] = Field(default_factory=list)
     new_contributor_addendum: str = ""
     enabled: bool = True
 

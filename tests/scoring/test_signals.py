@@ -8,6 +8,7 @@ from franktheunicorn.scoring.signals import (
     is_likely_bot,
     path_overlap_fraction,
     score_ai_generated,
+    score_cve_file_history,
     score_has_review_request,
     score_keyword_match,
     score_llm_interest,
@@ -308,3 +309,53 @@ class TestPendingResponse:
             ["2026-03-30T10:00:00Z", "2026-03-30T14:00:00Z"],
         )
         assert result == WEIGHTS["pending_response"]
+
+
+class TestCveFileHistory:
+    def test_no_cve_files(self) -> None:
+        assert score_cve_file_history(["src/main.py"], []) is None
+
+    def test_no_changed_files(self) -> None:
+        assert score_cve_file_history([], ["src/auth.py"]) is None
+
+    def test_both_empty(self) -> None:
+        assert score_cve_file_history([], []) is None
+
+    def test_full_overlap(self) -> None:
+        result = score_cve_file_history(
+            ["src/auth.py", "src/crypto.py"],
+            ["src/auth.py", "src/crypto.py"],
+        )
+        assert result == WEIGHTS["cve_file_history"]
+
+    def test_partial_overlap(self) -> None:
+        result = score_cve_file_history(
+            ["src/auth.py", "src/views.py", "src/models.py", "src/utils.py"],
+            ["src/auth.py"],
+        )
+        # 1/4 overlap = round(25 * 0.25) = 6
+        assert result == round(WEIGHTS["cve_file_history"] * 0.25)
+
+    def test_no_overlap(self) -> None:
+        assert score_cve_file_history(["src/views.py"], ["src/auth.py"]) is None
+
+    def test_glob_pattern_matching(self) -> None:
+        result = score_cve_file_history(
+            ["sql/catalyst/optimizer/Rules.scala"],
+            ["sql/catalyst/optimizer/**"],
+        )
+        assert result == WEIGHTS["cve_file_history"]
+
+    def test_prefix_pattern_matching(self) -> None:
+        result = score_cve_file_history(
+            ["src/auth/login.py"],
+            ["src/auth/"],
+        )
+        assert result == WEIGHTS["cve_file_history"]
+
+    def test_exact_match(self) -> None:
+        result = score_cve_file_history(
+            ["src/auth.py"],
+            ["src/auth.py"],
+        )
+        assert result == WEIGHTS["cve_file_history"]
