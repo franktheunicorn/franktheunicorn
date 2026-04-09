@@ -244,7 +244,7 @@ class TestFetchCveAffectedFiles:
     def test_cache_expiry(self, git_repo: Path) -> None:
         fetch_cve_affected_files(git_repo, governance="standard")
         # Manually expire the cache
-        key = str(git_repo)
+        key = f"{git_repo}:standard"
         cached_time, cached_files = _cache[key]
         _cache[key] = (cached_time - CACHE_TTL_SECONDS - 1, cached_files)
         # Add a new CVE commit
@@ -273,6 +273,13 @@ class TestFetchCveAffectedFiles:
             extra_cve_files=["zzz.py", "aaa.py"],
         )
         assert files == sorted(files)
+
+    def test_governance_keyed_cache(self, git_repo: Path) -> None:
+        """Different governance values should use separate cache entries."""
+        standard = fetch_cve_affected_files(git_repo, governance="standard")
+        asf = fetch_cve_affected_files(git_repo, governance="asf")
+        # Standard finds CVE-mentioning commits, ASF finds terse commits
+        assert standard != asf
 
     def test_nonexistent_repo(self, tmp_path: Path) -> None:
         result = fetch_cve_affected_files(tmp_path / "nonexistent")

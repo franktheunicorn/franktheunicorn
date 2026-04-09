@@ -231,16 +231,18 @@ def score_cve_file_history(
     """Boost when PR touches files involved in past CVE/security fixes.
 
     Proportional to the fraction of changed files overlapping with
-    CVE-affected files. Supports exact match and glob/prefix patterns
-    from manual config.
+    CVE-affected files. Auto-detected paths use exact match; manual
+    config entries with glob chars or trailing ``/`` use pattern matching.
     """
     if not changed_files or not cve_affected_files:
         return None
     cve_set = set(cve_affected_files)
+    # Only use _path_matches for entries that are glob/prefix patterns,
+    # not exact file paths (avoids prefix false positives like
+    # "src/auth.py" matching "src/auth.py.bak").
+    patterns = [p for p in cve_affected_files if any(c in p for c in "*?[") or p.endswith("/")]
     matches = sum(
-        1
-        for f in changed_files
-        if f in cve_set or any(_path_matches(f, p) for p in cve_affected_files)
+        1 for f in changed_files if f in cve_set or any(_path_matches(f, p) for p in patterns)
     )
     if matches == 0:
         return None

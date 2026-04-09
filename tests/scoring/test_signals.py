@@ -359,3 +359,7 @@ class TestCveFileHistory:
             ["src/auth.py"],
         )
         assert result == WEIGHTS["cve_file_history"]
+
+    def test_no_prefix_false_positive(self) -> None:
+        """Exact path 'src/auth.py' should NOT match 'src/auth.py.bak'."""
+        assert score_cve_file_history(["src/auth.py.bak"], ["src/auth.py"]) is None

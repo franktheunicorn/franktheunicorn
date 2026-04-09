@@ -213,9 +213,9 @@ def fetch_cve_affected_files(
     - other: git log CVE grep
 
     Results are merged with extra_cve_files (from project config)
-    and cached per repo for CACHE_TTL_SECONDS.
+    and cached per repo + governance for CACHE_TTL_SECONDS.
     """
-    cache_key = str(repo_path)
+    cache_key = f"{repo_path}:{governance}"
     now = time.monotonic()
 
     if cache_key in _cache:
