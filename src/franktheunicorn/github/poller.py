@@ -138,6 +138,20 @@ def poll_project(
             except Exception:
                 logger.debug("Blame fetch failed for PR #%d", pr_number, exc_info=True)
 
+        # Fetch CVE-affected files from git history.
+        cve_affected_files: list[str] | None = None
+        if repo_path is not None and repo_path.is_dir():
+            try:
+                from franktheunicorn.scoring.cve_history import fetch_cve_affected_files
+
+                cve_affected_files = fetch_cve_affected_files(
+                    repo_path,
+                    governance=project_config.governance,
+                    extra_cve_files=project_config.cve_files,
+                )
+            except Exception:
+                logger.debug("CVE history fetch failed for PR #%d", pr_number, exc_info=True)
+
         # Gather re-engagement data: check if operator has posted reviews
         # and if the author has replied since.
         operator_review_posted_at: str | None = None
@@ -175,6 +189,7 @@ def poll_project(
             project_config=project_config,
             operator_username=operator_username,
             blame_data=blame_data,
+            cve_affected_files=cve_affected_files,
             operator_review_posted_at=operator_review_posted_at,
             author_replies_after_review=author_replies,
         )
