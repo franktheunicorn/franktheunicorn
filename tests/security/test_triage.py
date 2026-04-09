@@ -24,14 +24,10 @@ class _MockLLMBackend(BaseLLMBackend):
     _default_model = ""
 
     def __init__(self, responses: list[str]) -> None:
-        self._config = LLMBackendConfig(provider="stub")
+        super().__init__(LLMBackendConfig(provider="stub"))
         self._model = "test"
-        self._sdk_available = True
         self._responses = responses
         self._call_count = 0
-        self._last_tokens_in = 0
-        self._last_tokens_out = 0
-        self._last_duration = None
 
     def _call_api(self, system_prompt: str, user_message: str, api_key: str) -> str:
         idx = min(self._call_count, len(self._responses) - 1)
