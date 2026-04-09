@@ -93,6 +93,21 @@ validate_github_token() {
     fi
 }
 
+infer_github_username() {
+    # Extract the login from GET /user. Prints the username on stdout.
+    local token="$1"
+    if ! command -v curl &>/dev/null; then
+        return 1
+    fi
+    local response
+    response=$(curl -s \
+        -H "Authorization: token ${token}" \
+        -H "Accept: application/vnd.github+json" \
+        https://api.github.com/user 2>/dev/null) || return 1
+    # Extract login using grep+sed (avoids jq dependency)
+    echo "$response" | grep -o '"login":"[^"]*"' | head -1 | sed 's/"login":"//;s/"//'
+}
+
 # --- Parse flags ------------------------------------------------------------
 
 MODE=""
@@ -293,6 +308,11 @@ if [ "$MODE" = "docker" ]; then
         if [ -n "$existing_gh_token" ]; then
             validate_github_token "$existing_gh_token" || \
                 warn "Continuing setup — fix the token in .env before starting containers."
+            # Auto-detect GitHub username from token
+            inferred_username=$(infer_github_username "$existing_gh_token" || true)
+            if [ -n "$inferred_username" ]; then
+                ok "Detected GitHub username: $inferred_username"
+            fi
         fi
     fi
 
@@ -498,6 +518,11 @@ if [ "$MOCK_MODE" = "false" ]; then
     if [ -n "$existing_gh_token" ]; then
         validate_github_token "$existing_gh_token" || \
             warn "Continuing setup — fix the token in .env before running the worker."
+        # Auto-detect GitHub username from token
+        inferred_username=$(infer_github_username "$existing_gh_token" || true)
+        if [ -n "$inferred_username" ]; then
+            ok "Detected GitHub username: $inferred_username"
+        fi
     fi
 
     # Persist any env-sourced LLM keys (ANTHROPIC_API_KEY etc.) to .env

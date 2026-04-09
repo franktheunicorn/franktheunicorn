@@ -85,6 +85,10 @@ class MockGitHubClient:
             return _load_json_fixture(fixture_path)
         return []
 
+    def get_authenticated_user(self) -> dict[str, Any]:
+        """Return a mock authenticated user."""
+        return {"login": "mock-user", "id": 0, "type": "User"}
+
     def close(self) -> None:
         pass
 
