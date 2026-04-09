@@ -60,6 +60,9 @@ jobs:
       - name: Run mypy
         run: mypy src/franktheunicorn/
 
+      - name: Check migration conflicts
+        run: python manage.py check_migration_conflicts
+
   docker:
     runs-on: ubuntu-latest
     steps:

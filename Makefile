@@ -9,7 +9,7 @@ ifeq ($(wildcard $(VENV)/bin/python),)
   ACTIVATE_MSG := "(run 'make venv' first or 'make setup')"
 endif
 
-.PHONY: help venv setup test lint format typecheck check serve worker migrate docker-up docker-build clean
+.PHONY: help venv setup test lint format typecheck check serve worker migrate check-migrations docker-up docker-build clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -39,7 +39,10 @@ format: venv ## Auto-format code
 typecheck: venv ## Run mypy type checking
 	$(PYTHON) -m mypy src/franktheunicorn/
 
-check: lint typecheck test ## Run all checks (lint + typecheck + test)
+check-migrations: venv ## Check for migration conflicts
+	$(PYTHON) manage.py check_migration_conflicts
+
+check: lint typecheck check-migrations test ## Run all checks (lint + typecheck + test)
 
 serve: venv migrate ## Start Django dev server
 	$(PYTHON) manage.py runserver
