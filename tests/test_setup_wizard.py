@@ -795,6 +795,118 @@ class TestCredentialDetectionIntegration:
         assert backend["api_key_env"] == "GROQ_API_KEY"
         assert backend["base_url"] == "https://api.groq.com/openai/v1"
 
+    def test_detected_ollama_host_uses_ollama_provider(self, tmp_path: Path) -> None:
+        """OLLAMA_HOST detection must produce a working Ollama backend, not OpenAI.
+
+        Regression test for a bug where detected Ollama endpoints were routed
+        through _configure_detected_backend, which hardcoded provider="openai"
+        — that produced a backend that wouldn't run without OPENAI_API_KEY
+        and never actually contacted the local Ollama server.
+        """
+        output_path = tmp_path / "operator.yaml"
+        inputs = [
+            "testuser",  # github_username
+            "direct",  # review_style
+            "8",  # select detected ollama backend
+            "",  # accept recommended model default
+            "0.3",  # temperature
+            "",  # projects: skip
+            "n",  # coderabbit: no
+        ]
+        clean_env = {
+            "ANTHROPIC_API_KEY": "",
+            "OPENAI_API_KEY": "",
+            "GOOGLE_API_KEY": "",
+            "OLLAMA_HOST": "http://localhost:11434",
+        }
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch.dict("os.environ", clean_env, clear=False),
+            patch(
+                "franktheunicorn.core.management.commands.setup_llm.recommend_local_model",
+                return_value=("qwen2.5-coder:7b", "test"),
+            ),
+            _NO_DISCOVERY,
+        ):
+            call_command("setup_llm", output=str(output_path))
+
+        config = yaml.safe_load(output_path.read_text())
+        assert len(config["llm_backends"]) == 1
+        backend = config["llm_backends"][0]
+        # Must be the native ollama provider — not openai, which would require
+        # OPENAI_API_KEY and fail silently at review time.
+        assert backend["provider"] == "ollama"
+        assert backend["base_url"] == "http://localhost:11434"
+        # Ollama doesn't need an api_key; ensure we didn't set one.
+        assert "api_key_env" not in backend
+        assert backend["model"] == "qwen2.5-coder:7b"
+
+    def test_detected_ollama_base_url_uses_ollama_provider(self, tmp_path: Path) -> None:
+        """OLLAMA_BASE_URL also routes to the ollama backend."""
+        output_path = tmp_path / "operator.yaml"
+        inputs = [
+            "testuser",
+            "direct",
+            "8",
+            "",  # accept recommended model
+            "0.3",
+            "",  # projects
+            "n",  # coderabbit
+        ]
+        clean_env = {
+            "ANTHROPIC_API_KEY": "",
+            "OPENAI_API_KEY": "",
+            "GOOGLE_API_KEY": "",
+            "OLLAMA_BASE_URL": "http://my-ollama.local:11434",
+        }
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch.dict("os.environ", clean_env, clear=False),
+            patch(
+                "franktheunicorn.core.management.commands.setup_llm.recommend_local_model",
+                return_value=("qwen2.5-coder:3b", "CPU only"),
+            ),
+            _NO_DISCOVERY,
+        ):
+            call_command("setup_llm", output=str(output_path))
+
+        config = yaml.safe_load(output_path.read_text())
+        backend = config["llm_backends"][0]
+        assert backend["provider"] == "ollama"
+        assert backend["base_url"] == "http://my-ollama.local:11434"
+        assert "api_key_env" not in backend
+        assert backend["model"] == "qwen2.5-coder:3b"
+
+    def test_detected_llama_cpp_host_stays_openai_compatible(self, tmp_path: Path) -> None:
+        """LLAMA_CPP_HOST is OpenAI-compatible, so it keeps provider=openai."""
+        output_path = tmp_path / "operator.yaml"
+        inputs = [
+            "testuser",
+            "direct",
+            "8",  # select detected llama-cpp
+            "my-model.gguf",  # model name (no hardware default for openai-compat)
+            "0.3",
+            "",
+            "n",
+        ]
+        clean_env = {
+            "ANTHROPIC_API_KEY": "",
+            "OPENAI_API_KEY": "",
+            "GOOGLE_API_KEY": "",
+            "LLAMA_CPP_HOST": "http://localhost:8080",
+        }
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch.dict("os.environ", clean_env, clear=False),
+            _NO_DISCOVERY,
+        ):
+            call_command("setup_llm", output=str(output_path))
+
+        config = yaml.safe_load(output_path.read_text())
+        backend = config["llm_backends"][0]
+        assert backend["provider"] == "openai"
+        assert backend["base_url"] == "http://localhost:8080"
+
 
 @pytest.mark.django_db
 class TestModelDiscoveryIntegration:

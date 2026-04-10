@@ -28,9 +28,10 @@ data/
 
 # Dev files
 scripts/
-# docker/ is excluded because Dockerfiles are passed via -f, not COPY'd.
-# If adding files under docker/ that need to be COPY'd, remove this line.
-docker/
+# docker/ contents are COPY'd into the image (compose.*.yaml.template files
+# are used by setup_llm --docker to generate local-inference overrides), so
+# we only exclude the Dockerfile itself, which isn't needed at runtime.
+docker/Dockerfile
 docs/
 *.md
 !README.md

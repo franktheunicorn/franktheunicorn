@@ -635,8 +635,21 @@ class Command(BaseCommand):
         return llm_backends
 
     def _configure_detected_backend(self, entry: DynamicMenuEntry) -> dict[str, object]:
-        """Configure a Tier 2/3 detected credential as an OpenAI-compatible backend."""
-        config: dict[str, object] = {"provider": "openai"}
+        """Configure a Tier 2/3 detected credential as a backend.
+
+        Most detected backends (Groq, Mistral, custom endpoints, …) are
+        OpenAI-compatible and use the ``openai`` provider with a base_url.
+        Ollama is the exception: it has its own native backend that doesn't
+        need an api_key, so detected ``OLLAMA_HOST`` / ``OLLAMA_BASE_URL``
+        entries are routed through the ``ollama`` provider instead — writing
+        ``provider: openai`` for an Ollama host would require
+        ``OPENAI_API_KEY`` at runtime and the backend would refuse to run.
+        """
+        # Ollama is the only non-OpenAI-compatible native backend we detect.
+        is_ollama = entry.provider_hint == "ollama"
+        provider = "ollama" if is_ollama else "openai"
+
+        config: dict[str, object] = {"provider": provider}
         if entry.api_key_env:
             config["api_key_env"] = entry.api_key_env
 
@@ -656,9 +669,18 @@ class Command(BaseCommand):
             if base_url:
                 config["base_url"] = base_url
 
+        # For Ollama, seed the discovery/prompt with a hardware-aware default
+        # so the user can just hit Enter.
+        default_model = ""
+        if is_ollama:
+            recommended_model, reason = recommend_local_model()
+            self.stdout.write(f"  Hardware detection: {reason}\n")
+            self.stdout.write(f"  Recommended model: {recommended_model}\n")
+            default_model = recommended_model
+
         model = self._discover_and_choose_model(
-            provider="openai",
-            default_model="",
+            provider=provider,
+            default_model=default_model,
             api_key_env=entry.api_key_env,
             base_url=str(config.get("base_url", "")),
         )
