@@ -429,6 +429,256 @@ class TestDockerMode:
 
 
 @pytest.mark.django_db
+class TestProjectRootResolution:
+    """Direct tests for Command._get_project_root() fallback behaviour."""
+
+    def test_returns_base_dir_when_docker_subdir_exists(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from franktheunicorn.core.management.commands.setup_llm import Command
+
+        base_dir = tmp_path / "real-base"
+        (base_dir / "docker").mkdir(parents=True)
+        cwd_with_docker = tmp_path / "other"
+        (cwd_with_docker / "docker").mkdir(parents=True)
+        monkeypatch.chdir(cwd_with_docker)
+
+        cmd = Command()
+        with patch("django.conf.settings.BASE_DIR", str(base_dir)):
+            assert cmd._get_project_root() == base_dir
+
+    def test_falls_back_to_cwd_when_base_dir_has_no_docker(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from franktheunicorn.core.management.commands.setup_llm import Command
+
+        base_dir = tmp_path / "fake-site-packages"
+        base_dir.mkdir()
+        cwd = tmp_path / "app"
+        (cwd / "docker").mkdir(parents=True)
+        monkeypatch.chdir(cwd)
+
+        cmd = Command()
+        with patch("django.conf.settings.BASE_DIR", str(base_dir)):
+            assert cmd._get_project_root() == cwd
+
+    def test_returns_base_dir_when_neither_has_docker(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If neither BASE_DIR nor cwd has a docker/ subdir, return BASE_DIR.
+
+        The caller will then hit the "template not found" branch and print
+        a warning — better to surface a broken absolute path than a cwd one.
+        """
+        from franktheunicorn.core.management.commands.setup_llm import Command
+
+        base_dir = tmp_path / "base"
+        base_dir.mkdir()
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+
+        cmd = Command()
+        with patch("django.conf.settings.BASE_DIR", str(base_dir)):
+            assert cmd._get_project_root() == base_dir
+
+
+@pytest.mark.django_db
+class TestMissingTemplateWarnings:
+    """Cover 'template not found' and OSError branches for all three compose generators."""
+
+    def test_ollama_docker_mode_missing_template_warns(self, tmp_path: Path) -> None:
+        """When the ollama template is missing, generation warns and doesn't write output."""
+        output_path = tmp_path / "operator.yaml"
+        (tmp_path / "docker").mkdir()  # empty docker/ — template missing
+        inputs = [
+            "testuser",
+            "direct",
+            "4",  # ollama
+            "",  # accept recommended default
+            "",  # projects: skip
+            "n",  # coderabbit: no
+        ]
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch(
+                "franktheunicorn.core.management.commands.setup_llm.recommend_local_model",
+                return_value=("qwen2.5-coder:3b", "test"),
+            ),
+            patch("django.conf.settings.BASE_DIR", str(tmp_path)),
+            _NO_DISCOVERY,
+        ):
+            call_command("setup_llm", output=str(output_path), docker=True)
+
+        assert output_path.exists()
+        assert not (tmp_path / "compose.ollama.yaml").exists()
+
+    def test_llama_cpp_docker_mode_missing_template_warns(self, tmp_path: Path) -> None:
+        """When the llama-cpp template is missing, generation warns and doesn't write output."""
+        output_path = tmp_path / "operator.yaml"
+        # Deliberately don't create the template file.
+        (tmp_path / "docker").mkdir()
+        inputs = [
+            "testuser",
+            "direct",
+            "5",  # llama-cpp
+            "my-model.gguf",
+            "",  # projects: skip
+            "n",  # coderabbit: no
+        ]
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch(
+                "franktheunicorn.core.management.commands.setup_llm.recommend_gguf_model",
+                return_value=("Qwen2.5-Coder-3B-Instruct-Q4_K_M.gguf", "test"),
+            ),
+            patch("django.conf.settings.BASE_DIR", str(tmp_path)),
+            _NO_DISCOVERY,
+        ):
+            call_command("setup_llm", output=str(output_path), docker=True)
+
+        assert output_path.exists()
+        # No compose override was generated because the template was missing.
+        assert not (tmp_path / "compose.llama-cpp.yaml").exists()
+
+    def test_vllm_docker_mode_missing_template_warns(self, tmp_path: Path) -> None:
+        """When the vLLM template is missing, generation warns and doesn't write output."""
+        output_path = tmp_path / "operator.yaml"
+        (tmp_path / "docker").mkdir()
+        inputs = [
+            "testuser",
+            "direct",
+            "6",  # vllm
+            "Qwen/Qwen2.5-Coder-7B-Instruct",
+            "",  # projects: skip
+            "n",  # coderabbit: no
+        ]
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch(
+                "franktheunicorn.core.management.commands.setup_llm.recommend_hf_model",
+                return_value=("Qwen/Qwen2.5-Coder-3B-Instruct", "test"),
+            ),
+            patch("django.conf.settings.BASE_DIR", str(tmp_path)),
+            _NO_DISCOVERY,
+        ):
+            call_command("setup_llm", output=str(output_path), docker=True)
+
+        assert output_path.exists()
+        assert not (tmp_path / "compose.vllm.yaml").exists()
+
+
+@pytest.mark.django_db
+class TestComposeGeneratorOSError:
+    """Cover OSError branches in the compose generators.
+
+    Triggers the failure by patching Path.write_text to raise — simulates
+    a read-only filesystem or permission error during write.
+    """
+
+    @staticmethod
+    def _make_write_text_fail(template_path: Path) -> object:
+        """Return a patched write_text that only fails for compose output files.
+
+        Reading the template must still succeed so we reach the except branch.
+        """
+        real_write_text = Path.write_text
+
+        def fake_write_text(
+            self: Path,
+            data: str,
+            encoding: str | None = None,
+            errors: str | None = None,
+            newline: str | None = None,
+        ) -> int:
+            if self.name.startswith("compose.") and self.name.endswith(".yaml"):
+                raise OSError("read-only filesystem")
+            return real_write_text(self, data, encoding=encoding, errors=errors, newline=newline)
+
+        return fake_write_text
+
+    def _write_minimal_templates(self, tmp_path: Path) -> None:
+        template_dir = tmp_path / "docker"
+        template_dir.mkdir()
+        for name in (
+            "compose.ollama.yaml.template",
+            "compose.llama-cpp.yaml.template",
+            "compose.vllm.yaml.template",
+        ):
+            (template_dir / name).write_text("services: {}\n# model={{MODEL}}\n")
+
+    def test_ollama_oserror_is_swallowed(self, tmp_path: Path) -> None:
+        self._write_minimal_templates(tmp_path)
+        output_path = tmp_path / "operator.yaml"
+        inputs = [
+            "testuser",
+            "direct",
+            "4",  # ollama
+            "",  # accept default
+            "",  # projects: skip
+            "n",  # coderabbit: no
+        ]
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch(
+                "franktheunicorn.core.management.commands.setup_llm.recommend_local_model",
+                return_value=("qwen2.5-coder:3b", "test"),
+            ),
+            patch("django.conf.settings.BASE_DIR", str(tmp_path)),
+            patch.object(Path, "write_text", self._make_write_text_fail(tmp_path)),
+            _NO_DISCOVERY,
+        ):
+            # Should not raise — the OSError is caught and reported as a warning.
+            call_command("setup_llm", output=str(output_path), docker=True)
+
+    def test_llama_cpp_oserror_is_swallowed(self, tmp_path: Path) -> None:
+        self._write_minimal_templates(tmp_path)
+        output_path = tmp_path / "operator.yaml"
+        inputs = [
+            "testuser",
+            "direct",
+            "5",  # llama-cpp
+            "my-model.gguf",
+            "",  # projects: skip
+            "n",  # coderabbit: no
+        ]
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch(
+                "franktheunicorn.core.management.commands.setup_llm.recommend_gguf_model",
+                return_value=("Qwen2.5-Coder-3B-Instruct-Q4_K_M.gguf", "test"),
+            ),
+            patch("django.conf.settings.BASE_DIR", str(tmp_path)),
+            patch.object(Path, "write_text", self._make_write_text_fail(tmp_path)),
+            _NO_DISCOVERY,
+        ):
+            call_command("setup_llm", output=str(output_path), docker=True)
+
+    def test_vllm_oserror_is_swallowed(self, tmp_path: Path) -> None:
+        self._write_minimal_templates(tmp_path)
+        output_path = tmp_path / "operator.yaml"
+        inputs = [
+            "testuser",
+            "direct",
+            "6",  # vllm
+            "Qwen/Qwen2.5-Coder-7B-Instruct",
+            "",  # projects: skip
+            "n",  # coderabbit: no
+        ]
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch(
+                "franktheunicorn.core.management.commands.setup_llm.recommend_hf_model",
+                return_value=("Qwen/Qwen2.5-Coder-3B-Instruct", "test"),
+            ),
+            patch("django.conf.settings.BASE_DIR", str(tmp_path)),
+            patch.object(Path, "write_text", self._make_write_text_fail(tmp_path)),
+            _NO_DISCOVERY,
+        ):
+            call_command("setup_llm", output=str(output_path), docker=True)
+
+
+@pytest.mark.django_db
 class TestCredentialDetectionIntegration:
     """Tests for credential detection integration in the setup wizard."""
 

@@ -512,8 +512,8 @@ class Command(BaseCommand):
             self._generate_llama_cpp_compose(model)
             self.stdout.write(
                 "  Place the GGUF file in the llama-models volume before starting:\n"
-                "    docker run --rm -v llama-models:/models -v $(pwd):/src alpine "
-                "cp /src/" + model + " /models/\n"
+                f"    docker run --rm -v llama-models:/models -v $(pwd):/src alpine "
+                f"cp /src/{model} /models/\n"
             )
         else:
             self.stdout.write(
