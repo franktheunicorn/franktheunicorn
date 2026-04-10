@@ -1,0 +1,28 @@
+<div style="background: var(--card); border: 1px solid var(--border); border-radius: 4px; padding: 0.75rem;">
+    <h3 style="font-size: 0.9rem; margin-bottom: 0.5rem;">CVE Matches</h3>
+
+    {% if report.cve_matches %}
+    <table>
+        <thead>
+            <tr>
+                <th>CVE ID</th>
+                <th>CVSS</th>
+                <th>Status</th>
+                <th>Description</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for cve in report.cve_matches %}
+            <tr>
+                <td style="white-space: nowrap; font-weight: 600;">{{ cve.cve_id }}</td>
+                <td>{% if cve.cvss_score %}{{ cve.cvss_score }}{% else %}&mdash;{% endif %}</td>
+                <td>{{ cve.status|default:"&mdash;" }}</td>
+                <td style="font-size: 0.8rem;">{{ cve.description|truncatewords:30 }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p style="font-size: 0.85rem; color: var(--muted);">No matching CVEs found.</p>
+    {% endif %}
+</div>

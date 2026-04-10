@@ -343,6 +343,10 @@ def _run_cycle(
     if operator_config is not None:
         _run_shepherding_pass(all_prs, pr_to_config, operator_config)
 
+    # Security email ingestion.
+    if operator_config is not None:
+        _poll_security_emails(operator_config)
+
     diff_http.close()
 
 
@@ -469,6 +473,62 @@ def _resolve_base_ref(repo_path: Path, pr: PullRequest) -> str | None:
         repo_path,
     )
     return None
+
+
+_last_security_email_poll: float = 0.0
+
+
+def _poll_security_emails(operator_config: OperatorConfig) -> None:
+    """Poll security email inbox and create SecurityReport records."""
+    global _last_security_email_poll
+
+    if not operator_config.security_triage.enabled:
+        return
+    if not operator_config.security_triage.email.enabled:
+        return
+
+    # Respect the configured poll interval.
+    now = time.monotonic()
+    interval = operator_config.security_triage.email.poll_interval_seconds
+    if now - _last_security_email_poll < interval:
+        return
+
+    try:
+        from franktheunicorn.core.models import SecurityReport
+        from franktheunicorn.data_access.email_inbox.fetcher import fetch_security_emails
+
+        messages = fetch_security_emails(operator_config.security_triage.email)
+        for msg in messages:
+            # Skip if already ingested (by message-id).
+            if (
+                msg.message_id
+                and SecurityReport.objects.filter(email_message_id=msg.message_id).exists()
+            ):
+                continue
+
+            report = SecurityReport.objects.create(
+                raw_text=msg.body,
+                title=msg.subject,
+                reporter_name=msg.from_name,
+                reporter_email=msg.from_email,
+                source="email",
+                email_message_id=msg.message_id,
+                email_received_at=msg.received_at,
+            )
+            logger.info("Ingested security report from email: %s", msg.subject)
+
+            # Auto-triage if configured.
+            if operator_config.security_triage.auto_triage:
+                try:
+                    from franktheunicorn.security.triage import triage_report
+
+                    triage_report(report, None, operator_config)
+                except Exception:
+                    logger.exception("Auto-triage failed for email report %d", report.pk)
+        # Only update timestamp after successful poll so errors retry sooner.
+        _last_security_email_poll = now
+    except Exception:
+        logger.exception("Error polling security emails")
 
 
 def _fetch_dependency_changelogs_for_cycle(

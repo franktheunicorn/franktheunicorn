@@ -1,0 +1,102 @@
+{% extends "dashboard/base.html" %}
+{% block title %}Security Report — franktheunicorn{% endblock %}
+{% block content %}
+<a href="{% url 'dashboard:security_list' %}" class="back-link">&larr; Security Reports</a>
+
+<div style="margin-top: 0.5rem; margin-bottom: 1rem;">
+    <h2 style="display: inline;">{{ report.title|default:"Untitled Report" }}</h2>
+    <span class="score-badge {% if report.status == 'valid' %}{% elif report.status == 'expected-behavior' or report.status == 'invalid' %}low{% else %}mid{% endif %}"
+          style="margin-left: 0.5rem; {% if report.status == 'valid' %}background: var(--red-bg); color: var(--red);{% elif report.status == 'duplicate' %}background: var(--orange-bg); color: var(--orange);{% endif %}">
+        {{ report.get_status_display }}
+    </span>
+    {% if report.assessed_severity != "unknown" %}
+    <span class="source-badge" style="background: {% if report.assessed_severity == 'critical' %}var(--red){% elif report.assessed_severity == 'high' %}var(--orange){% elif report.assessed_severity == 'medium' %}#f9a825{% else %}var(--muted){% endif %}; color: #fff;">
+        {{ report.get_assessed_severity_display }}
+    </span>
+    {% endif %}
+</div>
+
+<div class="breakdown" style="margin-bottom: 1rem;">
+    <dl>
+        <dt>Source:</dt><dd>{{ report.get_source_display }}</dd>
+        {% if report.project %}<dt>Project:</dt><dd>{{ report.project.full_name }}</dd>{% endif %}
+        {% if report.reporter_name %}<dt>Reporter:</dt><dd>{{ report.reporter_name }}</dd>{% endif %}
+        {% if report.reporter_email %}<dt>Email:</dt><dd>{{ report.reporter_email }}</dd>{% endif %}
+        <dt>Created:</dt><dd>{{ report.created_at|timesince }} ago</dd>
+    </dl>
+</div>
+
+<!-- Raw Report -->
+<details open style="margin-bottom: 1rem;">
+    <summary style="font-weight: 600; font-size: 0.9rem; cursor: pointer;">Raw Report</summary>
+    <pre style="background: var(--card); border: 1px solid var(--border); border-radius: 4px; padding: 0.75rem; font-size: 0.8rem; white-space: pre-wrap; word-wrap: break-word; max-height: 400px; overflow-y: auto; margin-top: 0.5rem;">{{ report.raw_text }}</pre>
+</details>
+
+<!-- Parsed Fields -->
+{% if report.parsed_component or report.parsed_poc or report.parsed_impact %}
+<div style="background: var(--card); border: 1px solid var(--border); border-radius: 4px; padding: 0.75rem; margin-bottom: 1rem;">
+    <h3 style="font-size: 0.9rem; margin-bottom: 0.5rem;">Parsed Fields</h3>
+    {% if report.parsed_component %}
+    <p style="font-size: 0.85rem;"><strong>Component:</strong> {{ report.parsed_component }}</p>
+    {% endif %}
+    {% if report.parsed_poc %}
+    <p style="font-size: 0.85rem; margin-top: 0.3rem;"><strong>POC:</strong></p>
+    <pre style="font-size: 0.8rem; background: var(--bg); padding: 0.5rem; border-radius: 3px; white-space: pre-wrap;">{{ report.parsed_poc }}</pre>
+    {% endif %}
+    {% if report.parsed_impact %}
+    <p style="font-size: 0.85rem; margin-top: 0.3rem;"><strong>Claimed Impact:</strong> {{ report.parsed_impact }}</p>
+    {% endif %}
+</div>
+{% endif %}
+
+<!-- Triage Results -->
+<div id="triage-area" style="margin-bottom: 1rem;">
+    {% if report.triage_summary %}
+    {% include "dashboard/_security_triage_result.html" %}
+    {% else %}
+    <button class="action-btn post"
+            hx-post="{% url 'dashboard:security_triage' report.pk %}"
+            hx-target="#triage-area"
+            hx-swap="innerHTML">
+        Run LLM Triage
+    </button>
+    {% endif %}
+</div>
+
+<!-- CVE Matches -->
+<div id="cve-area" style="margin-bottom: 1rem;">
+    {% if report.cve_matches %}
+    {% include "dashboard/_security_cve_matches.html" %}
+    {% else %}
+    <button class="action-btn"
+            hx-post="{% url 'dashboard:security_cve_check' report.pk %}"
+            hx-target="#cve-area"
+            hx-swap="innerHTML">
+        Check CVE Database
+    </button>
+    {% endif %}
+</div>
+
+<!-- Sandbox Execution -->
+{% if sandbox_enabled %}
+<div id="sandbox-area" style="margin-bottom: 1rem;">
+    {% if report.sandbox_requested %}
+    {% include "dashboard/_security_sandbox_result.html" %}
+    {% else %}
+    <button class="action-btn"
+            style="color: var(--orange); border-color: var(--orange);"
+            hx-post="{% url 'dashboard:security_sandbox' report.pk %}"
+            hx-target="#sandbox-area"
+            hx-swap="innerHTML"
+            hx-confirm="Run POC in sandboxed container? This executes the reported POC steps.">
+        Run POC in Sandbox
+    </button>
+    {% endif %}
+</div>
+{% endif %}
+
+<!-- Operator Verdict -->
+<div id="verdict-area" style="margin-bottom: 1rem;">
+    {% include "dashboard/_security_verdict.html" %}
+</div>
+{% endblock %}

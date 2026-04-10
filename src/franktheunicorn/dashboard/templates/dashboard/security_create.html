@@ -1,0 +1,54 @@
+{% extends "dashboard/base.html" %}
+{% block title %}New Security Report — franktheunicorn{% endblock %}
+{% block content %}
+<a href="{% url 'dashboard:security_list' %}" class="back-link">&larr; Security Reports</a>
+<h2 style="margin-top: 0.5rem;">Submit Security Report</h2>
+<p style="font-size: 0.85rem; color: var(--muted); margin-bottom: 1rem;">
+    Paste a security vulnerability report for triage. The LLM will parse the report,
+    assess POC validity, check for expected behavior, and search for matching CVEs.
+</p>
+
+<form method="post" action="{% url 'dashboard:security_create' %}"
+      style="padding: 1rem; background: var(--card); border: 1px solid var(--border); border-radius: 4px;">
+    {% csrf_token %}
+
+    <div class="form-row">
+        <label for="title" style="min-width: 6rem; font-size: 0.85rem; font-weight: 600;">Title</label>
+        <input type="text" id="title" name="title" placeholder="Brief title (optional — LLM will generate one)">
+    </div>
+
+    <div class="form-row">
+        <label for="project_id" style="min-width: 6rem; font-size: 0.85rem; font-weight: 600;">Project</label>
+        <select id="project_id" name="project_id">
+            <option value="">No specific project</option>
+            {% for project in projects %}
+            <option value="{{ project.pk }}">{{ project.full_name }}</option>
+            {% endfor %}
+        </select>
+    </div>
+
+    <div class="form-row">
+        <label for="reporter_name" style="min-width: 6rem; font-size: 0.85rem; font-weight: 600;">Reporter</label>
+        <input type="text" id="reporter_name" name="reporter_name" placeholder="Reporter name (optional)">
+    </div>
+
+    <div class="form-row">
+        <label for="reporter_email" style="min-width: 6rem; font-size: 0.85rem; font-weight: 600;">Email</label>
+        <input type="text" id="reporter_email" name="reporter_email" placeholder="Reporter email (optional)">
+    </div>
+
+    <div style="margin-top: 0.75rem;">
+        <label for="raw_text" style="display: block; font-size: 0.85rem; font-weight: 600; margin-bottom: 0.3rem;">Report Text</label>
+        <textarea id="raw_text" name="raw_text" required
+                  rows="16"
+                  style="width: 100%; font-family: monospace; font-size: 0.85rem; padding: 0.5rem; border: 1px solid var(--border); border-radius: 4px; resize: vertical;"
+                  placeholder="Paste the full security report here. Include the POC steps, affected component, and claimed impact."></textarea>
+    </div>
+
+    <div style="margin-top: 0.75rem;">
+        <button class="action-btn post" type="submit" style="font-size: 0.9rem; padding: 0.5rem 1.5rem;">
+            Submit &amp; Triage
+        </button>
+    </div>
+</form>
+{% endblock %}

@@ -15,6 +15,7 @@ from franktheunicorn.core.models import (
     Project,
     PullRequest,
     ReviewDraft,
+    SecurityReport,
     TestRun,
 )
 
@@ -179,3 +180,30 @@ class AgentFeedbackFactory(factory.django.DjangoModelFactory):  # type: ignore[m
     assessment = "good"
     feedback_body = factory.Faker("paragraph")
     feedback_method = "session-url"
+
+
+class SecurityReportFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
+    """Factory for SecurityReport model instances."""
+
+    class Meta:
+        model = SecurityReport
+
+    project = factory.SubFactory(ProjectFactory)
+    title = factory.Sequence(lambda n: f"Security Report #{n}")
+    raw_text = factory.Faker("paragraph")
+    source = "paste"
+    reporter_name = ""
+    reporter_email = ""
+    status = "new"
+    parsed_component = ""
+    parsed_poc = ""
+    parsed_impact = ""
+    assessed_severity = "unknown"
+    triage_summary = ""
+    is_expected_behavior = False
+    expected_behavior_explanation = ""
+    poc_assessment = ""
+    poc_plausible = None
+    cve_matches = factory.LazyFunction(list)
+    matched_cve_id = ""
+    operator_notes = ""

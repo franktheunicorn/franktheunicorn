@@ -417,3 +417,87 @@ class AgentFeedback(models.Model):
 
     def __str__(self) -> str:
         return f"Feedback for {self.pull_request}: {self.assessment}"
+
+
+class SecurityReport(models.Model):
+    """A security vulnerability report submitted for triage.
+
+    Supports manual paste and email ingestion. LLM-based triage assesses
+    POC validity, checks for expected/documented behavior, and searches
+    public CVE databases for duplicates.
+    """
+
+    STATUS_CHOICES = [
+        ("new", "New"),
+        ("triaging", "Triaging"),
+        ("valid", "Valid"),
+        ("invalid", "Invalid"),
+        ("duplicate", "Duplicate"),
+        ("expected-behavior", "Expected Behavior"),
+    ]
+
+    SOURCE_CHOICES = [
+        ("paste", "Pasted"),
+        ("email", "Email"),
+    ]
+
+    SEVERITY_CHOICES = [
+        ("critical", "Critical"),
+        ("high", "High"),
+        ("medium", "Medium"),
+        ("low", "Low"),
+        ("informational", "Informational"),
+        ("unknown", "Unknown"),
+    ]
+
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.CASCADE,
+        related_name="security_reports",
+        null=True,
+        blank=True,
+    )
+    title = models.CharField(max_length=500, blank=True, default="")
+    raw_text = models.TextField()
+    source = models.CharField(max_length=20, choices=SOURCE_CHOICES, default="paste")
+    reporter_name = models.CharField(max_length=255, blank=True, default="")
+    reporter_email = models.CharField(max_length=255, blank=True, default="")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="new")
+
+    # LLM-parsed structured fields (populated by triage pipeline)
+    parsed_component = models.CharField(max_length=500, blank=True, default="")
+    parsed_poc = models.TextField(blank=True, default="")
+    parsed_impact = models.TextField(blank=True, default="")
+    assessed_severity = models.CharField(max_length=20, choices=SEVERITY_CHOICES, default="unknown")
+
+    # LLM triage analysis
+    triage_summary = models.TextField(blank=True, default="")
+    is_expected_behavior = models.BooleanField(default=False)
+    expected_behavior_explanation = models.TextField(blank=True, default="")
+    poc_assessment = models.TextField(blank=True, default="")
+    poc_plausible = models.BooleanField(null=True, blank=True)
+
+    # Sandbox execution (optional follow-up)
+    sandbox_requested = models.BooleanField(default=False)
+    sandbox_result = models.TextField(blank=True, default="")
+    sandbox_verdict = models.CharField(max_length=20, blank=True, default="")
+
+    # CVE dedup
+    cve_matches = models.JSONField(default=list, blank=True)
+    matched_cve_id = models.CharField(max_length=50, blank=True, default="")
+
+    # Operator verdict
+    operator_notes = models.TextField(blank=True, default="")
+
+    # Email metadata (populated when source=email)
+    email_message_id = models.CharField(max_length=500, blank=True, default="")
+    email_received_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"SecurityReport: {self.title or self.raw_text[:60]}"
