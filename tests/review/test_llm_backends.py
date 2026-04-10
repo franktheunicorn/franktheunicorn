@@ -322,3 +322,84 @@ class TestCostEstimation:
         backend._last_tokens_out = 50
         # Should return early when project_id is None
         backend.record_cost(project_id=None, pr_id=None)
+
+
+class TestModelRecommendations:
+    """Tests for hardware-aware model recommendations."""
+
+    def test_recommend_gguf_model_returns_filename_and_reason(self) -> None:
+        from franktheunicorn.review.backends.ollama_backend import recommend_gguf_model
+
+        with patch(
+            "franktheunicorn.review.backends.ollama_backend.recommend_local_model",
+            return_value=("qwen2.5-coder:14b", "12GB VRAM available"),
+        ):
+            gguf, reason = recommend_gguf_model()
+        assert gguf == "Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf"
+        assert reason == "12GB VRAM available"
+
+    def test_recommend_gguf_model_for_each_tier(self) -> None:
+        from franktheunicorn.review.backends.ollama_backend import recommend_gguf_model
+
+        cases = {
+            "qwen2.5-coder:3b": "Qwen2.5-Coder-3B-Instruct-Q4_K_M.gguf",
+            "qwen2.5-coder:7b": "Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf",
+            "qwen2.5-coder:14b": "Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf",
+            "qwen2.5-coder:32b": "Qwen2.5-Coder-32B-Instruct-Q4_K_M.gguf",
+        }
+        for ollama_model, expected_gguf in cases.items():
+            with patch(
+                "franktheunicorn.review.backends.ollama_backend.recommend_local_model",
+                return_value=(ollama_model, "test"),
+            ):
+                gguf, _ = recommend_gguf_model()
+            assert gguf == expected_gguf, f"Mismatch for {ollama_model}"
+
+    def test_recommend_gguf_model_unknown_falls_back(self) -> None:
+        from franktheunicorn.review.backends.ollama_backend import recommend_gguf_model
+
+        with patch(
+            "franktheunicorn.review.backends.ollama_backend.recommend_local_model",
+            return_value=("unknown-model:1b", "weird hardware"),
+        ):
+            gguf, _ = recommend_gguf_model()
+        # Falls back to the smallest known model so the user gets something usable.
+        assert gguf == "Qwen2.5-Coder-3B-Instruct-Q4_K_M.gguf"
+
+    def test_recommend_hf_model_returns_id_and_reason(self) -> None:
+        from franktheunicorn.review.backends.ollama_backend import recommend_hf_model
+
+        with patch(
+            "franktheunicorn.review.backends.ollama_backend.recommend_local_model",
+            return_value=("qwen2.5-coder:14b", "12GB VRAM available"),
+        ):
+            hf, reason = recommend_hf_model()
+        assert hf == "Qwen/Qwen2.5-Coder-14B-Instruct"
+        assert reason == "12GB VRAM available"
+
+    def test_recommend_hf_model_for_each_tier(self) -> None:
+        from franktheunicorn.review.backends.ollama_backend import recommend_hf_model
+
+        cases = {
+            "qwen2.5-coder:3b": "Qwen/Qwen2.5-Coder-3B-Instruct",
+            "qwen2.5-coder:7b": "Qwen/Qwen2.5-Coder-7B-Instruct",
+            "qwen2.5-coder:14b": "Qwen/Qwen2.5-Coder-14B-Instruct",
+            "qwen2.5-coder:32b": "Qwen/Qwen2.5-Coder-32B-Instruct",
+        }
+        for ollama_model, expected_hf in cases.items():
+            with patch(
+                "franktheunicorn.review.backends.ollama_backend.recommend_local_model",
+                return_value=(ollama_model, "test"),
+            ):
+                hf, _ = recommend_hf_model()
+            assert hf == expected_hf, f"Mismatch for {ollama_model}"
+
+    def test_recommend_hf_model_unknown_falls_back(self) -> None:
+        from franktheunicorn.review.backends.ollama_backend import recommend_hf_model
+
+        with patch(
+            "franktheunicorn.review.backends.ollama_backend.recommend_local_model",
+            return_value=("unknown-model:1b", "weird hardware"),
+        ):
+            hf, _ = recommend_hf_model()
+        assert hf == "Qwen/Qwen2.5-Coder-3B-Instruct"

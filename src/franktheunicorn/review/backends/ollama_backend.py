@@ -84,6 +84,49 @@ def recommend_local_model() -> tuple[str, str]:
     return (model, f"No GPU detected, {ram_gb:.0f}GB RAM (CPU inference)")
 
 
+# Map an Ollama model id to the equivalent GGUF filename used by llama.cpp.
+# llama.cpp serves files from a volume, so the filename must match what gets
+# downloaded.  Q4_K_M is the standard quantization tier for code models.
+_OLLAMA_TO_GGUF: dict[str, str] = {
+    "qwen2.5-coder:3b": "Qwen2.5-Coder-3B-Instruct-Q4_K_M.gguf",
+    "qwen2.5-coder:7b": "Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf",
+    "qwen2.5-coder:14b": "Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf",
+    "qwen2.5-coder:32b": "Qwen2.5-Coder-32B-Instruct-Q4_K_M.gguf",
+}
+
+# Map an Ollama model id to the equivalent HuggingFace model id used by vLLM.
+# vLLM auto-downloads from HuggingFace on first start.  We use the Instruct
+# variant since these are coder models.
+_OLLAMA_TO_HF: dict[str, str] = {
+    "qwen2.5-coder:3b": "Qwen/Qwen2.5-Coder-3B-Instruct",
+    "qwen2.5-coder:7b": "Qwen/Qwen2.5-Coder-7B-Instruct",
+    "qwen2.5-coder:14b": "Qwen/Qwen2.5-Coder-14B-Instruct",
+    "qwen2.5-coder:32b": "Qwen/Qwen2.5-Coder-32B-Instruct",
+}
+
+
+def recommend_gguf_model() -> tuple[str, str]:
+    """Recommend a GGUF model filename for llama.cpp based on hardware.
+
+    Returns ``(filename, reason)`` tuple.  Reuses :func:`recommend_local_model`
+    so the same hardware tier picks an equivalent llama.cpp model.
+    """
+    ollama_model, reason = recommend_local_model()
+    gguf = _OLLAMA_TO_GGUF.get(ollama_model, "Qwen2.5-Coder-3B-Instruct-Q4_K_M.gguf")
+    return (gguf, reason)
+
+
+def recommend_hf_model() -> tuple[str, str]:
+    """Recommend a HuggingFace model id for vLLM based on hardware.
+
+    Returns ``(model_id, reason)`` tuple.  Reuses :func:`recommend_local_model`
+    so the same hardware tier picks an equivalent vLLM model.
+    """
+    ollama_model, reason = recommend_local_model()
+    hf = _OLLAMA_TO_HF.get(ollama_model, "Qwen/Qwen2.5-Coder-3B-Instruct")
+    return (hf, reason)
+
+
 class OllamaBackend(BaseLLMBackend):
     """Ollama Python SDK backend for local model inference."""
 

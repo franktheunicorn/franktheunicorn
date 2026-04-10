@@ -273,6 +273,10 @@ class TestDockerMode:
         ]
         with (
             patch("builtins.input", side_effect=inputs),
+            patch(
+                "franktheunicorn.core.management.commands.setup_llm.recommend_gguf_model",
+                return_value=("Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf", "12GB VRAM available"),
+            ),
             patch("django.conf.settings.BASE_DIR", str(tmp_path)),
             _NO_DISCOVERY,
         ):
@@ -310,6 +314,10 @@ class TestDockerMode:
         ]
         with (
             patch("builtins.input", side_effect=inputs),
+            patch(
+                "franktheunicorn.core.management.commands.setup_llm.recommend_hf_model",
+                return_value=("Qwen/Qwen2.5-Coder-7B-Instruct", "12GB VRAM available"),
+            ),
             patch("django.conf.settings.BASE_DIR", str(tmp_path)),
             _NO_DISCOVERY,
         ):
@@ -364,6 +372,60 @@ class TestDockerMode:
             call_command("setup_llm", output=str(output_path), docker=True)
 
         assert output_path.exists()
+
+    def test_compose_template_path_falls_back_to_cwd(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When BASE_DIR/docker doesn't exist (pip-installed in Docker), fall back to cwd.
+
+        Simulates the Docker container scenario where ``BASE_DIR`` resolves to
+        the site-packages location (``/usr/local/lib/python3.12``) but the
+        templates live at ``/app/docker/`` (the working directory).
+        """
+        # BASE_DIR points to a directory that has no `docker/` subdir.
+        fake_base_dir = tmp_path / "fake-site-packages"
+        fake_base_dir.mkdir()
+
+        # The "real" project root (cwd) has the templates.
+        project_root = tmp_path / "app"
+        project_root.mkdir()
+        template_dir = project_root / "docker"
+        template_dir.mkdir()
+        (template_dir / "compose.ollama.yaml.template").write_text(
+            "services:\n  ollama-pull:\n    entrypoint: ['ollama', 'pull', '{{MODEL}}']\n"
+        )
+
+        output_path = project_root / "operator.yaml"
+        monkeypatch.chdir(project_root)
+
+        inputs = [
+            "testuser",
+            "direct",
+            "4",  # ollama
+            "",  # accept default model
+            "",  # projects: skip
+            "n",  # coderabbit: no
+        ]
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch(
+                "franktheunicorn.core.management.commands.setup_llm.recommend_local_model",
+                return_value=("qwen2.5-coder:7b", "test"),
+            ),
+            patch("django.conf.settings.BASE_DIR", str(fake_base_dir)),
+            _NO_DISCOVERY,
+        ):
+            call_command("setup_llm", output=str(output_path), docker=True)
+
+        # Compose was generated relative to the cwd fallback, not BASE_DIR.
+        compose_output = project_root / "compose.ollama.yaml"
+        assert compose_output.exists()
+        content = compose_output.read_text()
+        assert "qwen2.5-coder:7b" in content
+        assert "{{MODEL}}" not in content
+
+        # Nothing was written under the (broken) BASE_DIR.
+        assert not (fake_base_dir / "compose.ollama.yaml").exists()
 
 
 @pytest.mark.django_db
@@ -559,6 +621,10 @@ class TestLlamaCppProvider:
         with (
             patch("builtins.input", side_effect=inputs),
             patch("shutil.which", return_value=None),
+            patch(
+                "franktheunicorn.core.management.commands.setup_llm.recommend_gguf_model",
+                return_value=("Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf", "test"),
+            ),
             _NO_DISCOVERY,
         ):
             call_command("setup_llm", output=str(output_path))
@@ -585,12 +651,51 @@ class TestLlamaCppProvider:
         with (
             patch("builtins.input", side_effect=inputs),
             patch("shutil.which", return_value=None),
+            patch(
+                "franktheunicorn.core.management.commands.setup_llm.recommend_gguf_model",
+                return_value=("Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf", "test"),
+            ),
             _NO_DISCOVERY,
         ):
             call_command("setup_llm", output=str(output_path))
 
         # Config should still be generated despite the warning
         assert output_path.exists()
+
+    def test_llama_cpp_docker_mode_uses_recommended_default(self, tmp_path: Path) -> None:
+        """In --docker mode, llama.cpp accepts the recommended GGUF default on Enter."""
+        output_path = tmp_path / "operator.yaml"
+        template_dir = tmp_path / "docker"
+        template_dir.mkdir()
+        (template_dir / "compose.llama-cpp.yaml.template").write_text(
+            "services:\n  llama-cpp:\n    command: -m /models/{{MODEL}}\n"
+        )
+        inputs = [
+            "testuser",  # github_username
+            "direct",  # review_style
+            "5",  # provider: llama-cpp
+            "",  # accept recommended default
+            "",  # projects: skip
+            "n",  # coderabbit: no
+        ]
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch(
+                "franktheunicorn.core.management.commands.setup_llm.recommend_gguf_model",
+                return_value=("Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf", "12GB VRAM available"),
+            ),
+            patch("django.conf.settings.BASE_DIR", str(tmp_path)),
+            _NO_DISCOVERY,
+        ):
+            call_command("setup_llm", output=str(output_path), docker=True)
+
+        config = yaml.safe_load(output_path.read_text())
+        backend = config["llm_backends"][0]
+        assert backend["model"] == "Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf"
+
+        compose_output = tmp_path / "compose.llama-cpp.yaml"
+        assert compose_output.exists()
+        assert "Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf" in compose_output.read_text()
 
 
 @pytest.mark.django_db
@@ -610,6 +715,10 @@ class TestVLLMProvider:
         with (
             patch("builtins.input", side_effect=inputs),
             patch("shutil.which", return_value=None),
+            patch(
+                "franktheunicorn.core.management.commands.setup_llm.recommend_hf_model",
+                return_value=("Qwen/Qwen2.5-Coder-7B-Instruct", "test"),
+            ),
             _NO_DISCOVERY,
         ):
             call_command("setup_llm", output=str(output_path))
@@ -620,6 +729,41 @@ class TestVLLMProvider:
         assert backend["provider"] == "openai"
         assert backend["base_url"] == "http://localhost:8081/v1"
         assert backend["model"] == "meta-llama/Llama-3-8b"
+
+    def test_vllm_docker_mode_uses_recommended_default(self, tmp_path: Path) -> None:
+        """In --docker mode, vLLM accepts the recommended HF model default on Enter."""
+        output_path = tmp_path / "operator.yaml"
+        template_dir = tmp_path / "docker"
+        template_dir.mkdir()
+        (template_dir / "compose.vllm.yaml.template").write_text(
+            'services:\n  vllm:\n    command: ["--model", "{{MODEL}}"]\n'
+        )
+        inputs = [
+            "testuser",  # github_username
+            "direct",  # review_style
+            "6",  # provider: vllm
+            "",  # accept recommended default
+            "",  # projects: skip
+            "n",  # coderabbit: no
+        ]
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch(
+                "franktheunicorn.core.management.commands.setup_llm.recommend_hf_model",
+                return_value=("Qwen/Qwen2.5-Coder-14B-Instruct", "12GB VRAM available"),
+            ),
+            patch("django.conf.settings.BASE_DIR", str(tmp_path)),
+            _NO_DISCOVERY,
+        ):
+            call_command("setup_llm", output=str(output_path), docker=True)
+
+        config = yaml.safe_load(output_path.read_text())
+        backend = config["llm_backends"][0]
+        assert backend["model"] == "Qwen/Qwen2.5-Coder-14B-Instruct"
+
+        compose_output = tmp_path / "compose.vllm.yaml"
+        assert compose_output.exists()
+        assert "Qwen/Qwen2.5-Coder-14B-Instruct" in compose_output.read_text()
 
 
 @pytest.mark.django_db
