@@ -50,6 +50,10 @@ services:
       context: .
       dockerfile: docker/Dockerfile
       target: worker
+      args:
+        # Set INSTALL_CODERABBIT=true in .env to bake the CodeRabbit CLI
+        # into the worker image (v1.5 feature).
+        INSTALL_CODERABBIT: ${INSTALL_CODERABBIT:-false}
     environment:
       <<: *common-env
     command: python -m franktheunicorn.worker.runner

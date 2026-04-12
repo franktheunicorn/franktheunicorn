@@ -33,4 +33,21 @@ EXPOSE 8000
 CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
 
 FROM base AS worker
+
+# The worker needs git for repo management and blame analysis.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    ca-certificates \
+    curl \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Optionally install the CodeRabbit CLI (v1.5 feature). Set
+# `--build-arg INSTALL_CODERABBIT=true` to bake it into the image.
+# See https://docs.coderabbit.ai/cli for details. CodeRabbit degrades
+# gracefully at runtime when the CLI is not installed.
+ARG INSTALL_CODERABBIT=false
+RUN if [ "$INSTALL_CODERABBIT" = "true" ]; then \
+        curl -fsSL https://cli.coderabbit.ai/install.sh | sh; \
+    fi
+
 CMD ["python", "-m", "franktheunicorn.worker.runner"]
