@@ -22,6 +22,9 @@ RUN pip install --no-cache-dir --no-deps .
 # Copy configs (can be overridden by volume mounts)
 COPY config/ config/
 
+# Copy docker templates so setup_llm --docker can generate compose overrides
+COPY docker/ docker/
+
 # Ensure data dir exists
 RUN mkdir -p /app/data
 

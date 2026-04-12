@@ -26,7 +26,11 @@ from franktheunicorn.config.model_discovery import (
     discover_models_verbose,
     format_model_menu,
 )
-from franktheunicorn.review.backends.ollama_backend import recommend_local_model
+from franktheunicorn.review.backends.ollama_backend import (
+    recommend_gguf_model,
+    recommend_hf_model,
+    recommend_local_model,
+)
 
 # (provider_id, label, default_model, api_key_env)
 _PROVIDERS: dict[str, tuple[str, str, str, str]] = {
@@ -363,11 +367,27 @@ class Command(BaseCommand):
 
         return llm_config
 
-    def _generate_ollama_compose(self, model: str) -> None:
-        """Generate compose.ollama.yaml from the template with the chosen model."""
+    def _get_project_root(self) -> Path:
+        """Return the project root directory for finding docker templates.
+
+        In Docker, the package is pip-installed so ``BASE_DIR`` resolves to the
+        site-packages location (e.g. ``/usr/local/lib/python3.12``) rather than
+        ``/app``.  When ``BASE_DIR / "docker"`` does not exist, fall back to the
+        current working directory, which the Dockerfile sets to ``/app``.
+        """
         import django.conf
 
         base_dir = Path(django.conf.settings.BASE_DIR)
+        if (base_dir / "docker").is_dir():
+            return base_dir
+        cwd = Path.cwd()
+        if (cwd / "docker").is_dir():
+            return cwd
+        return base_dir
+
+    def _generate_ollama_compose(self, model: str) -> None:
+        """Generate compose.ollama.yaml from the template with the chosen model."""
+        base_dir = self._get_project_root()
         template_path = base_dir / "docker" / "compose.ollama.yaml.template"
         output_path = base_dir / "compose.ollama.yaml"
 
@@ -396,9 +416,7 @@ class Command(BaseCommand):
 
     def _generate_llama_cpp_compose(self, model: str) -> None:
         """Generate compose.llama-cpp.yaml from the template with the chosen model."""
-        import django.conf
-
-        base_dir = Path(django.conf.settings.BASE_DIR)
+        base_dir = self._get_project_root()
         template_path = base_dir / "docker" / "compose.llama-cpp.yaml.template"
         output_path = base_dir / "compose.llama-cpp.yaml"
 
@@ -427,9 +445,7 @@ class Command(BaseCommand):
 
     def _generate_vllm_compose(self, model: str) -> None:
         """Generate compose.vllm.yaml from the template with the chosen model."""
-        import django.conf
-
-        base_dir = Path(django.conf.settings.BASE_DIR)
+        base_dir = self._get_project_root()
         template_path = base_dir / "docker" / "compose.vllm.yaml.template"
         output_path = base_dir / "compose.vllm.yaml"
 
@@ -471,6 +487,10 @@ class Command(BaseCommand):
         # llama.cpp exposes an OpenAI-compatible API, so use the openai provider.
         llm_config["provider"] = "openai"
 
+        recommended_gguf, reason = recommend_gguf_model()
+        self.stdout.write(f"\n  Hardware detection: {reason}\n")
+        self.stdout.write(f"  Recommended GGUF model: {recommended_gguf}\n")
+
         if self._docker_mode:
             base_url = "http://llama-cpp:8080/v1"
             self.stdout.write(f"  Using Docker service URL: {base_url}\n")
@@ -479,21 +499,26 @@ class Command(BaseCommand):
         llm_config["base_url"] = base_url
 
         if self._docker_mode:
-            model = self._ask("  GGUF model filename (e.g. model.gguf): ", default="")
+            model = self._ask("  GGUF model filename: ", default=recommended_gguf)
         else:
             model = self._discover_and_choose_model(
                 provider="openai",
-                default_model="",
+                default_model=recommended_gguf,
                 base_url=base_url,
             )
         llm_config["model"] = model
 
         if self._docker_mode:
             self._generate_llama_cpp_compose(model)
+            self.stdout.write(
+                "  Place the GGUF file in the llama-models volume before starting:\n"
+                f"    docker run --rm -v llama-models:/models -v $(pwd):/src alpine "
+                f"cp /src/{model} /models/\n"
+            )
         else:
             self.stdout.write(
                 "\n  To start the server, run:\n"
-                "    llama-server -m <path-to-model.gguf> --port 8080\n"
+                f"    llama-server -m <path-to-{model}> --port 8080\n"
                 "  Or via Docker:\n"
                 "    docker compose --profile inference up llama-cpp\n"
             )
@@ -514,6 +539,10 @@ class Command(BaseCommand):
         # vLLM exposes an OpenAI-compatible API, so use the openai provider.
         llm_config["provider"] = "openai"
 
+        recommended_hf, reason = recommend_hf_model()
+        self.stdout.write(f"\n  Hardware detection: {reason}\n")
+        self.stdout.write(f"  Recommended HuggingFace model: {recommended_hf}\n")
+
         if self._docker_mode:
             base_url = "http://vllm:8000/v1"
             self.stdout.write(f"  Using Docker service URL: {base_url}\n")
@@ -522,19 +551,18 @@ class Command(BaseCommand):
         llm_config["base_url"] = base_url
 
         if self._docker_mode:
-            model = self._ask(
-                "  HuggingFace model name (e.g. Qwen/Qwen2.5-Coder-14B): ", default=""
-            )
+            model = self._ask("  HuggingFace model name: ", default=recommended_hf)
         else:
             model = self._discover_and_choose_model(
                 provider="openai",
-                default_model="",
+                default_model=recommended_hf,
                 base_url=base_url,
             )
         llm_config["model"] = model
 
         if self._docker_mode:
             self._generate_vllm_compose(model)
+            self.stdout.write("  Model will be auto-downloaded by vLLM on first start.\n")
         else:
             self.stdout.write(
                 "\n  To start the server, run:\n"
@@ -607,8 +635,21 @@ class Command(BaseCommand):
         return llm_backends
 
     def _configure_detected_backend(self, entry: DynamicMenuEntry) -> dict[str, object]:
-        """Configure a Tier 2/3 detected credential as an OpenAI-compatible backend."""
-        config: dict[str, object] = {"provider": "openai"}
+        """Configure a Tier 2/3 detected credential as a backend.
+
+        Most detected backends (Groq, Mistral, custom endpoints, …) are
+        OpenAI-compatible and use the ``openai`` provider with a base_url.
+        Ollama is the exception: it has its own native backend that doesn't
+        need an api_key, so detected ``OLLAMA_HOST`` / ``OLLAMA_BASE_URL``
+        entries are routed through the ``ollama`` provider instead — writing
+        ``provider: openai`` for an Ollama host would require
+        ``OPENAI_API_KEY`` at runtime and the backend would refuse to run.
+        """
+        # Ollama is the only non-OpenAI-compatible native backend we detect.
+        is_ollama = entry.provider_hint == "ollama"
+        provider = "ollama" if is_ollama else "openai"
+
+        config: dict[str, object] = {"provider": provider}
         if entry.api_key_env:
             config["api_key_env"] = entry.api_key_env
 
@@ -628,9 +669,18 @@ class Command(BaseCommand):
             if base_url:
                 config["base_url"] = base_url
 
+        # For Ollama, seed the discovery/prompt with a hardware-aware default
+        # so the user can just hit Enter.
+        default_model = ""
+        if is_ollama:
+            recommended_model, reason = recommend_local_model()
+            self.stdout.write(f"  Hardware detection: {reason}\n")
+            self.stdout.write(f"  Recommended model: {recommended_model}\n")
+            default_model = recommended_model
+
         model = self._discover_and_choose_model(
-            provider="openai",
-            default_model="",
+            provider=provider,
+            default_model=default_model,
             api_key_env=entry.api_key_env,
             base_url=str(config.get("base_url", "")),
         )

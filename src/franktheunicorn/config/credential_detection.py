@@ -96,6 +96,12 @@ TIER2_MAP: dict[str, tuple[str, str]] = {
     "AZURE_OPENAI_ENDPOINT": ("azure-openai", "endpoint"),
     "HF_TOKEN": ("huggingface", "token"),
     "HUGGING_FACE_HUB_TOKEN": ("huggingface", "token"),
+    # Common local-inference endpoint env vars.  These don't carry an API key
+    # but signal that the user already has a server running.
+    "OLLAMA_HOST": ("ollama", "endpoint"),
+    "OLLAMA_BASE_URL": ("ollama", "endpoint"),
+    "LLAMA_CPP_HOST": ("llama-cpp", "endpoint"),
+    "VLLM_HOST": ("vllm", "endpoint"),
 }
 
 # ---------------------------------------------------------------------------
@@ -120,11 +126,15 @@ CREDENTIAL_NAME_SUFFIXES: tuple[str, ...] = (
     "_AUTH",
 )
 
-# Values that look like OpenAI-compatible endpoints.
+# Values that look like OpenAI-compatible endpoints.  Matches either an
+# explicit ``/v1`` / ``/chat/completions`` path (cloud-style) OR any
+# ``http(s)://host:port`` URL (local inference servers like Ollama on 11434
+# or llama.cpp on 8080 typically don't expose ``/v1`` in the env var value).
 _ENDPOINT_VALUE_RE = re.compile(
     r"/api/.*(/v1|/chat/completions)"
     r"|/v1(/|$)"
-    r"|/chat/completions",
+    r"|/chat/completions"
+    r"|^https?://[^/\s]+:\d+",
 )
 
 # Common API key value prefixes.

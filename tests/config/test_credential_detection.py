@@ -135,6 +135,36 @@ class TestTier2Detection:
         assert len(results) == 1
         assert results[0].provider == "together"
 
+    def test_ollama_host_detected(self) -> None:
+        """OLLAMA_HOST is recognised as a known local-inference endpoint."""
+        env = {"OLLAMA_HOST": "http://localhost:11434"}
+        results = detect_llm_credentials(env)
+        assert len(results) == 1
+        assert results[0].provider == "ollama"
+        assert results[0].confidence == "medium"
+        assert results[0].credential_type == "endpoint"
+
+    def test_ollama_base_url_detected(self) -> None:
+        """OLLAMA_BASE_URL is recognised as a known local-inference endpoint."""
+        env = {"OLLAMA_BASE_URL": "http://my-ollama:11434"}
+        results = detect_llm_credentials(env)
+        assert len(results) == 1
+        assert results[0].provider == "ollama"
+        assert results[0].confidence == "medium"
+        assert results[0].credential_type == "endpoint"
+
+    def test_llama_cpp_host_detected(self) -> None:
+        env = {"LLAMA_CPP_HOST": "http://localhost:8080"}
+        results = detect_llm_credentials(env)
+        assert len(results) == 1
+        assert results[0].provider == "llama-cpp"
+
+    def test_vllm_host_detected(self) -> None:
+        env = {"VLLM_HOST": "http://localhost:8000"}
+        results = detect_llm_credentials(env)
+        assert len(results) == 1
+        assert results[0].provider == "vllm"
+
 
 class TestTier3Detection:
     def test_endpoint_with_v1_detected(self) -> None:
@@ -156,6 +186,30 @@ class TestTier3Detection:
         results = detect_llm_credentials(env)
         assert len(results) == 1
         assert results[0].credential_type == "endpoint"
+
+    def test_endpoint_with_port_only_detected(self) -> None:
+        """URLs with explicit port numbers (and no /v1 path) are now detected.
+
+        Local-inference servers like a custom Ollama or llama.cpp deployment
+        often expose their bare URL — broadening the regex lets us pick them
+        up even when the URL doesn't include /v1 or /chat/completions.
+        """
+        env = {"MY_INFERENCE_HOST": "http://localhost:11434"}
+        results = detect_llm_credentials(env)
+        assert len(results) == 1
+        assert results[0].credential_type == "endpoint"
+
+    def test_endpoint_with_remote_port_detected(self) -> None:
+        env = {"CUSTOM_LLM_URL": "https://my-server.example.com:8443"}
+        results = detect_llm_credentials(env)
+        assert len(results) == 1
+        assert results[0].credential_type == "endpoint"
+
+    def test_postgres_url_still_not_detected(self) -> None:
+        """Non-http URLs with ports are still excluded."""
+        env = {"DATABASE_URL": "postgres://localhost:5432/db"}
+        results = detect_llm_credentials(env)
+        assert len(results) == 0
 
     def test_endpoint_paired_with_key(self) -> None:
         env = {
