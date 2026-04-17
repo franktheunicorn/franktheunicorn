@@ -213,8 +213,8 @@ class TestWorkerCodeRabbitIntegration:
         from franktheunicorn.core.models import ReviewDraft
         from franktheunicorn.worker.runner import _run_coderabbit_for_pr
 
-        # Set up the repo path so it exists.
-        repo_path = tmp_path / ".review-agent" / "repos" / db_pr.project.full_name
+        # Caller passes an existing repo_path (as ensure_repo would produce).
+        repo_path = tmp_path / "repos" / db_pr.project.full_name
         repo_path.mkdir(parents=True)
 
         mock_subprocess.return_value = subprocess.CompletedProcess(
@@ -225,9 +225,7 @@ class TestWorkerCodeRabbitIntegration:
         )
 
         config = CodeRabbitConfig(enabled=True, cli_path="coderabbit")
-
-        with patch("franktheunicorn.worker.runner.Path.home", return_value=tmp_path):
-            _run_coderabbit_for_pr(db_pr, config)
+        _run_coderabbit_for_pr(db_pr, config, repo_path)
 
         cr_drafts = [
             d
@@ -235,3 +233,37 @@ class TestWorkerCodeRabbitIntegration:
             if "coderabbit" in (d.sources or [])
         ]
         assert len(cr_drafts) == 3
+
+    @patch("franktheunicorn.review.coderabbit.subprocess.run")
+    def test_run_coderabbit_for_pr_skips_when_repo_path_is_none(
+        self,
+        mock_subprocess: Any,
+        db_pr: PullRequest,
+    ) -> None:
+        """If the caller passes None (ensure_repo failed), skip silently."""
+        from franktheunicorn.core.models import ReviewDraft
+        from franktheunicorn.worker.runner import _run_coderabbit_for_pr
+
+        config = CodeRabbitConfig(enabled=True, cli_path="coderabbit")
+        _run_coderabbit_for_pr(db_pr, config, None)
+
+        assert mock_subprocess.call_count == 0
+        assert not ReviewDraft.objects.filter(pull_request=db_pr).exists()
+
+    @patch("franktheunicorn.review.coderabbit.subprocess.run")
+    def test_run_coderabbit_for_pr_skips_when_repo_path_missing(
+        self,
+        mock_subprocess: Any,
+        db_pr: PullRequest,
+        tmp_path: Path,
+    ) -> None:
+        """If the repo_path doesn't exist on disk, skip silently."""
+        from franktheunicorn.core.models import ReviewDraft
+        from franktheunicorn.worker.runner import _run_coderabbit_for_pr
+
+        missing_path = tmp_path / "does" / "not" / "exist"
+        config = CodeRabbitConfig(enabled=True, cli_path="coderabbit")
+        _run_coderabbit_for_pr(db_pr, config, missing_path)
+
+        assert mock_subprocess.call_count == 0
+        assert not ReviewDraft.objects.filter(pull_request=db_pr).exists()

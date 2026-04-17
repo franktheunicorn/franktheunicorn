@@ -278,7 +278,7 @@ def _run_cycle(
 
                     # Run CodeRabbit if enabled and no CR drafts exist yet.
                     if cr_config is not None:
-                        _run_coderabbit_for_pr(pr, cr_config)
+                        _run_coderabbit_for_pr(pr, cr_config, repo_path)
 
                     # LLM sub-checks (coverage, etc.) — runs once alongside draft review.
                     if pc.llm_checks:
@@ -410,25 +410,27 @@ def _run_shepherding_pass(
 def _run_coderabbit_for_pr(
     pr: PullRequest,
     cr_config: CodeRabbitConfig,
+    repo_path: Path | None,
 ) -> None:
-    """Run CodeRabbit CLI review for a single PR. Never raises."""
+    """Run CodeRabbit CLI review for a single PR. Never raises.
+
+    ``repo_path`` should be the path returned by ``ensure_repo`` for this
+    project. When ``None`` or missing on disk, CodeRabbit is skipped silently.
+    """
+    if repo_path is None or not repo_path.exists():
+        logger.debug(
+            "Repo clone unavailable for %s; skipping CodeRabbit for PR #%d",
+            pr.project.full_name,
+            pr.number,
+        )
+        return
+
     from franktheunicorn.review.coderabbit import (
         create_drafts_from_coderabbit,
         run_coderabbit_review,
     )
 
     try:
-        # Derive repo clone path from the project. The worker is expected
-        # to operate inside a local clone or have access to one.
-        repo_path = Path.home() / ".review-agent" / "repos" / pr.project.full_name
-        if not repo_path.exists():
-            logger.debug(
-                "Repo clone not found at %s; skipping CodeRabbit for PR #%d",
-                repo_path,
-                pr.number,
-            )
-            return
-
         # Determine the base ref for diffing. The repo manager keeps the
         # working tree on the default branch, so origin/main or origin/master
         # should be available.

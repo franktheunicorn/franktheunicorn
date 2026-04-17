@@ -427,6 +427,39 @@ class TestDockerMode:
         # Nothing was written under the (broken) BASE_DIR.
         assert not (fake_base_dir / "compose.ollama.yaml").exists()
 
+    def test_coderabbit_docker_mode_skips_which_check(self, tmp_path: Path) -> None:
+        """In --docker mode, CodeRabbit skips shutil.which and sets cli_path directly."""
+        import io
+
+        output_path = tmp_path / "operator.yaml"
+        inputs = [
+            "testuser",
+            "direct",
+            "7",  # skip/stub
+            "",  # projects: skip
+            "y",  # coderabbit: yes
+        ]
+        mock_which = patch(
+            "franktheunicorn.core.management.commands.setup_llm.shutil.which",
+            side_effect=AssertionError("should not be called"),
+        )
+        stdout = io.StringIO()
+        with (
+            patch("builtins.input", side_effect=inputs),
+            mock_which,
+            _NO_DISCOVERY,
+        ):
+            call_command("setup_llm", output=str(output_path), docker=True, stdout=stdout)
+
+        config = yaml.safe_load(output_path.read_text())
+        assert config["coderabbit"]["enabled"] is True
+        assert config["coderabbit"]["cli_path"] == "coderabbit"
+
+        # The wizard should remind the user to rebuild with the build arg.
+        out = stdout.getvalue()
+        assert "INSTALL_CODERABBIT=true" in out
+        assert "docker compose build worker" in out
+
 
 @pytest.mark.django_db
 class TestProjectRootResolution:

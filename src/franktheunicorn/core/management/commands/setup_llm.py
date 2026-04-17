@@ -756,14 +756,30 @@ class Command(BaseCommand):
 
         cr_config: dict[str, object] = {"enabled": True}
 
-        # Check if coderabbit is on PATH.
-        if shutil.which("coderabbit"):
+        # In Docker mode the setup wizard runs in the web container, but
+        # the CodeRabbit CLI needs to be installed into the worker image via
+        # a build arg. Skip the PATH check here and remind the user.
+        if self._docker_mode:
+            self.stdout.write(
+                self.style.SUCCESS(
+                    "  Using default cli_path 'coderabbit' in the worker container.\n"
+                )
+            )
+            self.stdout.write(
+                "  To bake the CodeRabbit CLI into the worker image, set\n"
+                "  INSTALL_CODERABBIT=true in your .env and rebuild the\n"
+                "  worker service: `docker compose build worker`.\n"
+                "  See https://docs.coderabbit.ai/cli for CLI details.\n"
+            )
+            cr_config["cli_path"] = "coderabbit"
+        elif shutil.which("coderabbit"):
             self.stdout.write(self.style.SUCCESS("  Found 'coderabbit' on PATH.\n"))
             cr_config["cli_path"] = "coderabbit"
         else:
             self.stdout.write(
                 self.style.WARNING(
-                    "  'coderabbit' not found on PATH.\n  Install: npm install -g coderabbitai\n"
+                    "  'coderabbit' not found on PATH.\n"
+                    "  Install: curl -fsSL https://cli.coderabbit.ai/install.sh | sh\n"
                 )
             )
             cli_path = self._ask("Path to coderabbit CLI: ", default="coderabbit")
