@@ -3,8 +3,10 @@
 Used by the setup wizard to let users pick from models actually available
 on their account / endpoint rather than guessing model names.
 
-Each ``list_models_*`` function returns a list of model ID strings or
-an empty list on failure (missing SDK, bad key, network error, etc.).
+Each ``list_models_*`` function returns ``(models, status)`` where *status*
+is ``"ok"`` when models were found, ``"empty"`` when the API responded
+successfully but returned no models, or ``"error"`` on failure (missing
+SDK, bad key, network error, etc.).
 """
 
 from __future__ import annotations
@@ -13,7 +15,10 @@ import logging
 import os
 import socket
 from dataclasses import dataclass
+from typing import Literal
 from urllib.parse import urlparse
+
+ListingStatus = Literal["ok", "empty", "error"]
 
 logger = logging.getLogger(__name__)
 
@@ -31,11 +36,11 @@ class DiscoveredModel:
 
 def list_models_anthropic(
     api_key_env: str = "ANTHROPIC_API_KEY",
-) -> list[DiscoveredModel]:
+) -> tuple[list[DiscoveredModel], ListingStatus]:
     """List models from the Anthropic API."""
     api_key = os.environ.get(api_key_env, "")
     if not api_key:
-        return []
+        return [], "error"
     try:
         import anthropic
 
@@ -47,20 +52,20 @@ def list_models_anthropic(
             display = getattr(m, "display_name", model_id) or model_id
             models.append(DiscoveredModel(model_id=model_id, display_name=display))
         models.sort(key=lambda m: m.model_id)
-        return models
+        return models, "ok" if models else "empty"
     except Exception:
         logger.debug("Failed to list Anthropic models", exc_info=True)
-        return []
+        return [], "error"
 
 
 def list_models_openai(
     api_key_env: str = "OPENAI_API_KEY",
     base_url: str = "",
-) -> list[DiscoveredModel]:
+) -> tuple[list[DiscoveredModel], ListingStatus]:
     """List models from the OpenAI API (or any compatible endpoint)."""
     api_key = os.environ.get(api_key_env, "")
     if not api_key:
-        return []
+        return [], "error"
     try:
         import openai
 
@@ -73,19 +78,19 @@ def list_models_openai(
         for m in response.data:
             models.append(DiscoveredModel(model_id=m.id, display_name=m.id))
         models.sort(key=lambda m: m.model_id)
-        return models
+        return models, "ok" if models else "empty"
     except Exception:
         logger.debug("Failed to list OpenAI models", exc_info=True)
-        return []
+        return [], "error"
 
 
 def list_models_gemini(
     api_key_env: str = "GOOGLE_API_KEY",
-) -> list[DiscoveredModel]:
+) -> tuple[list[DiscoveredModel], ListingStatus]:
     """List models from the Google Gemini API."""
     api_key = os.environ.get(api_key_env, "")
     if not api_key:
-        return []
+        return [], "error"
     try:
         from google import genai
 
@@ -99,15 +104,15 @@ def list_models_gemini(
             display = getattr(m, "display_name", model_id) or model_id
             models.append(DiscoveredModel(model_id=model_id, display_name=display))
         models.sort(key=lambda m: m.model_id)
-        return models
+        return models, "ok" if models else "empty"
     except Exception:
         logger.debug("Failed to list Gemini models", exc_info=True)
-        return []
+        return [], "error"
 
 
 def list_models_ollama(
     base_url: str = "",
-) -> list[DiscoveredModel]:
+) -> tuple[list[DiscoveredModel], ListingStatus]:
     """List locally available models from an Ollama server."""
     try:
         import ollama
@@ -115,23 +120,24 @@ def list_models_ollama(
         client = ollama.Client(host=base_url or None)
         response = client.list()
         models = []
-        model_list = getattr(response, "models", None) or response
+        raw = getattr(response, "models", None)
+        model_list = raw if raw is not None else response
         for m in model_list:
             model_id = getattr(m, "model", None) or getattr(m, "name", "") or ""
             if model_id:
                 models.append(DiscoveredModel(model_id=model_id, display_name=model_id))
         models.sort(key=lambda m: m.model_id)
-        return models
+        return models, "ok" if models else "empty"
     except Exception:
         logger.debug("Failed to list Ollama models", exc_info=True)
-        return []
+        return [], "error"
 
 
 def discover_models(
     provider: str,
     api_key_env: str = "",
     base_url: str = "",
-) -> list[DiscoveredModel]:
+) -> tuple[list[DiscoveredModel], ListingStatus]:
     """Discover models for a given provider.
 
     Parameters
@@ -143,7 +149,8 @@ def discover_models(
     base_url:
         Base URL for OpenAI-compatible or Ollama endpoints.
 
-    Returns an empty list if discovery fails or the provider is unknown.
+    Returns ``(models, status)`` where *status* is ``"ok"``, ``"empty"``,
+    or ``"error"``.
     """
     if provider == "claude":
         return list_models_anthropic(api_key_env=api_key_env or "ANTHROPIC_API_KEY")
@@ -156,7 +163,7 @@ def discover_models(
         return list_models_gemini(api_key_env=api_key_env or "GOOGLE_API_KEY")
     if provider == "ollama":
         return list_models_ollama(base_url=base_url)
-    return []
+    return [], "error"
 
 
 # Default base URLs used by each provider's SDK when none is specified.
@@ -202,11 +209,17 @@ def discover_models_verbose(
     listing fails.  The diagnostic includes the URL that was attempted and
     a reachability check of the host.
     """
-    models = discover_models(provider=provider, api_key_env=api_key_env, base_url=base_url)
+    models, status = discover_models(provider=provider, api_key_env=api_key_env, base_url=base_url)
     if models:
         return models, ""
 
-    # Build diagnostic.
+    if status == "empty":
+        return [], (
+            "Listing models failed \u2014 the API returned no models.\n"
+            "Please enter a model name manually."
+        )
+
+    # Build diagnostic for error cases.
     effective_url = base_url or _DEFAULT_BASE_URLS.get(provider, "")
     if not effective_url:
         return [], "Unknown provider and no base URL specified."

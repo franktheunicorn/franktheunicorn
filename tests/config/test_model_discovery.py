@@ -48,9 +48,11 @@ def _mock_sdk_modules(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class TestListModelsAnthropic:
-    def test_returns_empty_without_key(self) -> None:
+    def test_returns_error_without_key(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
-            assert list_models_anthropic() == []
+            models, status = list_models_anthropic()
+        assert models == []
+        assert status == "error"
 
     def test_returns_models_on_success(self) -> None:
         mock_model = SimpleNamespace(
@@ -65,18 +67,32 @@ class TestListModelsAnthropic:
             patch.dict("os.environ", {"ANTHROPIC_API_KEY": "sk-test"}),
             patch("anthropic.Anthropic", return_value=mock_client),
         ):
-            models = list_models_anthropic()
+            models, status = list_models_anthropic()
 
         assert len(models) == 1
         assert models[0].model_id == "claude-sonnet-4-20250514"
         assert models[0].display_name == "Claude Sonnet 4"
+        assert status == "ok"
 
-    def test_returns_empty_on_api_error(self) -> None:
+    def test_returns_error_on_api_error(self) -> None:
         with (
             patch.dict("os.environ", {"ANTHROPIC_API_KEY": "sk-test"}),
             patch("anthropic.Anthropic", side_effect=Exception("API error")),
         ):
-            assert list_models_anthropic() == []
+            models, status = list_models_anthropic()
+        assert models == []
+        assert status == "error"
+
+    def test_returns_empty_when_api_returns_no_models(self) -> None:
+        mock_client = MagicMock()
+        mock_client.models.list.return_value = SimpleNamespace(data=[])
+        with (
+            patch.dict("os.environ", {"ANTHROPIC_API_KEY": "sk-test"}),
+            patch("anthropic.Anthropic", return_value=mock_client),
+        ):
+            models, status = list_models_anthropic()
+        assert models == []
+        assert status == "empty"
 
     def test_custom_key_env(self) -> None:
         mock_client = MagicMock()
@@ -90,9 +106,11 @@ class TestListModelsAnthropic:
 
 
 class TestListModelsOpenAI:
-    def test_returns_empty_without_key(self) -> None:
+    def test_returns_error_without_key(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
-            assert list_models_openai() == []
+            models, status = list_models_openai()
+        assert models == []
+        assert status == "error"
 
     def test_returns_models_on_success(self) -> None:
         mock_model = SimpleNamespace(id="gpt-4o")
@@ -104,10 +122,22 @@ class TestListModelsOpenAI:
             patch.dict("os.environ", {"OPENAI_API_KEY": "sk-test"}),
             patch("openai.OpenAI", return_value=mock_client),
         ):
-            models = list_models_openai()
+            models, status = list_models_openai()
 
         assert len(models) == 1
         assert models[0].model_id == "gpt-4o"
+        assert status == "ok"
+
+    def test_returns_empty_when_api_returns_no_models(self) -> None:
+        mock_client = MagicMock()
+        mock_client.models.list.return_value = SimpleNamespace(data=[])
+        with (
+            patch.dict("os.environ", {"OPENAI_API_KEY": "sk-test"}),
+            patch("openai.OpenAI", return_value=mock_client),
+        ):
+            models, status = list_models_openai()
+        assert models == []
+        assert status == "empty"
 
     def test_passes_base_url(self) -> None:
         mock_client = MagicMock()
@@ -123,18 +153,22 @@ class TestListModelsOpenAI:
             base_url="https://api.groq.com/openai/v1",
         )
 
-    def test_returns_empty_on_error(self) -> None:
+    def test_returns_error_on_error(self) -> None:
         with (
             patch.dict("os.environ", {"OPENAI_API_KEY": "sk-test"}),
             patch("openai.OpenAI", side_effect=Exception("fail")),
         ):
-            assert list_models_openai() == []
+            models, status = list_models_openai()
+        assert models == []
+        assert status == "error"
 
 
 class TestListModelsGemini:
-    def test_returns_empty_without_key(self) -> None:
+    def test_returns_error_without_key(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
-            assert list_models_gemini() == []
+            models, status = list_models_gemini()
+        assert models == []
+        assert status == "error"
 
     def test_returns_models_on_success(self) -> None:
         mock_model = SimpleNamespace(
@@ -148,11 +182,12 @@ class TestListModelsGemini:
             patch.dict("os.environ", {"GOOGLE_API_KEY": "test-key"}),
             patch("google.genai.Client", return_value=mock_client),
         ):
-            models = list_models_gemini()
+            models, status = list_models_gemini()
 
         assert len(models) == 1
         assert models[0].model_id == "gemini-2.5-flash"
         assert models[0].display_name == "Gemini 2.5 Flash"
+        assert status == "ok"
 
     def test_strips_models_prefix(self) -> None:
         mock_model = SimpleNamespace(
@@ -166,16 +201,29 @@ class TestListModelsGemini:
             patch.dict("os.environ", {"GOOGLE_API_KEY": "test-key"}),
             patch("google.genai.Client", return_value=mock_client),
         ):
-            models = list_models_gemini()
+            models, _status = list_models_gemini()
 
         assert models[0].model_id == "gemini-2.5-pro"
 
-    def test_returns_empty_on_error(self) -> None:
+    def test_returns_empty_when_api_returns_no_models(self) -> None:
+        mock_client = MagicMock()
+        mock_client.models.list.return_value = []
+        with (
+            patch.dict("os.environ", {"GOOGLE_API_KEY": "test-key"}),
+            patch("google.genai.Client", return_value=mock_client),
+        ):
+            models, status = list_models_gemini()
+        assert models == []
+        assert status == "empty"
+
+    def test_returns_error_on_error(self) -> None:
         with (
             patch.dict("os.environ", {"GOOGLE_API_KEY": "test-key"}),
             patch("google.genai.Client", side_effect=Exception("fail")),
         ):
-            assert list_models_gemini() == []
+            models, status = list_models_gemini()
+        assert models == []
+        assert status == "error"
 
 
 class TestListModelsOllama:
@@ -185,10 +233,19 @@ class TestListModelsOllama:
         mock_client.list.return_value = SimpleNamespace(models=[mock_model])
 
         with patch("ollama.Client", return_value=mock_client):
-            models = list_models_ollama()
+            models, status = list_models_ollama()
 
         assert len(models) == 1
         assert models[0].model_id == "qwen2.5-coder:14b"
+        assert status == "ok"
+
+    def test_returns_empty_when_no_local_models(self) -> None:
+        mock_client = MagicMock()
+        mock_client.list.return_value = SimpleNamespace(models=[])
+        with patch("ollama.Client", return_value=mock_client):
+            models, status = list_models_ollama()
+        assert models == []
+        assert status == "empty"
 
     def test_passes_base_url(self) -> None:
         mock_client = MagicMock()
@@ -198,9 +255,11 @@ class TestListModelsOllama:
             list_models_ollama(base_url="http://gpu-box:11434")
         mock_ctor.assert_called_once_with(host="http://gpu-box:11434")
 
-    def test_returns_empty_on_error(self) -> None:
+    def test_returns_error_on_error(self) -> None:
         with patch("ollama.Client", side_effect=Exception("fail")):
-            assert list_models_ollama() == []
+            models, status = list_models_ollama()
+        assert models == []
+        assert status == "error"
 
     def test_default_base_url_passes_none(self) -> None:
         mock_client = MagicMock()
@@ -215,16 +274,20 @@ class TestDiscoverModels:
     def test_routes_to_anthropic(self) -> None:
         with patch(
             "franktheunicorn.config.model_discovery.list_models_anthropic",
-            return_value=[DiscoveredModel("claude-sonnet-4-20250514", "Claude Sonnet 4")],
+            return_value=(
+                [DiscoveredModel("claude-sonnet-4-20250514", "Claude Sonnet 4")],
+                "ok",
+            ),
         ) as mock:
-            result = discover_models("claude")
+            models, status = discover_models("claude")
         mock.assert_called_once_with(api_key_env="ANTHROPIC_API_KEY")
-        assert len(result) == 1
+        assert len(models) == 1
+        assert status == "ok"
 
     def test_routes_to_openai(self) -> None:
         with patch(
             "franktheunicorn.config.model_discovery.list_models_openai",
-            return_value=[],
+            return_value=([], "error"),
         ) as mock:
             discover_models("openai", base_url="https://api.example.com")
         mock.assert_called_once_with(
@@ -234,7 +297,7 @@ class TestDiscoverModels:
     def test_routes_to_gemini(self) -> None:
         with patch(
             "franktheunicorn.config.model_discovery.list_models_gemini",
-            return_value=[],
+            return_value=([], "error"),
         ) as mock:
             discover_models("gemini")
         mock.assert_called_once_with(api_key_env="GOOGLE_API_KEY")
@@ -242,18 +305,20 @@ class TestDiscoverModels:
     def test_routes_to_ollama(self) -> None:
         with patch(
             "franktheunicorn.config.model_discovery.list_models_ollama",
-            return_value=[],
+            return_value=([], "error"),
         ) as mock:
             discover_models("ollama", base_url="http://localhost:11434")
         mock.assert_called_once_with(base_url="http://localhost:11434")
 
-    def test_unknown_provider_returns_empty(self) -> None:
-        assert discover_models("unknown-provider") == []
+    def test_unknown_provider_returns_error(self) -> None:
+        models, status = discover_models("unknown-provider")
+        assert models == []
+        assert status == "error"
 
     def test_custom_api_key_env(self) -> None:
         with patch(
             "franktheunicorn.config.model_discovery.list_models_anthropic",
-            return_value=[],
+            return_value=([], "error"),
         ) as mock:
             discover_models("claude", api_key_env="MY_KEY")
         mock.assert_called_once_with(api_key_env="MY_KEY")
@@ -317,16 +382,16 @@ class TestDiscoverModelsVerbose:
         expected = [DiscoveredModel("gpt-4o", "gpt-4o")]
         with patch(
             "franktheunicorn.config.model_discovery.discover_models",
-            return_value=expected,
+            return_value=(expected, "ok"),
         ):
             models, diagnostic = discover_models_verbose("openai")
         assert models == expected
         assert diagnostic == ""
 
-    def test_returns_diagnostic_on_failure(self) -> None:
+    def test_returns_diagnostic_on_error(self) -> None:
         with patch(
             "franktheunicorn.config.model_discovery.discover_models",
-            return_value=[],
+            return_value=([], "error"),
         ):
             models, diagnostic = discover_models_verbose(
                 "openai",
@@ -336,11 +401,21 @@ class TestDiscoverModelsVerbose:
         assert models == []
         assert "Attempted: GET" in diagnostic
 
+    def test_empty_status_shows_listing_failed(self) -> None:
+        with patch(
+            "franktheunicorn.config.model_discovery.discover_models",
+            return_value=([], "empty"),
+        ):
+            models, diagnostic = discover_models_verbose("claude")
+        assert models == []
+        assert "Listing models failed" in diagnostic
+        assert "API returned no models" in diagnostic
+
     def test_dns_failure_diagnostic(self) -> None:
         with (
             patch(
                 "franktheunicorn.config.model_discovery.discover_models",
-                return_value=[],
+                return_value=([], "error"),
             ),
             patch(
                 "franktheunicorn.config.model_discovery.check_endpoint_reachability",
@@ -357,7 +432,7 @@ class TestDiscoverModelsVerbose:
         with (
             patch(
                 "franktheunicorn.config.model_discovery.discover_models",
-                return_value=[],
+                return_value=([], "error"),
             ),
             patch(
                 "franktheunicorn.config.model_discovery.check_endpoint_reachability",
@@ -375,7 +450,7 @@ class TestDiscoverModelsVerbose:
     def test_unknown_provider_no_base_url(self) -> None:
         with patch(
             "franktheunicorn.config.model_discovery.discover_models",
-            return_value=[],
+            return_value=([], "error"),
         ):
             _models, diagnostic = discover_models_verbose("unknown-thing")
         assert _models == []
@@ -385,7 +460,7 @@ class TestDiscoverModelsVerbose:
         with (
             patch(
                 "franktheunicorn.config.model_discovery.discover_models",
-                return_value=[],
+                return_value=([], "error"),
             ),
             patch(
                 "franktheunicorn.config.model_discovery.check_endpoint_reachability",
