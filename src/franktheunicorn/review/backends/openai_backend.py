@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from franktheunicorn.review.backends.base import BaseLLMBackend
+
+logger = logging.getLogger(__name__)
 
 
 class OpenAIBackend(BaseLLMBackend):
@@ -19,6 +22,11 @@ class OpenAIBackend(BaseLLMBackend):
     # on the first BadRequestError, then cache the survivor.
     _token_param: str = "max_completion_tokens"
 
+    # Some OpenAI-compatible servers (older vLLM, llama.cpp, certain proxies)
+    # don't accept `response_format={"type": "json_object"}`. Start optimistic,
+    # fall back to a plain prompt-only JSON request and cache the result.
+    _supports_json_object: bool = True
+
     def _call_api(self, system_prompt: str, user_message: str, api_key: str) -> str:
         import openai
 
@@ -28,31 +36,62 @@ class OpenAIBackend(BaseLLMBackend):
 
         client = openai.OpenAI(**kwargs)  # type: ignore[arg-type]
 
-        def _create(token_param: str) -> Any:
-            return client.chat.completions.create(  # type: ignore[call-overload]
-                model=self._model,
-                temperature=self._config.temperature,
-                response_format={"type": "json_object"},
-                messages=[
+        def _create() -> Any:
+            request_kwargs: dict[str, Any] = {
+                "model": self._model,
+                "temperature": self._config.temperature,
+                "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_message},
                 ],
-                **{token_param: self._config.max_tokens},
-            )
+                self._token_param: self._config.max_tokens,
+            }
+            if self._supports_json_object:
+                request_kwargs["response_format"] = {"type": "json_object"}
+            return client.chat.completions.create(**request_kwargs)
 
-        try:
-            response = _create(self._token_param)
-        except openai.BadRequestError as exc:
-            alt = (
-                "max_tokens"
-                if self._token_param == "max_completion_tokens"
-                else "max_completion_tokens"
-            )
-            if self._token_param in str(exc) or alt in str(exc):
-                response = _create(alt)
-                self._token_param = alt
-            else:
+        # Retry once per known compatibility quirk (token-param name and
+        # response_format support). Cap attempts so an unrelated 400 can't loop.
+        last_exc: openai.BadRequestError | None = None
+        for _ in range(3):
+            try:
+                response = _create()
+                break
+            except openai.BadRequestError as exc:
+                msg = str(exc).lower()
+                if self._supports_json_object and (
+                    "response_format" in msg
+                    or "response format" in msg
+                    or "json_object" in msg
+                    or "json object" in msg
+                ):
+                    logger.warning(
+                        "Server rejected response_format=json_object; "
+                        "falling back to plain JSON prompting for %s.",
+                        self._model,
+                    )
+                    self._supports_json_object = False
+                    last_exc = exc
+                    continue
+                alt = (
+                    "max_tokens"
+                    if self._token_param == "max_completion_tokens"
+                    else "max_completion_tokens"
+                )
+                if self._token_param in msg or alt in msg:
+                    logger.warning(
+                        "Server rejected %s; falling back to %s for %s.",
+                        self._token_param,
+                        alt,
+                        self._model,
+                    )
+                    self._token_param = alt
+                    last_exc = exc
+                    continue
                 raise
+        else:
+            assert last_exc is not None
+            raise last_exc
 
         if hasattr(response, "usage") and response.usage:
             self._last_tokens_in = getattr(response.usage, "prompt_tokens", 0)
