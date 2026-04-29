@@ -9,7 +9,7 @@ ifeq ($(wildcard $(VENV)/bin/python),)
   ACTIVATE_MSG := "(run 'make venv' first or 'make setup')"
 endif
 
-.PHONY: help venv setup test lint format typecheck check serve worker migrate check-migrations docker-up docker-build clean
+.PHONY: help venv setup test lint format typecheck check serve worker worker-debug migrate check-migrations docker-up docker-build clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -47,8 +47,16 @@ check: lint typecheck check-migrations test ## Run all checks (lint + typecheck 
 serve: venv migrate ## Start Django dev server
 	$(PYTHON) manage.py runserver
 
-worker: venv ## Start background worker
+worker: venv ## Start background worker (log level from operator.yaml or FRANK_LOG_LEVEL)
 	$(PYTHON) -m franktheunicorn.worker.runner
+
+worker-debug: venv ## Start background worker with DEBUG logging
+	$(PYTHON) -m franktheunicorn.worker.runner --log-level=DEBUG
+
+# Tip: any log level can be set ad-hoc via the env var, e.g.
+#   FRANK_LOG_LEVEL=DEBUG make worker
+# or by passing args to the runner directly:
+#   .venv/bin/python -m franktheunicorn.worker.runner --log-level=DEBUG
 
 migrate: venv ## Run database migrations
 	$(PYTHON) manage.py migrate

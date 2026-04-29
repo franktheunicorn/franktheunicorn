@@ -63,11 +63,19 @@ def poll_project(
         defaults={"review_context": project_config.review_context},
     )
 
+    logger.debug("Listing pull requests for %s/%s ...", project_config.owner, project_config.repo)
     raw_prs = client.list_pull_requests(project_config.owner, project_config.repo)
+    logger.debug(
+        "GitHub returned %d open PR(s) for %s/%s",
+        len(raw_prs),
+        project_config.owner,
+        project_config.repo,
+    )
     results: list[PullRequest] = []
 
     for pr_data in raw_prs:
         pr_number: int = pr_data["number"]
+        logger.debug("Fetching changed files for PR #%d ...", pr_number)
 
         # Fetch changed files for scoring
         try:
@@ -75,6 +83,7 @@ def poll_project(
                 project_config.owner, project_config.repo, pr_number
             )
             changed_files = [f["filename"] for f in files_data]
+            logger.debug("PR #%d touches %d file(s)", pr_number, len(changed_files))
         except Exception:
             logger.warning("Could not fetch files for PR #%d, using empty list", pr_number)
             changed_files = []
