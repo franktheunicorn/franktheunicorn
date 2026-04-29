@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from franktheunicorn.review.backends.base import BaseLLMBackend
 
 
@@ -25,21 +27,21 @@ class OpenAIBackend(BaseLLMBackend):
             kwargs["base_url"] = self._config.base_url
 
         client = openai.OpenAI(**kwargs)  # type: ignore[arg-type]
-        base_params: dict[str, object] = {
-            "model": self._model,
-            "temperature": self._config.temperature,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message},
-            ],
-        }
+
+        def _create(token_param: str) -> Any:
+            return client.chat.completions.create(  # type: ignore[call-overload]
+                model=self._model,
+                temperature=self._config.temperature,
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message},
+                ],
+                **{token_param: self._config.max_tokens},
+            )
 
         try:
-            response = client.chat.completions.create(
-                **base_params,  # type: ignore[arg-type]
-                **{self._token_param: self._config.max_tokens},
-            )
+            response = _create(self._token_param)
         except openai.BadRequestError as exc:
             alt = (
                 "max_tokens"
@@ -47,10 +49,7 @@ class OpenAIBackend(BaseLLMBackend):
                 else "max_completion_tokens"
             )
             if self._token_param in str(exc) or alt in str(exc):
-                response = client.chat.completions.create(
-                    **base_params,  # type: ignore[arg-type]
-                    **{alt: self._config.max_tokens},
-                )
+                response = _create(alt)
                 self._token_param = alt
             else:
                 raise
