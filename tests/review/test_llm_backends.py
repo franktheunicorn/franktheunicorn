@@ -238,11 +238,81 @@ class TestOpenAIBackend:
         mock_response.choices = [mock_choice]
 
         with patch("openai.OpenAI") as mock_client_cls:
-            mock_client_cls.return_value.chat.completions.create.return_value = mock_response
+            create = mock_client_cls.return_value.chat.completions.create
+            create.return_value = mock_response
             findings = backend.generate_findings(_SAMPLE_DIFF, ctx)
+            # Default is the modern parameter.
+            kwargs = create.call_args.kwargs
+            assert "max_completion_tokens" in kwargs
+            assert "max_tokens" not in kwargs
 
         assert len(findings) == 1
         assert findings[0].confidence == 0.8  # high -> 0.8
+
+    @patch.dict("os.environ", {"TEST_OPENAI_KEY": "sk-test"})
+    def test_falls_back_to_max_tokens_for_legacy_server(self) -> None:
+        """Legacy vLLM servers reject `max_completion_tokens`; retry with `max_tokens`."""
+        import openai
+
+        config = LLMBackendConfig(provider="openai", api_key_env="TEST_OPENAI_KEY")
+        from franktheunicorn.review.backends.openai_backend import OpenAIBackend
+
+        backend = OpenAIBackend(config)
+        ctx = make_pr_context()
+
+        mock_choice = MagicMock()
+        mock_choice.message.content = json.dumps(
+            {"findings": [{"file_path": "a.py", "title": "T", "body": "B", "severity": "low"}]}
+        )
+        mock_response = MagicMock()
+        mock_response.choices = [mock_choice]
+
+        bad_request = openai.BadRequestError(
+            message="unrecognized field: max_completion_tokens",
+            response=MagicMock(),
+            body={"message": "unrecognized field: max_completion_tokens"},
+        )
+
+        with patch("openai.OpenAI") as mock_client_cls:
+            create = mock_client_cls.return_value.chat.completions.create
+            create.side_effect = [bad_request, mock_response]
+            findings = backend.generate_findings(_SAMPLE_DIFF, ctx)
+
+            assert create.call_count == 2
+            first_kwargs = create.call_args_list[0].kwargs
+            second_kwargs = create.call_args_list[1].kwargs
+            assert "max_completion_tokens" in first_kwargs
+            assert "max_tokens" in second_kwargs
+            assert "max_completion_tokens" not in second_kwargs
+
+        assert len(findings) == 1
+        # Fallback is cached for subsequent calls on this backend instance.
+        assert backend._token_param == "max_tokens"
+
+    @patch.dict("os.environ", {"TEST_OPENAI_KEY": "sk-test"})
+    def test_unrelated_bad_request_is_not_retried(self) -> None:
+        """A 400 unrelated to the token-param field must propagate, not loop."""
+        import openai
+
+        config = LLMBackendConfig(provider="openai", api_key_env="TEST_OPENAI_KEY")
+        from franktheunicorn.review.backends.openai_backend import OpenAIBackend
+
+        backend = OpenAIBackend(config)
+        ctx = make_pr_context()
+
+        bad_request = openai.BadRequestError(
+            message="model not found",
+            response=MagicMock(),
+            body={"message": "model not found"},
+        )
+
+        with patch("openai.OpenAI") as mock_client_cls:
+            create = mock_client_cls.return_value.chat.completions.create
+            create.side_effect = bad_request
+            # generate_findings swallows exceptions and returns [].
+            findings = backend.generate_findings(_SAMPLE_DIFF, ctx)
+            assert create.call_count == 1
+            assert findings == []
 
 
 class TestGeminiBackend:
