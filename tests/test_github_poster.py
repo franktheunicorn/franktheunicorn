@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from franktheunicorn.github.poster import GitHubPoster
+from franktheunicorn.backends.poster import GitHubPoster
 from tests.factories import PullRequestFactory, ReviewDraftFactory
 
 

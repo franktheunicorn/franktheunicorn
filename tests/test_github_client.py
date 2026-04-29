@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from pytest_httpx import HTTPXMock
 
-from franktheunicorn.github.client import GitHubClient, infer_github_username
+from franktheunicorn.backends.github import GitHubClient, infer_github_username
 
 
 class TestGitHubClient:

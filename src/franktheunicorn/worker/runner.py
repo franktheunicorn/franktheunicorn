@@ -81,9 +81,9 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
 
     from django.conf import settings
 
+    from franktheunicorn.backends.github import GitHubClient
+    from franktheunicorn.backends.mock import MockGitHubClient
     from franktheunicorn.config.loader import load_operator_config, load_project_configs
-    from franktheunicorn.github.client import GitHubClient
-    from franktheunicorn.github.mock import MockGitHubClient
 
     # Precedence: --log-level CLI flag > FRANK_LOG_LEVEL env > operator.yaml > INFO.
     # The env var path is already applied inside the resolver, so reading
@@ -218,9 +218,9 @@ def _run_cycle(
     import httpx
     from django.conf import settings
 
+    from franktheunicorn.backends.poller import poll_project
     from franktheunicorn.config.models import ProjectConfig
     from franktheunicorn.data_access.github.diff_fetcher import DiffFetcher
-    from franktheunicorn.github.poller import poll_project
     from franktheunicorn.review.copypasta import check_copypasta
     from franktheunicorn.review.drafter import draft_review
     from franktheunicorn.worker.test_runner import TestRunner

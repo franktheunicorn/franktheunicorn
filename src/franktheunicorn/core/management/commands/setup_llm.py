@@ -84,7 +84,7 @@ class Command(BaseCommand):
         if not existing_username:
             token = os.environ.get("FRANK_GITHUB_TOKEN", "")
             if token:
-                from franktheunicorn.github.client import infer_github_username
+                from franktheunicorn.backends.github import infer_github_username
 
                 inferred = infer_github_username(token)
                 if inferred:

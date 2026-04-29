@@ -508,8 +508,8 @@ def recall_draft(request: HttpRequest, draft_id: int) -> HttpResponse:
     try:
         from django.conf import settings
 
-        from franktheunicorn.github.client import GitHubClient
-        from franktheunicorn.github.poster import GitHubPoster
+        from franktheunicorn.backends.github import GitHubClient
+        from franktheunicorn.backends.poster import GitHubPoster
 
         token = getattr(settings, "FRANK_GITHUB_TOKEN", "")
         if not token:
@@ -549,8 +549,8 @@ def post_review(request: HttpRequest, pr_id: int) -> HttpResponse:
     try:
         from django.conf import settings
 
-        from franktheunicorn.github.client import GitHubClient
-        from franktheunicorn.github.poster import GitHubPoster
+        from franktheunicorn.backends.github import GitHubClient
+        from franktheunicorn.backends.poster import GitHubPoster
 
         token = getattr(settings, "FRANK_GITHUB_TOKEN", "")
         if not token:
@@ -820,8 +820,8 @@ def merge_pr(request: HttpRequest, pr_id: int) -> HttpResponse:
     """Execute a merge for a PR."""
     from django.conf import settings
 
+    from franktheunicorn.backends.github import GitHubClient
     from franktheunicorn.config.loader import load_project_configs
-    from franktheunicorn.github.client import GitHubClient
     from franktheunicorn.worker.merge_queue import evaluate_merge_eligibility, execute_merge
 
     pr = get_object_or_404(PullRequest, pk=pr_id)

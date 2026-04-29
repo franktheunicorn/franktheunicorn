@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from franktheunicorn.github.poster import (
+from franktheunicorn.backends.poster import (
     DEFAULT_ATTRIBUTION,
     MANAGED_MARKER,
     GitHubPoster,

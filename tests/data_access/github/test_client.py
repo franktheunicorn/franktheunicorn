@@ -10,8 +10,8 @@ import httpx
 import pytest
 from pytest_httpx import HTTPXMock
 
-from franktheunicorn.github.client import GitHubClient, infer_github_username
-from franktheunicorn.github.mock import MockGitHubClient
+from franktheunicorn.backends.github import GitHubClient, infer_github_username
+from franktheunicorn.backends.mock import MockGitHubClient
 
 
 class TestMockGitHubClient:

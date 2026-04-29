@@ -172,11 +172,11 @@ class TestAutoPostFindings:
         mock_poster.post_review.return_value = {"id": 1}
 
         monkeypatch.setattr(
-            "franktheunicorn.github.client.GitHubClient",
+            "franktheunicorn.backends.github.GitHubClient",
             lambda token: mock_client,
         )
         monkeypatch.setattr(
-            "franktheunicorn.github.poster.GitHubPoster",
+            "franktheunicorn.backends.poster.GitHubPoster",
             lambda client, attribution: mock_poster,
         )
 
@@ -247,11 +247,11 @@ class TestAutoPostFindings:
         mock_poster.post_review.return_value = {"id": 42}
 
         monkeypatch.setattr(
-            "franktheunicorn.github.client.GitHubClient",
+            "franktheunicorn.backends.github.GitHubClient",
             lambda token: mock_client,
         )
         monkeypatch.setattr(
-            "franktheunicorn.github.poster.GitHubPoster",
+            "franktheunicorn.backends.poster.GitHubPoster",
             lambda client, attribution: mock_poster,
         )
 
@@ -287,7 +287,7 @@ class TestAutoPostFindings:
             raise ConnectionError(msg)
 
         monkeypatch.setattr(
-            "franktheunicorn.github.client.GitHubClient",
+            "franktheunicorn.backends.github.GitHubClient",
             raise_import_error,
         )
 
@@ -316,11 +316,11 @@ class TestAutoPostFindings:
         mock_poster.post_review.side_effect = RuntimeError("API failure")
 
         monkeypatch.setattr(
-            "franktheunicorn.github.client.GitHubClient",
+            "franktheunicorn.backends.github.GitHubClient",
             lambda token: mock_client,
         )
         monkeypatch.setattr(
-            "franktheunicorn.github.poster.GitHubPoster",
+            "franktheunicorn.backends.poster.GitHubPoster",
             lambda client, attribution: mock_poster,
         )
 
