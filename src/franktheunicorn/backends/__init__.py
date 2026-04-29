@@ -35,5 +35,9 @@ def make_client(entry: ForgeRegistryEntry) -> ForgeClient:
         from franktheunicorn.backends.github import GitHubClient
 
         return GitHubClient(token=entry.token, base_url=entry.base_url)
+    if entry.type in ("gitea", "forgejo"):
+        from franktheunicorn.backends.gitea import GiteaClient
+
+        return GiteaClient(token=entry.token, base_url=entry.base_url)
     msg = f"forge type {entry.type!r} is not yet implemented"
     raise NotImplementedError(msg)
