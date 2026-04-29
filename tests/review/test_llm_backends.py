@@ -77,6 +77,28 @@ class TestParseResponse:
     def test_invalid_json(self) -> None:
         assert parse_llm_response("not json at all") == []
 
+    def test_extracts_json_with_prose_preamble(self) -> None:
+        """Models without response_format enforcement may add a chatty preamble."""
+        data = {"findings": [{"file_path": "x.py", "title": "T", "body": "B", "severity": "low"}]}
+        raw = "Sure, here is the review: " + json.dumps(data)
+        findings = parse_llm_response(raw)
+        assert len(findings) == 1
+        assert findings[0].file_path == "x.py"
+
+    def test_extracts_json_with_trailing_prose(self) -> None:
+        data = [{"file_path": "y.py", "title": "T", "body": "B", "severity": "high"}]
+        raw = json.dumps(data) + "\n\nLet me know if you have questions!"
+        findings = parse_llm_response(raw)
+        assert len(findings) == 1
+        assert findings[0].file_path == "y.py"
+
+    def test_extracts_json_with_prose_on_both_sides(self) -> None:
+        data = {"findings": [{"file_path": "z.py", "title": "T", "body": "B"}]}
+        raw = f"Here you go:\n{json.dumps(data)}\nHope that helps."
+        findings = parse_llm_response(raw)
+        assert len(findings) == 1
+        assert findings[0].file_path == "z.py"
+
     def test_markdown_code_fences(self) -> None:
         raw = '```json\n[{"file_path":"x.py","title":"T","body":"B","severity":"nit"}]\n```'
         findings = parse_llm_response(raw)

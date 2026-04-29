@@ -192,6 +192,25 @@ SEVERITY_CONFIDENCE: dict[str, float] = {
 _CODE_FENCE_RE = re.compile(r"```(?:json)?\s*\n(.*?)\n```", re.DOTALL)
 
 
+def _extract_json_blob(text: str) -> object | None:
+    """Find and decode the first JSON value embedded in arbitrary text.
+
+    Models without strict JSON enforcement sometimes wrap output in prose
+    ('Sure, here is the review: [...]' or '[...]\\n\\nLet me know!').
+    raw_decode handles trailing junk; we scan for the first '{' or '['
+    that successfully decodes to handle leading junk too.
+    """
+    decoder = json.JSONDecoder()
+    for i, ch in enumerate(text):
+        if ch in "{[":
+            try:
+                obj, _ = decoder.raw_decode(text[i:])
+            except json.JSONDecodeError:
+                continue
+            return obj  # type: ignore[no-any-return]
+    return None
+
+
 def parse_llm_response(raw_text: str) -> list[ReviewFinding]:
     """Parse JSON output from an LLM into validated ReviewFinding objects.
 
@@ -210,8 +229,12 @@ def parse_llm_response(raw_text: str) -> list[ReviewFinding]:
     try:
         data = json.loads(raw_text)
     except json.JSONDecodeError:
-        logger.warning("LLM response is not valid JSON; returning empty findings.")
-        return []
+        # Models without response_format enforcement may add prose around
+        # the JSON. Try to extract the first valid JSON value.
+        data = _extract_json_blob(raw_text)
+        if data is None:
+            logger.warning("LLM response is not valid JSON; returning empty findings.")
+            return []
 
     # Accept {"findings": [...]} or [...]
     if isinstance(data, dict):
