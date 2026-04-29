@@ -408,6 +408,7 @@ class OperatorConfig(BaseModel):
     personality: str = "frank"
     auto_post: bool = False
     poll_interval_seconds: int | None = None
+    log_level: str = "INFO"
     digest_email: str = ""
     digest_enabled: bool = False
     workspaces: dict[str, object] = Field(default_factory=dict)
@@ -458,6 +459,16 @@ class OperatorConfig(BaseModel):
         v = v.strip()
         if v and not GITHUB_NAME_PATTERN.match(v):
             msg = "github_username contains invalid characters"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("log_level")
+    @classmethod
+    def log_level_valid(cls, v: str) -> str:
+        v = (v or "INFO").strip().upper()
+        valid = {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSET"}
+        if v not in valid:
+            msg = f"log_level must be one of {sorted(valid)}, got {v!r}"
             raise ValueError(msg)
         return v
 

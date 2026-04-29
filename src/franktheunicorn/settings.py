@@ -109,6 +109,7 @@ FRANK_MOCK_MODE: bool = bool(_resolved["mock_mode"])
 FRANK_FIXTURES_DIR: str = str(_resolved["fixtures_dir"])
 FRANK_REPOS_DIR = Path(str(_resolved["repos_dir"]))
 FRANK_POLL_INTERVAL: int = int(_resolved["poll_interval"])
+FRANK_LOG_LEVEL: str = str(_resolved["log_level"])
 FRANK_DIGEST_EMAIL: str = str(_resolved["digest_email"])
 
 # Email settings for digest (optional — skip silently if not configured)

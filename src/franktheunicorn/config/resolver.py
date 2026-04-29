@@ -34,6 +34,17 @@ def resolve_operator_config_path(base_dir: Path) -> str:
     return str(base_dir / "config" / "examples" / "operator.yaml")
 
 
+_VALID_LOG_LEVELS = {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSET"}
+
+
+def _resolve_log_level(oc: OperatorConfig) -> str:
+    """Resolve effective log level. ``FRANK_LOG_LEVEL`` env var wins over YAML."""
+    env_override = os.environ.get("FRANK_LOG_LEVEL", "").strip().upper()
+    if env_override in _VALID_LOG_LEVELS:
+        return env_override
+    return oc.log_level or "INFO"
+
+
 def _resolve_projects_dir(base_dir: Path, oc: OperatorConfig) -> str:
     """Determine the projects directory, applying the same fallback as before."""
     env_override = os.environ.get("FRANK_PROJECTS_DIR")
@@ -75,6 +86,7 @@ def resolve_config(base_dir: Path) -> tuple[OperatorConfig, dict[str, str | int 
         "repos_dir": oc.repos_dir or str(base_dir / "data" / "repos"),
         "projects_dir": _resolve_projects_dir(base_dir, oc),
         "poll_interval": oc.poll_interval_seconds or 300,
+        "log_level": _resolve_log_level(oc),
         "digest_email": oc.digest_email,
         # Email
         "email_host": oc.email.smtp_host,

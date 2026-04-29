@@ -12,6 +12,7 @@ This is the main loop for the worker service. It:
 
 from __future__ import annotations
 
+import argparse
 import fcntl
 import logging
 import os
@@ -32,9 +33,37 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_VALID_LOG_LEVELS = ("CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSET")
 
-def run_worker() -> None:
+
+def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="franktheunicorn-worker",
+        description="Run the franktheunicorn background worker.",
+    )
+    parser.add_argument(
+        "--log-level",
+        choices=_VALID_LOG_LEVELS,
+        default=None,
+        help=(
+            "Set the log level (default: from operator.yaml's log_level, or INFO). "
+            "Overrides both YAML config and the FRANK_LOG_LEVEL env var."
+        ),
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_const",
+        const="DEBUG",
+        dest="log_level",
+        help="Shortcut for --log-level=DEBUG.",
+    )
+    return parser.parse_args(argv)
+
+
+def run_worker(argv: Sequence[str] | None = None) -> None:
     """Main worker entry point."""
+    args = _parse_args(argv)
+
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "franktheunicorn.settings")
     django.setup()
 
@@ -44,10 +73,15 @@ def run_worker() -> None:
     from franktheunicorn.github.client import GitHubClient
     from franktheunicorn.github.mock import MockGitHubClient
 
+    # Precedence: --log-level CLI flag > FRANK_LOG_LEVEL env > operator.yaml > INFO.
+    # The env var path is already applied inside the resolver, so reading
+    # settings.FRANK_LOG_LEVEL covers env + YAML.
+    log_level = args.log_level or getattr(settings, "FRANK_LOG_LEVEL", "INFO")
     logging.basicConfig(
-        level=logging.INFO,
+        level=log_level,
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     )
+    logger.debug("Log level set to %s", log_level)
 
     # Acquire instance lock to prevent duplicate workers.
     data_dir = Path(getattr(settings, "DATA_DIR", Path.home() / ".review-agent"))
@@ -194,6 +228,10 @@ def _run_cycle(
 
     for pc in project_configs:
         if not isinstance(pc, ProjectConfig) or not pc.enabled:
+            logger.debug(
+                "Skipping project config %r (not a ProjectConfig or disabled)",
+                getattr(pc, "owner", "?"),
+            )
             continue
         try:
             logger.info("Polling %s/%s ...", pc.owner, pc.repo)
@@ -203,7 +241,9 @@ def _run_cycle(
             try:
                 from franktheunicorn.worker.repo_manager import ensure_repo
 
+                logger.debug("Ensuring local repo clone for %s/%s ...", pc.owner, pc.repo)
                 repo_path = ensure_repo(Path(settings.FRANK_REPOS_DIR), pc.owner, pc.repo)
+                logger.debug("Repo clone ready at %s", repo_path)
             except Exception:
                 logger.debug(
                     "Repo checkout failed for %s/%s; blame will be skipped",
@@ -213,20 +253,31 @@ def _run_cycle(
                 )
 
             # Repo health analysis: run (or refresh) when stale or missing.
+            logger.debug("Checking repo health snapshot for %s/%s ...", pc.owner, pc.repo)
             _maybe_refresh_repo_health(pc, repo_path)
 
+            logger.debug("Calling poll_project for %s/%s ...", pc.owner, pc.repo)
             prs = poll_project(
                 client=client,  # type: ignore[arg-type]
                 project_config=pc,
                 operator_username=operator_username,
                 repo_path=repo_path,
             )
+            logger.debug("poll_project returned %d PR(s) for %s/%s", len(prs), pc.owner, pc.repo)
             for pr in prs:
                 all_prs.append(pr)
                 pr_to_config[pr.pk] = pc
+                logger.debug(
+                    "Processing PR #%d (%s/%s) score=%.2f",
+                    pr.number,
+                    pc.owner,
+                    pc.repo,
+                    getattr(pr, "interest_score", 0.0),
+                )
 
                 # Only draft reviews for PRs without existing drafts
                 if not pr.review_drafts.exists():
+                    logger.debug("Drafting review for PR #%d ...", pr.number)
                     # Fetch external context (v1.5) for the review pipeline.
                     community_ctx = ""
                     jira_ctx = ""
