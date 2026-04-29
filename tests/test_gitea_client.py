@@ -163,4 +163,4 @@ class TestGiteaClient:
             method="DELETE",
             status_code=204,
         )
-        client.delete_review_comment("org", "repo", 123)
+        client.delete_review_comment("org", "repo", 7, 123)

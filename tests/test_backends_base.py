@@ -107,7 +107,9 @@ def test_forge_client_concrete_subclass_works() -> None:
         ) -> list[dict[str, Any]]:
             return []
 
-        def delete_review_comment(self, owner: str, repo: str, comment_id: int) -> None:
+        def delete_review_comment(
+            self, owner: str, repo: str, pr_number: int, comment_id: int
+        ) -> None:
             pass
 
         def get_authenticated_user(self) -> dict[str, Any]:

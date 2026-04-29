@@ -117,8 +117,9 @@ class GitHubClient(ForgeClient):
         result: list[dict[str, Any]] = response.json()
         return result
 
-    def delete_review_comment(self, owner: str, repo: str, comment_id: int) -> None:
-        """Delete a review comment (for recall)."""
+    def delete_review_comment(self, owner: str, repo: str, pr_number: int, comment_id: int) -> None:
+        """Delete a review comment (for recall). ``pr_number`` is unused on GitHub."""
+        del pr_number
         url = f"/repos/{owner}/{repo}/pulls/comments/{comment_id}"
         response = self._client.delete(url)
         response.raise_for_status()

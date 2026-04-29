@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from franktheunicorn.backends import make_client
 from franktheunicorn.backends.gitea import GiteaClient
 from franktheunicorn.backends.github import GitHubClient
+from franktheunicorn.backends.gitlab import GitLabClient
 from franktheunicorn.config.models import ForgeRegistryEntry, OperatorConfig, ProjectConfig
 from franktheunicorn.config.resolver import get_forge_entry
 
@@ -157,7 +158,10 @@ class TestMakeClientFactory:
         finally:
             client.close()
 
-    def test_gitlab_not_yet_implemented(self) -> None:
+    def test_gitlab_returns_gitlab_client(self) -> None:
         entry = ForgeRegistryEntry(name="gl", type="gitlab", token="t")
-        with pytest.raises(NotImplementedError):
-            make_client(entry)
+        client = make_client(entry)
+        try:
+            assert isinstance(client, GitLabClient)
+        finally:
+            client.close()

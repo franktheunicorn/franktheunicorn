@@ -39,5 +39,9 @@ def make_client(entry: ForgeRegistryEntry) -> ForgeClient:
         from franktheunicorn.backends.gitea import GiteaClient
 
         return GiteaClient(token=entry.token, base_url=entry.base_url)
+    if entry.type == "gitlab":
+        from franktheunicorn.backends.gitlab import GitLabClient
+
+        return GitLabClient(token=entry.token, base_url=entry.base_url)
     msg = f"forge type {entry.type!r} is not yet implemented"
     raise NotImplementedError(msg)

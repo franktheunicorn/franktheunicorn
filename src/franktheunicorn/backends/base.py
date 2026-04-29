@@ -81,7 +81,12 @@ class ForgeClient(ABC):
     ) -> list[dict[str, Any]]: ...
 
     @abstractmethod
-    def delete_review_comment(self, owner: str, repo: str, comment_id: int) -> None: ...
+    def delete_review_comment(self, owner: str, repo: str, pr_number: int, comment_id: int) -> None:
+        """Delete a posted review comment.
+
+        ``pr_number`` is required by GitLab (notes are scoped to the MR);
+        GitHub and Gitea ignore it.
+        """
 
     @abstractmethod
     def get_authenticated_user(self) -> dict[str, Any]: ...

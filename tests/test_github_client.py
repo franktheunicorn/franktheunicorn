@@ -80,8 +80,8 @@ class TestGitHubClient:
 
     def test_delete_review_comment(self, httpx_mock: HTTPXMock, client: GitHubClient) -> None:
         httpx_mock.add_response(status_code=204)
-        # Should not raise
-        client.delete_review_comment("org", "repo", 123)
+        # pr_number is unused on GitHub but required by the abstract signature.
+        client.delete_review_comment("org", "repo", 42, 123)
 
     def test_get_authenticated_user(self, httpx_mock: HTTPXMock, client: GitHubClient) -> None:
         httpx_mock.add_response(json={"login": "holdenk"})

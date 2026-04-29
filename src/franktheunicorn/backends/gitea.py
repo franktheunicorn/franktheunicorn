@@ -165,10 +165,13 @@ class GiteaClient(ForgeClient):
         result: list[dict[str, Any]] = response.json()
         return result
 
-    def delete_review_comment(self, owner: str, repo: str, comment_id: int) -> None:
-        # Gitea/Forgejo expose review-comment deletion under the pulls path
-        # without requiring the PR index. Some older Forgejo versions may
-        # not support this URL form; recall is best-effort.
+    def delete_review_comment(self, owner: str, repo: str, pr_number: int, comment_id: int) -> None:
+        """Delete a posted review comment. ``pr_number`` is unused on Gitea/Forgejo.
+
+        Some older Forgejo versions may not support this URL form; recall
+        is best-effort.
+        """
+        del pr_number
         url = f"/repos/{owner}/{repo}/pulls/comments/{comment_id}"
         response = self._client.delete(url)
         response.raise_for_status()

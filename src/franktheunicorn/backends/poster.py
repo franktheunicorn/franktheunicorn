@@ -151,6 +151,7 @@ class GitHubPoster:
             self._client.delete_review_comment(
                 draft.pull_request.project.owner,
                 draft.pull_request.project.repo,
+                draft.pull_request.number,
                 draft.github_comment_id,
             )
         except Exception:

@@ -112,7 +112,7 @@ class MockForgeClient(ForgeClient):
             return _load_json_fixture(fixture_path)
         return []
 
-    def delete_review_comment(self, owner: str, repo: str, comment_id: int) -> None:
+    def delete_review_comment(self, owner: str, repo: str, pr_number: int, comment_id: int) -> None:
         """No-op in mock mode."""
 
     def get_authenticated_user(self) -> dict[str, Any]:
