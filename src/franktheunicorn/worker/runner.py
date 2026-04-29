@@ -35,6 +35,9 @@ logger = logging.getLogger(__name__)
 
 def run_worker() -> None:
     """Main worker entry point."""
+    from franktheunicorn.env_loader import load_project_dotenv
+
+    load_project_dotenv()
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "franktheunicorn.settings")
     django.setup()
 
