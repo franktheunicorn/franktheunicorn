@@ -89,6 +89,39 @@ class TestSynthesizeDefaultForge:
         assert [e.name for e in oc.forges] == ["github", "codeberg", "gl"]
 
 
+class TestForgeTokensSet:
+    def test_empty_token_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="empty token"):
+            OperatorConfig(
+                forges=[
+                    ForgeRegistryEntry(name="codeberg", type="forgejo", token=""),
+                ]
+            )
+
+    def test_error_lists_offending_entry_names(self) -> None:
+        with pytest.raises(ValidationError, match="codeberg"):
+            OperatorConfig(
+                forges=[
+                    ForgeRegistryEntry(name="github", type="github", token="g"),
+                    ForgeRegistryEntry(name="codeberg", type="forgejo", token=""),
+                ]
+            )
+
+    def test_mock_mode_bypasses_check(self) -> None:
+        oc = OperatorConfig(
+            mock_mode=True,
+            forges=[ForgeRegistryEntry(name="codeberg", type="forgejo", token="")],
+        )
+        assert oc.forges[0].token == ""
+
+    def test_no_forges_no_error(self) -> None:
+        OperatorConfig()  # empty registry is fine
+
+    def test_synthesized_default_with_real_token_passes(self) -> None:
+        oc = OperatorConfig(github_token="ghp_real")
+        assert oc.forges[0].token == "ghp_real"
+
+
 class TestForgeNamesUnique:
     def test_duplicate_names_rejected(self) -> None:
         with pytest.raises(ValidationError, match="duplicate forge name"):

@@ -538,6 +538,28 @@ class OperatorConfig(BaseModel):
             seen.add(entry.name)
         return self
 
+    @model_validator(mode="after")
+    def forge_tokens_set(self) -> OperatorConfig:
+        """Fail fast when a forge entry's token resolved to empty.
+
+        Tokens come from ``${VAR}`` substitution at YAML load time; an
+        empty value almost always means the referenced env var is not
+        set. Surface that here rather than waiting for a 401 from the
+        forge API. Bypassed when ``mock_mode`` is true.
+        """
+        if self.mock_mode:
+            return self
+        missing = [e.name for e in self.forges if not e.token]
+        if missing:
+            msg = (
+                f"forge entries with empty token (env var likely unset): "
+                f"{', '.join(missing)}. "
+                f"Set the referenced ${{...}} variables in .env, or enable "
+                f"mock_mode for offline use."
+            )
+            raise ValueError(msg)
+        return self
+
     @field_validator("poll_interval_seconds")
     @classmethod
     def poll_interval_must_be_positive(cls, v: int | None) -> int | None:
