@@ -11,13 +11,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pyproject.toml README.md ./
 RUN mkdir -p src/franktheunicorn && \
     touch src/franktheunicorn/__init__.py && \
-    pip install --no-cache-dir . && \
+    pip install --no-cache-dir ".[dev]" && \
     rm -rf src/franktheunicorn
 
 # Copy application source
 COPY src/ src/
 COPY manage.py .
-RUN pip install --no-cache-dir --no-deps .
+RUN pip install --no-cache-dir --no-deps ".[dev]"
 
 # Copy configs (can be overridden by volume mounts)
 COPY config/ config/
