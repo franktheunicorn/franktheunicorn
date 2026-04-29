@@ -61,8 +61,17 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def run_worker(argv: Sequence[str] | None = None) -> None:
-    """Main worker entry point."""
-    args = _parse_args(argv)
+    """Main worker entry point.
+
+    ``argv`` is parsed for ``--log-level`` / ``--debug``. Default ``None``
+    means "no CLI args" — argparse is *not* allowed to fall back to
+    ``sys.argv`` here, since this function is also called from the Django
+    ``run_worker`` management command (where ``sys.argv`` contains
+    ``manage.py``-specific tokens that this parser would reject). The
+    ``__main__`` entry point below is the only caller that forwards
+    ``sys.argv[1:]`` explicitly.
+    """
+    args = _parse_args(list(argv) if argv is not None else [])
 
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "franktheunicorn.settings")
     django.setup()
@@ -632,4 +641,4 @@ def _fetch_dependency_changelogs_for_cycle(
 
 
 if __name__ == "__main__":
-    run_worker()
+    run_worker(sys.argv[1:])
