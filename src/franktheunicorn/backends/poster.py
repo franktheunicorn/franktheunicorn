@@ -1,6 +1,8 @@
 """
-GitHub review posting — batch post approved findings as a single review.
+Forge review posting — batch post approved findings as a single review.
 
+Forge-agnostic: builds ``ReviewBody`` / ``ReviewComment`` dataclasses
+and lets each ``ForgeClient`` translate to its own wire format.
 Supports suggestion blocks, multi-line comments, attribution footer,
 and comment recall within a configurable window.
 """
@@ -11,6 +13,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from franktheunicorn.backends.base import ForgeClient, ReviewBody, ReviewComment
 from franktheunicorn.core.models import PullRequest, ReviewDraft
 
 logger = logging.getLogger(__name__)
@@ -39,26 +42,24 @@ def _format_comment_body(
     return body
 
 
-def _build_review_comment(draft: ReviewDraft, attribution: str) -> dict[str, Any]:
-    """Build a single review comment dict for the GitHub Reviews API."""
-    comment: dict[str, Any] = {
-        "path": draft.file_path,
-        "body": _format_comment_body(draft, attribution),
-    }
-
-    if draft.line_number:
-        comment["line"] = draft.line_number
-        if draft.line_end and draft.line_end > draft.line_number:
-            comment["start_line"] = draft.line_number
-            comment["line"] = draft.line_end
-
-    return comment
+def _build_review_comment(draft: ReviewDraft, attribution: str) -> ReviewComment:
+    """Build a normalized ReviewComment from a stored draft."""
+    return ReviewComment(
+        path=draft.file_path,
+        body=_format_comment_body(draft, attribution),
+        line=draft.line_number if draft.line_number else None,
+        line_end=draft.line_end if draft.line_end else None,
+    )
 
 
 class GitHubPoster:
-    """Posts review findings to GitHub as a single batch review."""
+    """Posts review findings to a forge as a single batch review.
 
-    def __init__(self, client: Any, attribution: str = DEFAULT_ATTRIBUTION) -> None:
+    The class name is kept for back-compat with existing imports; it now
+    works with any ``ForgeClient`` (GitHub, Forgejo, mock, ...).
+    """
+
+    def __init__(self, client: ForgeClient, attribution: str = DEFAULT_ATTRIBUTION) -> None:
         self._client = client
         self._attribution = attribution
 
@@ -84,18 +85,14 @@ class GitHubPoster:
             return None
 
         comments = [_build_review_comment(d, self._attribution) for d in drafts]
-
-        body = {
-            "event": event,
-            "comments": comments,
-        }
+        review = ReviewBody(event=event, comments=comments)
 
         try:
             result: dict[str, Any] = self._client.create_review(
                 pr.project.owner,
                 pr.project.repo,
                 pr.number,
-                body,
+                review,
             )
         except Exception:
             logger.exception("Failed to post review for PR #%d", pr.number)

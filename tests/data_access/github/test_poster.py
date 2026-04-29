@@ -79,9 +79,9 @@ class TestGitHubPoster:
         client.create_review.assert_called_once()
         call_args = client.create_review.call_args
         body = call_args[0][3]
-        assert len(body["comments"]) == 2
-        assert body["comments"][0]["path"] == "a.py"
-        assert body["comments"][1]["path"] == "b.py"
+        assert len(body.comments) == 2
+        assert body.comments[0].path == "a.py"
+        assert body.comments[1].path == "b.py"
 
     def test_post_review_updates_draft_status(self) -> None:
         poster, _ = self._make_poster()
@@ -122,9 +122,9 @@ class TestGitHubPoster:
         poster.post_review(pr, [draft])
 
         body = client.create_review.call_args[0][3]
-        comment = body["comments"][0]
-        assert comment["start_line"] == 10
-        assert comment["line"] == 15
+        comment = body.comments[0]
+        assert comment.line == 10
+        assert comment.line_end == 15
 
     def test_recall_within_window(self) -> None:
         poster, client = self._make_poster()

@@ -1,8 +1,10 @@
 """
-Mock GitHub client that returns fixture data from local JSON files.
+Mock forge client that returns fixture data from local JSON files.
 
-This allows the entire system to be tested and demoed without a GitHub token
-or network access. Fixture files live in configs/fixtures/.
+Allows the entire system to be tested and demoed without a forge token
+or network access. Fixture files live in ``configs/fixtures/`` and use
+GitHub-shaped JSON; Forgejo-specific shape differences are not modeled
+in mock mode (documented v1 limitation).
 """
 
 from __future__ import annotations
@@ -11,6 +13,8 @@ import json
 import logging
 from pathlib import Path
 from typing import Any
+
+from franktheunicorn.backends.base import ForgeClient, ReviewBody
 
 logger = logging.getLogger(__name__)
 
@@ -22,8 +26,8 @@ def _load_json_fixture(path: Path) -> list[dict[str, Any]]:
         return result
 
 
-class MockGitHubClient:
-    """Returns fixture data from local JSON files instead of calling GitHub."""
+class MockForgeClient(ForgeClient):
+    """Returns fixture data from local JSON files instead of calling a forge."""
 
     def __init__(self, fixtures_dir: str | Path) -> None:
         self._fixtures_dir = Path(fixtures_dir)
@@ -46,7 +50,6 @@ class MockGitHubClient:
             with fixture_path.open() as f:
                 result: dict[str, Any] = json.load(f)
                 return result
-        # Demo data — include mergeable status + base/head refs.
         return {
             "number": pr_number,
             "mergeable": True,
@@ -84,6 +87,18 @@ class MockGitHubClient:
             return fixture_path.read_text()
         return "--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n+# Updated\n"
 
+    def create_review(
+        self, owner: str, repo: str, pr_number: int, review: ReviewBody
+    ) -> dict[str, Any]:
+        """Return a canned review-create response."""
+        return {"id": 1, "state": "COMMENTED", "body": review.body}
+
+    def get_review_comments(
+        self, owner: str, repo: str, pr_number: int, review_id: int
+    ) -> list[dict[str, Any]]:
+        """Return an empty list — mock mode doesn't track posted comments."""
+        return []
+
     def get_issue_comments(
         self,
         owner: str,
@@ -97,12 +112,18 @@ class MockGitHubClient:
             return _load_json_fixture(fixture_path)
         return []
 
+    def delete_review_comment(self, owner: str, repo: str, comment_id: int) -> None:
+        """No-op in mock mode."""
+
     def get_authenticated_user(self) -> dict[str, Any]:
         """Return a mock authenticated user."""
         return {"login": "mock-user", "id": 0, "type": "User"}
 
     def close(self) -> None:
         pass
+
+
+MockGitHubClient = MockForgeClient
 
 
 def _builtin_demo_pulls(owner: str, repo: str) -> list[dict[str, Any]]:

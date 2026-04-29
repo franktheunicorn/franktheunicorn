@@ -1,9 +1,9 @@
 """
 GitHub API client using httpx.
 
-Supports both real GitHub polling via token and a mock/demo mode
-driven by local fixture JSON, so the app is usable and testable
-without external API access.
+Implements the ``ForgeClient`` ABC. ``create_review`` accepts the
+forge-agnostic ``ReviewBody`` dataclass and converts to GitHub's wire
+format internally, so callers can target any forge uniformly.
 """
 
 from __future__ import annotations
@@ -13,13 +13,14 @@ from typing import Any
 
 import httpx
 
+from franktheunicorn.backends.base import ForgeClient, ReviewBody, ReviewComment, infer_username
 from franktheunicorn.data_access.base import GITHUB_API_BASE
 
 logger = logging.getLogger(__name__)
 
 
-class GitHubClient:
-    """Thin wrapper around the GitHub REST API using httpx."""
+class GitHubClient(ForgeClient):
+    """ForgeClient implementation backed by the GitHub REST API."""
 
     def __init__(self, token: str = "", base_url: str = GITHUB_API_BASE) -> None:
         headers: dict[str, str] = {
@@ -68,11 +69,19 @@ class GitHubClient:
         return response.text
 
     def create_review(
-        self, owner: str, repo: str, pr_number: int, body: dict[str, Any]
+        self, owner: str, repo: str, pr_number: int, review: ReviewBody
     ) -> dict[str, Any]:
-        """Create a pull request review with comments."""
+        """Create a pull request review with comments.
+
+        Converts the forge-agnostic ``ReviewBody`` to GitHub's wire format.
+        """
+        payload: dict[str, Any] = {"event": review.event}
+        if review.body:
+            payload["body"] = review.body
+        payload["comments"] = [_to_github_comment(c) for c in review.comments]
+
         url = f"/repos/{owner}/{repo}/pulls/{pr_number}/reviews"
-        response = self._client.post(url, json=body)
+        response = self._client.post(url, json=payload)
         response.raise_for_status()
         result: dict[str, Any] = response.json()
         return result
@@ -125,27 +134,29 @@ class GitHubClient:
         self._client.close()
 
 
+def _to_github_comment(comment: ReviewComment) -> dict[str, Any]:
+    """Convert a normalized ReviewComment to GitHub's review-comment wire format."""
+    out: dict[str, Any] = {"path": comment.path, "body": comment.body}
+    if comment.line is not None:
+        out["line"] = comment.line
+        out["side"] = comment.side
+        if comment.line_end is not None and comment.line_end > comment.line:
+            out["start_line"] = comment.line
+            out["line"] = comment.line_end
+    return out
+
+
 def infer_github_username(token: str, base_url: str = GITHUB_API_BASE) -> str:
     """Infer the GitHub username from a personal access token.
 
-    Calls ``GET /user`` and returns the ``login`` field.
-    Returns an empty string if the request fails for any reason
-    (network error, invalid token, insufficient scopes, etc.).
+    Back-compat wrapper around ``infer_username``. New code should prefer
+    constructing the appropriate ``ForgeClient`` and calling
+    ``infer_username`` directly.
     """
     if not token:
         return ""
     client = GitHubClient(token=token, base_url=base_url)
     try:
-        user_data = client.get_authenticated_user()
-        login: str = user_data.get("login", "")
-        if login:
-            logger.info("Inferred GitHub username from token: %s", login)
-        return login
-    except Exception:
-        logger.warning(
-            "Could not infer GitHub username from token (network error or invalid token)",
-            exc_info=True,
-        )
-        return ""
+        return infer_username(client)
     finally:
         client.close()

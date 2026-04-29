@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from pytest_httpx import HTTPXMock
 
+from franktheunicorn.backends.base import ReviewBody, ReviewComment
 from franktheunicorn.backends.github import GitHubClient, infer_github_username
 
 
@@ -27,8 +28,37 @@ class TestGitHubClient:
 
     def test_create_review(self, httpx_mock: HTTPXMock, client: GitHubClient) -> None:
         httpx_mock.add_response(json={"id": 99})
-        result = client.create_review("org", "repo", 42, {"event": "COMMENT", "comments": []})
+        result = client.create_review("org", "repo", 42, ReviewBody(event="COMMENT"))
         assert result["id"] == 99
+
+    def test_create_review_translates_inline_comments(
+        self, httpx_mock: HTTPXMock, client: GitHubClient
+    ) -> None:
+        httpx_mock.add_response(json={"id": 1})
+        review = ReviewBody(
+            event="COMMENT",
+            body="overall",
+            comments=[
+                ReviewComment(path="a.py", body="single", line=5),
+                ReviewComment(path="b.py", body="range", line=10, line_end=15),
+            ],
+        )
+        client.create_review("org", "repo", 42, review)
+        request = httpx_mock.get_request()
+        assert request is not None
+        import json as _json
+
+        sent = _json.loads(request.content)
+        assert sent["event"] == "COMMENT"
+        assert sent["body"] == "overall"
+        assert sent["comments"][0] == {"path": "a.py", "body": "single", "line": 5, "side": "RIGHT"}
+        assert sent["comments"][1] == {
+            "path": "b.py",
+            "body": "range",
+            "line": 15,
+            "side": "RIGHT",
+            "start_line": 10,
+        }
 
     def test_get_review_comments(self, httpx_mock: HTTPXMock, client: GitHubClient) -> None:
         httpx_mock.add_response(json=[{"id": 1, "body": "nit"}])
