@@ -78,6 +78,18 @@ GITHUB_TOKEN_VARS: dict[str, tuple[str, str]] = {
     "GH_TOKEN": ("github", "token"),
 }
 
+# Tokens for non-GitHub forges. Setup wizard surfaces these when offering
+# to add the corresponding forge entry to operator.yaml.
+FORGE_TOKEN_VARS: dict[str, tuple[str, str]] = {
+    "FRANK_FORGEJO_TOKEN": ("forgejo", "token"),
+    "FORGEJO_TOKEN": ("forgejo", "token"),
+    "FRANK_GITEA_TOKEN": ("gitea", "token"),
+    "GITEA_TOKEN": ("gitea", "token"),
+    "FRANK_GITLAB_TOKEN": ("gitlab", "token"),
+    "GITLAB_TOKEN": ("gitlab", "token"),
+    "GITLAB_PRIVATE_TOKEN": ("gitlab", "token"),
+}
+
 # ---------------------------------------------------------------------------
 # Tier 2: known third-party LLM providers
 # ---------------------------------------------------------------------------
@@ -198,6 +210,7 @@ def detect_llm_credentials(
     environ: dict[str, str] | None = None,
     *,
     include_github: bool = False,
+    include_forges: bool = False,
 ) -> list[DetectedCredential]:
     """Scan environment variables for LLM API credentials and endpoints.
 
@@ -207,6 +220,8 @@ def detect_llm_credentials(
         Mapping to scan.  Defaults to ``os.environ``.
     include_github:
         If ``True``, also detect ``GITHUB_TOKEN`` / ``GH_TOKEN``.
+    include_forges:
+        If ``True``, also detect tokens for Gitea/Forgejo/GitLab forges.
 
     Returns a list sorted by confidence (high → low), then alphabetically.
     """
@@ -232,6 +247,24 @@ def detect_llm_credentials(
 
     if include_github:
         for var, (provider, ctype) in GITHUB_TOKEN_VARS.items():
+            if var in seen:
+                continue
+            val = env.get(var, "")
+            if val:
+                results.append(
+                    DetectedCredential(
+                        env_var=var,
+                        value_preview=mask_value(val),
+                        provider=provider,
+                        confidence="high",
+                        credential_type=ctype,
+                        paired_with="",
+                    )
+                )
+                seen.add(var)
+
+    if include_forges:
+        for var, (provider, ctype) in FORGE_TOKEN_VARS.items():
             if var in seen:
                 continue
             val = env.get(var, "")

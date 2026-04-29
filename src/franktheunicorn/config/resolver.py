@@ -16,7 +16,22 @@ import os
 from pathlib import Path
 
 from franktheunicorn.config.loader import load_operator_config
-from franktheunicorn.config.models import OperatorConfig
+from franktheunicorn.config.models import ForgeRegistryEntry, OperatorConfig
+
+
+def get_forge_entry(oc: OperatorConfig, name: str) -> ForgeRegistryEntry:
+    """Look up a forge by name in the operator's registry.
+
+    Raises ``KeyError`` if the name is not registered, listing the
+    available names — projects misconfigured against a missing forge
+    should fail loudly at config-resolution time, not silently.
+    """
+    for entry in oc.forges:
+        if entry.name == name:
+            return entry
+    available = ", ".join(e.name for e in oc.forges) or "(empty registry)"
+    msg = f"forge {name!r} not found in operator registry; available: {available}"
+    raise KeyError(msg)
 
 
 def resolve_operator_config_path(base_dir: Path) -> str:
