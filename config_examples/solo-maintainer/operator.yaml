@@ -8,6 +8,31 @@ digest_enabled: false
 llm_backends:
   - provider: stub
 
+# Forge registry. Each entry is a named forge instance the operator wants
+# to talk to. Project YAMLs reference an entry by ``name`` via ``forge:``.
+# If you only use github.com, you can leave this empty and rely on the
+# legacy ``github_token``/``github_username`` fields above — a default
+# entry named "github" is synthesized automatically.
+#
+# forges:
+#   - name: github
+#     type: github
+#     base_url: https://api.github.com
+#     token: ${FRANK_GITHUB_TOKEN}
+#     username: alice
+#   - name: codeberg
+#     type: forgejo
+#     base_url: https://codeberg.org
+#     token: ${FRANK_CODEBERG_TOKEN}
+#   - name: work-gitea
+#     type: gitea
+#     base_url: https://git.work.example
+#     token: ${FRANK_WORK_GITEA_TOKEN}
+#   - name: gitlab
+#     type: gitlab
+#     base_url: https://gitlab.com
+#     token: ${FRANK_GITLAB_TOKEN}
+
 # workspaces:
 #   all:
 #     projects: "*"

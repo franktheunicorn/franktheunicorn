@@ -176,9 +176,15 @@ class Command(BaseCommand):
         if llm_backends:
             config["llm_backends"] = llm_backends
 
+        # --- Additional forges (Forgejo / Gitea / GitLab) ---
+        forges = self._configure_additional_forges()
+        if forges:
+            config["forges"] = forges
+
         # --- Initial projects ---
         output_path_obj = self._output_path
-        self._configure_initial_projects(output_path_obj)
+        forge_names: list[str] = ["github"] + [str(f["name"]) for f in forges]
+        self._configure_initial_projects(output_path_obj, forge_names=forge_names)
 
         # --- CodeRabbit ---
         cr_config = self._configure_coderabbit()
@@ -694,11 +700,76 @@ class Command(BaseCommand):
 
         return config
 
-    def _configure_initial_projects(self, operator_path: Path) -> None:
-        """Prompt for initial GitHub repositories to monitor."""
+    def _configure_additional_forges(self) -> list[dict[str, object]]:
+        """Optionally collect non-GitHub forge entries (Forgejo/Gitea/GitLab).
+
+        Returns a list of dicts suitable for operator.yaml ``forges:``.
+        Each entry references a token via ``${VAR}`` so the secret stays
+        in ``.env``.
+        """
+        self.stdout.write("\n--- Additional Forges (optional) ---\n")
+        self.stdout.write(
+            "  Add Forgejo (e.g. Codeberg), Gitea, or GitLab instances\n"
+            "  alongside GitHub. Skip with ENTER.\n\n"
+        )
+        forges: list[dict[str, object]] = []
+        defaults = {
+            "forgejo": ("codeberg", "https://codeberg.org", "FRANK_CODEBERG_TOKEN"),
+            "gitea": ("work-gitea", "", "FRANK_GITEA_TOKEN"),
+            "gitlab": ("gitlab", "https://gitlab.com", "FRANK_GITLAB_TOKEN"),
+        }
+        while True:
+            forge_type = (
+                self._ask(
+                    "  Forge type (forgejo/gitea/gitlab/skip): ",
+                    default="skip",
+                )
+                .strip()
+                .lower()
+            )
+            if forge_type in ("", "skip", "n", "no"):
+                break
+            if forge_type not in defaults:
+                self.stdout.write(
+                    self.style.WARNING(
+                        f"  Unknown type {forge_type!r}; expected forgejo/gitea/gitlab\n"
+                    )
+                )
+                continue
+            default_name, default_url, default_env = defaults[forge_type]
+            name = self._ask("  Name for this forge: ", default=default_name).strip()
+            base_url = self._ask("  Base URL: ", default=default_url).strip()
+            if forge_type == "gitea" and not base_url:
+                self.stdout.write(self.style.ERROR("  Gitea requires a base URL; skipping entry\n"))
+                continue
+            token_env = self._ask(
+                "  Token env var (set the value in .env): ", default=default_env
+            ).strip()
+            entry: dict[str, object] = {
+                "name": name,
+                "type": forge_type,
+                "token": f"${{{token_env}}}",
+            }
+            if base_url:
+                entry["base_url"] = base_url
+            forges.append(entry)
+            self.stdout.write(
+                self.style.SUCCESS(
+                    f"  Added forge '{name}' ({forge_type}). "
+                    f"Remember to set {token_env} in your .env file.\n"
+                )
+            )
+        return forges
+
+    def _configure_initial_projects(
+        self, operator_path: Path, forge_names: list[str] | None = None
+    ) -> None:
+        """Prompt for initial repositories to monitor."""
+        if forge_names is None:
+            forge_names = ["github"]
         self.stdout.write("\n--- Projects to Monitor ---\n")
         self.stdout.write(
-            "  Add GitHub repositories you want to review.\n"
+            "  Add repositories you want to review.\n"
             "  You can add more later with: python manage.py add_project --repo owner/repo\n\n"
         )
         repos_raw = self._ask(
@@ -710,6 +781,9 @@ class Command(BaseCommand):
 
         projects_dir = operator_path.parent / "projects"
         projects_dir.mkdir(parents=True, exist_ok=True)
+
+        ask_forge = len(forge_names) > 1
+        forge_prompt_choices = "/".join(forge_names)
 
         for repo_raw in repos_raw.split(","):
             repo = repo_raw.strip()
@@ -723,6 +797,18 @@ class Command(BaseCommand):
                 continue
             owner, repo_name = parts
 
+            forge = "github"
+            if ask_forge:
+                forge = self._ask(
+                    f"  Forge for {repo} ({forge_prompt_choices}): ",
+                    default="github",
+                ).strip()
+                if forge not in forge_names:
+                    self.stdout.write(
+                        self.style.WARNING(f"  Unknown forge {forge!r}; using 'github'\n")
+                    )
+                    forge = "github"
+
             governance = self._ask(
                 f"  Governance for {repo} (standard/asf/personal): ",
                 default="standard",
@@ -732,9 +818,11 @@ class Command(BaseCommand):
 
             filename = f"{owner}-{repo_name}.yaml"
             filepath = projects_dir / filename
+            forge_line = f'forge: "{forge}"\n' if forge != "github" else ""
             yaml_content = (
                 f'owner: "{owner}"\n'
                 f'repo: "{repo_name}"\n'
+                f"{forge_line}"
                 f'review_context: "general open-source"\n'
                 f'governance: "{governance}"\n'
                 f'tone: "direct"\n'

@@ -61,7 +61,7 @@ For project configuration and workspaces, see the **[Install Guide](docs/install
 
 ## What It Does
 
-- **Triages PRs** across multiple repos with configurable interest scoring (path overlap, git blame, collaborator detection, custom LLM-generated scoring functions)
+- **Triages PRs** across multiple repos and forges (GitHub, Gitea, Forgejo / Codeberg, GitLab) with configurable interest scoring (path overlap, git blame, collaborator detection, custom LLM-generated scoring functions)
 - **Drafts review comments** using multi-backend LLM review (Sonnet for substance, Haiku for nits, Opus for architecture)
 - **Learns from your corrections** via an anti-pattern list that improves with every rejection and edit
 - **Runs differential tests** to verify new tests actually fail without the PR's changes — see [docs/test-runner.md](docs/test-runner.md) to enable per project
@@ -98,7 +98,7 @@ For project configuration and workspaces, see the **[Install Guide](docs/install
 src/franktheunicorn/
 ├── config/       # Pydantic models + YAML loader
 ├── core/         # Django models (Project, PR, ReviewDraft, AntiPattern, OperatorAction)
-├── github/       # httpx client + mock client with fixture data
+├── backends/     # Forge-agnostic ABC + GitHub / Gitea-Forgejo / GitLab clients
 ├── scoring/      # Interest scoring (author, review request, paths, contributors, bots)
 ├── review/       # Stub LLM drafter + anti-pattern detection
 ├── digest/       # Daily digest stub

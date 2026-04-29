@@ -10,6 +10,22 @@ llm_backends:
     model: "claude-sonnet-4-20250514"
     api_key_env: "ANTHROPIC_API_KEY"
 
+# Forge registry — uncomment to ingest from non-GitHub forges. Each
+# project YAML picks one by ``name``. Leaving this empty falls back to
+# the legacy single-GitHub setup driven by ``github_token``.
+#
+# forges:
+#   - name: github
+#     type: github
+#     token: ${FRANK_GITHUB_TOKEN}
+#   - name: codeberg
+#     type: forgejo
+#     base_url: https://codeberg.org
+#     token: ${FRANK_CODEBERG_TOKEN}
+#   - name: gitlab
+#     type: gitlab
+#     token: ${FRANK_GITLAB_TOKEN}
+
 # workspaces:
 #   work:
 #     projects: []
