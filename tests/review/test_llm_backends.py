@@ -327,6 +327,12 @@ class TestOpenAIBackend:
         assert len(findings) == 1
         # The degradation is cached for subsequent calls on this backend instance.
         assert backend._supports_json_object is False
+        # Without response_format enforcement, the system prompt gets a
+        # stronger JSON-only reminder appended.
+        retry_system = second_kwargs["messages"][0]["content"]
+        assert "ONLY the JSON" in retry_system
+        first_system = first_kwargs["messages"][0]["content"]
+        assert "ONLY the JSON" not in first_system
 
     @patch.dict("os.environ", {"TEST_OPENAI_KEY": "sk-test"})
     def test_falls_back_for_both_response_format_and_token_param(self) -> None:

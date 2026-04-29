@@ -9,6 +9,13 @@ from franktheunicorn.review.backends.base import BaseLLMBackend
 
 logger = logging.getLogger(__name__)
 
+# Reinforces the JSON-only contract when response_format enforcement isn't
+# available — small/older models tend to add prose preamble otherwise.
+_JSON_ONLY_REMINDER = (
+    "\n\nIMPORTANT: Respond with ONLY the JSON object described above. "
+    "No prose, no explanation, no markdown fences — just the raw JSON."
+)
+
 
 class OpenAIBackend(BaseLLMBackend):
     """Review backend using the OpenAI Python SDK."""
@@ -37,11 +44,14 @@ class OpenAIBackend(BaseLLMBackend):
         client = openai.OpenAI(**kwargs)  # type: ignore[arg-type]
 
         def _create() -> Any:
+            effective_system = (
+                system_prompt if self._supports_json_object else system_prompt + _JSON_ONLY_REMINDER
+            )
             request_kwargs: dict[str, Any] = {
                 "model": self._model,
                 "temperature": self._config.temperature,
                 "messages": [
-                    {"role": "system", "content": system_prompt},
+                    {"role": "system", "content": effective_system},
                     {"role": "user", "content": user_message},
                 ],
                 self._token_param: self._config.max_tokens,
