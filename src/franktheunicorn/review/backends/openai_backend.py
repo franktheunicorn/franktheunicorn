@@ -65,7 +65,7 @@ class OpenAIBackend(BaseLLMBackend):
                     or "json_object" in msg
                     or "json object" in msg
                 ):
-                    logger.warning(
+                    logger.debug(
                         "Server rejected response_format=json_object; "
                         "falling back to plain JSON prompting for %s.",
                         self._model,
@@ -79,7 +79,7 @@ class OpenAIBackend(BaseLLMBackend):
                     else "max_completion_tokens"
                 )
                 if self._token_param in msg or alt in msg:
-                    logger.warning(
+                    logger.debug(
                         "Server rejected %s; falling back to %s for %s.",
                         self._token_param,
                         alt,
