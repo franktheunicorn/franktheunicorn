@@ -12,6 +12,11 @@ class OpenAIBackend(BaseLLMBackend):
     _default_key_env = "OPENAI_API_KEY"
     _default_model = "gpt-4o"
 
+    # Modern OpenAI-compatible servers require `max_completion_tokens`; some
+    # legacy vLLM builds only accept `max_tokens`. Start modern, fall back
+    # on the first BadRequestError, then cache the survivor.
+    _token_param: str = "max_completion_tokens"
+
     def _call_api(self, system_prompt: str, user_message: str, api_key: str) -> str:
         import openai
 
@@ -20,16 +25,36 @@ class OpenAIBackend(BaseLLMBackend):
             kwargs["base_url"] = self._config.base_url
 
         client = openai.OpenAI(**kwargs)  # type: ignore[arg-type]
-        response = client.chat.completions.create(
-            model=self._model,
-            max_tokens=self._config.max_tokens,
-            temperature=self._config.temperature,
-            response_format={"type": "json_object"},
-            messages=[
+        base_params: dict[str, object] = {
+            "model": self._model,
+            "temperature": self._config.temperature,
+            "response_format": {"type": "json_object"},
+            "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_message},
             ],
-        )
+        }
+
+        try:
+            response = client.chat.completions.create(
+                **base_params,  # type: ignore[arg-type]
+                **{self._token_param: self._config.max_tokens},
+            )
+        except openai.BadRequestError as exc:
+            alt = (
+                "max_tokens"
+                if self._token_param == "max_completion_tokens"
+                else "max_completion_tokens"
+            )
+            if self._token_param in str(exc) or alt in str(exc):
+                response = client.chat.completions.create(
+                    **base_params,  # type: ignore[arg-type]
+                    **{alt: self._config.max_tokens},
+                )
+                self._token_param = alt
+            else:
+                raise
+
         if hasattr(response, "usage") and response.usage:
             self._last_tokens_in = getattr(response.usage, "prompt_tokens", 0)
             self._last_tokens_out = getattr(response.usage, "completion_tokens", 0)
