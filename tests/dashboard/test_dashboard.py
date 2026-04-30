@@ -498,6 +498,128 @@ class TestRejectionProbabilityDisplay:
         assert draft.status == "accepted"
         assert draft.is_auto_suppressed is False
 
+
+@pytest.mark.django_db
+class TestProjectFilters:
+    """Tests for project-type and project filter GET params on the index view."""
+
+    def _make_projects_and_prs(self) -> tuple:
+        """Create two projects of different types, each with one open PR."""
+        from tests.factories import ProjectFactory, PullRequestFactory
+
+        asf_project = ProjectFactory(owner="apache", repo="spark", project_type="asf")
+        personal_project = ProjectFactory(owner="holdenk", repo="my-app", project_type="personal")
+        asf_pr = PullRequestFactory(
+            project=asf_project, title="ASF PR", state="open", queue="review"
+        )
+        personal_pr = PullRequestFactory(
+            project=personal_project, title="Personal PR", state="open", queue="review"
+        )
+        return asf_project, personal_project, asf_pr, personal_pr
+
+    def test_filter_by_project_type_asf(self, client: Client) -> None:
+        self._make_projects_and_prs()
+        response = client.get("/?project_type=asf")
+        assert response.status_code == 200
+        assert b"ASF PR" in response.content
+        assert b"Personal PR" not in response.content
+
+    def test_filter_by_project_type_personal(self, client: Client) -> None:
+        self._make_projects_and_prs()
+        response = client.get("/?project_type=personal")
+        assert response.status_code == 200
+        assert b"Personal PR" in response.content
+        assert b"ASF PR" not in response.content
+
+    def test_filter_by_specific_project(self, client: Client) -> None:
+        self._make_projects_and_prs()
+        response = client.get("/?project=apache/spark")
+        assert response.status_code == 200
+        assert b"ASF PR" in response.content
+        assert b"Personal PR" not in response.content
+
+    def test_filter_by_project_and_type_combined(self, client: Client) -> None:
+        self._make_projects_and_prs()
+        response = client.get("/?project_type=asf&project=apache/spark")
+        assert response.status_code == 200
+        assert b"ASF PR" in response.content
+        assert b"Personal PR" not in response.content
+
+    def test_invalid_project_type_ignored_returns_all(self, client: Client) -> None:
+        self._make_projects_and_prs()
+        response = client.get("/?project_type=notatype")
+        assert response.status_code == 200
+        assert b"ASF PR" in response.content
+        assert b"Personal PR" in response.content
+
+    def test_invalid_project_slug_ignored_returns_all(self, client: Client) -> None:
+        self._make_projects_and_prs()
+        response = client.get("/?project=noslash")
+        assert response.status_code == 200
+        assert b"ASF PR" in response.content
+        assert b"Personal PR" in response.content
+
+    def test_available_project_types_only_has_active_types(self, client: Client) -> None:
+        from tests.factories import ProjectFactory
+
+        ProjectFactory(owner="apache", repo="kafka", project_type="asf", enabled=True)
+        # Disabled project of type 'org' should not appear in the selector.
+        ProjectFactory(owner="some-org", repo="tool", project_type="org", enabled=False)
+        response = client.get("/")
+        assert response.status_code == 200
+        context = response.context
+        available_types = [pt["key"] for pt in context["available_project_types"]]
+        assert "asf" in available_types
+        assert "org" not in available_types
+
+    def test_available_projects_narrowed_when_type_set(self, client: Client) -> None:
+        self._make_projects_and_prs()
+        response = client.get("/?project_type=asf")
+        assert response.status_code == 200
+        context = response.context
+        project_owners = [p["owner"] for p in context["available_projects"]]
+        assert "apache" in project_owners
+        assert "holdenk" not in project_owners
+
+    def test_queue_counts_respect_project_type_filter(self, client: Client) -> None:
+        _, personal_project, _, _ = self._make_projects_and_prs()
+        # Add an extra PR for the personal project in the same queue.
+        PullRequestFactory(
+            project=personal_project, title="Extra Personal PR", state="open", queue="review"
+        )
+        response = client.get("/?project_type=asf")
+        assert response.status_code == 200
+        context = response.context
+        # Only the ASF PR should count towards the review queue badge.
+        assert context["queue_counts"]["review"] == 1
+
+    def test_queue_counts_respect_project_filter(self, client: Client) -> None:
+        self._make_projects_and_prs()
+        response = client.get("/?project=holdenk/my-app")
+        assert response.status_code == 200
+        context = response.context
+        assert context["queue_counts"]["review"] == 1
+
+    def test_filter_bar_rendered_in_html(self, client: Client) -> None:
+        from tests.factories import ProjectFactory
+
+        ProjectFactory(owner="apache", repo="spark", project_type="asf", enabled=True)
+        response = client.get("/")
+        assert response.status_code == 200
+        assert b"filter-bar" in response.content
+        assert b"project_type" in response.content
+        assert b"filter-project" in response.content
+
+    def test_tab_links_preserve_project_type_filter(self, client: Client) -> None:
+        response = client.get("/?project_type=asf")
+        assert response.status_code == 200
+        assert b"project_type=asf" in response.content
+
+    def test_tab_links_preserve_project_filter(self, client: Client) -> None:
+        response = client.get("/?project=apache/spark")
+        assert response.status_code == 200
+        assert b"project=apache/spark" in response.content
+
     def test_no_suppressed_section_when_none(self, client: Client, db_pr: PullRequest) -> None:
         ReviewDraftFactory(
             pull_request=db_pr,
