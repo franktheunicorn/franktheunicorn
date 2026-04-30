@@ -223,7 +223,7 @@ class ReviewDraft(models.Model):
         pr_files_url = f"{self.pull_request.url}/files"
         if not self.file_path:
             return pr_files_url
-        file_hash = hashlib.md5(self.file_path.encode()).hexdigest()
+        file_hash = hashlib.sha256(self.file_path.encode()).hexdigest()
         url = f"{pr_files_url}#diff-{file_hash}"
         if self.line_number:
             url += f"R{self.line_number}"
