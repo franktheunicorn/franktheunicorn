@@ -16,17 +16,18 @@ from franktheunicorn.review.call_extraction.types import CallSite, Language
 __all__ = ["CallSite", "Language", "extract_calls"]
 
 
-def extract_calls(diff: str, *, project_package: str = "") -> list[CallSite]:
+def extract_calls(diff: str, *, project_packages: list[str] | None = None) -> list[CallSite]:
     """Extract external function call sites from a unified diff.
 
     Dispatches to per-language extractors based on file extensions seen
-    in the diff. Skips stdlib calls and (when ``project_package`` is set)
-    first-party calls under that package.
+    in the diff. Skips stdlib calls and (when ``project_packages`` has
+    entries) first-party calls under any of those package prefixes.
     """
     from franktheunicorn.review.call_extraction.java import extract_java_calls
     from franktheunicorn.review.call_extraction.python import extract_python_calls
 
+    roots = list(project_packages or [])
     sites: list[CallSite] = []
-    sites.extend(extract_python_calls(diff, project_package=project_package))
-    sites.extend(extract_java_calls(diff, project_package=project_package))
+    sites.extend(extract_python_calls(diff, project_packages=roots))
+    sites.extend(extract_java_calls(diff, project_packages=roots))
     return sites

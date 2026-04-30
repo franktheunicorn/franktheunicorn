@@ -70,7 +70,7 @@ diff --git a/foo.py b/foo.py
 +
 +helper(42)
 """
-        sites = extract_calls(diff, project_package="myproj")
+        sites = extract_calls(diff, project_packages=["myproj"])
         assert sites == []
 
     def test_ignores_non_python_files(self) -> None:

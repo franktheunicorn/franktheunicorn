@@ -39,7 +39,7 @@ class _JavaImport:
     simple: str
 
 
-def extract_java_calls(diff: str, *, project_package: str = "") -> list[CallSite]:
+def extract_java_calls(diff: str, *, project_packages: list[str] | None = None) -> list[CallSite]:
     """Return external Java call sites observed in the diff."""
     try:
         patch = PatchSet(diff)
@@ -47,17 +47,20 @@ def extract_java_calls(diff: str, *, project_package: str = "") -> list[CallSite
         logger.debug("Failed to parse diff as PatchSet", exc_info=True)
         return []
 
+    roots = tuple(project_packages or [])
     sites: list[CallSite] = []
     for pf in patch:
         path = getattr(pf, "path", "") or getattr(pf, "target_file", "")
         if not path.endswith(".java"):
             continue
         for hunk in pf:
-            sites.extend(_extract_from_hunk(path, hunk, project_package))
+            sites.extend(_extract_from_hunk(path, hunk, roots))
     return _dedupe(sites)
 
 
-def _extract_from_hunk(path: str, hunk: object, project_package: str) -> list[CallSite]:
+def _extract_from_hunk(
+    path: str, hunk: object, project_packages: tuple[str, ...]
+) -> list[CallSite]:
     added: list[tuple[int, str]] = []
     for line in hunk:  # type: ignore[attr-defined]
         if line.is_added:
@@ -76,7 +79,7 @@ def _extract_from_hunk(path: str, hunk: object, project_package: str) -> list[Ca
             imp = imports.get(simple)
             if imp is None:
                 continue
-            if _should_skip(imp.fqcn, project_package):
+            if _should_skip(imp.fqcn, project_packages):
                 continue
             top_pkg = _top_package(imp.fqcn)
             qualified = f"{imp.fqcn}.{method}"
@@ -116,12 +119,12 @@ def _top_package(fqcn: str) -> str:
     return ".".join(parts[:3])
 
 
-def _should_skip(fqcn: str, project_package: str) -> bool:
+def _should_skip(fqcn: str, project_packages: tuple[str, ...]) -> bool:
     if not fqcn:
         return True
     if fqcn.startswith(_STDLIB_PREFIXES):
         return True
-    return bool(project_package and fqcn.startswith(project_package + "."))
+    return any(fqcn == root or fqcn.startswith(root + ".") for root in project_packages)
 
 
 def _dedupe(sites: list[CallSite]) -> list[CallSite]:

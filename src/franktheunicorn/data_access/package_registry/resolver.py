@@ -94,7 +94,6 @@ def resolve_call_docs(
             cached = cache.get(
                 registry,
                 package=site.package,
-                version="",  # version unknown until fetched; cache by ""
                 qualified_name=site.qualified_name,
             )
             if cached is not None:

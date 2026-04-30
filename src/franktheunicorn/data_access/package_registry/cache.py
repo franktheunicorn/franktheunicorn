@@ -1,13 +1,14 @@
 """SQLite-backed TTL cache for fetched package docs.
 
-Keyed on ``(registry, package, version, qualified_name)``. Reuses the
-existing per-process SQLite file (defaults to ``data/frank.sqlite3``)
-but creates its own table so it doesn't collide with Django models.
+Keyed on ``(registry, package, qualified_name)``. The version is part
+of the stored payload, not the cache key — at lookup time we don't
+know which version the registry will return, and we want one entry per
+function regardless. The TTL bounds staleness when upstream upgrades.
 
-The cache is intentionally opaque — call ``DocsCache.get()`` to fetch a
-recent entry and ``DocsCache.put()`` after each network round-trip.
-Stale entries are filtered on read but only removed lazily on write to
-keep the read path lock-free.
+Reuses the existing per-process SQLite file (defaults to
+``data/frank.sqlite3``) but creates its own table so it doesn't collide
+with Django models. Stale entries are filtered on read and removed
+lazily on write to keep the read path lock-free.
 """
 
 from __future__ import annotations
@@ -28,11 +29,10 @@ _SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS {_TABLE} (
     registry TEXT NOT NULL,
     package TEXT NOT NULL,
-    version TEXT NOT NULL,
     qualified_name TEXT NOT NULL,
     payload TEXT NOT NULL,
     fetched_at REAL NOT NULL,
-    PRIMARY KEY (registry, package, version, qualified_name)
+    PRIMARY KEY (registry, package, qualified_name)
 )
 """
 
@@ -59,7 +59,6 @@ class DocsCache:
         self,
         registry: Registry,
         package: str,
-        version: str,
         qualified_name: str,
     ) -> PackageDocs | None:
         """Return a cached entry if present and not expired, else ``None``."""
@@ -68,8 +67,8 @@ class DocsCache:
         with closing(self._connect()) as conn:
             row = conn.execute(
                 f"SELECT payload, fetched_at FROM {_TABLE} "
-                "WHERE registry = ? AND package = ? AND version = ? AND qualified_name = ?",
-                (registry.value, package, version, qualified_name),
+                "WHERE registry = ? AND package = ? AND qualified_name = ?",
+                (registry.value, package, qualified_name),
             ).fetchone()
         if row is None:
             return None
@@ -86,12 +85,11 @@ class DocsCache:
         with closing(self._connect()) as conn, conn:
             conn.execute(
                 f"INSERT OR REPLACE INTO {_TABLE} "
-                "(registry, package, version, qualified_name, payload, fetched_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "(registry, package, qualified_name, payload, fetched_at) "
+                "VALUES (?, ?, ?, ?, ?)",
                 (
                     docs.registry.value,
                     docs.package,
-                    docs.version,
                     docs.qualified_name,
                     _serialize(docs),
                     time.time(),

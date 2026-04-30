@@ -16,6 +16,7 @@ paths are best-effort; the consumer treats results as hints, not facts.
 from __future__ import annotations
 
 import ast
+import builtins
 import logging
 import re
 import sys
@@ -32,20 +33,13 @@ _STDLIB: frozenset[str] = frozenset(sys.stdlib_module_names) | frozenset(
     {"__future__", "typing_extensions"}
 )
 
-
-def _builtin_names() -> frozenset[str]:
-    """Best-effort enumeration of Python builtin names."""
-    import builtins
-
-    return frozenset(dir(builtins))
-
-
 # Builtins we never want to surface as "external API misuse" candidates.
-_BUILTINS: frozenset[str] = _builtin_names()
+_BUILTINS: frozenset[str] = frozenset(dir(builtins))
 
-_DOTTED_CALL_RE = re.compile(
-    r"\b([a-zA-Z_][\w\.]{2,})\s*\("  # module.func( — at least one dot
-)
+# Identifier-or-dotted-path followed by ``(``. The bindings filter rejects
+# anything not seen in an import statement, so untyped local calls don't
+# slip through.
+_DOTTED_CALL_RE = re.compile(r"\b([a-zA-Z_][\w\.]{2,})\s*\(")
 
 
 @dataclass(frozen=True)
@@ -56,11 +50,11 @@ class _ImportBinding:
     qualified: str
 
 
-def extract_python_calls(diff: str, *, project_package: str = "") -> list[CallSite]:
+def extract_python_calls(diff: str, *, project_packages: list[str] | None = None) -> list[CallSite]:
     """Return external Python call sites observed in the diff.
 
-    ``project_package`` is the operator's first-party top-level package name
-    (e.g. ``franktheunicorn``); calls under it are dropped.
+    ``project_packages`` is the list of first-party top-level package names
+    (e.g. ``["franktheunicorn"]``); calls under any of them are dropped.
     """
     try:
         patch = PatchSet(diff)
@@ -68,17 +62,18 @@ def extract_python_calls(diff: str, *, project_package: str = "") -> list[CallSi
         logger.debug("Failed to parse diff as PatchSet", exc_info=True)
         return []
 
+    roots = frozenset(project_packages or [])
     sites: list[CallSite] = []
     for pf in patch:
         path = getattr(pf, "path", "") or getattr(pf, "target_file", "")
         if not path.endswith(".py"):
             continue
         for hunk in pf:
-            sites.extend(_extract_from_hunk(path, hunk, project_package))
+            sites.extend(_extract_from_hunk(path, hunk, roots))
     return _dedupe(sites)
 
 
-def _extract_from_hunk(path: str, hunk: object, project_package: str) -> list[CallSite]:
+def _extract_from_hunk(path: str, hunk: object, project_packages: frozenset[str]) -> list[CallSite]:
     added: list[tuple[int, str]] = []
     for line in hunk:  # type: ignore[attr-defined]
         if line.is_added:
@@ -92,7 +87,7 @@ def _extract_from_hunk(path: str, hunk: object, project_package: str) -> list[Ca
 
     for line_no, source in added:
         for pkg, qualified, snippet in _calls_in_line(source, bindings):
-            if _should_skip(pkg, project_package):
+            if _should_skip(pkg, project_packages):
                 continue
             sites.append(
                 CallSite(
@@ -199,14 +194,14 @@ def _resolve_call(func: ast.expr, bindings: dict[str, _ImportBinding]) -> tuple[
     return binding.package, qualified
 
 
-def _should_skip(package: str, project_package: str) -> bool:
+def _should_skip(package: str, project_packages: frozenset[str]) -> bool:
     if not package:
         return True
     if package in _STDLIB:
         return True
     if package in _BUILTINS:
         return True
-    return bool(project_package and package == project_package)
+    return package in project_packages
 
 
 def _dedupe(sites: list[CallSite]) -> list[CallSite]:

@@ -80,20 +80,29 @@ _DOCS_BLOCK_HEADER = "\n[Upstream docs for third-party calls in this PR]\n"
 
 
 class APIMisuseCheck(BaseCheck):
-    """Detects misuse of third-party APIs by consulting upstream docs."""
+    """Detects misuse of third-party APIs by consulting upstream docs.
+
+    ``package_roots`` is the list of first-party Python / Java package
+    prefixes (sourced from ``ProjectConfig.context.package_roots``).
+    Calls under any of these prefixes are skipped — they are not external
+    APIs and don't have upstream docs to consult.
+    """
 
     name = "api-misuse"
 
     def __init__(
         self,
         config: APIMisuseConfig | None = None,
+        *,
+        package_roots: list[str] | None = None,
     ) -> None:
         from franktheunicorn.config.models import APIMisuseConfig as _Cfg
 
         self._config = config if config is not None else _Cfg()
+        self._package_roots = list(package_roots or [])
 
     def build_prompt(self, diff: str, pr_context: PRContext) -> tuple[str, str]:
-        sites = extract_calls(diff, project_package=self._config.first_party_package)
+        sites = extract_calls(diff, project_packages=self._package_roots)
         docs = (
             resolve_call_docs(sites, self._config, diff=diff)
             if (sites and self._config.enabled)

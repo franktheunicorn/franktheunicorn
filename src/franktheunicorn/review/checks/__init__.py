@@ -134,7 +134,10 @@ def _instantiate_check(
     if check_name == "api-misuse":
         from franktheunicorn.review.checks.api_misuse import APIMisuseCheck
 
-        return APIMisuseCheck(config=project_config.api_misuse)
+        return APIMisuseCheck(
+            config=project_config.api_misuse,
+            package_roots=project_config.context.package_roots,
+        )
     return check_cls()
 
 

@@ -62,6 +62,25 @@ class TestParsePomXml:
 </project>"""
         assert parse_pom_xml(pom) == []
 
+    def test_nested_property_reference_left_literal(self) -> None:
+        # Nested resolution (one ${a} pointing at another) is not supported.
+        # The single-pass resolver leaves the inner reference unexpanded —
+        # explicitly documented behaviour, not silently broken.
+        pom = """<?xml version="1.0"?>
+<project>
+<properties>
+<outer>${inner}</outer>
+<inner>33.0.0</inner>
+</properties>
+<dependencies>
+<dependency><groupId>g</groupId><artifactId>a</artifactId>
+<version>${outer}</version></dependency>
+</dependencies>
+</project>"""
+        deps = parse_pom_xml(pom)
+        assert len(deps) == 1
+        assert deps[0].version == "${inner}"
+
 
 class TestParseBuildSbt:
     def test_parses_inline_dependencies(self) -> None:

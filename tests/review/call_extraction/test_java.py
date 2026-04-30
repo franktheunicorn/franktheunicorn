@@ -56,7 +56,7 @@ diff --git a/Foo.java b/Foo.java
 +public class Foo {
 +    Helper.run(); }
 """
-        sites = extract_calls(diff, project_package="com.example")
+        sites = extract_calls(diff, project_packages=["com.example"])
         assert sites == []
 
     def test_ignores_wildcard_imports(self) -> None:

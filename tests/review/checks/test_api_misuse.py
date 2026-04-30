@@ -61,8 +61,8 @@ diff --git a/foo.py b/foo.py
         system, _user = check.build_prompt("", ctx)
         assert "api-misuse:" in system
 
-    def test_first_party_package_filters_calls(self) -> None:
-        # Calls under the configured first-party package should not be
+    def test_package_roots_filter_calls(self) -> None:
+        # Calls under any configured first-party package_root should not be
         # surfaced — even when enabled is True we skip the resolver because
         # there's nothing to fetch.
         diff = """\
@@ -75,10 +75,11 @@ diff --git a/foo.py b/foo.py
 +helper(42)
 """
         ctx = make_pr_context()
-        check = APIMisuseCheck(config=APIMisuseConfig(enabled=True, first_party_package="myproj"))
+        check = APIMisuseCheck(
+            config=APIMisuseConfig(enabled=True),
+            package_roots=["myproj", "anotherproj"],
+        )
         _system, user = check.build_prompt(diff, ctx)
-        # The call was first-party; no docs block was added, regardless of
-        # the enabled flag, because no external sites were extracted.
         assert "Upstream docs" not in user
 
 

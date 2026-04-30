@@ -100,11 +100,7 @@ class PyPIDocsFetcher(DataFetcher[PackageDocs]):
     def fetch_via_scrape(self, *args: object, **kwargs: object) -> PackageDocs:
         package, qualified_name = unpack_args(args, kwargs)
         project_url = f"{_PYPI_PROJECT_BASE}/{package}/"
-        try:
-            response = self._scrape_get(project_url)
-        except NotFoundError:
-            raise
-
+        response = self._scrape_get(project_url)
         soup = BeautifulSoup(response.text, "html.parser")
         version = _scrape_version(soup)
         summary = _scrape_summary(soup)

@@ -156,10 +156,6 @@ class APIMisuseConfig(BaseModel):
     # When True, also fetch hosted docs (readthedocs/javadoc.io). When False,
     # use only registry metadata + docstrings (faster, no scraping).
     scrape_hosted_docs: bool = True
-    # Top-level package name of the project under review (e.g. "myproj"
-    # for Python or "com.example" for Java). Calls under this prefix are
-    # treated as first-party and skipped — they are not external APIs.
-    first_party_package: str = ""
 
     @field_validator("registries")
     @classmethod
