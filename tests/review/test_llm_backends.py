@@ -77,6 +77,28 @@ class TestParseResponse:
     def test_invalid_json(self) -> None:
         assert parse_llm_response("not json at all") == []
 
+    def test_extracts_json_with_prose_preamble(self) -> None:
+        """Models without response_format enforcement may add a chatty preamble."""
+        data = {"findings": [{"file_path": "x.py", "title": "T", "body": "B", "severity": "low"}]}
+        raw = "Sure, here is the review: " + json.dumps(data)
+        findings = parse_llm_response(raw)
+        assert len(findings) == 1
+        assert findings[0].file_path == "x.py"
+
+    def test_extracts_json_with_trailing_prose(self) -> None:
+        data = [{"file_path": "y.py", "title": "T", "body": "B", "severity": "high"}]
+        raw = json.dumps(data) + "\n\nLet me know if you have questions!"
+        findings = parse_llm_response(raw)
+        assert len(findings) == 1
+        assert findings[0].file_path == "y.py"
+
+    def test_extracts_json_with_prose_on_both_sides(self) -> None:
+        data = {"findings": [{"file_path": "z.py", "title": "T", "body": "B"}]}
+        raw = f"Here you go:\n{json.dumps(data)}\nHope that helps."
+        findings = parse_llm_response(raw)
+        assert len(findings) == 1
+        assert findings[0].file_path == "z.py"
+
     def test_markdown_code_fences(self) -> None:
         raw = '```json\n[{"file_path":"x.py","title":"T","body":"B","severity":"nit"}]\n```'
         findings = parse_llm_response(raw)
@@ -287,6 +309,95 @@ class TestOpenAIBackend:
 
         assert len(findings) == 1
         # Fallback is cached for subsequent calls on this backend instance.
+        assert backend._token_param == "max_tokens"
+
+    @patch.dict("os.environ", {"TEST_OPENAI_KEY": "sk-test"})
+    def test_falls_back_when_response_format_unsupported(self) -> None:
+        """Servers that reject response_format=json_object should retry without it."""
+        import openai
+
+        config = LLMBackendConfig(provider="openai", api_key_env="TEST_OPENAI_KEY")
+        from franktheunicorn.review.backends.openai_backend import OpenAIBackend
+
+        backend = OpenAIBackend(config)
+        ctx = make_pr_context()
+
+        mock_choice = MagicMock()
+        mock_choice.message.content = json.dumps(
+            {"findings": [{"file_path": "a.py", "title": "T", "body": "B", "severity": "low"}]}
+        )
+        mock_response = MagicMock()
+        mock_response.choices = [mock_choice]
+
+        bad_request = openai.BadRequestError(
+            message="json_object response format is not supported",
+            response=MagicMock(),
+            body={"message": "json_object response format is not supported"},
+        )
+
+        with patch("openai.OpenAI") as mock_client_cls:
+            create = mock_client_cls.return_value.chat.completions.create
+            create.side_effect = [bad_request, mock_response]
+            findings = backend.generate_findings(_SAMPLE_DIFF, ctx)
+
+            assert create.call_count == 2
+            first_kwargs = create.call_args_list[0].kwargs
+            second_kwargs = create.call_args_list[1].kwargs
+            assert first_kwargs.get("response_format") == {"type": "json_object"}
+            assert "response_format" not in second_kwargs
+
+        assert len(findings) == 1
+        # The degradation is cached for subsequent calls on this backend instance.
+        assert backend._supports_json_object is False
+        # Without response_format enforcement, the system prompt gets a
+        # stronger JSON-only reminder appended.
+        retry_system = second_kwargs["messages"][0]["content"]
+        assert "ONLY the JSON" in retry_system
+        first_system = first_kwargs["messages"][0]["content"]
+        assert "ONLY the JSON" not in first_system
+
+    @patch.dict("os.environ", {"TEST_OPENAI_KEY": "sk-test"})
+    def test_falls_back_for_both_response_format_and_token_param(self) -> None:
+        """A server can be old enough to reject both quirks; both should degrade."""
+        import openai
+
+        config = LLMBackendConfig(provider="openai", api_key_env="TEST_OPENAI_KEY")
+        from franktheunicorn.review.backends.openai_backend import OpenAIBackend
+
+        backend = OpenAIBackend(config)
+        ctx = make_pr_context()
+
+        mock_choice = MagicMock()
+        mock_choice.message.content = json.dumps(
+            {"findings": [{"file_path": "a.py", "title": "T", "body": "B", "severity": "low"}]}
+        )
+        mock_response = MagicMock()
+        mock_response.choices = [mock_choice]
+
+        format_err = openai.BadRequestError(
+            message="response_format is not supported",
+            response=MagicMock(),
+            body={"message": "response_format is not supported"},
+        )
+        token_err = openai.BadRequestError(
+            message="unrecognized field: max_completion_tokens",
+            response=MagicMock(),
+            body={"message": "unrecognized field: max_completion_tokens"},
+        )
+
+        with patch("openai.OpenAI") as mock_client_cls:
+            create = mock_client_cls.return_value.chat.completions.create
+            create.side_effect = [format_err, token_err, mock_response]
+            findings = backend.generate_findings(_SAMPLE_DIFF, ctx)
+
+            assert create.call_count == 3
+            final_kwargs = create.call_args_list[2].kwargs
+            assert "response_format" not in final_kwargs
+            assert "max_tokens" in final_kwargs
+            assert "max_completion_tokens" not in final_kwargs
+
+        assert len(findings) == 1
+        assert backend._supports_json_object is False
         assert backend._token_param == "max_tokens"
 
     @patch.dict("os.environ", {"TEST_OPENAI_KEY": "sk-test"})
