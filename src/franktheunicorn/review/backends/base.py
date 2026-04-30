@@ -191,6 +191,9 @@ SEVERITY_CONFIDENCE: dict[str, float] = {
 # Matches markdown code fences anywhere in the text (```json ... ```)
 _CODE_FENCE_RE = re.compile(r"```(?:json)?\s*\n(.*?)\n```", re.DOTALL)
 
+# Matches the next JSON-value-start ('{' or '[') in arbitrary text.
+_JSON_START_RE = re.compile(r"[{\[]")
+
 
 def _extract_json_blob(text: str) -> object | None:
     """Find and decode the first JSON value embedded in arbitrary text.
@@ -201,18 +204,12 @@ def _extract_json_blob(text: str) -> object | None:
     str.find and decode in place — no per-character scan, no slicing.
     """
     decoder = json.JSONDecoder()
-    i = 0
-    n = len(text)
-    while i < n:
-        nb = text.find("{", i)
-        nk = text.find("[", i)
-        if nb == -1 and nk == -1:
-            return None
-        i = nb if nk == -1 else nk if nb == -1 else min(nb, nk)
+    pos = 0
+    while (m := _JSON_START_RE.search(text, pos)) is not None:
         try:
-            obj, _ = decoder.raw_decode(text, i)
+            obj, _ = decoder.raw_decode(text, m.start())
         except json.JSONDecodeError:
-            i += 1
+            pos = m.start() + 1
             continue
         return obj  # type: ignore[no-any-return]
     return None
