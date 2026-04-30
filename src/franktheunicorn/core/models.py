@@ -419,6 +419,40 @@ class AgentFeedback(models.Model):
         return f"Feedback for {self.pull_request}: {self.assessment}"
 
 
+class LLMBackendFallback(models.Model):
+    """Persisted compatibility-probe state for an LLM backend endpoint.
+
+    ``OpenAIBackend`` discovers at runtime whether a given server accepts
+    ``response_format=json_object`` and which token-count parameter name it
+    requires.  Without persistence those probes repeat on every fresh
+    backend instance, wasting API quota with invalid requests.
+
+    One row per ``(provider, model, base_url)`` combination; updated in-place
+    each time a fallback is activated.
+    """
+
+    provider = models.CharField(max_length=50)
+    model = models.CharField(max_length=200)
+    base_url = models.CharField(max_length=500, blank=True, default="")
+    token_param = models.CharField(max_length=50, default="max_completion_tokens")
+    supports_json_object = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["provider", "model", "base_url"],
+                name="unique_llm_fallback_provider_model_base_url",
+            )
+        ]
+        ordering = ["provider", "model"]
+
+    def __str__(self) -> str:
+        base = f" ({self.base_url})" if self.base_url else ""
+        return f"LLMBackendFallback: {self.provider}/{self.model}{base}"
+
+
 class SecurityReport(models.Model):
     """A security vulnerability report submitted for triage.
 

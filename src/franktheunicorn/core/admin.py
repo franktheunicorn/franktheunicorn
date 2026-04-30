@@ -6,6 +6,7 @@ from franktheunicorn.core.models import (
     AgentFeedback,
     AntiPattern,
     CostRecord,
+    LLMBackendFallback,
     OperatorAction,
     Project,
     PullRequest,
@@ -146,3 +147,20 @@ class AgentFeedbackAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
     )
     list_filter = ("assessment", "feedback_method")
     readonly_fields = ("created_at",)
+
+
+@admin.register(LLMBackendFallback)
+class LLMBackendFallbackAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
+    """Admin for persisted LLM backend compatibility-probe state."""
+
+    list_display = (
+        "provider",
+        "model",
+        "base_url",
+        "token_param",
+        "supports_json_object",
+        "updated_at",
+    )
+    list_filter = ("provider", "supports_json_object")
+    search_fields = ("provider", "model", "base_url")
+    readonly_fields = ("created_at", "updated_at")

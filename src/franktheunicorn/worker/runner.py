@@ -73,6 +73,9 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
     """
     args = _parse_args(list(argv) if argv is not None else [])
 
+    from franktheunicorn.env_loader import load_project_dotenv
+
+    load_project_dotenv()
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "franktheunicorn.settings")
     django.setup()
 
@@ -328,6 +331,7 @@ def _run_cycle(
                         community_context=community_ctx,
                         jira_context=jira_ctx,
                         sentry_context=sentry_ctx,
+                        repo_path=repo_path,
                     )
                     logger.info(
                         "  PR #%d: score=%.2f, %d drafts generated",

@@ -11,6 +11,7 @@ from franktheunicorn.core.models import (
     AntiPattern,
     CostRecord,
     DependencyChange,
+    LLMBackendFallback,
     OperatorAction,
     Project,
     PullRequest,
@@ -207,3 +208,16 @@ class SecurityReportFactory(factory.django.DjangoModelFactory):  # type: ignore[
     cve_matches = factory.LazyFunction(list)
     matched_cve_id = ""
     operator_notes = ""
+
+
+class LLMBackendFallbackFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
+    """Factory for LLMBackendFallback model instances."""
+
+    class Meta:
+        model = LLMBackendFallback
+
+    provider = "openai"
+    model = factory.Sequence(lambda n: f"gpt-4o-{n}")
+    base_url = ""
+    token_param = "max_completion_tokens"
+    supports_json_object = True

@@ -92,6 +92,13 @@ def build_user_message(diff: str, ctx: PRContext) -> str:
             body_preview += "\n... (truncated)"
         header_parts.append(f"\nPR description:\n{body_preview}")
 
+    # Local-source context (read from the checkout, before the diff so the
+    # reviewer can ground hunks in surrounding code).
+    if ctx.full_file_context:
+        header_parts.append(f"\n{ctx.full_file_context}")
+    if ctx.imported_modules_context:
+        header_parts.append(f"\n{ctx.imported_modules_context}")
+
     header_parts.append(f"\nDiff:\n```diff\n{diff}\n```")
 
     # Repo health context (from git history analysis — trusted, locally generated).

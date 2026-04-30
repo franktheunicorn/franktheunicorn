@@ -43,6 +43,10 @@ QUEUE_TABS: list[dict[str, str]] = [
     {"key": "needs-triage", "label": "Needs Triage"},
 ]
 
+# Valid project type values and their human-readable labels.
+VALID_PROJECT_TYPES: frozenset[str] = frozenset({"asf", "personal", "org"})
+PROJECT_TYPE_LABELS: dict[str, str] = {"asf": "ASF", "personal": "Personal", "org": "Organization"}
+
 
 def _get_workspace_projects(request: HttpRequest) -> list[str] | None:
     """Get project full_names for the active workspace from cookie.
@@ -69,9 +73,37 @@ def _get_workspace_projects(request: HttpRequest) -> list[str] | None:
     return None
 
 
+def _build_workspace_q(workspace_projects: list[str]) -> Q:
+    """Build a Q filter for a list of 'owner/repo' project full names."""
+    q = Q()
+    for full_name in workspace_projects:
+        parts = full_name.split("/", 1)
+        if len(parts) == 2:
+            q |= Q(project__owner=parts[0], project__repo=parts[1])
+    return q
+
+
+def _parse_project_slug(project: str) -> tuple[str, str] | None:
+    """Parse an ``owner/repo`` project slug, returning ``(owner, repo)`` or ``None``."""
+    if not project:
+        return None
+    parts = project.split("/", 1)
+    if len(parts) == 2:
+        return parts[0], parts[1]
+    return None
+
+
 def index(request: HttpRequest) -> HttpResponse:
-    """Main dashboard: list of PRs sorted by interest score with queue tabs."""
+    """Main dashboard: list of PRs sorted by interest score with queue tabs.
+
+    Supports optional GET filters:
+    - ``queue``: one of the QUEUE_TABS keys (default ``review``)
+    - ``project_type``: one of ``asf``, ``personal``, ``org`` (default all)
+    - ``project``: an ``owner/repo`` string to narrow to a single project (default all)
+    """
     queue = request.GET.get("queue", "review")
+    project_type = request.GET.get("project_type", "")
+    project = request.GET.get("project", "")
     workspace_projects = _get_workspace_projects(request)
 
     prs = (
@@ -81,20 +113,48 @@ def index(request: HttpRequest) -> HttpResponse:
     )
 
     if workspace_projects is not None:
-        project_filters = Q()
-        for full_name in workspace_projects:
-            parts = full_name.split("/", 1)
-            if len(parts) == 2:
-                project_filters |= Q(project__owner=parts[0], project__repo=parts[1])
-        prs = prs.filter(project_filters)
+        prs = prs.filter(_build_workspace_q(workspace_projects))
+
+    # Apply project-type filter (ignore unknown values).
+    active_project_type = project_type if project_type in VALID_PROJECT_TYPES else ""
+    if active_project_type:
+        prs = prs.filter(project__project_type=active_project_type)
+
+    # Apply specific-project filter (ignore malformed values).
+    parsed_project = _parse_project_slug(project)
+    active_project = project if parsed_project is not None else ""
+    if parsed_project is not None:
+        prs = prs.filter(project__owner=parsed_project[0], project__repo=parsed_project[1])
 
     prs = prs[:100]
 
-    # Count PRs per queue for tab badges.
-    queue_counts: dict[str, int] = {}
+    # Count PRs per queue for tab badges (respects the same project/type filters).
     base_qs = PullRequest.objects.filter(state="open")
-    for tab in QUEUE_TABS:
-        queue_counts[tab["key"]] = base_qs.filter(queue=tab["key"]).count()
+    if workspace_projects is not None:
+        base_qs = base_qs.filter(_build_workspace_q(workspace_projects))
+    if active_project_type:
+        base_qs = base_qs.filter(project__project_type=active_project_type)
+    if parsed_project is not None:
+        base_qs = base_qs.filter(project__owner=parsed_project[0], project__repo=parsed_project[1])
+    queue_counts: dict[str, int] = {
+        tab["key"]: base_qs.filter(queue=tab["key"]).count() for tab in QUEUE_TABS
+    }
+
+    # Build available filter options from enabled projects only.
+    enabled_projects_qs = Project.objects.filter(enabled=True)
+    available_type_keys = list(
+        enabled_projects_qs.values_list("project_type", flat=True)
+        .distinct()
+        .order_by("project_type")
+    )
+    available_project_types = [
+        {"key": k, "label": PROJECT_TYPE_LABELS.get(k, k)} for k in available_type_keys
+    ]
+    # Narrow project list to the selected type so the second selector is contextual.
+    projects_qs = enabled_projects_qs.order_by("owner", "repo")
+    if active_project_type:
+        projects_qs = projects_qs.filter(project_type=active_project_type)
+    available_projects = list(projects_qs.values("owner", "repo"))
 
     workspace = request.COOKIES.get("workspace", "all")
     workspaces = _get_workspace_list()
@@ -109,6 +169,10 @@ def index(request: HttpRequest) -> HttpResponse:
             "queue_counts": queue_counts,
             "workspace": workspace,
             "workspaces": workspaces,
+            "active_project_type": active_project_type,
+            "active_project": active_project,
+            "available_project_types": available_project_types,
+            "available_projects": available_projects,
         },
     )
 

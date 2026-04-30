@@ -45,6 +45,9 @@ class PRContext:
     community_context: str = ""
     jira_context: str = ""
     sentry_context: str = ""
+    # v1: full-file + first-party-import context (built from local checkout)
+    full_file_context: str = ""
+    imported_modules_context: str = ""
 
 
 class ReviewFinding(BaseModel):
@@ -70,6 +73,52 @@ class LLMBackend(Protocol):
         diff: str,
         pr_context: PRContext,
     ) -> list[ReviewFinding]: ...
+
+
+def _log_backend_error(backend_name: str, exc: BaseException) -> None:
+    """Emit an appropriate log message for an LLM API error.
+
+    HTTP 4xx errors get concise, actionable messages at the right level
+    (WARNING for transient rate limits, ERROR for configuration problems).
+    Unexpected errors get the full traceback via ``logger.exception``.
+    """
+    raw_code = getattr(exc, "status_code", None)
+    # Some SDK exceptions (e.g. openai) expose status_code as a property that
+    # reads from the underlying response object, which may be None or absent
+    # when the error is constructed without a full response (e.g. during
+    # connection errors before a response was received).
+    status_code: int | None = raw_code if isinstance(raw_code, int) else None
+    if status_code == 401:
+        logger.error(
+            "%s: authentication failed (HTTP 401) — check that your API key is "
+            "correct and has not expired.",
+            backend_name,
+            exc_info=True,
+        )
+    elif status_code == 403:
+        logger.error(
+            "%s: permission denied (HTTP 403) — check that your API key has the "
+            "required permissions and that your account is in good standing.",
+            backend_name,
+            exc_info=True,
+        )
+    elif status_code == 429:
+        logger.warning(
+            "%s: rate limited (HTTP 429) — the API quota was exceeded. "
+            "Findings skipped for this cycle; will retry on the next poll.",
+            backend_name,
+            exc_info=True,
+        )
+    elif status_code is not None and 400 <= status_code < 500:
+        logger.error(
+            "%s: API call failed with HTTP %s — %s",
+            backend_name,
+            status_code,
+            exc,
+            exc_info=True,
+        )
+    else:
+        logger.exception("%s API call failed.", backend_name)
 
 
 class BaseLLMBackend:
@@ -128,8 +177,8 @@ class BaseLLMBackend:
 
         try:
             raw_text = self._call_api(system_prompt, user_message, api_key)
-        except Exception:
-            logger.exception("%s API call failed.", type(self).__name__)
+        except Exception as exc:
+            _log_backend_error(type(self).__name__, exc)
             return []
         finally:
             self._last_duration = time.monotonic() - start
