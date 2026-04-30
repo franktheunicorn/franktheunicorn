@@ -255,6 +255,25 @@ class TestPRPrefilter:
         assert report is None
         assert SecurityReport.objects.count() == 0
 
+    def test_dedup_marker_does_not_collide_on_pr_number_prefix(self, db: Any) -> None:
+        """Regression: PR #2 and PR #20 share a marker prefix; ensure no false dedupe."""
+        from franktheunicorn.core.models import SecurityReport
+        from franktheunicorn.security.pr_prefilter import file_security_report
+        from tests.factories import ProjectFactory, PullRequestFactory
+
+        project = ProjectFactory()
+        pr_20 = PullRequestFactory(project=project, number=20)
+        pr_2 = PullRequestFactory(project=project, number=2)
+        verdict = MaliciousPromptVerdict(verdict="yes")
+
+        report_20 = file_security_report(pr_20, "", verdict)
+        report_2 = file_security_report(pr_2, "", verdict)
+
+        assert report_20 is not None
+        assert report_2 is not None
+        assert report_20.pk != report_2.pk
+        assert SecurityReport.objects.count() == 2
+
     def test_dedups_same_pr(self, db: Any) -> None:
         from franktheunicorn.core.models import SecurityReport
         from franktheunicorn.security.pr_prefilter import file_security_report

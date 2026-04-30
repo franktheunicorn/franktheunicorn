@@ -69,13 +69,21 @@ def _format_report_text(
     return "\n".join(lines)
 
 
+def _marker_for_pr(pr: PullRequest) -> str:
+    """Return the dedupe marker for a PR.
+
+    Wrapped in brackets so substring lookups are unambiguous —
+    e.g. ``[prefilter:pr-1-2]`` does not collide with ``[prefilter:pr-1-20]``.
+    """
+    return f"[prefilter:pr-{pr.project_id}-{pr.number}]"
+
+
 def _existing_report_for_pr(pr: PullRequest) -> SecurityReport | None:
     """Look for an existing auto-generated report for this PR."""
     from franktheunicorn.core.models import SecurityReport
 
-    marker = f"#prefilter:pr-{pr.project_id}-{pr.number}"
     return SecurityReport.objects.filter(
-        project=pr.project, operator_notes__contains=marker
+        project=pr.project, operator_notes__contains=_marker_for_pr(pr)
     ).first()
 
 
@@ -109,7 +117,7 @@ def file_security_report(
         status="new",
         assessed_severity=severity,
         triage_summary=verdict.llm_reasoning or "Regex pre-filter hits only.",
-        operator_notes=f"#prefilter:pr-{pr.project_id}-{pr.number}",
+        operator_notes=_marker_for_pr(pr),
     )
 
 
