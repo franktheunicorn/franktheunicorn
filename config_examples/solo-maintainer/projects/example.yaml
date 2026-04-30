@@ -8,6 +8,15 @@ ignore_paths: []
 frequent_contributors: []
 enabled: true
 
+# Differential test runner (see docs/test-runner.md). Disabled by default.
+# Pick exactly one of: container_image, dockerfile, auto_build.
+# tests:
+#   enabled: true
+#   dockerfile: ".frank/Dockerfile"   # repo-checked-in Dockerfile
+#   resource_tier: standard
+#   workdir: /workspace
+#   test_command: "python -m pytest {tests} --tb=short -q"
+
 # Known CVE-affected file paths/patterns (merged with auto-detected from git log):
 # cve_files:
 #   - "src/auth/"

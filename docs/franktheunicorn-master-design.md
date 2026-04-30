@@ -1461,6 +1461,10 @@ For trivially fixable issues, the agent generates GitHub `suggestion` blocks. Co
 
 ## 9. Differential Test Verification
 
+> **Operator guide:** for the per-project YAML schema, the three image-source
+> modes (prebuilt / Dockerfile / auto-build), and troubleshooting, see
+> [`test-runner.md`](test-runner.md). The sections below describe the design.
+
 ### 9.1 Test Identification (Three Sources)
 
 1. **Diff analysis** (deterministic): new/modified test files from `git diff`

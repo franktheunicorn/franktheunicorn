@@ -103,6 +103,10 @@ class PullRequest(models.Model):
     # Merge status (fetched from single-PR endpoint)
     mergeable = models.BooleanField(null=True, blank=True)
 
+    # Base/head SHAs from GitHub (used by blame and the differential test runner).
+    base_sha = models.CharField(max_length=64, blank=True, default="")
+    head_sha = models.CharField(max_length=64, blank=True, default="")
+
     # Cached context (v1.5)
     jira_ticket_id = models.CharField(max_length=50, blank=True, default="")
     jira_cache = models.JSONField(null=True, blank=True)

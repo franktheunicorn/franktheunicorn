@@ -512,6 +512,76 @@ class ContextConfig(BaseModel):
         return v
 
 
+class TestAutoBuildConfig(BaseModel):
+    """Auto-build instructions used when no prebuilt image or Dockerfile is given."""
+
+    __test__ = False  # not a pytest test class
+
+    base_image: str = "python:3.12-slim"
+    requirements_files: list[str] = Field(default_factory=list)
+    setup_commands: list[str] = Field(default_factory=list)
+
+
+_KNOWN_TEST_RESOURCE_TIERS = {"heavy", "standard", "light"}
+
+
+class TestExecutionConfig(BaseModel):
+    """Per-project differential test runner config (§9 of master design).
+
+    Three mutually exclusive image sources, checked in order:
+      1. ``container_image`` — use a prebuilt image as-is.
+      2. ``dockerfile``      — path inside the repo to a Dockerfile to build.
+      3. ``auto_build``      — generate a Dockerfile from base + requirements.
+
+    If none are set and ``enabled`` is true, the runner falls back to
+    ``python:3.12-slim`` (suitable only for projects with zero deps).
+    """
+
+    __test__ = False  # not a pytest test class
+
+    enabled: bool = False
+    container_image: str | None = None
+    dockerfile: str | None = None
+    auto_build: TestAutoBuildConfig | None = None
+    resource_tier: str = "standard"
+    test_command: str = "python -m pytest {tests} --tb=short -q"
+    workdir: str = "/workspace"
+    env: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("resource_tier")
+    @classmethod
+    def resource_tier_valid(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in _KNOWN_TEST_RESOURCE_TIERS:
+            msg = f"resource_tier must be one of {sorted(_KNOWN_TEST_RESOURCE_TIERS)}, got {v!r}"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("workdir")
+    @classmethod
+    def workdir_must_be_absolute(cls, v: str) -> str:
+        if not v.startswith("/"):
+            msg = "workdir must be an absolute path"
+            raise ValueError(msg)
+        return v
+
+    @model_validator(mode="after")
+    def exactly_one_image_source(self) -> TestExecutionConfig:
+        sources = [
+            ("container_image", self.container_image is not None),
+            ("dockerfile", self.dockerfile is not None),
+            ("auto_build", self.auto_build is not None),
+        ]
+        set_sources = [name for name, present in sources if present]
+        if len(set_sources) > 1:
+            msg = (
+                "tests: only one of container_image, dockerfile, auto_build "
+                f"may be set (got: {', '.join(set_sources)})"
+            )
+            raise ValueError(msg)
+        return self
+
+
 class ProjectConfig(BaseModel):
     """Per-project config loaded from a YAML file in the projects directory."""
 
@@ -556,6 +626,9 @@ class ProjectConfig(BaseModel):
 
     # Full-file + first-party-import context for review prompts (v1).
     context: ContextConfig = Field(default_factory=ContextConfig)
+
+    # Differential test runner (§9). Disabled by default; see docs/test-runner.md.
+    tests: TestExecutionConfig = Field(default_factory=TestExecutionConfig)
 
     @field_validator("llm_checks")
     @classmethod

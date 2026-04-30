@@ -2,91 +2,198 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from franktheunicorn.config.models import ProjectConfig, TestExecutionConfig
 from franktheunicorn.worker.test_runner import TestRunner as DockerTestRunner
 from tests.factories import PullRequestFactory
 
 
+def _enabled_config() -> ProjectConfig:
+    """ProjectConfig with the runner enabled (default image, default tier)."""
+    return ProjectConfig(owner="test", repo="test", tests=TestExecutionConfig(enabled=True))
+
+
+def _ready_pr(**kwargs: object) -> object:
+    """PR factory shortcut with SHAs populated."""
+    defaults: dict[str, object] = {
+        "head_sha": "a" * 40,
+        "base_sha": "b" * 40,
+        "body": "",
+    }
+    defaults.update(kwargs)
+    return PullRequestFactory(**defaults)
+
+
+@pytest.fixture
+def fake_workspaces(tmp_path: Path):
+    """Patch worktree context managers to yield ``tmp_path``."""
+    pr_ws = tmp_path / "pr_ws"
+    base_ws = tmp_path / "base_ws"
+    pr_ws.mkdir()
+    base_ws.mkdir()
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _pr_ctx(repo_path: Path, head_sha: str):
+        yield pr_ws
+
+    @contextmanager
+    def _base_ctx(repo_path: Path, base_sha: str, head_sha: str, test_files: list[str]):
+        yield base_ws
+
+    with (
+        patch("franktheunicorn.worker.test_runner.pr_branch_workspace", _pr_ctx),
+        patch("franktheunicorn.worker.test_runner.base_cherry_pick_workspace", _base_ctx),
+        patch(
+            "franktheunicorn.worker.test_runner.resolve_image",
+            return_value="python:3.12-slim",
+        ),
+    ):
+        yield pr_ws, base_ws
+
+
 @pytest.mark.django_db
-class TestTestRunner:
-    def test_skips_when_no_test_files_and_not_ai(self) -> None:
+class TestRunDifferential:
+    def test_disabled_by_default(self) -> None:
         runner = DockerTestRunner()
-        pr = PullRequestFactory(changed_files=["src/main.py"], likely_ai_generated=False)
-
-        from franktheunicorn.config.models import ProjectConfig
-
+        pr = _ready_pr(changed_files=["tests/test_main.py"])
         config = ProjectConfig(owner="test", repo="test")
-        result = runner.run_differential_test(pr, config)
-        assert result is None
+        assert runner.run_differential_test(pr, config, Path("/repo")) is None
 
-    def test_runs_when_test_files_present(self) -> None:
+    def test_skips_when_no_test_files_and_not_ai(self, tmp_path: Path) -> None:
+        runner = DockerTestRunner()
+        pr = _ready_pr(changed_files=["src/main.py"], likely_ai_generated=False)
+        assert runner.run_differential_test(pr, _enabled_config(), tmp_path) is None
+
+    def test_skips_when_repo_path_missing(self) -> None:
+        runner = DockerTestRunner()
+        pr = _ready_pr(changed_files=["tests/test_main.py"])
+        assert runner.run_differential_test(pr, _enabled_config(), None) is None
+        assert runner.run_differential_test(pr, _enabled_config(), Path("/nonexistent")) is None
+
+    def test_skips_when_shas_missing(self, tmp_path: Path) -> None:
         runner = DockerTestRunner()
         pr = PullRequestFactory(
-            changed_files=["src/main.py", "tests/test_main.py"],
-            body="",
+            changed_files=["tests/test_main.py"], body="", head_sha="", base_sha=""
         )
+        assert runner.run_differential_test(pr, _enabled_config(), tmp_path) is None
+
+    def test_runs_when_test_files_present(
+        self, tmp_path: Path, fake_workspaces: tuple[Path, Path]
+    ) -> None:
+        runner = DockerTestRunner()
+        pr = _ready_pr(changed_files=["src/main.py", "tests/test_main.py"])
 
         mock_docker = MagicMock()
         mock_container = MagicMock()
         mock_container.wait.return_value = {"StatusCode": 0}
         mock_container.logs.return_value = b"1 passed"
         mock_docker.containers.run.return_value = mock_container
-        mock_docker.ping.return_value = True
 
         with patch(
-            "franktheunicorn.worker.test_runner.TestRunner._get_docker", return_value=mock_docker
+            "franktheunicorn.worker.test_runner.TestRunner._get_docker",
+            return_value=mock_docker,
         ):
-            from franktheunicorn.config.models import ProjectConfig
-
-            config = ProjectConfig(owner="test", repo="test")
-            result = runner.run_differential_test(pr, config)
+            result = runner.run_differential_test(pr, _enabled_config(), tmp_path)
 
         assert result is not None
         assert result.status == "completed"
         assert result.test_scope == ["tests/test_main.py"]
+        # Two runs: PR + base.
+        assert mock_docker.containers.run.call_count == 2
 
-    def test_runs_for_ai_generated_prs(self) -> None:
+    def test_container_invocation_mounts_workspace(
+        self, tmp_path: Path, fake_workspaces: tuple[Path, Path]
+    ) -> None:
+        pr_ws, _base_ws = fake_workspaces
         runner = DockerTestRunner()
-        pr = PullRequestFactory(
-            changed_files=["src/main.py"],
-            likely_ai_generated=True,
-            body="",
-        )
+        pr = _ready_pr(changed_files=["tests/test_main.py"])
+
+        mock_docker = MagicMock()
+        mock_container = MagicMock()
+        mock_container.wait.return_value = {"StatusCode": 0}
+        mock_container.logs.return_value = b""
+        mock_docker.containers.run.return_value = mock_container
+
+        with patch(
+            "franktheunicorn.worker.test_runner.TestRunner._get_docker",
+            return_value=mock_docker,
+        ):
+            runner.run_differential_test(pr, _enabled_config(), tmp_path)
+
+        first_call = mock_docker.containers.run.call_args_list[0]
+        kwargs = first_call.kwargs
+        assert kwargs["network_mode"] == "none"
+        assert kwargs["read_only"] is True
+        assert kwargs["working_dir"] == "/workspace"
+        assert kwargs["volumes"] == {str(pr_ws): {"bind": "/workspace", "mode": "ro"}}
+        assert "ALL" in kwargs["cap_drop"]
+        # Writable tmpfs lives at a path *different* from the read-only repo
+        # mount; mounting both at the same destination would break startup.
+        assert "/workspace" not in kwargs["tmpfs"]
+        assert "/frank-scratch" in kwargs["tmpfs"]
+        assert kwargs["environment"]["HOME"] == "/frank-scratch"
+        assert kwargs["environment"]["TMPDIR"] == "/frank-scratch"
+        # tests.test_command renders {tests} into the command
+        assert "pytest tests/test_main.py" in kwargs["command"][-1]
+
+    def test_runs_for_ai_generated_prs(
+        self, tmp_path: Path, fake_workspaces: tuple[Path, Path]
+    ) -> None:
+        runner = DockerTestRunner()
+        pr = _ready_pr(changed_files=["src/main.py"], likely_ai_generated=True)
 
         mock_docker = MagicMock()
         mock_container = MagicMock()
         mock_container.wait.return_value = {"StatusCode": 0}
         mock_container.logs.return_value = b"ok"
         mock_docker.containers.run.return_value = mock_container
-        mock_docker.ping.return_value = True
 
         with patch(
-            "franktheunicorn.worker.test_runner.TestRunner._get_docker", return_value=mock_docker
+            "franktheunicorn.worker.test_runner.TestRunner._get_docker",
+            return_value=mock_docker,
         ):
-            from franktheunicorn.config.models import ProjectConfig
-
-            config = ProjectConfig(owner="test", repo="test")
-            result = runner.run_differential_test(pr, config)
+            result = runner.run_differential_test(pr, _enabled_config(), tmp_path)
 
         assert result is not None
 
-    def test_handles_docker_unavailable(self) -> None:
+    def test_handles_docker_unavailable(self, tmp_path: Path) -> None:
         runner = DockerTestRunner()
-        pr = PullRequestFactory(
-            changed_files=["tests/test_main.py"],
-            body="",
-        )
+        pr = _ready_pr(changed_files=["tests/test_main.py"])
+        with patch(
+            "franktheunicorn.worker.test_runner.TestRunner._get_docker",
+            return_value=None,
+        ):
+            assert runner.run_differential_test(pr, _enabled_config(), tmp_path) is None
 
-        with patch("franktheunicorn.worker.test_runner.TestRunner._get_docker", return_value=None):
-            from franktheunicorn.config.models import ProjectConfig
+    def test_exception_sets_failed(
+        self, tmp_path: Path, fake_workspaces: tuple[Path, Path]
+    ) -> None:
+        runner = DockerTestRunner()
+        pr = _ready_pr(changed_files=["tests/test_main.py"])
 
-            config = ProjectConfig(owner="test", repo="test")
-            result = runner.run_differential_test(pr, config)
+        mock_docker = MagicMock()
 
-        assert result is None
+        with (
+            patch(
+                "franktheunicorn.worker.test_runner.TestRunner._get_docker",
+                return_value=mock_docker,
+            ),
+            patch(
+                "franktheunicorn.worker.test_runner.TestRunner._run_container",
+                side_effect=RuntimeError("Docker exploded"),
+            ),
+        ):
+            result = runner.run_differential_test(pr, _enabled_config(), tmp_path)
+
+        assert result is not None
+        assert result.status == "failed"
+        assert "Docker exploded" in result.error_log
 
 
 class TestComputeVerdict:
@@ -142,9 +249,8 @@ class TestComputeVerdict:
         )
 
 
-@pytest.mark.django_db
-class TestTestRunnerContainerPaths:
-    def test_run_container_timeout(self) -> None:
+class TestRunContainer:
+    def test_run_container_timeout(self, tmp_path: Path) -> None:
         runner = DockerTestRunner()
         mock_docker = MagicMock()
         mock_container = MagicMock()
@@ -152,13 +258,18 @@ class TestTestRunnerContainerPaths:
         mock_docker.containers.run.return_value = mock_container
 
         result = runner._run_container(
-            mock_docker, "python:3.12-slim", ["tests/test_main.py"], {"timeout": 10}, "pr_branch"
+            mock_docker,
+            "python:3.12-slim",
+            tmp_path,
+            ["tests/test_main.py"],
+            {"timeout": 10},
+            TestExecutionConfig(enabled=True),
         )
 
         assert result["timed_out"] is True
         assert result["exit_code"] == -1
 
-    def test_run_container_non_timeout_exception(self) -> None:
+    def test_run_container_non_timeout_exception(self, tmp_path: Path) -> None:
         runner = DockerTestRunner()
         mock_docker = MagicMock()
         mock_container = MagicMock()
@@ -169,46 +280,37 @@ class TestTestRunnerContainerPaths:
             runner._run_container(
                 mock_docker,
                 "python:3.12-slim",
+                tmp_path,
                 ["tests/test_main.py"],
                 {"timeout": 10},
-                "pr_branch",
+                TestExecutionConfig(enabled=True),
             )
 
-    def test_differential_test_exception_sets_failed(self) -> None:
+    def test_run_container_uses_test_command_template(self, tmp_path: Path) -> None:
         runner = DockerTestRunner()
-        pr = PullRequestFactory(
-            changed_files=["tests/test_main.py"],
-            body="",
-        )
-
         mock_docker = MagicMock()
-        mock_docker.ping.return_value = True
+        mock_container = MagicMock()
+        mock_container.wait.return_value = {"StatusCode": 0}
+        mock_container.logs.return_value = b""
+        mock_docker.containers.run.return_value = mock_container
 
-        with (
-            patch(
-                "franktheunicorn.worker.test_runner.TestRunner._get_docker",
-                return_value=mock_docker,
-            ),
-            patch(
-                "franktheunicorn.worker.test_runner.TestRunner._run_container",
-                side_effect=RuntimeError("Docker exploded"),
-            ),
-        ):
-            from franktheunicorn.config.models import ProjectConfig
-
-            config = ProjectConfig(owner="test", repo="test")
-            result = runner.run_differential_test(pr, config)
-
-        assert result is not None
-        assert result.status == "failed"
-        assert "Docker exploded" in result.error_log
-
-    def test_skips_when_test_config_disabled(self) -> None:
-        runner = DockerTestRunner()
-        pr = PullRequestFactory(changed_files=["tests/test_main.py"], body="")
-
-        # ProjectConfig uses getattr(config, "test_config", None), so use a mock.
-        mock_config = MagicMock()
-        mock_config.test_config = {"enabled": False}
-        result = runner.run_differential_test(pr, mock_config)
-        assert result is None
+        cfg = TestExecutionConfig(
+            enabled=True,
+            test_command="go test {tests}",
+            workdir="/src",
+            env={"FOO": "bar"},
+        )
+        runner._run_container(
+            mock_docker,
+            "golang:1.22",
+            tmp_path,
+            ["./pkg/foo"],
+            {"timeout": 10},
+            cfg,
+        )
+        kwargs = mock_docker.containers.run.call_args.kwargs
+        assert kwargs["command"][-1] == "go test ./pkg/foo"
+        assert kwargs["working_dir"] == "/src"
+        # User env merges with the scratch defaults; user keys win on collision.
+        assert kwargs["environment"]["FOO"] == "bar"
+        assert kwargs["environment"]["HOME"] == "/frank-scratch"

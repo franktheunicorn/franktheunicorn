@@ -125,6 +125,13 @@ def poll_project(
             )
             fork_clone_url = fork_clone_url_raw if is_fork else ""
 
+        # Persist SHAs on the PR so downstream consumers (differential test
+        # runner, blame, etc.) don't need to re-hit the GitHub API.
+        if base_sha and pr_obj.base_sha != base_sha:
+            pr_obj.base_sha = base_sha
+        if head_sha and pr_obj.head_sha != head_sha:
+            pr_obj.head_sha = head_sha
+
         # Fetch blame data if repo clone is available (v1.25).
         blame_data: list[dict[str, object]] | None = None
         if repo_path is not None and repo_path.is_dir() and changed_files and base_sha:
@@ -246,6 +253,8 @@ def poll_project(
                 "is_low_context",
                 "is_likely_unowned",
                 "mergeable",
+                "base_sha",
+                "head_sha",
             ]
         )
 
