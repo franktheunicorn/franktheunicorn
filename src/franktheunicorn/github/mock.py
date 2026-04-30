@@ -51,8 +51,20 @@ class MockGitHubClient:
             "number": pr_number,
             "mergeable": True,
             "mergeable_state": "clean",
-            "base": {"ref": "main", "sha": "0" * 40},
-            "head": {"ref": f"pr-{pr_number}", "sha": "1" * 40},
+            "base": {
+                "ref": "main",
+                "sha": "0" * 40,
+                "repo": {"full_name": f"{owner}/{repo}"},
+            },
+            "head": {
+                "ref": f"pr-{pr_number}",
+                "sha": "1" * 40,
+                "repo": {
+                    "clone_url": "",
+                    "full_name": f"{owner}/{repo}",
+                    "fork": False,
+                },
+            },
         }
 
     def get_pull_request_files(self, owner: str, repo: str, pr_number: int) -> list[dict[str, Any]]:
