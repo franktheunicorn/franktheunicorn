@@ -197,17 +197,24 @@ def _extract_json_blob(text: str) -> object | None:
 
     Models without strict JSON enforcement sometimes wrap output in prose
     ('Sure, here is the review: [...]' or '[...]\\n\\nLet me know!').
-    raw_decode handles trailing junk; we scan for the first '{' or '['
-    that successfully decodes to handle leading junk too.
+    raw_decode handles trailing junk; we jump to each '{' or '[' via
+    str.find and decode in place — no per-character scan, no slicing.
     """
     decoder = json.JSONDecoder()
-    for i, ch in enumerate(text):
-        if ch in "{[":
-            try:
-                obj, _ = decoder.raw_decode(text[i:])
-            except json.JSONDecodeError:
-                continue
-            return obj  # type: ignore[no-any-return]
+    i = 0
+    n = len(text)
+    while i < n:
+        nb = text.find("{", i)
+        nk = text.find("[", i)
+        if nb == -1 and nk == -1:
+            return None
+        i = nb if nk == -1 else nk if nb == -1 else min(nb, nk)
+        try:
+            obj, _ = decoder.raw_decode(text, i)
+        except json.JSONDecodeError:
+            i += 1
+            continue
+        return obj  # type: ignore[no-any-return]
     return None
 
 
