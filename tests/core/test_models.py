@@ -213,18 +213,14 @@ class TestReviewDraftModel:
             line_number=100,
             line_end=None,
         )
-        expected_hash = hashlib.sha256(
-            b"src/main/scala/org/apache/spark/Foo.scala"
-        ).hexdigest()
+        expected_hash = hashlib.sha256(b"src/main/scala/org/apache/spark/Foo.scala").hexdigest()
         assert draft.github_diff_url == (
             f"https://github.com/apache/spark/pull/42/files#diff-{expected_hash}R100"
         )
 
     def test_github_diff_url_no_line_number(self) -> None:
         pr = PullRequestFactory(url="https://github.com/apache/spark/pull/42")
-        draft = ReviewDraftFactory(
-            pull_request=pr, file_path="src/main.py", line_number=None
-        )
+        draft = ReviewDraftFactory(pull_request=pr, file_path="src/main.py", line_number=None)
         expected_hash = hashlib.sha256(b"src/main.py").hexdigest()
         assert draft.github_diff_url == (
             f"https://github.com/apache/spark/pull/42/files#diff-{expected_hash}"
