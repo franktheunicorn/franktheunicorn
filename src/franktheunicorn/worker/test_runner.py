@@ -177,6 +177,19 @@ class TestRunner:
         """
         command = tests.test_command.format(tests=" ".join(test_files))
 
+        # Writable scratch area separate from the read-only repo mount. Tests
+        # need somewhere to write pytest cache, pip cache, $HOME files, etc.
+        # Mounting tmpfs at the same path as the repo bind would either fail
+        # (Docker rejects duplicate destinations) or hide the repo, so keep
+        # them disjoint.
+        scratch = "/frank-scratch"
+        env = {
+            "HOME": scratch,
+            "TMPDIR": scratch,
+            "PYTHONUSERBASE": scratch,
+            **dict(tests.env),
+        }
+
         container = None
         try:
             container = docker.containers.run(
@@ -189,10 +202,10 @@ class TestRunner:
                 security_opt=["no-new-privileges"],
                 cap_drop=["ALL"],
                 read_only=True,
-                tmpfs={"/tmp": "size=1G", tests.workdir: "size=2G,exec"},
+                tmpfs={"/tmp": "size=1G", scratch: "size=2G,exec"},
                 volumes={str(workspace): {"bind": tests.workdir, "mode": "ro"}},
                 working_dir=tests.workdir,
-                environment=dict(tests.env),
+                environment=env,
             )
 
             timeout = resources.get("timeout", 900)

@@ -133,6 +133,12 @@ class TestRunDifferential:
         assert kwargs["working_dir"] == "/workspace"
         assert kwargs["volumes"] == {str(pr_ws): {"bind": "/workspace", "mode": "ro"}}
         assert "ALL" in kwargs["cap_drop"]
+        # Writable tmpfs lives at a path *different* from the read-only repo
+        # mount; mounting both at the same destination would break startup.
+        assert "/workspace" not in kwargs["tmpfs"]
+        assert "/frank-scratch" in kwargs["tmpfs"]
+        assert kwargs["environment"]["HOME"] == "/frank-scratch"
+        assert kwargs["environment"]["TMPDIR"] == "/frank-scratch"
         # tests.test_command renders {tests} into the command
         assert "pytest tests/test_main.py" in kwargs["command"][-1]
 
@@ -305,4 +311,6 @@ class TestRunContainer:
         kwargs = mock_docker.containers.run.call_args.kwargs
         assert kwargs["command"][-1] == "go test ./pkg/foo"
         assert kwargs["working_dir"] == "/src"
-        assert kwargs["environment"] == {"FOO": "bar"}
+        # User env merges with the scratch defaults; user keys win on collision.
+        assert kwargs["environment"]["FOO"] == "bar"
+        assert kwargs["environment"]["HOME"] == "/frank-scratch"

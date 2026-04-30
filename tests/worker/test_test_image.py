@@ -59,16 +59,22 @@ def test_dockerfile_missing_raises(tmp_path: Path) -> None:
         resolve_image(docker, "owner", "repo", cfg, tmp_path)
 
 
-def test_dockerfile_skips_build_when_cached(tmp_path: Path) -> None:
+def test_dockerfile_always_invokes_build(tmp_path: Path) -> None:
+    """Mode B always calls docker build (BuildKit handles the layer cache).
+
+    A tag-level skip would silently reuse a stale image when files COPYed by
+    the Dockerfile (requirements.txt, etc.) change without the Dockerfile
+    itself being edited — producing incorrect verdicts.
+    """
     df = tmp_path / "Dockerfile"
     df.write_text("FROM scratch\n")
 
     docker = MagicMock()
-    docker.images.get.return_value = MagicMock()
+    docker.images.get.return_value = MagicMock()  # would-be cache hit
     cfg = TestExecutionConfig(enabled=True, dockerfile="Dockerfile")
     tag = resolve_image(docker, "o", "r", cfg, tmp_path)
     assert tag.startswith("franktheunicorn-test/o-r:")
-    docker.images.build.assert_not_called()
+    docker.images.build.assert_called_once()
 
 
 def test_auto_build_generates_and_builds(tmp_path: Path) -> None:

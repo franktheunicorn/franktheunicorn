@@ -94,6 +94,19 @@ def test_base_cherry_pick_with_no_test_files(
     assert not ws.exists()
 
 
+def test_base_cherry_pick_raises_on_overlay_failure(
+    git_repo: tuple[Path, str, str],
+) -> None:
+    """An invalid/missing overlay path must raise so the run is failed,
+    not yield a base workspace silently missing the intended tests."""
+    repo, base, head = git_repo
+    with (
+        pytest.raises(RuntimeError, match="failed to overlay test files"),
+        base_cherry_pick_workspace(repo, base, head, ["tests/does_not_exist.py"]),
+    ):
+        pass
+
+
 def test_pr_branch_workspace_unknown_sha_raises(
     git_repo: tuple[Path, str, str],
 ) -> None:

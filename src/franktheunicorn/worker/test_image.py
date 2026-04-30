@@ -95,9 +95,13 @@ def resolve_image(
             msg = f"tests.dockerfile {tests.dockerfile!r} not found in repo workspace"
             raise FileNotFoundError(msg)
         df_bytes = df_path.read_bytes()
+        # We can't enumerate everything the Dockerfile COPYs without parsing
+        # it, so a hash over Dockerfile bytes alone would happily reuse a
+        # stale image when e.g. ``requirements.txt`` changes — producing
+        # incorrect verdicts. Instead, always invoke ``docker build`` and
+        # rely on BuildKit's layer cache for efficiency. The tag is just a
+        # stable name tied to the current Dockerfile contents.
         tag = f"{IMAGE_TAG_PREFIX}/{owner}-{repo}:{_hash_inputs(df_bytes)}"
-        if _image_exists(docker, tag):
-            return tag
         logger.info("Building test image %s from %s", tag, tests.dockerfile)
         docker.images.build(
             path=str(workspace),

@@ -100,15 +100,17 @@ def base_cherry_pick_workspace(
     try:
         if test_files:
             # Pull the test files (and only those) from the PR head onto base.
-            # Missing files at head are skipped — they may be deletions in the
-            # PR, in which case base already lacks the corresponding test.
+            # If checkout fails (renamed/missing path, ambiguous ref, etc.),
+            # raise rather than yielding a base workspace without the
+            # intended overlay — running tests in that state would silently
+            # misclassify the verdict.
             checkout = _git(work_dir, "checkout", head_sha, "--", *test_files)
             if checkout.returncode != 0:
-                logger.debug(
-                    "checkout of test files from %s onto base failed: %s",
-                    head_sha[:12],
-                    checkout.stderr[:200],
+                msg = (
+                    f"failed to overlay test files from {head_sha[:12]} onto "
+                    f"base {base_sha[:12]}: {checkout.stderr[:200]}"
                 )
+                raise RuntimeError(msg)
         yield work_dir
     finally:
         _git(repo_path, "worktree", "remove", "--force", str(work_dir))
