@@ -143,14 +143,22 @@ def set_workspace(request: HttpRequest) -> HttpResponse:
 def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
     """Detail view for a single PR showing drafts and score breakdown."""
     pr = get_object_or_404(PullRequest.objects.select_related("project"), pk=pr_id)
-    drafts = ReviewDraft.objects.filter(
-        pull_request=pr,
-        is_auto_suppressed=False,
-    ).order_by("file_path", "line_number")
-    suppressed_drafts = ReviewDraft.objects.filter(
-        pull_request=pr,
-        is_auto_suppressed=True,
-    ).order_by("file_path", "line_number")
+    drafts = (
+        ReviewDraft.objects.filter(
+            pull_request=pr,
+            is_auto_suppressed=False,
+        )
+        .select_related("pull_request")
+        .order_by("file_path", "line_number")
+    )
+    suppressed_drafts = (
+        ReviewDraft.objects.filter(
+            pull_request=pr,
+            is_auto_suppressed=True,
+        )
+        .select_related("pull_request")
+        .order_by("file_path", "line_number")
+    )
     dep_changes = DependencyChange.objects.filter(pull_request=pr).order_by("package_name")
     test_runs = TestRun.objects.filter(pull_request=pr).order_by("-created_at")
 
