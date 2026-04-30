@@ -390,18 +390,22 @@ def draft_review(
     backend_configs = _maybe_inject_fine_tuned_model(backend_configs, project_config)
 
     # Collect findings from all backends, and persist each backend's vibe.
+    # The vibe key includes the model so two configured backends sharing a
+    # provider (e.g. fine-tuned model injection adding a second ollama entry)
+    # don't collide on the unique (pull_request, backend) constraint.
     all_findings: list[tuple[str, ReviewFinding]] = []
     for backend_config in backend_configs:
         source, result = _run_single_backend(backend_config, diff, pr_context)
         if result.overall_vibe:
+            vibe_backend = f"{source}/{backend_config.model}" if backend_config.model else source
             try:
                 AgentVibe.objects.update_or_create(
                     pull_request=pr,
-                    backend=source,
+                    backend=vibe_backend,
                     defaults={"vibe_text": result.overall_vibe},
                 )
             except Exception:
-                logger.debug("Failed to persist agent vibe for %s", source, exc_info=True)
+                logger.debug("Failed to persist agent vibe for %s", vibe_backend, exc_info=True)
         for f in result.findings:
             all_findings.append((source, f))
 
