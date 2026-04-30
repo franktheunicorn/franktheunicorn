@@ -21,16 +21,21 @@ Both paths attempt to extract:
 from __future__ import annotations
 
 import logging
-import re
 from typing import Any
 
 import httpx
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
 from franktheunicorn.data_access.base import (
     DataFetcher,
     FetchMethod,
     NotFoundError,
+)
+from franktheunicorn.data_access.package_registry._helpers import (
+    detect_deprecation,
+    extract_complexity,
+    truncate,
+    unpack_args,
 )
 from franktheunicorn.data_access.package_registry.types import (
     PackageDocs,
@@ -50,10 +55,6 @@ _DOCS_URL_KEYS: tuple[str, ...] = (
     "home-page",
 )
 
-_BIG_O_RE = re.compile(r"\bO\s*\([^)]+\)")
-_COMPLEXITY_RE = re.compile(r"(?im)^(?:complexity|time complexity|performance)\s*[:\-].*$")
-_DEPRECATED_RE = re.compile(r"(?im)\b(?:deprecated since|\.\.\s*deprecated::|@deprecated)\b.*$")
-
 
 class PyPIDocsFetcher(DataFetcher[PackageDocs]):
     """Fetch upstream docs for a Python function via PyPI + readthedocs."""
@@ -67,7 +68,7 @@ class PyPIDocsFetcher(DataFetcher[PackageDocs]):
         self._scrape_hosted_docs = scrape_hosted_docs
 
     def fetch_via_api(self, *args: object, **kwargs: object) -> PackageDocs:
-        package, qualified_name = _unpack_args(args, kwargs)
+        package, qualified_name = unpack_args(args, kwargs)
         url = f"{_PYPI_JSON_BASE}/{package}/json"
         response = self._client.get(url, headers={"Accept": "application/json"})
         if response.status_code == 404:
@@ -97,7 +98,7 @@ class PyPIDocsFetcher(DataFetcher[PackageDocs]):
         return docs
 
     def fetch_via_scrape(self, *args: object, **kwargs: object) -> PackageDocs:
-        package, qualified_name = _unpack_args(args, kwargs)
+        package, qualified_name = unpack_args(args, kwargs)
         project_url = f"{_PYPI_PROJECT_BASE}/{package}/"
         try:
             response = self._scrape_get(project_url)
@@ -139,8 +140,8 @@ class PyPIDocsFetcher(DataFetcher[PackageDocs]):
             return docs
 
         signature, docstring = _split_signature_and_body(section)
-        complexity = _extract_complexity(docstring)
-        deprecated, dep_msg = _detect_deprecation(docstring)
+        complexity = extract_complexity(docstring)
+        deprecated, dep_msg = detect_deprecation(docstring)
 
         return PackageDocs(
             fetched_via=docs.fetched_via,
@@ -150,7 +151,7 @@ class PyPIDocsFetcher(DataFetcher[PackageDocs]):
             version=docs.version,
             qualified_name=docs.qualified_name,
             signature=signature,
-            docstring=_truncate(docstring, 1500),
+            docstring=truncate(docstring, 1500),
             complexity_notes=complexity,
             deprecated=deprecated,
             deprecation_message=dep_msg,
@@ -158,16 +159,6 @@ class PyPIDocsFetcher(DataFetcher[PackageDocs]):
             summary=docs.summary,
             raw_warnings=docs.raw_warnings,
         )
-
-
-def _unpack_args(args: tuple[object, ...], kwargs: dict[str, object]) -> tuple[str, str]:
-    """Resolve (package, qualified_name) from ``DataFetcher.fetch`` *args/**kwargs."""
-    package = str(kwargs.get("package", args[0] if args else ""))
-    qualified = str(kwargs.get("qualified_name", args[1] if len(args) > 1 else ""))
-    if not package:
-        msg = "package is required"
-        raise ValueError(msg)
-    return package, qualified
 
 
 def _safe_version(meta: dict[str, Any]) -> str:
@@ -208,8 +199,6 @@ def _scrape_summary(soup: BeautifulSoup) -> str:
 
 
 def _scrape_docs_url(soup: BeautifulSoup) -> str:
-    from bs4 import Tag
-
     sidebar = soup.find("ul", class_="vertical-tabs__list")
     if not isinstance(sidebar, Tag):
         return ""
@@ -253,34 +242,3 @@ def _split_signature_and_body(section: str) -> tuple[str, str]:
     if not lines:
         return "", ""
     return lines[0].strip(), "\n".join(lines[1:]).strip()
-
-
-def _extract_complexity(text: str) -> str:
-    if not text:
-        return ""
-    parts: list[str] = []
-    parts.extend(match.group(0).strip() for match in _COMPLEXITY_RE.finditer(text))
-    parts.extend(match.group(0) for match in _BIG_O_RE.finditer(text))
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for p in parts:
-        if p in seen:
-            continue
-        seen.add(p)
-        deduped.append(p)
-    return "; ".join(deduped)
-
-
-def _detect_deprecation(text: str) -> tuple[bool, str]:
-    if not text:
-        return False, ""
-    match = _DEPRECATED_RE.search(text)
-    if match is None:
-        return False, ""
-    return True, match.group(0).strip()
-
-
-def _truncate(text: str, limit: int) -> str:
-    if len(text) <= limit:
-        return text
-    return text[: limit - 1] + "…"

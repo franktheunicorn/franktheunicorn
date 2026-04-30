@@ -22,7 +22,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from franktheunicorn.data_access.package_registry import PackageDocs, resolve_call_docs
+from franktheunicorn.data_access.package_registry import resolve_call_docs
+from franktheunicorn.data_access.package_registry._helpers import format_docs_block
 from franktheunicorn.review.call_extraction import extract_calls
 from franktheunicorn.review.checks import BaseCheck
 from franktheunicorn.review.prompt import build_user_message, finding_schema_json
@@ -86,45 +87,21 @@ class APIMisuseCheck(BaseCheck):
     def __init__(
         self,
         config: APIMisuseConfig | None = None,
-        *,
-        project_package: str = "",
     ) -> None:
         from franktheunicorn.config.models import APIMisuseConfig as _Cfg
 
         self._config = config if config is not None else _Cfg()
-        self._project_package = project_package
 
     def build_prompt(self, diff: str, pr_context: PRContext) -> tuple[str, str]:
-        sites = extract_calls(diff, project_package=self._project_package)
-        docs = resolve_call_docs(sites, self._config) if (sites and self._config.enabled) else []
+        sites = extract_calls(diff, project_package=self._config.first_party_package)
+        docs = (
+            resolve_call_docs(sites, self._config, diff=diff)
+            if (sites and self._config.enabled)
+            else []
+        )
 
         system_prompt = _SYSTEM_PROMPT.format(schema=finding_schema_json())
         user_message = build_user_message(diff, pr_context)
         if docs:
             user_message = user_message + _DOCS_BLOCK_HEADER + format_docs_block(docs)
         return system_prompt, user_message
-
-
-def format_docs_block(docs: list[PackageDocs]) -> str:
-    """Render a list of PackageDocs into a compact block for the user message."""
-    if not docs:
-        return "(no upstream docs found for the third-party calls in this PR)"
-
-    parts: list[str] = []
-    for d in docs:
-        section = [f"- {d.package} :: {d.qualified_name}"]
-        if d.version:
-            section.append(f"  version: {d.version}")
-        if d.signature:
-            section.append(f"  signature: {d.signature}")
-        if d.deprecated:
-            label = d.deprecation_message or "deprecated"
-            section.append(f"  deprecated: {label}")
-        if d.complexity_notes:
-            section.append(f"  complexity: {d.complexity_notes}")
-        if d.docstring:
-            section.append(f"  docstring: {d.docstring}")
-        if d.doc_url:
-            section.append(f"  docs: {d.doc_url}")
-        parts.append("\n".join(section))
-    return "\n\n".join(parts)

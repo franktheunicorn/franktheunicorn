@@ -16,6 +16,10 @@ from typing import TYPE_CHECKING
 import httpx
 
 from franktheunicorn.data_access.base import FetchError
+from franktheunicorn.data_access.package_registry.build_files import (
+    BuildFileDep,
+    collect_deps_from_diff,
+)
 from franktheunicorn.data_access.package_registry.cache import DocsCache
 from franktheunicorn.data_access.package_registry.maven import MavenDocsFetcher
 from franktheunicorn.data_access.package_registry.pypi import PyPIDocsFetcher
@@ -36,12 +40,20 @@ def resolve_call_docs(
     *,
     cache_db_path: str | Path | None = None,
     client: httpx.Client | None = None,
+    diff: str = "",
+    build_file_deps: list[BuildFileDep] | None = None,
 ) -> list[PackageDocs]:
     """Return :class:`PackageDocs` for each call site (best-effort).
 
     Cache hits short-circuit network requests. Sites whose registry is
     disabled in ``config.registries`` or whose package can't be looked
     up return ``None`` and are dropped from the result.
+
+    When ``diff`` is supplied, ``pom.xml`` / ``build.sbt`` content is
+    parsed out of it and used to map Java packages to Maven coordinates
+    in preference to the Solr fallback. ``build_file_deps`` lets callers
+    supply pre-parsed deps directly (e.g. fetched from the PR's base
+    branch) — these are merged with deps discovered in the diff.
     """
     if not sites:
         return []
@@ -54,8 +66,18 @@ def resolve_call_docs(
         client if client is not None else httpx.Client(timeout=config.fetch_timeout_seconds)
     )
 
+    deps: list[BuildFileDep] = []
+    if diff:
+        deps.extend(collect_deps_from_diff(diff))
+    if build_file_deps:
+        deps.extend(build_file_deps)
+
     pypi = PyPIDocsFetcher(active_client, scrape_hosted_docs=config.scrape_hosted_docs)
-    maven = MavenDocsFetcher(active_client, scrape_hosted_docs=config.scrape_hosted_docs)
+    maven = MavenDocsFetcher(
+        active_client,
+        scrape_hosted_docs=config.scrape_hosted_docs,
+        build_file_deps=deps,
+    )
 
     results: list[PackageDocs] = []
     try:

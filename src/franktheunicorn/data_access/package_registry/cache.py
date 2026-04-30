@@ -16,6 +16,7 @@ import json
 import logging
 import sqlite3
 import time
+from contextlib import closing
 from pathlib import Path
 
 from franktheunicorn.data_access.package_registry.types import PackageDocs, Registry
@@ -51,7 +52,7 @@ class DocsCache:
         return conn
 
     def _init_schema(self) -> None:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             conn.execute(_SCHEMA)
 
     def get(
@@ -64,7 +65,7 @@ class DocsCache:
         """Return a cached entry if present and not expired, else ``None``."""
         if self._ttl_seconds == 0:
             return None
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             row = conn.execute(
                 f"SELECT payload, fetched_at FROM {_TABLE} "
                 "WHERE registry = ? AND package = ? AND version = ? AND qualified_name = ?",
@@ -82,7 +83,7 @@ class DocsCache:
 
     def put(self, docs: PackageDocs) -> None:
         """Store an entry, replacing any prior one for the same key."""
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             conn.execute(
                 f"INSERT OR REPLACE INTO {_TABLE} "
                 "(registry, package, version, qualified_name, payload, fetched_at) "

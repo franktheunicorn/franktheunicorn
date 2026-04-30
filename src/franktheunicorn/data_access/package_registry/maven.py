@@ -1,11 +1,18 @@
 """Maven Central doc fetcher (dual-path).
 
-API path: ``https://search.maven.org/solrsearch/select`` JSON for
-groupId/artifactId/version. Then fetch javadoc.io HTML for the class
-and locate the method's anchor.
+Coordinate resolution prefers project build files (``pom.xml`` /
+``build.sbt``) when available — they are the project's own ground
+truth. Solr is used as a fallback for the long tail of packages that
+don't appear in the build file.
 
-Scrape path: ``https://mvnrepository.com/artifact/{group}/{artifact}``
-HTML for coordinates, then javadoc.io for the method-level docs.
+API path: build-file lookup first, then ``https://search.maven.org/
+solrsearch/select`` JSON. Once coords are resolved, fetch javadoc.io
+HTML for the class and locate the method's anchor.
+
+Scrape path: same build-file lookup, with no remote fallback (we drop
+the unreliable mvnrepository heuristic — it guessed wrong for almost
+every real package). When build files are absent the scrape path
+raises ``NotFoundError`` so the caller can degrade gracefully.
 
 Both extract: signature, docstring blurb, complexity hints (rare in
 javadoc but matched anyway), and the ``@Deprecated`` flag.
@@ -19,12 +26,21 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
 from franktheunicorn.data_access.base import (
     DataFetcher,
     FetchMethod,
     NotFoundError,
+)
+from franktheunicorn.data_access.package_registry._helpers import (
+    extract_complexity,
+    truncate,
+    unpack_args,
+)
+from franktheunicorn.data_access.package_registry.build_files import (
+    BuildFileDep,
+    match_package_to_dep,
 )
 from franktheunicorn.data_access.package_registry.types import (
     PackageDocs,
@@ -34,11 +50,7 @@ from franktheunicorn.data_access.package_registry.types import (
 logger = logging.getLogger(__name__)
 
 _SOLR_URL = "https://search.maven.org/solrsearch/select"
-_MVNREPO_BASE = "https://mvnrepository.com/artifact"
 _JAVADOC_BASE = "https://javadoc.io/doc"
-
-_BIG_O_RE = re.compile(r"\bO\s*\([^)]+\)")
-_COMPLEXITY_RE = re.compile(r"(?im)^(?:complexity|performance)\s*[:\-].*$")
 
 
 class MavenDocsFetcher(DataFetcher[PackageDocs]):
@@ -48,13 +60,17 @@ class MavenDocsFetcher(DataFetcher[PackageDocs]):
         self,
         client: httpx.Client,
         scrape_hosted_docs: bool = True,
+        build_file_deps: list[BuildFileDep] | None = None,
     ) -> None:
         super().__init__(client=client, rate_limiter=None)
         self._scrape_hosted_docs = scrape_hosted_docs
+        self._build_file_deps = list(build_file_deps) if build_file_deps else []
 
     def fetch_via_api(self, *args: object, **kwargs: object) -> PackageDocs:
-        package, qualified_name = _unpack_args(args, kwargs)
-        coords = _resolve_coords_via_solr(self._client, package, qualified_name)
+        package, qualified_name = unpack_args(args, kwargs)
+        coords = self._coords_from_build_files(package) or _resolve_coords_via_solr(
+            self._client, package, qualified_name
+        )
         return self._build(
             FetchMethod.API,
             package=package,
@@ -63,8 +79,8 @@ class MavenDocsFetcher(DataFetcher[PackageDocs]):
         )
 
     def fetch_via_scrape(self, *args: object, **kwargs: object) -> PackageDocs:
-        package, qualified_name = _unpack_args(args, kwargs)
-        coords = _resolve_coords_via_mvnrepo(self._client, package)
+        package, qualified_name = unpack_args(args, kwargs)
+        coords = self._coords_from_build_files(package)
         if coords is None:
             raise NotFoundError(
                 f"No Maven coordinates found for {package}",
@@ -77,6 +93,14 @@ class MavenDocsFetcher(DataFetcher[PackageDocs]):
             qualified_name=qualified_name,
             coords=coords,
         )
+
+    def _coords_from_build_files(self, package: str) -> _Coords | None:
+        if not self._build_file_deps:
+            return None
+        match = match_package_to_dep(package, self._build_file_deps)
+        if match is None:
+            return None
+        return _Coords(group=match.group, artifact=match.artifact, version=match.version)
 
     def _build(
         self,
@@ -120,7 +144,7 @@ class MavenDocsFetcher(DataFetcher[PackageDocs]):
             return docs
 
         signature, docstring, deprecated, dep_msg = _extract_method_section(html, qualified_name)
-        complexity = _extract_complexity(docstring)
+        complexity = extract_complexity(docstring)
 
         return PackageDocs(
             fetched_via=docs.fetched_via,
@@ -130,7 +154,7 @@ class MavenDocsFetcher(DataFetcher[PackageDocs]):
             version=docs.version,
             qualified_name=docs.qualified_name,
             signature=signature,
-            docstring=_truncate(docstring, 1500),
+            docstring=truncate(docstring, 1500),
             complexity_notes=complexity,
             deprecated=deprecated,
             deprecation_message=dep_msg,
@@ -182,28 +206,6 @@ def _resolve_coords_via_solr(
     return None
 
 
-def _resolve_coords_via_mvnrepo(client: httpx.Client, package: str) -> _Coords | None:
-    """Fallback: scrape mvnrepository.com search results to guess coordinates."""
-    parts = package.split(".")
-    if len(parts) < 2:
-        return None
-    # mvnrepository's URL scheme matches groupId/artifactId — guess the
-    # group is the full package and the artifact is the last component.
-    group = package
-    artifact = parts[-1]
-    url = f"{_MVNREPO_BASE}/{group}/{artifact}"
-    try:
-        response = client.get(url, follow_redirects=True)
-    except httpx.HTTPError:
-        return None
-    if response.status_code != 200:
-        return None
-    soup = BeautifulSoup(response.text, "html.parser")
-    version_link = soup.select_one("a.vbtn.release")
-    version = version_link.get_text(strip=True) if version_link is not None else ""
-    return _Coords(group=group, artifact=artifact, version=version)
-
-
 def _javadoc_url(coords: _Coords, qualified_name: str) -> str:
     if not coords.version:
         base = f"{_JAVADOC_BASE}/{coords.group}/{coords.artifact}/latest"
@@ -227,8 +229,6 @@ def _extract_method_section(html: str, qualified_name: str) -> tuple[str, str, b
             detail = section
             break
 
-    from bs4 import Tag
-
     if detail is None:
         # Older javadoc uses <a name="method-...">.
         anchor = soup.find("a", attrs={"name": re.compile(rf"^{re.escape(method)}-")})
@@ -251,34 +251,3 @@ def _extract_method_section(html: str, qualified_name: str) -> tuple[str, str, b
     dep_msg = deprecated_el.get_text(" ", strip=True) if deprecated_el is not None else ""
 
     return signature, docstring, deprecated, dep_msg
-
-
-def _extract_complexity(text: str) -> str:
-    if not text:
-        return ""
-    parts: list[str] = []
-    parts.extend(match.group(0).strip() for match in _COMPLEXITY_RE.finditer(text))
-    parts.extend(match.group(0) for match in _BIG_O_RE.finditer(text))
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for p in parts:
-        if p in seen:
-            continue
-        seen.add(p)
-        deduped.append(p)
-    return "; ".join(deduped)
-
-
-def _unpack_args(args: tuple[object, ...], kwargs: dict[str, object]) -> tuple[str, str]:
-    package = str(kwargs.get("package", args[0] if args else ""))
-    qualified = str(kwargs.get("qualified_name", args[1] if len(args) > 1 else ""))
-    if not package:
-        msg = "package is required"
-        raise ValueError(msg)
-    return package, qualified
-
-
-def _truncate(text: str, limit: int) -> str:
-    if len(text) <= limit:
-        return text
-    return text[: limit - 1] + "…"

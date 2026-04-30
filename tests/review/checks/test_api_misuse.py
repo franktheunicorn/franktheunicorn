@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from franktheunicorn.config.models import APIMisuseConfig
-from franktheunicorn.data_access.package_registry import PackageDocs, Registry
-from franktheunicorn.review.checks.api_misuse import APIMisuseCheck, format_docs_block
+from franktheunicorn.data_access.package_registry import PackageDocs, Registry, format_docs_block
+from franktheunicorn.review.checks.api_misuse import APIMisuseCheck
 from tests.conftest import make_pr_context
 
 _DIFF = """\
@@ -60,6 +60,26 @@ diff --git a/foo.py b/foo.py
         check = APIMisuseCheck(config=APIMisuseConfig(enabled=False))
         system, _user = check.build_prompt("", ctx)
         assert "api-misuse:" in system
+
+    def test_first_party_package_filters_calls(self) -> None:
+        # Calls under the configured first-party package should not be
+        # surfaced — even when enabled is True we skip the resolver because
+        # there's nothing to fetch.
+        diff = """\
+diff --git a/foo.py b/foo.py
+--- a/foo.py
++++ b/foo.py
+@@ -0,0 +1,3 @@
++from myproj.utils import helper
++
++helper(42)
+"""
+        ctx = make_pr_context()
+        check = APIMisuseCheck(config=APIMisuseConfig(enabled=True, first_party_package="myproj"))
+        _system, user = check.build_prompt(diff, ctx)
+        # The call was first-party; no docs block was added, regardless of
+        # the enabled flag, because no external sites were extracted.
+        assert "Upstream docs" not in user
 
 
 class TestFormatDocsBlock:
