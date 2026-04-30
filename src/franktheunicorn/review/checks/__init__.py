@@ -46,12 +46,14 @@ class BaseCheck(ABC):
 
 def _get_registry() -> dict[str, type[BaseCheck]]:
     """Lazy registry to avoid circular imports at module level."""
+    from franktheunicorn.review.checks.api_misuse import APIMisuseCheck
     from franktheunicorn.review.checks.coverage import CoverageCheck
     from franktheunicorn.review.checks.issue_link import IssueLinkCheck
     from franktheunicorn.review.checks.security import SecurityCheck
     from franktheunicorn.review.checks.security_context import SecurityContextCheck
 
     return {
+        "api-misuse": APIMisuseCheck,
         "coverage": CoverageCheck,
         "issue-link": IssueLinkCheck,
         "security": SecurityCheck,
@@ -101,7 +103,7 @@ def run_enabled_checks(
             logger.warning("Unknown LLM check '%s'; skipping.", check_name)
             continue
 
-        check = check_cls()
+        check = _instantiate_check(check_cls, check_name, project_config)
         try:
             findings = _run_single_check(check, diff, pr_context, backend_config)
         except Exception:
@@ -121,6 +123,19 @@ def run_enabled_checks(
         all_drafts.extend(drafts)
 
     return all_drafts
+
+
+def _instantiate_check(
+    check_cls: type[BaseCheck],
+    check_name: str,
+    project_config: ProjectConfig,
+) -> BaseCheck:
+    """Construct a check, passing config kwargs the class accepts."""
+    if check_name == "api-misuse":
+        from franktheunicorn.review.checks.api_misuse import APIMisuseCheck
+
+        return APIMisuseCheck(config=project_config.api_misuse)
+    return check_cls()
 
 
 def _run_single_check(
