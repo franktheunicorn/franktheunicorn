@@ -83,6 +83,16 @@ def _build_workspace_q(workspace_projects: list[str]) -> Q:
     return q
 
 
+def _parse_project_slug(project: str) -> tuple[str, str] | None:
+    """Parse an ``owner/repo`` project slug, returning ``(owner, repo)`` or ``None``."""
+    if not project:
+        return None
+    parts = project.split("/", 1)
+    if len(parts) == 2:
+        return parts[0], parts[1]
+    return None
+
+
 def index(request: HttpRequest) -> HttpResponse:
     """Main dashboard: list of PRs sorted by interest score with queue tabs.
 
@@ -111,10 +121,10 @@ def index(request: HttpRequest) -> HttpResponse:
         prs = prs.filter(project__project_type=active_project_type)
 
     # Apply specific-project filter (ignore malformed values).
-    project_parts = project.split("/", 1) if project else []
-    active_project = project if len(project_parts) == 2 else ""
-    if active_project:
-        prs = prs.filter(project__owner=project_parts[0], project__repo=project_parts[1])
+    parsed_project = _parse_project_slug(project)
+    active_project = project if parsed_project is not None else ""
+    if parsed_project is not None:
+        prs = prs.filter(project__owner=parsed_project[0], project__repo=parsed_project[1])
 
     prs = prs[:100]
 
@@ -124,8 +134,8 @@ def index(request: HttpRequest) -> HttpResponse:
         base_qs = base_qs.filter(_build_workspace_q(workspace_projects))
     if active_project_type:
         base_qs = base_qs.filter(project__project_type=active_project_type)
-    if active_project:
-        base_qs = base_qs.filter(project__owner=project_parts[0], project__repo=project_parts[1])
+    if parsed_project is not None:
+        base_qs = base_qs.filter(project__owner=parsed_project[0], project__repo=parsed_project[1])
     queue_counts: dict[str, int] = {
         tab["key"]: base_qs.filter(queue=tab["key"]).count() for tab in QUEUE_TABS
     }

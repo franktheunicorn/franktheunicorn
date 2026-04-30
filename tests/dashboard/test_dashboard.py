@@ -584,7 +584,7 @@ class TestProjectFilters:
     def test_queue_counts_respect_project_type_filter(self, client: Client) -> None:
         _, personal_project, _, _ = self._make_projects_and_prs()
         # Add an extra PR for the personal project in the same queue.
-        PullRequestFactory(
+        _extra_pr = PullRequestFactory(
             project=personal_project, title="Extra Personal PR", state="open", queue="review"
         )
         response = client.get("/?project_type=asf")
