@@ -77,7 +77,7 @@ class TestOpenAIBackendLoadsFromDB:
 class TestOpenAIBackendPersistsFallback:
     """_call_api writes fallback state to DB when a BadRequestError triggers it."""
 
-    def _bad_request(self, message: str) -> MagicMock:
+    def _make_bad_request(self, message: str) -> MagicMock:
         import openai
 
         resp = MagicMock()
@@ -91,7 +91,7 @@ class TestOpenAIBackendPersistsFallback:
         backend = OpenAIBackend(config)
         assert backend._supports_json_object is True
 
-        bad_req = self._bad_request("response_format json_object not supported")
+        bad_req = self._make_bad_request("response_format json_object not supported")
         good_resp = MagicMock()
         good_resp.choices = [MagicMock()]
         good_resp.choices[0].message.content = "[]"
@@ -122,7 +122,7 @@ class TestOpenAIBackendPersistsFallback:
         backend = OpenAIBackend(config)
         assert backend._token_param == "max_completion_tokens"
 
-        bad_req = self._bad_request("max_completion_tokens is not valid for this model")
+        bad_req = self._make_bad_request("max_completion_tokens is not valid for this model")
         good_resp = MagicMock()
         good_resp.choices = [MagicMock()]
         good_resp.choices[0].message.content = "[]"
