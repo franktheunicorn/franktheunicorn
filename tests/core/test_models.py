@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import timedelta
 
 import pytest
@@ -203,6 +204,44 @@ class TestReviewDraftModel:
         for status_val, _ in ReviewDraft.STATUS_CHOICES:
             draft = ReviewDraftFactory(status=status_val)
             draft.full_clean()
+
+    def test_github_diff_url_with_file_and_line(self) -> None:
+        pr = PullRequestFactory(url="https://github.com/apache/spark/pull/42")
+        draft = ReviewDraftFactory(
+            pull_request=pr,
+            file_path="src/main/scala/org/apache/spark/Foo.scala",
+            line_number=100,
+            line_end=None,
+        )
+        expected_hash = hashlib.sha256(
+            b"src/main/scala/org/apache/spark/Foo.scala"
+        ).hexdigest()
+        assert draft.github_diff_url == (
+            f"https://github.com/apache/spark/pull/42/files#diff-{expected_hash}R100"
+        )
+
+    def test_github_diff_url_no_line_number(self) -> None:
+        pr = PullRequestFactory(url="https://github.com/apache/spark/pull/42")
+        draft = ReviewDraftFactory(
+            pull_request=pr, file_path="src/main.py", line_number=None
+        )
+        expected_hash = hashlib.sha256(b"src/main.py").hexdigest()
+        assert draft.github_diff_url == (
+            f"https://github.com/apache/spark/pull/42/files#diff-{expected_hash}"
+        )
+
+    def test_github_diff_url_no_file_path(self) -> None:
+        pr = PullRequestFactory(url="https://github.com/apache/spark/pull/42")
+        draft = ReviewDraftFactory(pull_request=pr, file_path="", line_number=None)
+        assert draft.github_diff_url == "https://github.com/apache/spark/pull/42/files"
+
+    def test_github_diff_url_uses_sha256_not_md5(self) -> None:
+        # SHA-256 produces a 64-char hex digest; MD5 produces 32 chars.
+        # Regression guard against reverting to MD5.
+        pr = PullRequestFactory(url="https://github.com/apache/spark/pull/1")
+        draft = ReviewDraftFactory(pull_request=pr, file_path="src/foo.py", line_number=1)
+        anchor = draft.github_diff_url.split("#diff-")[1].split("R")[0]
+        assert len(anchor) == 64
 
 
 @pytest.mark.django_db
