@@ -11,7 +11,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from franktheunicorn.config.models import ProjectConfig
+    from franktheunicorn.config.models import OperatorConfig, ProjectConfig
 
 from django.db.models import Count, Q, Sum
 from django.http import HttpRequest, HttpResponse
@@ -140,6 +140,140 @@ def set_workspace(request: HttpRequest) -> HttpResponse:
     return response
 
 
+def _draft_source_key(draft: ReviewDraft) -> str:
+    """Return the primary source identifier for a draft.
+
+    Prefers the first entry in ``draft.sources``; falls back to
+    ``backend_used`` and then ``"unknown"``.
+    """
+    if draft.sources:
+        return str(draft.sources[0])
+    if draft.backend_used:
+        return draft.backend_used
+    return "unknown"
+
+
+def build_agent_run_summary(
+    pr: PullRequest,
+    operator_config: OperatorConfig,
+    project_config: ProjectConfig | None,
+) -> list[dict[str, object]]:
+    """Build a structured summary of which agents ran (or were configured) for a PR.
+
+    Returns a list of dicts, one per agent, ordered by: LLM backends first,
+    then CodeRabbit, then LLM checks, then shepherding, then any extra sources
+    found in the database that were not part of the configured set.
+
+    Each dict has the following keys:
+
+    - ``source``: internal source key (matches ``ReviewDraft.sources[0]``)
+    - ``display_name``: human-readable agent name
+    - ``did_run``: True if at least one draft was produced by this agent
+    - ``total``: total finding count (including auto-suppressed)
+    - ``active``: non-suppressed finding count
+    - ``suppressed``: auto-suppressed count
+    - ``pending`` / ``accepted`` / ``edited`` / ``rejected`` / ``posted`` /
+      ``recalled``: per-status counts for non-suppressed drafts
+    - ``findings``: list of line-level dicts with ``file_path``, ``line_number``,
+      ``severity``, ``category``, ``body_snippet``, ``is_suppressed``, ``status``
+    """
+    from collections import defaultdict
+
+    # Fetch all drafts (including suppressed) for this PR in a single query.
+    all_drafts = list(
+        ReviewDraft.objects.filter(pull_request=pr).order_by("file_path", "line_number")
+    )
+
+    # Group drafts by their primary source key.
+    source_drafts: dict[str, list[ReviewDraft]] = defaultdict(list)
+    for draft in all_drafts:
+        source_drafts[_draft_source_key(draft)].append(draft)
+
+    # Build the ordered list of configured (expected) agents.
+    configured: list[tuple[str, str]] = []  # (source_key, display_name)
+
+    # 1. LLM backends from operator config.
+    backends = list(operator_config.llm_backends)
+    if not backends:
+        # Stub fallback — used when no backends are configured.
+        configured.append(("agent", "Stub Agent"))
+    else:
+        for backend in backends:
+            source_key = "agent" if backend.provider == "stub" else backend.provider
+            display = backend.provider.title()
+            if backend.model:
+                display += f" ({backend.model})"
+            configured.append((source_key, display))
+
+    # 2. CodeRabbit (when enabled).
+    if operator_config.coderabbit.enabled:
+        configured.append(("coderabbit", "CodeRabbit"))
+
+    # 3. LLM sub-checks from project config.
+    if project_config:
+        for check_name in project_config.llm_checks:
+            pretty = check_name.replace("-", " ").title()
+            configured.append((f"check:{check_name}", f"Check: {pretty}"))
+
+    # 4. Shepherding — only relevant for the operator's own PRs.
+    if pr.is_operator_pr:
+        configured.append(("shepherding", "Shepherding"))
+
+    # 5. Any sources present in the DB that weren't in the configured set
+    #    (e.g. a backend removed from config after it already ran, or copypasta).
+    configured_keys = {key for key, _ in configured}
+    for src_key in source_drafts:
+        if src_key and src_key not in configured_keys and src_key != "unknown":
+            pretty = src_key.replace("check:", "Check: ").replace("-", " ").title()
+            configured.append((src_key, pretty))
+
+    # Build one summary entry per agent.
+    _status_keys = ("pending", "accepted", "edited", "rejected", "posted", "recalled")
+
+    summary = []
+    for source_key, display_name in configured:
+        drafts = source_drafts.get(source_key, [])
+        did_run = bool(drafts)
+
+        status_counts: dict[str, int] = dict.fromkeys(_status_keys, 0)
+        suppressed_count = 0
+        findings_list: list[dict[str, object]] = []
+
+        for d in drafts:
+            if d.is_auto_suppressed:
+                suppressed_count += 1
+            else:
+                bucket = d.status if d.status in status_counts else "pending"
+                status_counts[bucket] += 1
+
+            findings_list.append(
+                {
+                    "file_path": d.file_path,
+                    "line_number": d.line_number,
+                    "severity": d.severity,
+                    "category": d.category,
+                    "body_snippet": (d.edited_body or d.comment_body or "")[:120],
+                    "is_suppressed": d.is_auto_suppressed,
+                    "status": d.status,
+                }
+            )
+
+        summary.append(
+            {
+                "source": source_key,
+                "display_name": display_name,
+                "did_run": did_run,
+                "total": len(drafts),
+                "active": len(drafts) - suppressed_count,
+                "suppressed": suppressed_count,
+                **status_counts,
+                "findings": findings_list,
+            }
+        )
+
+    return summary
+
+
 def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
     """Detail view for a single PR showing drafts and score breakdown."""
     pr = get_object_or_404(PullRequest.objects.select_related("project"), pk=pr_id)
@@ -157,10 +291,12 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
     # Check if agent feedback is enabled (v1.25).
     feedback_enabled = _is_agent_feedback_enabled()
 
-    # Load personality name for template display.
-    from franktheunicorn.config.loader import get_operator_config
+    # Load config — used for personality name and agent run summary.
+    from franktheunicorn.config.loader import get_operator_config, get_project_config
 
-    personality_name = get_operator_config().personality
+    operator_config = get_operator_config()
+    personality_name = operator_config.personality
+    project_config = get_project_config(pr.project.full_name)
 
     # v1.5: Separate CodeRabbit-sourced findings.
     coderabbit_drafts = [d for d in drafts if any("coderabbit" in s for s in (d.sources or []))]
@@ -170,6 +306,9 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
     jira_context = pr.jira_cache if pr.jira_cache else None
     community_context = pr.community_context_cache if pr.community_context_cache else None
     sentry_context = pr.sentry_context_cache if pr.sentry_context_cache else None
+
+    # Agent run summary: which agents ran, their stats, and which didn't.
+    agent_run_summary = build_agent_run_summary(pr, operator_config, project_config)
 
     return render(
         request,
@@ -187,6 +326,7 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
             "jira_context": jira_context,
             "community_context": community_context,
             "sentry_context": sentry_context,
+            "agent_run_summary": agent_run_summary,
         },
     )
 

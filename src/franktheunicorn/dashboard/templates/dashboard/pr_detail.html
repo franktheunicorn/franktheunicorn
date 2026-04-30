@@ -48,6 +48,81 @@
 </dl>
 {% endif %}
 
+{% if agent_run_summary %}
+<h3 style="margin-top: 1.5rem;">Agent Run Summary</h3>
+<table style="font-size: 0.85rem;">
+    <thead>
+        <tr>
+            <th>Agent</th>
+            <th>Status</th>
+            <th>Findings</th>
+            <th>Line Summaries</th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for agent in agent_run_summary %}
+    <tr>
+        <td>
+            {% if agent.did_run %}
+                {% if "coderabbit" in agent.source %}
+                <span class="source-badge source-coderabbit">{{ agent.display_name }}</span>
+                {% else %}
+                <span class="source-badge source-agent">{{ agent.display_name }}</span>
+                {% endif %}
+            {% else %}
+            <span class="source-badge" style="background: #e0e0e0; color: #666;">{{ agent.display_name }}</span>
+            {% endif %}
+        </td>
+        <td>
+            {% if agent.did_run %}
+            <span style="color: var(--green); font-weight: 600;">&#10003; ran</span>
+            {% else %}
+            <span style="color: #bbb; font-style: italic;">not run</span>
+            {% endif %}
+        </td>
+        <td>
+            {% if agent.did_run %}
+            <span>{{ agent.total }} total</span>
+            {% if agent.accepted %}&middot; <span style="color: var(--green);">{{ agent.accepted }} approved</span>{% endif %}
+            {% if agent.edited %}&middot; <span style="color: var(--orange);">{{ agent.edited }} edited</span>{% endif %}
+            {% if agent.posted %}&middot; <span style="color: var(--blue);">{{ agent.posted }} posted</span>{% endif %}
+            {% if agent.rejected %}&middot; <span style="color: var(--red);">{{ agent.rejected }} rejected</span>{% endif %}
+            {% if agent.suppressed %}&middot; <span style="color: #999;">{{ agent.suppressed }} suppressed</span>{% endif %}
+            {% if agent.pending and not agent.accepted and not agent.rejected and not agent.edited and not agent.posted %}&middot; <span style="color: var(--muted);">{{ agent.pending }} pending</span>{% endif %}
+            {% else %}
+            &mdash;
+            {% endif %}
+        </td>
+        <td>
+            {% if agent.did_run and agent.findings %}
+            <details>
+                <summary style="cursor: pointer; font-size: 0.8rem; color: var(--accent);">{{ agent.findings|length }} location{{ agent.findings|length|pluralize }}</summary>
+                <ul style="list-style: none; margin-top: 0.4rem; padding: 0; font-size: 0.78rem;">
+                {% for f in agent.findings %}
+                <li style="margin-bottom: 0.2rem;
+                    {% if f.is_suppressed %}color: #aaa;
+                    {% elif f.status == 'rejected' %}color: var(--red);
+                    {% elif f.status == 'accepted' or f.status == 'edited' or f.status == 'posted' %}color: var(--green);
+                    {% else %}color: var(--text);{% endif %}">
+                    <code>{{ f.file_path }}{% if f.line_number %}:{{ f.line_number }}{% endif %}</code>
+                    <span style="color: #999; font-size: 0.7rem;">[{{ f.severity }}{% if f.is_suppressed %}, suppressed{% else %}, {{ f.status }}{% endif %}]</span>
+                    {% if f.body_snippet %}&mdash; <em style="color: var(--muted);">{{ f.body_snippet }}</em>{% endif %}
+                </li>
+                {% endfor %}
+                </ul>
+            </details>
+            {% elif agent.did_run %}
+            <span style="color: #999; font-size: 0.8rem;">(no line findings)</span>
+            {% else %}
+            &mdash;
+            {% endif %}
+        </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+
 {% if test_runs %}
 <h3 style="margin-top: 1.5rem;">Test Runs</h3>
 {% for run in test_runs %}
