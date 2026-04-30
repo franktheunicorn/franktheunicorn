@@ -8,7 +8,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("core", "0014_add_llm_backend_fallback"),
+        ("core", "0015_pullrequest_base_head_sha"),
     ]
 
     operations = [
