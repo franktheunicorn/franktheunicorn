@@ -102,6 +102,35 @@ class TestPersonalityInPrompt:
         # Should not have stray blank lines from missing philosophy
         assert "Correctness" not in prompt
 
+    def test_personality_examples_injected(self) -> None:
+        ctx = make_pr_context(
+            personality_identity="You are a reviewer.",
+            personality_examples_text=(
+                "Here are real examples of comments this reviewer has written:\n"
+                "\n[correctness]\n"
+                '"Use isNullAt(idx) instead of == null."'
+            ),
+        )
+        prompt = build_system_prompt(ctx)
+        assert "real examples" in prompt
+        assert "isNullAt" in prompt
+
+    def test_personality_examples_omitted_when_empty(self) -> None:
+        ctx = make_pr_context(personality_examples_text="")
+        prompt = build_system_prompt(ctx)
+        assert "real examples" not in prompt
+
+    def test_personality_examples_appear_after_philosophy(self) -> None:
+        ctx = make_pr_context(
+            personality_identity="You are a reviewer.",
+            personality_review_philosophy="Correctness over style.",
+            personality_examples_text='Here are real examples:\n[style]\n"Use 4 spaces."',
+        )
+        prompt = build_system_prompt(ctx)
+        philosophy_pos = prompt.index("Correctness over style.")
+        examples_pos = prompt.index("real examples")
+        assert examples_pos > philosophy_pos
+
 
 class TestFindingSchemaGeneration:
     """Verify the schema is auto-generated from the ReviewFinding Pydantic model."""

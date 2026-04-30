@@ -38,6 +38,7 @@ class PRContext:
     personality_internal_voice: str = ""
     personality_external_voice: str = ""
     personality_review_philosophy: str = ""
+    personality_examples_text: str = ""
     linked_issues_context: str = ""
     # Repo health context (bootstrapped from git history analysis)
     repo_health_context: str = ""

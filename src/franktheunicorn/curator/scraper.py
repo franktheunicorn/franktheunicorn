@@ -31,11 +31,17 @@ def scrape_review_comments(
     repo: str,
     token: str,
     limit: int = 100,
+    *,
+    author: str | None = None,
 ) -> list[RawComment]:
     """Scrape recent review comments from GitHub.
 
     Uses the GitHub API to fetch pull request review comments.
     Returns up to ``limit`` comments, sorted by most recent first.
+
+    When ``author`` is provided, only comments by that GitHub username are
+    returned.  Filtering happens client-side because the GitHub pulls/comments
+    endpoint does not support an author filter.
     """
     headers = {
         "Accept": "application/vnd.github+json",
@@ -63,9 +69,12 @@ def scrape_review_comments(
             for item in items:
                 if len(comments) >= limit:
                     break
+                comment_author = item.get("user", {}).get("login", "")
+                if author is not None and comment_author != author:
+                    continue
                 comments.append(
                     RawComment(
-                        author=item.get("user", {}).get("login", ""),
+                        author=comment_author,
                         body=item.get("body", "") or "",
                         diff_context=item.get("diff_hunk", "") or "",
                         file_path=item.get("path", "") or "",
@@ -80,6 +89,48 @@ def scrape_review_comments(
 
     logger.info("Scraped %d review comments from %s/%s", len(comments), owner, repo)
     return comments
+
+
+def scrape_user_comments(
+    username: str,
+    repos: list[tuple[str, str]],
+    token: str,
+    limit: int = 200,
+) -> list[RawComment]:
+    """Scrape review comments authored by a specific GitHub user across repos.
+
+    ``repos`` is a list of ``(owner, repo)`` pairs.  Comments are fetched from
+    each repo and filtered to those authored by ``username``.  Returns up to
+    ``limit`` comments in total, distributed across repos.
+    """
+    if not repos:
+        return []
+
+    per_repo_limit = max(1, limit // len(repos))
+    all_comments: list[RawComment] = []
+
+    for owner, repo in repos:
+        if len(all_comments) >= limit:
+            break
+        remaining = limit - len(all_comments)
+        try:
+            comments = scrape_review_comments(
+                owner,
+                repo,
+                token,
+                limit=min(per_repo_limit, remaining),
+                author=username,
+            )
+            all_comments.extend(comments)
+        except Exception:
+            logger.warning(
+                "Failed to scrape comments from %s/%s — skipping.", owner, repo, exc_info=True
+            )
+
+    logger.info(
+        "Scraped %d comments by %s across %d repos", len(all_comments), username, len(repos)
+    )
+    return all_comments
 
 
 def _extract_pr_number(pull_request_url: str) -> int:

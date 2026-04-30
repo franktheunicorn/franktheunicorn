@@ -83,6 +83,18 @@ def build_pr_context(
 
     personality = load_personality(operator_config.personality)
 
+    # Format examples into a pre-rendered string for the prompt builder.
+    personality_examples_text = ""
+    if personality and personality.examples:
+        lines: list[str] = ["Here are real examples of comments this reviewer has written:"]
+        seen_cats: set[str] = set()
+        for cat, text in personality.examples:
+            if cat not in seen_cats:
+                lines.append(f"\n[{cat}]")
+                seen_cats.add(cat)
+            lines.append(f'"{text}"')
+        personality_examples_text = "\n".join(lines)
+
     return PRContext(
         pr_title=pr.title,
         pr_body=pr.body or "",
@@ -99,6 +111,7 @@ def build_pr_context(
         personality_internal_voice=personality.internal_voice if personality else "",
         personality_external_voice=personality.external_voice if personality else "",
         personality_review_philosophy=(personality.review_philosophy if personality else ""),
+        personality_examples_text=personality_examples_text,
         repo_health_context=repo_health_context,
         community_context=community_context,
         jira_context=jira_context,

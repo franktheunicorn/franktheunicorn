@@ -71,6 +71,10 @@ def build_system_prompt(ctx: PRContext) -> str:
         parts.append("")
         parts.append(ctx.personality_review_philosophy)
 
+    if ctx.personality_examples_text:
+        parts.append("")
+        parts.append(ctx.personality_examples_text)
+
     parts.append("")
     parts.append(_finding_schema())
 

@@ -77,6 +77,7 @@ class TestBuildPRContext:
                     "internal_voice": "Think carefully",
                     "external_voice": "Be kind",
                     "review_philosophy": "Teach, don't lecture",
+                    "examples": (),
                 },
             )()
             mock_load.return_value = mock_personality

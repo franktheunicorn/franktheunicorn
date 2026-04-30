@@ -264,3 +264,178 @@ class TestScrapeReviewCommentsErrorHandling:
 def httpx_mock(httpx_mock):
     """Re-export pytest-httpx fixture."""
     return httpx_mock
+
+
+class TestAuthorFilter:
+    """Tests for the author= keyword filter in scrape_review_comments."""
+
+    def test_filters_by_author(self, httpx_mock) -> None:
+        api_comments = [
+            _make_api_comment(login="alice", body="Alice comment"),
+            _make_api_comment(login="bob", body="Bob comment"),
+            _make_api_comment(login="alice", body="Another Alice comment"),
+        ]
+        httpx_mock.add_response(
+            url=httpx.URL(
+                "https://api.github.com/repos/org/repo/pulls/comments"
+                "?sort=created&direction=desc&per_page=3&page=1"
+            ),
+            json=api_comments,
+        )
+        # Page 2 returns empty, signalling end of results.
+        httpx_mock.add_response(
+            url=httpx.URL(
+                "https://api.github.com/repos/org/repo/pulls/comments"
+                "?sort=created&direction=desc&per_page=3&page=2"
+            ),
+            json=[],
+        )
+
+        result = scrape_review_comments("org", "repo", "fake-token", limit=3, author="alice")
+
+        assert len(result) == 2
+        assert all(c.author == "alice" for c in result)
+
+    def test_author_filter_none_returns_all(self, httpx_mock) -> None:
+        api_comments = [
+            _make_api_comment(login="alice"),
+            _make_api_comment(login="bob"),
+        ]
+        httpx_mock.add_response(
+            url=httpx.URL(
+                "https://api.github.com/repos/org/repo/pulls/comments"
+                "?sort=created&direction=desc&per_page=2&page=1"
+            ),
+            json=api_comments,
+        )
+
+        result = scrape_review_comments("org", "repo", "fake-token", limit=2, author=None)
+        assert len(result) == 2
+
+    def test_author_filter_no_match_returns_empty(self, httpx_mock) -> None:
+        api_comments = [
+            _make_api_comment(login="alice"),
+            _make_api_comment(login="bob"),
+        ]
+        httpx_mock.add_response(
+            url=httpx.URL(
+                "https://api.github.com/repos/org/repo/pulls/comments"
+                "?sort=created&direction=desc&per_page=10&page=1"
+            ),
+            json=api_comments,
+        )
+        httpx_mock.add_response(
+            url=httpx.URL(
+                "https://api.github.com/repos/org/repo/pulls/comments"
+                "?sort=created&direction=desc&per_page=10&page=2"
+            ),
+            json=[],
+        )
+
+        result = scrape_review_comments("org", "repo", "fake-token", limit=10, author="nobody")
+        assert result == []
+
+
+class TestScrapeUserComments:
+    """Tests for scrape_user_comments() multi-repo scraping."""
+
+    def test_aggregates_across_repos(self, httpx_mock) -> None:
+        from franktheunicorn.curator.scraper import scrape_user_comments
+
+        # per_repo_limit = 200 // 2 = 100; per_page = min(100, 100) = 100
+        httpx_mock.add_response(
+            url=httpx.URL(
+                "https://api.github.com/repos/org/repo1/pulls/comments"
+                "?sort=created&direction=desc&per_page=100&page=1"
+            ),
+            json=[_make_api_comment(login="alice", body="Comment in repo1")],
+        )
+        httpx_mock.add_response(
+            url=httpx.URL(
+                "https://api.github.com/repos/org/repo1/pulls/comments"
+                "?sort=created&direction=desc&per_page=100&page=2"
+            ),
+            json=[],
+        )
+        httpx_mock.add_response(
+            url=httpx.URL(
+                "https://api.github.com/repos/org/repo2/pulls/comments"
+                "?sort=created&direction=desc&per_page=100&page=1"
+            ),
+            json=[_make_api_comment(login="alice", body="Comment in repo2")],
+        )
+        httpx_mock.add_response(
+            url=httpx.URL(
+                "https://api.github.com/repos/org/repo2/pulls/comments"
+                "?sort=created&direction=desc&per_page=100&page=2"
+            ),
+            json=[],
+        )
+
+        result = scrape_user_comments("alice", [("org", "repo1"), ("org", "repo2")], "token")
+        bodies = [c.body for c in result]
+        assert "Comment in repo1" in bodies
+        assert "Comment in repo2" in bodies
+
+    def test_empty_repos_returns_empty(self) -> None:
+        from franktheunicorn.curator.scraper import scrape_user_comments
+
+        result = scrape_user_comments("alice", [], "token")
+        assert result == []
+
+    def test_filters_by_author_across_repos(self, httpx_mock) -> None:
+        from franktheunicorn.curator.scraper import scrape_user_comments
+
+        # single repo: per_repo_limit = 200, per_page = min(200, 100) = 100
+        httpx_mock.add_response(
+            url=httpx.URL(
+                "https://api.github.com/repos/org/repo1/pulls/comments"
+                "?sort=created&direction=desc&per_page=100&page=1"
+            ),
+            json=[
+                _make_api_comment(login="alice", body="Alice"),
+                _make_api_comment(login="bob", body="Bob"),
+            ],
+        )
+        httpx_mock.add_response(
+            url=httpx.URL(
+                "https://api.github.com/repos/org/repo1/pulls/comments"
+                "?sort=created&direction=desc&per_page=100&page=2"
+            ),
+            json=[],
+        )
+
+        result = scrape_user_comments("alice", [("org", "repo1")], "token", limit=200)
+        assert all(c.author == "alice" for c in result)
+
+    def test_skips_failed_repos(self, httpx_mock) -> None:
+        from franktheunicorn.curator.scraper import scrape_user_comments
+
+        # per_repo_limit = 200 // 2 = 100; per_page = min(100, 100) = 100
+        httpx_mock.add_response(
+            url=httpx.URL(
+                "https://api.github.com/repos/org/fails/pulls/comments"
+                "?sort=created&direction=desc&per_page=100&page=1"
+            ),
+            status_code=404,
+        )
+        httpx_mock.add_response(
+            url=httpx.URL(
+                "https://api.github.com/repos/org/ok/pulls/comments"
+                "?sort=created&direction=desc&per_page=100&page=1"
+            ),
+            json=[_make_api_comment(login="alice", body="OK comment")],
+        )
+        httpx_mock.add_response(
+            url=httpx.URL(
+                "https://api.github.com/repos/org/ok/pulls/comments"
+                "?sort=created&direction=desc&per_page=100&page=2"
+            ),
+            json=[],
+        )
+
+        result = scrape_user_comments(
+            "alice", [("org", "fails"), ("org", "ok")], "token", limit=200
+        )
+        assert len(result) == 1
+        assert result[0].body == "OK comment"

@@ -15,13 +15,14 @@ from __future__ import annotations
 import importlib.resources
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 _SECTION_RE = re.compile(r"^## (.+)$", re.MULTILINE)
+_SUBSECTION_RE = re.compile(r"^### (.+)$", re.MULTILINE)
 
 _USER_PERSONALITIES_DIR = (
     Path(__file__).resolve().parent.parent.parent.parent / "config" / "active" / "personalities"
@@ -38,6 +39,8 @@ class Personality:
     external_voice: str
     review_philosophy: str
     raw: str
+    # Verbatim review examples grouped by category: ((category, text), ...)
+    examples: tuple[tuple[str, str], ...] = field(default_factory=tuple)
 
 
 def _parse_sections(raw: str) -> dict[str, str]:
@@ -50,6 +53,35 @@ def _parse_sections(raw: str) -> dict[str, str]:
         end = headers[i + 1].start() if i + 1 < len(headers) else len(raw)
         sections[key] = raw[start:end].strip()
     return sections
+
+
+def _parse_review_examples(section_body: str) -> tuple[tuple[str, str], ...]:
+    """Parse the ``## Review Examples`` section body into (category, text) pairs.
+
+    The section uses ``### category`` sub-headers and blockquote-formatted
+    comment bodies (lines starting with ``> ``).
+    """
+    examples: list[tuple[str, str]] = []
+    sub_headers = list(_SUBSECTION_RE.finditer(section_body))
+    for i, match in enumerate(sub_headers):
+        category = match.group(1).strip().lower()
+        start = match.end()
+        end = sub_headers[i + 1].start() if i + 1 < len(sub_headers) else len(section_body)
+        block = section_body[start:end].strip()
+
+        # Extract blockquote lines ("> text" or ">").
+        lines: list[str] = []
+        for line in block.splitlines():
+            if line.startswith("> "):
+                lines.append(line[2:])
+            elif line.strip() == ">":
+                lines.append("")
+
+        text = "\n".join(lines).strip()
+        if text:
+            examples.append((category, text))
+
+    return tuple(examples)
 
 
 def _read_personality_file(name: str) -> str | None:
@@ -82,6 +114,8 @@ def load_personality(name: str) -> Personality | None:
         return None
 
     sections = _parse_sections(raw)
+    examples = _parse_review_examples(sections.get("review examples", ""))
+
     return Personality(
         name=name,
         identity=sections.get("identity", ""),
@@ -89,7 +123,18 @@ def load_personality(name: str) -> Personality | None:
         external_voice=sections.get("external voice", ""),
         review_philosophy=sections.get("review philosophy", ""),
         raw=raw,
+        examples=examples,
     )
 
 
-__all__ = ["Personality", "load_personality"]
+def refresh_personality(name: str) -> None:
+    """Clear the cached personality for *name* so the next load re-reads the file.
+
+    Call this after rebuilding or editing a personality file to make the change
+    take effect without restarting the worker.
+    """
+    load_personality.cache_clear()
+    logger.debug("Cleared personality cache for '%s'", name)
+
+
+__all__ = ["Personality", "load_personality", "refresh_personality"]
