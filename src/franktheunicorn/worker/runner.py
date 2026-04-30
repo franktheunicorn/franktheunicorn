@@ -367,7 +367,7 @@ def _run_cycle(
 
                 # Differential test verification (§9).
                 try:
-                    test_run = test_runner.run_differential_test(pr, pc)
+                    test_run = test_runner.run_differential_test(pr, pc, repo_path)
                     if test_run:
                         logger.info(
                             "  PR #%d: test verdict=%s",

@@ -10,13 +10,19 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from franktheunicorn.core.models import TestRun
 from franktheunicorn.worker.test_identifier import identify_test_scope
+from franktheunicorn.worker.test_image import resolve_image
+from franktheunicorn.worker.test_workspace import (
+    base_cherry_pick_workspace,
+    pr_branch_workspace,
+)
 
 if TYPE_CHECKING:
-    from franktheunicorn.config.models import ProjectConfig
+    from franktheunicorn.config.models import ProjectConfig, TestExecutionConfig
     from franktheunicorn.core.models import PullRequest
 
 logger = logging.getLogger(__name__)
@@ -53,13 +59,14 @@ class TestRunner:
         self,
         pr: PullRequest,
         project_config: ProjectConfig,
+        repo_path: Path | None = None,
     ) -> TestRun | None:
         """Run a differential test for a PR.
 
         Returns the TestRun record, or None if tests can't run.
         """
-        test_config = getattr(project_config, "test_config", None)
-        if test_config is not None and not test_config.get("enabled", False):
+        tests: TestExecutionConfig = project_config.tests
+        if not tests.enabled:
             return None
 
         # Identify test scope.
@@ -70,45 +77,70 @@ class TestRunner:
             # No test files changed and not AI-generated — skip.
             return None
 
+        if repo_path is None or not repo_path.is_dir():
+            logger.info(
+                "Repo clone unavailable for %s; skipping test verification for PR #%d",
+                project_config.full_name,
+                pr.number,
+            )
+            return None
+
+        if not pr.head_sha or not pr.base_sha:
+            logger.info(
+                "PR #%d missing base/head SHA; skipping test verification",
+                pr.number,
+            )
+            return None
+
         docker = self._get_docker()
         if docker is None:
             logger.info("Docker not available; skipping test verification for PR #%d", pr.number)
             return None
 
-        # Determine container image and resource tier.
-        container_image = "python:3.12-slim"
-        resource_tier = "standard"
-        if test_config:
-            container_image = test_config.get("container_image", container_image)
-            resource_tier = test_config.get("resource_tier", resource_tier)
+        resources = RESOURCE_TIERS.get(tests.resource_tier, RESOURCE_TIERS["standard"])
 
-        resources = RESOURCE_TIERS.get(resource_tier, RESOURCE_TIERS["standard"])
-
-        # Create TestRun record.
+        # Create TestRun record. ``container_image`` is filled in once the
+        # image has been resolved (build may take a while).
         test_run = TestRun.objects.create(
             pull_request=pr,
             run_type="pr_branch",
             status="running",
             test_scope=test_scope,
-            container_image=container_image,
+            container_image="",
             started_at=datetime.now(tz=UTC),
         )
 
         try:
-            pr_result = self._run_container(
-                docker,
-                container_image,
-                test_scope,
-                resources,
-                "pr_branch",
-            )
-            base_result = self._run_container(
-                docker,
-                container_image,
-                test_scope,
-                resources,
-                "base_cherry_pick",
-            )
+            with pr_branch_workspace(repo_path, pr.head_sha) as pr_ws:
+                image = resolve_image(
+                    docker,
+                    project_config.owner,
+                    project_config.repo,
+                    tests,
+                    pr_ws,
+                )
+                test_run.container_image = image
+
+                pr_result = self._run_container(
+                    docker,
+                    image,
+                    pr_ws,
+                    test_scope,
+                    resources,
+                    tests,
+                )
+
+            with base_cherry_pick_workspace(
+                repo_path, pr.base_sha, pr.head_sha, test_scope
+            ) as base_ws:
+                base_result = self._run_container(
+                    docker,
+                    image,
+                    base_ws,
+                    test_scope,
+                    resources,
+                    tests,
+                )
 
             verdict = self._compute_verdict(pr_result, base_result)
 
@@ -134,29 +166,33 @@ class TestRunner:
         self,
         docker: Any,
         image: str,
+        workspace: Path,
         test_files: list[str],
         resources: dict[str, Any],
-        run_type: str,
+        tests: TestExecutionConfig,
     ) -> dict[str, Any]:
         """Run tests in a Docker container.
 
         Returns a dict with 'exit_code', 'stdout', 'stderr', 'timed_out'.
         """
-        test_cmd = " ".join(test_files)
-        command = f"python -m pytest {test_cmd} --tb=short -q"
+        command = tests.test_command.format(tests=" ".join(test_files))
 
         container = None
         try:
             container = docker.containers.run(
                 image,
-                command=f"sh -c '{command}'",
+                command=["sh", "-c", command],
                 detach=True,
                 network_mode="none",  # §9.5: no network access
                 cpu_count=resources.get("cpu_count", 4),
                 mem_limit=resources.get("mem_limit", "8g"),
                 security_opt=["no-new-privileges"],
+                cap_drop=["ALL"],
                 read_only=True,
-                tmpfs={"/tmp": "size=1G"},
+                tmpfs={"/tmp": "size=1G", tests.workdir: "size=2G,exec"},
+                volumes={str(workspace): {"bind": tests.workdir, "mode": "ro"}},
+                working_dir=tests.workdir,
+                environment=dict(tests.env),
             )
 
             timeout = resources.get("timeout", 900)

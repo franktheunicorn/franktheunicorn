@@ -29,6 +29,14 @@ frequent_contributors:
 
 enabled: true
 
+# Differential test runner (see docs/test-runner.md). Spark publishes a
+# CI-grade test image upstream, so we use it as-is rather than rebuilding.
+tests:
+  enabled: true
+  container_image: ghcr.io/apache/spark-test:latest
+  resource_tier: heavy
+  test_command: "python -m pytest {tests} --tb=short -q"
+
 # --- v1.5 features ---
 
 # JIRA integration — fetch ticket context for PRs referencing SPARK-xxxxx

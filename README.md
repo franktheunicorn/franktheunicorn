@@ -64,7 +64,7 @@ For project configuration and workspaces, see the **[Install Guide](docs/install
 - **Triages PRs** across multiple repos with configurable interest scoring (path overlap, git blame, collaborator detection, custom LLM-generated scoring functions)
 - **Drafts review comments** using multi-backend LLM review (Sonnet for substance, Haiku for nits, Opus for architecture)
 - **Learns from your corrections** via an anti-pattern list that improves with every rejection and edit
-- **Runs differential tests** to verify new tests actually fail without the PR's changes
+- **Runs differential tests** to verify new tests actually fail without the PR's changes — see [docs/test-runner.md](docs/test-runner.md) to enable per project
 - **Routes PRs to queues** — AI-generated, new contributors, low-context drive-bys, consider-closing
 - **Respects project cultures** — ASF governance norms are different from your Django side project
 - **Works on your phone** — responsive dashboard over Tailscale for conference triage
