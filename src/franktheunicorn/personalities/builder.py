@@ -34,7 +34,7 @@ TOP_CATEGORIES_N = 5
 
 _QUESTION_RE = re.compile(r"\?")
 _SUGGESTION_RE = re.compile(
-    r"(?i)(consider |you might|you could|try |perhaps|maybe |i.d suggest|"
+    r"(?i)(consider |you might|you could|try |perhaps|maybe |i'd suggest|"
     r"one option|an alternative)"
 )
 
@@ -148,7 +148,11 @@ def _build_fallback_persona(
     stats: PersonaStats,
     examples_by_category: dict[str, list[str]],
 ) -> str:
-    """Generate a template-based persona when no LLM is available."""
+    """Generate a template-based persona when no LLM is available.
+
+    Returns Identity/Voice/Philosophy sections followed by the Review Examples
+    section (if any examples were selected).
+    """
     top = stats.top_categories
 
     style_notes: list[str] = []
@@ -205,10 +209,9 @@ def _build_fallback_persona(
     if stats.suggestion_rate > 0.3:
         sections.append("- Suggest concrete alternative implementations")
 
-    sections.append("")
-
     examples_section = _format_review_examples(examples_by_category)
     if examples_section:
+        sections.append("")
         sections.append(examples_section)
 
     return "\n".join(sections)
@@ -229,7 +232,7 @@ def _build_llm_persona(
     try:
         import anthropic
     except ImportError:
-        logger.debug("anthropic package not available; using fallback persona builder")
+        logger.warning("anthropic package not available; using fallback persona builder")
         return None
 
     api_key = os.environ.get(backend_config.api_key_env or "ANTHROPIC_API_KEY", "")
@@ -330,17 +333,12 @@ def build_persona_from_comments(
     if backend_config is not None and backend_config.provider not in ("stub", ""):
         persona_body = _build_llm_persona(stats, examples_by_category, backend_config)
 
-    examples_section = _format_review_examples(examples_by_category)
-
     if persona_body is None:
-        result = _build_fallback_persona(stats, examples_by_category)
-        # _build_fallback_persona already appends examples internally, but
-        # double-check to avoid duplication when the section was empty.
-        if examples_section and "## Review Examples" not in result:
-            result = result.rstrip() + "\n\n" + examples_section
-        return result
+        # Fallback path: _build_fallback_persona includes the examples section.
+        return _build_fallback_persona(stats, examples_by_category)
 
-    # LLM succeeded: compose full file.
+    # LLM path: append the verbatim examples section after the generated prose.
+    examples_section = _format_review_examples(examples_by_category)
     result = f"# {username}\n\n{persona_body}"
     if examples_section:
         result = result.rstrip() + "\n\n" + examples_section
