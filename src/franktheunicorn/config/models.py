@@ -473,6 +473,45 @@ class OperatorConfig(BaseModel):
         return v
 
 
+class ContextConfig(BaseModel):
+    """Optional full-file and first-party-import context for review prompts.
+
+    When enabled, the drafter reads the local checkout and includes the full
+    contents of changed files (when they fit ``per_file_token_cap``) and the
+    first-party modules they import — up to ``total_token_budget`` total.
+    Tokens are estimated cheaply as ``len(text) // 4``; the budget leaves
+    headroom for that approximation.
+    """
+
+    include_full_file: bool = True
+    include_first_party_imports: bool = True
+    total_token_budget: int = 4000
+    per_file_token_cap: int = 2000
+    import_depth: int = 1
+    package_roots: list[str] = Field(default_factory=list)
+
+    @field_validator("total_token_budget", "per_file_token_cap")
+    @classmethod
+    def budget_must_be_positive(cls, v: int) -> int:
+        if v <= 0:
+            msg = "must be positive"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("import_depth")
+    @classmethod
+    def import_depth_in_range(cls, v: int) -> int:
+        if v < 0:
+            msg = "import_depth must be >= 0"
+            raise ValueError(msg)
+        if v > 1:
+            logger.warning(
+                "import_depth=%d requested; v1 resolver only walks one level (treating as 1)",
+                v,
+            )
+        return v
+
+
 class ProjectConfig(BaseModel):
     """Per-project config loaded from a YAML file in the projects directory."""
 
@@ -514,6 +553,9 @@ class ProjectConfig(BaseModel):
 
     # LLM sub-checks (v1) — e.g. ["coverage"]
     llm_checks: list[str] = Field(default_factory=list)
+
+    # Full-file + first-party-import context for review prompts (v1).
+    context: ContextConfig = Field(default_factory=ContextConfig)
 
     @field_validator("llm_checks")
     @classmethod

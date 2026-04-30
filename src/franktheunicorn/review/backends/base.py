@@ -45,6 +45,9 @@ class PRContext:
     community_context: str = ""
     jira_context: str = ""
     sentry_context: str = ""
+    # v1: full-file + first-party-import context (built from local checkout)
+    full_file_context: str = ""
+    imported_modules_context: str = ""
 
 
 class ReviewFinding(BaseModel):

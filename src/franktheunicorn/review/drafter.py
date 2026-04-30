@@ -19,6 +19,7 @@ from franktheunicorn.review.antipattern import (
 )
 from franktheunicorn.review.backends import get_backend
 from franktheunicorn.review.backends.base import PRContext, ReviewFinding
+from franktheunicorn.review.context_builder import build_context_strings
 from franktheunicorn.review.dedup import deduplicate_findings
 from franktheunicorn.review.tone_guard import apply_tone_guard_batch
 from franktheunicorn.scoring.rejection_predictor import (
@@ -28,6 +29,8 @@ from franktheunicorn.scoring.rejection_predictor import (
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig, ProjectConfig
     from franktheunicorn.core.models import Project, PullRequest
     from franktheunicorn.scoring.rejection_predictor import RejectionPredictor
@@ -66,6 +69,7 @@ def build_pr_context(
     community_context: str = "",
     jira_context: str = "",
     sentry_context: str = "",
+    repo_path: Path | None = None,
 ) -> PRContext:
     """Bundle PR + config data into a PRContext for the LLM."""
     anti_patterns: list[str] = []
@@ -82,6 +86,17 @@ def build_pr_context(
     from franktheunicorn.personalities import load_personality
 
     personality = load_personality(operator_config.personality)
+
+    full_file_ctx = ""
+    imported_ctx = ""
+    try:
+        full_file_ctx, imported_ctx = build_context_strings(
+            changed_files=pr.changed_files or [],
+            repo_path=repo_path,
+            config=project_config.context,
+        )
+    except Exception:
+        logger.debug("Failed to build full-file context for PR #%d", pr.number, exc_info=True)
 
     return PRContext(
         pr_title=pr.title,
@@ -103,6 +118,8 @@ def build_pr_context(
         community_context=community_context,
         jira_context=jira_context,
         sentry_context=sentry_context,
+        full_file_context=full_file_ctx,
+        imported_modules_context=imported_ctx,
     )
 
 
@@ -328,6 +345,7 @@ def draft_review(
     community_context: str = "",
     jira_context: str = "",
     sentry_context: str = "",
+    repo_path: Path | None = None,
 ) -> list[ReviewDraft]:
     """Generate review drafts for a PR using all configured LLM backends.
 
@@ -353,6 +371,7 @@ def draft_review(
         community_context=community_context,
         jira_context=jira_context,
         sentry_context=sentry_context,
+        repo_path=repo_path,
     )
     diff = _get_pr_diff(pr)
 
