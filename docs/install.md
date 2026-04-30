@@ -307,3 +307,51 @@ and `FRANK_GITHUB_TOKEN` is set in `.env`. The worker polls every
 
 **Docker build fails** — Make sure Docker is running. Try `docker compose build
 --no-cache` for a clean build.
+
+## Logging
+
+### Where logs go
+
+All log output goes to **stdout/stderr**:
+
+- **Docker Compose:** `docker compose logs -f worker` / `docker compose logs -f web`
+- **Make / local:** logs print directly to the terminal that's running the worker
+
+### Changing the log level
+
+Set `log_level` in `config/active/operator.yaml`:
+
+```yaml
+# CRITICAL | ERROR | WARNING | INFO | DEBUG | NOTSET
+log_level: "INFO"   # default
+```
+
+Or override at runtime without touching the file:
+
+```bash
+# env var — works for both Docker and local
+FRANK_LOG_LEVEL=DEBUG make worker
+
+# CLI flag (worker only)
+make worker-debug          # shortcut for --log-level=DEBUG
+python manage.py run_worker --log-level=DEBUG
+python manage.py run_worker --debug   # same thing
+```
+
+Use `DEBUG` when diagnosing issues — it includes prompt sizes, token counts, and
+the raw JSON returned by LLM backends.
+
+### Common log messages from LLM backends
+
+The worker logs a clear message whenever an AI backend call fails.
+
+| Message | What it means | How to fix |
+|---|---|---|
+| `HTTP 401 … authentication failed` | API key rejected | Check that the key in `.env` is correct and not expired |
+| `HTTP 403 … permission denied` | Key lacks permissions or account suspended | Check your provider account dashboard |
+| `HTTP 429 … rate limited` | Quota exhausted for this billing cycle | Wait for the quota to reset, or upgrade your plan; franktheunicorn will retry automatically on the next poll |
+| `HTTP 4xx` (other) | Bad request — likely a model or config problem | Check `log_level: "DEBUG"` for the full error body |
+| `API call failed` (no HTTP code) | Network or SDK error | Check your internet connection and that the provider's API is reachable |
+
+All 4xx messages are logged at `ERROR` level except 429 (rate limit), which is
+`WARNING` because it is transient and handled automatically.
