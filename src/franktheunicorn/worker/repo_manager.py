@@ -7,6 +7,7 @@ where possible to avoid needing to checkout specific branches.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import subprocess
@@ -159,12 +160,16 @@ def _ensure_fork_remote(repo_path: Path, clone_url: str) -> str:
     remote name.
     """
     # Derive a deterministic, filesystem-safe remote name from the URL.
+    # Include an 8-hex hash of the full URL so that two different URLs that
+    # share a long common prefix don't silently collide after truncation.
     url = clone_url
     url = re.sub(r"^git@[^:]+:", "", url)  # strip git@host:
     url = re.sub(r"^https?://[^/]+/", "", url)  # strip https://host/
     url = url.removesuffix(".git")
     sanitized = re.sub(r"[^a-zA-Z0-9._-]", "-", url).lstrip("-")
-    remote_name = ("fork-" + sanitized)[:50]
+    url_hash = hashlib.sha256(clone_url.encode()).hexdigest()[:8]
+    # "fork-" (5) + sanitized[:36] (≤36) + "-" (1) + hash (8) = ≤50 chars
+    remote_name = f"fork-{sanitized[:36]}-{url_hash}"
 
     try:
         result = subprocess.run(
