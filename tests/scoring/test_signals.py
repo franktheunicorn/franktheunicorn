@@ -9,6 +9,7 @@ from franktheunicorn.scoring.signals import (
     path_overlap_fraction,
     score_ai_generated,
     score_cve_file_history,
+    score_draft_findings,
     score_has_review_request,
     score_keyword_match,
     score_llm_interest,
@@ -309,6 +310,24 @@ class TestPendingResponse:
             ["2026-03-30T10:00:00Z", "2026-03-30T14:00:00Z"],
         )
         assert result == WEIGHTS["pending_response"]
+
+
+class TestDraftFindings:
+    def test_none(self) -> None:
+        assert score_draft_findings(None) is None
+
+    def test_zero(self) -> None:
+        assert score_draft_findings(0) is None
+
+    def test_negative(self) -> None:
+        assert score_draft_findings(-1) is None
+
+    def test_one_finding(self) -> None:
+        assert score_draft_findings(1) == WEIGHTS["draft_findings"]
+
+    def test_many_findings(self) -> None:
+        # Boolean signal: count doesn't scale the boost.
+        assert score_draft_findings(50) == WEIGHTS["draft_findings"]
 
 
 class TestCveFileHistory:

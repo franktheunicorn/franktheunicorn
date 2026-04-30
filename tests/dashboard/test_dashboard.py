@@ -107,6 +107,25 @@ class TestDashboardViews:
         assert b"15.0" in response.content
         assert b"has_review_request" in response.content
 
+    def test_index_shows_findings_count(self, client: Client, db_pr: PullRequest) -> None:
+        ReviewDraftFactory(pull_request=db_pr, line_number=42, status="pending")
+        ReviewDraftFactory(pull_request=db_pr, line_number=84, status="accepted")
+        # Excluded: PR-level draft (no line_number).
+        ReviewDraftFactory(pull_request=db_pr, line_number=None)
+        # Excluded: rejected.
+        ReviewDraftFactory(pull_request=db_pr, line_number=99, status="rejected")
+        # Excluded: auto-suppressed.
+        ReviewDraftFactory(pull_request=db_pr, line_number=120, is_auto_suppressed=True)
+
+        response = client.get("/")
+        assert response.status_code == 200
+        assert b"2 findings" in response.content
+
+    def test_index_omits_findings_count_when_zero(self, client: Client, db_pr: PullRequest) -> None:
+        response = client.get("/")
+        assert response.status_code == 200
+        assert b'class="findings-badge"' not in response.content
+
 
 @pytest.mark.django_db
 class TestQueueTabs:

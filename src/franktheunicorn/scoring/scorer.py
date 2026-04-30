@@ -14,6 +14,7 @@ from franktheunicorn.scoring.signals import (
     score_ai_generated,
     score_committer_is_on_it,
     score_cve_file_history,
+    score_draft_findings,
     score_has_review_request,
     score_keyword_match,
     score_llm_interest,
@@ -59,6 +60,7 @@ def score_pull_request(
     downstream_apis: dict[str, list[str]] | None = None,
     sentry_error_count: int | None = None,
     cve_affected_files: list[str] | None = None,
+    draft_findings_count: int | None = None,
 ) -> tuple[float, dict[str, float]]:
     """Score a PR for operator interest. Pure function — no Django imports.
 
@@ -192,6 +194,8 @@ def score_pull_request(
     if sentry_error_count is not None and sentry_error_count > 0:
         _add("sentry_errors", weights.get("sentry_errors", 15))
 
+    _add("draft_findings", score_draft_findings(draft_findings_count))
+
     if custom_expressions:
         for i, expr in enumerate(custom_expressions):
             result = evaluate_custom_score(expr, pr_dict, project_config_dict)
@@ -221,6 +225,7 @@ def score_pull_request_from_model(
     downstream_apis: dict[str, list[str]] | None = None,
     sentry_error_count: int | None = None,
     cve_affected_files: list[str] | None = None,
+    draft_findings_count: int | None = None,
 ) -> tuple[float, dict[str, float]]:
     """Django-aware wrapper: converts models to dicts, resolves known_authors."""
     pr_dict: dict[str, object] = {
@@ -287,6 +292,16 @@ def score_pull_request_from_model(
         if latest_posted_at is not None:
             operator_review_posted_at = latest_posted_at.isoformat()
 
+    if draft_findings_count is None:
+        from franktheunicorn.core.models import ReviewDraft
+
+        draft_findings_count = ReviewDraft.objects.filter(
+            pull_request=pr,
+            line_number__isnull=False,
+            is_auto_suppressed=False,
+            status__in=["pending", "accepted", "edited", "posted"],
+        ).count()
+
     return score_pull_request(
         pr_dict,
         config_dict,
@@ -302,4 +317,5 @@ def score_pull_request_from_model(
         downstream_apis=downstream_apis,
         sentry_error_count=sentry_error_count,
         cve_affected_files=cve_affected_files,
+        draft_findings_count=draft_findings_count,
     )

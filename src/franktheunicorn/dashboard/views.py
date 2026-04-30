@@ -110,6 +110,16 @@ def index(request: HttpRequest) -> HttpResponse:
     prs = (
         PullRequest.objects.select_related("project")
         .filter(state="open", queue=queue)
+        .annotate(
+            findings_count=Count(
+                "review_drafts",
+                filter=Q(
+                    review_drafts__line_number__isnull=False,
+                    review_drafts__is_auto_suppressed=False,
+                    review_drafts__status__in=["pending", "accepted", "edited", "posted"],
+                ),
+            )
+        )
         .order_by("-interest_score", "-github_updated_at")
     )
 
