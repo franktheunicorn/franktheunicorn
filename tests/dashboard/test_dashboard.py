@@ -466,9 +466,12 @@ class TestRejectionProbabilityDisplay:
         )
         response = client.get(f"/pr/{db_pr.pk}/")
         content = response.content.decode()
-        # The suppressed finding should only appear in the suppressed section.
-        main_section_end = content.index("Suppressed Findings")
-        main_section = content[:main_section_end]
+        # The main draft-list section must contain the visible finding but not
+        # render the suppressed finding as a standalone item.  We scope the
+        # check to the draft-list div, which comes after the Agent Run Summary.
+        draft_list_start = content.index('id="draft-list"')
+        suppressed_section_start = content.index("Suppressed Findings")
+        main_section = content[draft_list_start:suppressed_section_start]
         assert "Visible finding body." in main_section
         assert "Suppressed finding body." not in main_section
 
@@ -1181,3 +1184,218 @@ class TestMergeQueueView:
 
         assert response.status_code == 200
         assert b"No PRs in the merge queue" in response.content
+
+
+@pytest.mark.django_db
+class TestAgentRunSummary:
+    """Tests for the agent run summary feature on the PR detail page."""
+
+    def test_summary_in_context(self, client: Client, db_pr: PullRequest) -> None:
+        """Agent run summary is always passed to the template context."""
+        response = client.get(f"/pr/{db_pr.pk}/")
+        assert response.status_code == 200
+        assert "agent_run_summary" in response.context
+
+    def test_summary_section_renders(self, client: Client, db_pr: PullRequest) -> None:
+        """Agent Run Summary heading appears when there are configured agents."""
+        response = client.get(f"/pr/{db_pr.pk}/")
+        assert response.status_code == 200
+        assert b"Agent Run Summary" in response.content
+
+    def test_stub_agent_shows_as_ran_with_findings(
+        self, client: Client, db_pr: PullRequest
+    ) -> None:
+        """When a draft with sources=['agent'] exists, stub agent shows as ran."""
+        ReviewDraftFactory(
+            pull_request=db_pr,
+            sources=["agent"],
+            comment_body="Consider a better approach.",
+            file_path="src/lib.py",
+            line_number=10,
+        )
+        response = client.get(f"/pr/{db_pr.pk}/")
+        assert response.status_code == 200
+        summary = response.context["agent_run_summary"]
+        stub_entry = next((e for e in summary if e["source"] == "agent"), None)
+        assert stub_entry is not None
+        assert stub_entry["did_run"] is True
+        assert stub_entry["total"] == 1
+
+    def test_coderabbit_extra_source_included(self, client: Client, db_pr: PullRequest) -> None:
+        """CodeRabbit drafts not in configured list still appear as an extra source."""
+        ReviewDraftFactory(
+            pull_request=db_pr,
+            sources=["coderabbit"],
+            comment_body="CR finding.",
+        )
+        response = client.get(f"/pr/{db_pr.pk}/")
+        assert response.status_code == 200
+        summary = response.context["agent_run_summary"]
+        cr_entry = next((e for e in summary if e["source"] == "coderabbit"), None)
+        assert cr_entry is not None
+        assert cr_entry["did_run"] is True
+        assert cr_entry["total"] == 1
+
+    def test_multiple_sources_grouped_separately(self, client: Client, db_pr: PullRequest) -> None:
+        """Drafts from different sources are grouped into separate summary entries."""
+        ReviewDraftFactory(pull_request=db_pr, sources=["agent"])
+        ReviewDraftFactory(pull_request=db_pr, sources=["agent"])
+        ReviewDraftFactory(pull_request=db_pr, sources=["check:security"])
+        response = client.get(f"/pr/{db_pr.pk}/")
+        assert response.status_code == 200
+        summary = response.context["agent_run_summary"]
+        agent_entry = next((e for e in summary if e["source"] == "agent"), None)
+        check_entry = next((e for e in summary if e["source"] == "check:security"), None)
+        assert agent_entry is not None
+        assert agent_entry["total"] == 2
+        assert check_entry is not None
+        assert check_entry["total"] == 1
+
+    def test_status_counts_in_summary(self, client: Client, db_pr: PullRequest) -> None:
+        """Per-status counts are accurate in the summary."""
+        ReviewDraftFactory(pull_request=db_pr, sources=["agent"], status="accepted")
+        ReviewDraftFactory(pull_request=db_pr, sources=["agent"], status="rejected")
+        ReviewDraftFactory(pull_request=db_pr, sources=["agent"], status="pending")
+        response = client.get(f"/pr/{db_pr.pk}/")
+        summary = response.context["agent_run_summary"]
+        entry = next(e for e in summary if e["source"] == "agent")
+        assert entry["accepted"] == 1
+        assert entry["rejected"] == 1
+        assert entry["pending"] == 1
+
+    def test_suppressed_counted_separately(self, client: Client, db_pr: PullRequest) -> None:
+        """Auto-suppressed drafts are not counted in status totals."""
+        ReviewDraftFactory(
+            pull_request=db_pr, sources=["agent"], is_auto_suppressed=True, status="pending"
+        )
+        ReviewDraftFactory(
+            pull_request=db_pr, sources=["agent"], is_auto_suppressed=False, status="pending"
+        )
+        response = client.get(f"/pr/{db_pr.pk}/")
+        summary = response.context["agent_run_summary"]
+        entry = next(e for e in summary if e["source"] == "agent")
+        assert entry["total"] == 2
+        assert entry["suppressed"] == 1
+        assert entry["active"] == 1
+        assert entry["pending"] == 1  # only the non-suppressed one
+
+    def test_line_level_summaries_in_findings(self, client: Client, db_pr: PullRequest) -> None:
+        """Line-level summaries include file path, line number, and body snippet."""
+        ReviewDraftFactory(
+            pull_request=db_pr,
+            sources=["agent"],
+            file_path="src/core.py",
+            line_number=42,
+            comment_body="A" * 200,  # longer than 120 chars
+        )
+        response = client.get(f"/pr/{db_pr.pk}/")
+        summary = response.context["agent_run_summary"]
+        entry = next(e for e in summary if e["source"] == "agent")
+        assert len(entry["findings"]) == 1
+        finding = entry["findings"][0]
+        assert finding["file_path"] == "src/core.py"
+        assert finding["line_number"] == 42
+        # body_snippet is truncated to 120 chars
+        assert len(finding["body_snippet"]) == 120
+
+    def test_not_run_agents_shown_in_response(self, client: Client, db_pr: PullRequest) -> None:
+        """Agents configured (via mock) but with no findings show 'not run'."""
+        from unittest.mock import MagicMock, patch
+
+        mock_op_config = MagicMock()
+        mock_op_config.llm_backends = []
+        mock_op_config.coderabbit.enabled = True  # CR configured but no CR drafts
+        mock_op_config.personality = "frank"
+
+        mock_pc = MagicMock()
+        mock_pc.llm_checks = []
+
+        with (
+            patch(
+                "franktheunicorn.config.loader.get_operator_config",
+                return_value=mock_op_config,
+            ),
+            patch(
+                "franktheunicorn.config.loader.get_project_config",
+                return_value=mock_pc,
+            ),
+        ):
+            response = client.get(f"/pr/{db_pr.pk}/")
+
+        assert response.status_code == 200
+        summary = response.context["agent_run_summary"]
+        cr_entry = next((e for e in summary if e["source"] == "coderabbit"), None)
+        assert cr_entry is not None
+        assert cr_entry["did_run"] is False
+
+    def test_html_shows_ran_checkmark(self, client: Client, db_pr: PullRequest) -> None:
+        """HTML output contains run indicator for an agent that ran."""
+        ReviewDraftFactory(pull_request=db_pr, sources=["agent"])
+        response = client.get(f"/pr/{db_pr.pk}/")
+        assert response.status_code == 200
+        # The ✓ is represented as &#10003; in the template
+        assert b"ran" in response.content
+
+    def test_html_shows_not_run(self, client: Client, db_pr: PullRequest) -> None:
+        """HTML output says 'not run' for configured-but-not-executed agents."""
+        from unittest.mock import MagicMock, patch
+
+        mock_op_config = MagicMock()
+        mock_op_config.llm_backends = []
+        mock_op_config.coderabbit.enabled = True
+        mock_op_config.personality = "frank"
+        mock_pc = MagicMock()
+        mock_pc.llm_checks = []
+
+        with (
+            patch(
+                "franktheunicorn.config.loader.get_operator_config",
+                return_value=mock_op_config,
+            ),
+            patch(
+                "franktheunicorn.config.loader.get_project_config",
+                return_value=mock_pc,
+            ),
+        ):
+            response = client.get(f"/pr/{db_pr.pk}/")
+
+        assert b"not run" in response.content
+
+    def test_build_agent_run_summary_directly(self, db_pr: PullRequest) -> None:
+        """Unit-test build_agent_run_summary helper directly."""
+        from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig
+        from franktheunicorn.dashboard.views import build_agent_run_summary
+
+        ReviewDraftFactory(pull_request=db_pr, sources=["claude"], status="accepted")
+        ReviewDraftFactory(pull_request=db_pr, sources=["claude"], status="rejected")
+
+        op_cfg = OperatorConfig(llm_backends=[LLMBackendConfig(provider="claude")])
+        result = build_agent_run_summary(db_pr, op_cfg, None)
+
+        claude_entry = next(e for e in result if e["source"] == "claude")
+        assert claude_entry["did_run"] is True
+        assert claude_entry["total"] == 2
+        assert claude_entry["accepted"] == 1
+        assert claude_entry["rejected"] == 1
+        assert len(claude_entry["findings"]) == 2
+
+    def test_draft_source_key_helper(self) -> None:
+        """_draft_source_key returns correct primary key."""
+        from unittest.mock import MagicMock
+
+        from franktheunicorn.dashboard.views import _draft_source_key
+
+        draft_with_sources = MagicMock()
+        draft_with_sources.sources = ["claude"]
+        draft_with_sources.backend_used = "claude"
+        assert _draft_source_key(draft_with_sources) == "claude"
+
+        draft_no_sources = MagicMock()
+        draft_no_sources.sources = []
+        draft_no_sources.backend_used = "openai"
+        assert _draft_source_key(draft_no_sources) == "openai"
+
+        draft_nothing = MagicMock()
+        draft_nothing.sources = []
+        draft_nothing.backend_used = ""
+        assert _draft_source_key(draft_nothing) == "unknown"
