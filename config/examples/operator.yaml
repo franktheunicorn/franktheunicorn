@@ -49,6 +49,11 @@ auto_post: false
 # How often the worker polls GitHub for new PRs (in seconds)
 poll_interval_seconds: 300
 
+# Log level for the worker (CRITICAL/ERROR/WARNING/INFO/DEBUG/NOTSET).
+# Override at the command line with `make worker-debug`, the runner's
+# `--log-level=DEBUG` flag, or the FRANK_LOG_LEVEL env var.
+log_level: "INFO"
+
 # --- Email Digest ---
 digest_email: ""
 digest_enabled: false

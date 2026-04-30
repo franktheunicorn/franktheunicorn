@@ -159,6 +159,45 @@ class TestResolveConfig:
         _oc, resolved = resolve_config(tmp_path)
         assert resolved["projects_dir"] == "/custom/projects"
 
+    def test_log_level_default_is_info(self, tmp_path: Path) -> None:
+        _oc, resolved = resolve_config(tmp_path)
+        assert resolved["log_level"] == "INFO"
+
+    def test_log_level_from_yaml(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / "config" / "active"
+        config_dir.mkdir(parents=True)
+        (config_dir / "operator.yaml").write_text('log_level: "DEBUG"\n')
+
+        oc, resolved = resolve_config(tmp_path)
+        assert oc.log_level == "DEBUG"
+        assert resolved["log_level"] == "DEBUG"
+
+    def test_log_level_normalised_to_uppercase(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / "config" / "active"
+        config_dir.mkdir(parents=True)
+        (config_dir / "operator.yaml").write_text('log_level: "debug"\n')
+
+        _oc, resolved = resolve_config(tmp_path)
+        assert resolved["log_level"] == "DEBUG"
+
+    def test_log_level_env_var_overrides_yaml(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / "config" / "active"
+        config_dir.mkdir(parents=True)
+        (config_dir / "operator.yaml").write_text('log_level: "INFO"\n')
+
+        with patch.dict("os.environ", {"FRANK_LOG_LEVEL": "DEBUG"}):
+            _oc, resolved = resolve_config(tmp_path)
+        assert resolved["log_level"] == "DEBUG"
+
+    def test_log_level_env_var_invalid_falls_back_to_yaml(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / "config" / "active"
+        config_dir.mkdir(parents=True)
+        (config_dir / "operator.yaml").write_text('log_level: "WARNING"\n')
+
+        with patch.dict("os.environ", {"FRANK_LOG_LEVEL": "BANANAS"}):
+            _oc, resolved = resolve_config(tmp_path)
+        assert resolved["log_level"] == "WARNING"
+
     def test_backwards_compat_no_new_fields(self, tmp_path: Path) -> None:
         """Config files without new fields still load with sensible defaults."""
         config_dir = tmp_path / "config" / "active"
