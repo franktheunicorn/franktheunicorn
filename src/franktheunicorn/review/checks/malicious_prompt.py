@@ -1,10 +1,9 @@
 """Malicious-prompt sub-check.
 
-Runs the security pre-filter on the PR diff + description. Unlike other
-checks, hits do not produce ReviewDrafts — they are filed as
-SecurityReport rows so the operator triages them in the security tab.
-The check still returns an informational ReviewFinding so the dashboard
-shows that the scan ran and found something.
+Hits do not produce ReviewDrafts via the standard flow — they are filed
+as ``SecurityReport`` rows so the operator triages them in the security
+tab. The check returns an informational ``ReviewFinding`` so the PR
+detail page shows a breadcrumb pointing there.
 """
 
 from __future__ import annotations
@@ -24,19 +23,12 @@ logger = logging.getLogger(__name__)
 
 
 class MaliciousPromptCheck(BaseCheck):
-    """Pre-filter check for prompt-injection attempts in PR text.
-
-    Stores a reference to the originating ``PullRequest`` so it can file a
-    ``SecurityReport`` when the detector flags the content. The standard
-    check pipeline does not pass the PR object into ``build_prompt``, so
-    we override ``run`` (called from ``run_enabled_checks``) instead.
-    """
+    """Pre-filter check for prompt-injection attempts in PR text."""
 
     name = "malicious-prompt"
 
     def build_prompt(self, diff: str, pr_context: PRContext) -> tuple[str, str]:
-        # Unused — this check bypasses the standard prompt path. Implemented
-        # to satisfy the abstract base.
+        # Unused — this check uses ``scan`` instead of the standard prompt path.
         return "", ""
 
     def scan(
@@ -45,25 +37,18 @@ class MaliciousPromptCheck(BaseCheck):
         diff: str,
         backend_config: LLMBackendConfig | None,
     ) -> list[ReviewFinding]:
-        """Scan the PR and file a SecurityReport on a bad verdict.
-
-        Returns an informational ReviewFinding only when something was
-        detected, so the operator sees a breadcrumb on the PR detail page
-        pointing at the security tab.
-        """
         from franktheunicorn.review.backends import get_backend
         from franktheunicorn.review.backends.base import BaseLLMBackend
-        from franktheunicorn.security.malicious_prompt import assess
-        from franktheunicorn.security.pr_prefilter import file_security_report
+        from franktheunicorn.security.malicious_prompt import assess, file_security_report
 
-        backend: BaseLLMBackend | None = None
+        backend = None
         if backend_config is not None:
             candidate = get_backend(backend_config)
             if isinstance(candidate, BaseLLMBackend):
                 backend = candidate
 
         text = "\n\n".join(part for part in (pr.body or "", diff) if part)
-        verdict = assess(text, backend, pr_title=pr.title, pr_number=pr.number)
+        verdict = assess(text, backend)
 
         if not verdict.is_bad:
             return []
@@ -83,12 +68,11 @@ class MaliciousPromptCheck(BaseCheck):
         if verdict.llm_reasoning:
             body += f"\n\nReasoning: {verdict.llm_reasoning}"
 
-        severity = "critical" if verdict.verdict == "yes" else "important"
         return [
             ReviewFinding(
                 title=f"malicious-prompt: {verdict.verdict}",
                 body=body,
-                severity=severity,
+                severity="critical" if verdict.verdict == "yes" else "important",
                 confidence=0.9 if verdict.verdict == "yes" else 0.6,
             )
         ]
