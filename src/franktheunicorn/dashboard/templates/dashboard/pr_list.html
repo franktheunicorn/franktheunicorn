@@ -2,9 +2,38 @@
 {% load static %}
 {% block title %}PRs — franktheunicorn{% endblock %}
 {% block content %}
+{# Filter bar: project type + specific project selects.
+   hx-select ensures only #pr-content is swapped from the full-page response. #}
+<form class="filter-bar" method="get"
+      hx-get="/" hx-target="#pr-content" hx-select="#pr-content"
+      hx-push-url="true" hx-trigger="change">
+    <input type="hidden" name="queue" value="{{ active_queue }}">
+    {% if available_project_types %}
+    <label for="filter-type">Type:</label>
+    <select name="project_type" id="filter-type">
+        <option value="">All Types</option>
+        {% for pt in available_project_types %}
+        <option value="{{ pt.key }}" {% if active_project_type == pt.key %}selected{% endif %}>{{ pt.label }}</option>
+        {% endfor %}
+    </select>
+    {% endif %}
+    {% if available_projects %}
+    <label for="filter-project">Project:</label>
+    <select name="project" id="filter-project">
+        <option value="">All Projects</option>
+        {% for proj in available_projects %}
+        {% with proj_full=proj.owner|add:"/"|add:proj.repo %}
+        <option value="{{ proj_full }}" {% if active_project == proj_full %}selected{% endif %}>{{ proj_full }}</option>
+        {% endwith %}
+        {% endfor %}
+    </select>
+    {% endif %}
+</form>
+
+<div id="pr-content">
 <div class="tab-bar">
     {% for tab in queue_tabs %}
-    <a href="?queue={{ tab.key }}"
+    <a href="?queue={{ tab.key }}{% if active_project_type %}&amp;project_type={{ active_project_type }}{% endif %}{% if active_project %}&amp;project={{ active_project }}{% endif %}"
        {% if active_queue == tab.key %}class="active"{% endif %}>
         {{ tab.label }}
         {% if queue_counts %}
@@ -43,4 +72,5 @@
     <p>Start the worker to poll GitHub or run in mock mode.</p>
 </div>
 {% endif %}
+</div>
 {% endblock %}
