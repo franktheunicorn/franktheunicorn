@@ -88,7 +88,7 @@
             {% if agent.posted %}&middot; <span style="color: var(--blue);">{{ agent.posted }} posted</span>{% endif %}
             {% if agent.rejected %}&middot; <span style="color: var(--red);">{{ agent.rejected }} rejected</span>{% endif %}
             {% if agent.suppressed %}&middot; <span style="color: #999;">{{ agent.suppressed }} suppressed</span>{% endif %}
-            {% if agent.pending and not agent.accepted and not agent.rejected and not agent.edited and not agent.posted %}&middot; <span style="color: var(--muted);">{{ agent.pending }} pending</span>{% endif %}
+            {% if agent.pending %}&middot; <span style="color: var(--muted);">{{ agent.pending }} pending</span>{% endif %}
             {% else %}
             &mdash;
             {% endif %}

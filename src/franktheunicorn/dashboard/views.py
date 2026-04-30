@@ -153,6 +153,11 @@ def _draft_source_key(draft: ReviewDraft) -> str:
     return "unknown"
 
 
+# Maximum number of characters to show for a finding's body snippet in the
+# agent run summary table.
+_BODY_SNIPPET_MAX_LEN = 120
+
+
 def build_agent_run_summary(
     pr: PullRequest,
     operator_config: OperatorConfig,
@@ -252,7 +257,7 @@ def build_agent_run_summary(
                     "line_number": d.line_number,
                     "severity": d.severity,
                     "category": d.category,
-                    "body_snippet": (d.edited_body or d.comment_body or "")[:120],
+                    "body_snippet": (d.edited_body or d.comment_body or "")[:_BODY_SNIPPET_MAX_LEN],
                     "is_suppressed": d.is_auto_suppressed,
                     "status": d.status,
                 }
