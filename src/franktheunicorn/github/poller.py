@@ -102,26 +102,54 @@ def poll_project(
         except Exception:
             logger.debug("Could not fetch PR detail for #%d", pr_number)
 
-        # Extract base/head SHAs for blame (v1.25).
+        # Extract base/head SHAs and branch refs for blame (v1.25).
         base_sha = ""
         head_sha = ""
+        base_branch = ""
+        head_branch = ""
+        fork_clone_url = ""
         base_data = pr_detail.get("base")
         head_data = pr_detail.get("head")
         if isinstance(base_data, dict):
             base_sha = base_data.get("sha", "")
+            base_branch = base_data.get("ref", "")
         if isinstance(head_data, dict):
             head_sha = head_data.get("sha", "")
+            head_branch = head_data.get("ref", "")
+            head_repo_data = head_data.get("repo") or {}
+            fork_clone_url_raw = head_repo_data.get("clone_url", "")
+            head_full_name = head_repo_data.get("full_name", "")
+            is_fork = head_repo_data.get("fork", False) or (
+                bool(head_full_name)
+                and head_full_name != f"{project_config.owner}/{project_config.repo}"
+            )
+            fork_clone_url = fork_clone_url_raw if is_fork else ""
 
         # Fetch blame data if repo clone is available (v1.25).
         blame_data: list[dict[str, object]] | None = None
         if repo_path is not None and repo_path.is_dir() and changed_files and base_sha:
             try:
                 from franktheunicorn.scoring.blame_fetcher import fetch_blame_for_files
-                from franktheunicorn.worker.repo_manager import ensure_ref_available
+                from franktheunicorn.worker.repo_manager import ensure_sha_fetched
 
-                # Verify both refs are available locally before running blame.
-                base_ok = ensure_ref_available(repo_path, base_sha)
-                head_ok = ensure_ref_available(repo_path, head_sha) if head_sha else False
+                # Fetch refs if not available locally, then run blame.
+                base_ok = ensure_sha_fetched(
+                    repo_path,
+                    base_sha,
+                    branch=base_branch,
+                    pr_number=pr_number,
+                )
+                head_ok = (
+                    ensure_sha_fetched(
+                        repo_path,
+                        head_sha,
+                        branch=head_branch,
+                        pr_number=pr_number,
+                        fork_clone_url=fork_clone_url,
+                    )
+                    if head_sha
+                    else False
+                )
 
                 if base_ok and head_ok:
                     blame_data = fetch_blame_for_files(

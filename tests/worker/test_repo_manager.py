@@ -8,9 +8,11 @@ from pathlib import Path
 import pytest
 
 from franktheunicorn.worker.repo_manager import (
+    _ensure_fork_remote,
     _git_fetch,
     ensure_ref_available,
     ensure_repo,
+    ensure_sha_fetched,
     fetch_ref,
 )
 
@@ -148,3 +150,154 @@ class TestEnsureRepoTimeout:
         ):
             result = ensure_repo(repos_dir, "org", "slow-repo")
         assert result is None
+
+
+def _add_commit(work: Path, filename: str, content: str, message: str) -> str:
+    """Add a file and commit in *work*; return the new commit SHA."""
+    _git(work, "config", "user.email", "test@example.com")
+    _git(work, "config", "user.name", "test")
+    (work / filename).write_text(content)
+    _git(work, "add", ".")
+    _git(work, "commit", "-m", message)
+    return _git(work, "rev-parse", "HEAD")
+
+
+class TestEnsureShaFetched:
+    """Tests for ensure_sha_fetched — the multi-strategy ref fetcher."""
+
+    def test_already_available_returns_true(self, tmp_path: Path, bare_repo: Path) -> None:
+        repos_dir = tmp_path / "repos"
+        repos_dir.mkdir()
+        repo = ensure_repo(repos_dir, "org", "repo", clone_url=str(bare_repo))
+        assert repo is not None
+        sha = _git(repo, "rev-parse", "HEAD")
+        # SHA already present — should return True without any fetch.
+        assert ensure_sha_fetched(repo, sha) is True
+
+    def test_branch_fetch_succeeds(self, tmp_path: Path, bare_repo: Path) -> None:
+        repos_dir = tmp_path / "repos"
+        repos_dir.mkdir()
+        repo = ensure_repo(repos_dir, "org", "repo", clone_url=str(bare_repo))
+        assert repo is not None
+
+        # Push a new commit on a feature branch to the bare remote.
+        work = tmp_path / "work2"
+        subprocess.run(
+            ["git", "-c", "commit.gpgsign=false", "clone", str(bare_repo), str(work)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        _git(work, "checkout", "-b", "feature")
+        new_sha = _add_commit(work, "feature.txt", "feature\n", "feature commit")
+        _git(work, "push", "origin", "feature")
+
+        assert ensure_ref_available(repo, new_sha) is False
+        assert ensure_sha_fetched(repo, new_sha, branch="feature") is True
+
+    def test_pr_ref_fetch_succeeds(self, tmp_path: Path, bare_repo: Path) -> None:
+        repos_dir = tmp_path / "repos"
+        repos_dir.mkdir()
+        repo = ensure_repo(repos_dir, "org", "repo", clone_url=str(bare_repo))
+        assert repo is not None
+
+        # Push a commit to refs/pull/5/head on the bare remote.
+        work = tmp_path / "work2"
+        subprocess.run(
+            ["git", "-c", "commit.gpgsign=false", "clone", str(bare_repo), str(work)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        new_sha = _add_commit(work, "pr_file.txt", "pr content\n", "pr commit")
+        subprocess.run(
+            ["git", "push", str(bare_repo), "HEAD:refs/pull/5/head"],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=str(work),
+        )
+
+        assert ensure_ref_available(repo, new_sha) is False
+        assert ensure_sha_fetched(repo, new_sha, pr_number=5) is True
+
+    def test_fork_remote_added_and_fetched(self, tmp_path: Path, bare_repo: Path) -> None:
+        repos_dir = tmp_path / "repos"
+        repos_dir.mkdir()
+        repo = ensure_repo(repos_dir, "org", "repo", clone_url=str(bare_repo))
+        assert repo is not None
+
+        # Create a fork bare repo with a commit not present in the main clone.
+        fork_remote = tmp_path / "fork.git"
+        subprocess.run(
+            ["git", "init", "--bare", str(fork_remote)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        fork_work = tmp_path / "fork_work"
+        subprocess.run(
+            ["git", "-c", "commit.gpgsign=false", "clone", str(bare_repo), str(fork_work)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        fork_sha = _add_commit(fork_work, "fork_file.txt", "fork content\n", "fork commit")
+        subprocess.run(
+            ["git", "push", str(fork_remote), "HEAD:main"],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=str(fork_work),
+        )
+
+        assert ensure_ref_available(repo, fork_sha) is False
+        assert ensure_sha_fetched(repo, fork_sha, fork_clone_url=str(fork_remote)) is True
+
+    def test_fork_remote_already_exists_url_updated(self, tmp_path: Path, bare_repo: Path) -> None:
+        repos_dir = tmp_path / "repos"
+        repos_dir.mkdir()
+        repo = ensure_repo(repos_dir, "org", "repo", clone_url=str(bare_repo))
+        assert repo is not None
+
+        fork_remote = tmp_path / "fork.git"
+        subprocess.run(
+            ["git", "init", "--bare", str(fork_remote)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        fork_clone_url = str(fork_remote)
+
+        # First call: add the remote.
+        remote_name = _ensure_fork_remote(repo, fork_clone_url)
+
+        # Corrupt the URL so we can verify it gets updated.
+        subprocess.run(
+            ["git", "remote", "set-url", remote_name, "/old/path.git"],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=str(repo),
+        )
+
+        # Second call: should detect the changed URL and update it.
+        _ensure_fork_remote(repo, fork_clone_url)
+
+        result = subprocess.run(
+            ["git", "remote", "get-url", remote_name],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=str(repo),
+        )
+        assert result.stdout.strip() == fork_clone_url
+
+    def test_all_strategies_fail_returns_false(self, tmp_path: Path, bare_repo: Path) -> None:
+        repos_dir = tmp_path / "repos"
+        repos_dir.mkdir()
+        repo = ensure_repo(repos_dir, "org", "repo", clone_url=str(bare_repo))
+        assert repo is not None
+
+        unknown_sha = "deadbeef" * 5  # 40 hex chars, doesn't exist anywhere
+        assert ensure_sha_fetched(repo, unknown_sha) is False

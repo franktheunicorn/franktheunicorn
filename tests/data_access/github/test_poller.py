@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -243,3 +244,174 @@ class TestReEngagementDataInPoller:
         assert score_with > score_without
         assert "updated_since_operator_review" in pr42.score_breakdown
         assert "pending_response" in pr42.score_breakdown
+
+
+# ---------------------------------------------------------------------------
+# Helpers shared by TestPollerRefFetching
+# ---------------------------------------------------------------------------
+
+_BASE_SHA = "a" * 40
+_HEAD_SHA = "b" * 40
+
+
+def _make_pr_list_item() -> dict[str, Any]:
+    return {
+        "number": 99,
+        "id": 9999,
+        "title": "Test PR",
+        "user": {"login": "test-user"},
+        "state": "open",
+        "html_url": "https://github.com/apache/spark/pull/99",
+        "diff_url": "",
+        "body": "",
+        "labels": [],
+        "requested_reviewers": [],
+        "assignees": [],
+        "draft": False,
+        "additions": 5,
+        "deletions": 2,
+        "created_at": "2026-04-01T10:00:00Z",
+        "updated_at": "2026-04-01T10:00:00Z",
+    }
+
+
+class _SinglePRMockClient(MockGitHubClient):
+    """MockGitHubClient returning a single PR with a controlled detail dict."""
+
+    def __init__(self, tmp_path: Path, pr_detail: dict[str, Any]) -> None:
+        super().__init__(tmp_path)
+        self._pr_detail = pr_detail
+
+    def list_pull_requests(
+        self, owner: str, repo: str, state: str = "open"
+    ) -> list[dict[str, Any]]:
+        return [_make_pr_list_item()]
+
+    def get_pull_request(self, owner: str, repo: str, pr_number: int) -> dict[str, Any]:
+        return self._pr_detail
+
+    def get_pull_request_files(self, owner: str, repo: str, pr_number: int) -> list[dict[str, Any]]:
+        return [{"filename": "src/main.py", "additions": 5, "deletions": 2, "status": "modified"}]
+
+
+def _same_repo_detail(owner: str = "apache", repo: str = "spark") -> dict[str, Any]:
+    """PR detail for a same-repo PR (no fork)."""
+    return {
+        "number": 99,
+        "mergeable": True,
+        "base": {
+            "ref": "main",
+            "sha": _BASE_SHA,
+            "repo": {"full_name": f"{owner}/{repo}"},
+        },
+        "head": {
+            "ref": "feature-branch",
+            "sha": _HEAD_SHA,
+            "repo": {
+                "clone_url": f"https://github.com/{owner}/{repo}.git",
+                "full_name": f"{owner}/{repo}",
+                "fork": False,
+            },
+        },
+    }
+
+
+def _fork_detail(
+    owner: str = "apache",
+    repo: str = "spark",
+    fork_clone_url: str = "https://github.com/fork-user/spark.git",
+) -> dict[str, Any]:
+    """PR detail for a cross-repo (fork) PR."""
+    return {
+        "number": 99,
+        "mergeable": True,
+        "base": {
+            "ref": "main",
+            "sha": _BASE_SHA,
+            "repo": {"full_name": f"{owner}/{repo}"},
+        },
+        "head": {
+            "ref": "fork-feature",
+            "sha": _HEAD_SHA,
+            "repo": {
+                "clone_url": fork_clone_url,
+                "full_name": "fork-user/spark",
+                "fork": True,
+            },
+        },
+    }
+
+
+@pytest.mark.django_db
+class TestPollerRefFetching:
+    """Tests that the poller calls ensure_sha_fetched with the correct arguments."""
+
+    def test_base_sha_fetch_attempted_when_missing(self, tmp_path: Path) -> None:
+        """ensure_sha_fetched is called for the base SHA with branch and pr_number."""
+        client = _SinglePRMockClient(tmp_path, _same_repo_detail())
+        config = ProjectConfig(owner="apache", repo="spark")
+
+        with patch(
+            "franktheunicorn.worker.repo_manager.ensure_sha_fetched",
+            return_value=False,
+        ) as mock_fetch:
+            poll_project(client, config, operator_username="holdenk", repo_path=tmp_path)
+
+        base_calls = [c for c in mock_fetch.call_args_list if c.args[1] == _BASE_SHA]
+        assert base_calls, "ensure_sha_fetched not called for base SHA"
+        kw = base_calls[0].kwargs
+        assert kw["branch"] == "main"
+        assert kw["pr_number"] == 99
+
+    def test_head_sha_fetch_attempted_for_fork(self, tmp_path: Path) -> None:
+        """Fork URL is forwarded to ensure_sha_fetched for the head SHA."""
+        fork_url = "https://github.com/fork-user/spark.git"
+        client = _SinglePRMockClient(tmp_path, _fork_detail(fork_clone_url=fork_url))
+        config = ProjectConfig(owner="apache", repo="spark")
+
+        with patch(
+            "franktheunicorn.worker.repo_manager.ensure_sha_fetched",
+            return_value=False,
+        ) as mock_fetch:
+            poll_project(client, config, operator_username="holdenk", repo_path=tmp_path)
+
+        head_calls = [c for c in mock_fetch.call_args_list if c.args[1] == _HEAD_SHA]
+        assert head_calls, "ensure_sha_fetched not called for head SHA"
+        kw = head_calls[0].kwargs
+        assert kw["fork_clone_url"] == fork_url
+        assert kw["pr_number"] == 99
+
+    def test_blame_skipped_when_both_unavailable(self, tmp_path: Path) -> None:
+        """fetch_blame_for_files is NOT called when ensure_sha_fetched returns False."""
+        client = _SinglePRMockClient(tmp_path, _same_repo_detail())
+        config = ProjectConfig(owner="apache", repo="spark")
+
+        with (
+            patch(
+                "franktheunicorn.worker.repo_manager.ensure_sha_fetched",
+                return_value=False,
+            ),
+            patch("franktheunicorn.scoring.blame_fetcher.fetch_blame_for_files") as mock_blame,
+        ):
+            poll_project(client, config, operator_username="holdenk", repo_path=tmp_path)
+
+        mock_blame.assert_not_called()
+
+    def test_blame_runs_when_both_available_after_fetch(self, tmp_path: Path) -> None:
+        """fetch_blame_for_files IS called when ensure_sha_fetched returns True."""
+        client = _SinglePRMockClient(tmp_path, _same_repo_detail())
+        config = ProjectConfig(owner="apache", repo="spark")
+
+        with (
+            patch(
+                "franktheunicorn.worker.repo_manager.ensure_sha_fetched",
+                return_value=True,
+            ),
+            patch(
+                "franktheunicorn.scoring.blame_fetcher.fetch_blame_for_files",
+                return_value=[],
+            ) as mock_blame,
+        ):
+            poll_project(client, config, operator_username="holdenk", repo_path=tmp_path)
+
+        mock_blame.assert_called_once()
