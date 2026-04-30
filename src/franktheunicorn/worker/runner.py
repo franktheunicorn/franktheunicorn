@@ -331,6 +331,7 @@ def _run_cycle(
                         community_context=community_ctx,
                         jira_context=jira_ctx,
                         sentry_context=sentry_ctx,
+                        repo_path=repo_path,
                     )
                     logger.info(
                         "  PR #%d: score=%.2f, %d drafts generated",

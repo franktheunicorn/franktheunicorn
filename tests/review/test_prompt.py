@@ -72,6 +72,30 @@ class TestBuildUserMessage:
         msg = build_user_message("diff", ctx)
         assert "truncated" in msg
 
+    def test_includes_full_file_context_before_diff(self) -> None:
+        ctx = make_pr_context(
+            full_file_context="## Full file context\n\n### foo.py\n```\npass\n```"
+        )
+        msg = build_user_message("DIFF_MARKER", ctx)
+        assert "## Full file context" in msg
+        assert msg.index("## Full file context") < msg.index("DIFF_MARKER")
+
+    def test_includes_imported_modules_context(self) -> None:
+        ctx = make_pr_context(
+            imported_modules_context=(
+                "## Imported modules (first-party)\n\n### bar.py\n```\npass\n```"
+            )
+        )
+        msg = build_user_message("DIFF_MARKER", ctx)
+        assert "Imported modules" in msg
+        assert msg.index("Imported modules") < msg.index("DIFF_MARKER")
+
+    def test_omits_full_file_section_when_empty(self) -> None:
+        ctx = make_pr_context(full_file_context="", imported_modules_context="")
+        msg = build_user_message("diff", ctx)
+        assert "Full file context" not in msg
+        assert "Imported modules" not in msg
+
 
 class TestPersonalityInPrompt:
     def test_personality_identity_in_system_prompt(self) -> None:
