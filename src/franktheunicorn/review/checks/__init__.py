@@ -20,6 +20,8 @@ from franktheunicorn.review.backends.base import PRContext, ReviewFinding, parse
 from franktheunicorn.review.drafter import build_pr_context, create_drafts_from_findings
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig, ProjectConfig
     from franktheunicorn.core.models import PullRequest, ReviewDraft
 
@@ -66,6 +68,8 @@ def run_enabled_checks(
     diff: str,
     project_config: ProjectConfig,
     operator_config: OperatorConfig | None = None,
+    *,
+    repo_path: Path | str | None = None,
 ) -> list[ReviewDraft]:
     """Run all LLM checks enabled in project config and return resulting drafts.
 
@@ -103,7 +107,7 @@ def run_enabled_checks(
             logger.warning("Unknown LLM check '%s'; skipping.", check_name)
             continue
 
-        check = _instantiate_check(check_cls, check_name, project_config)
+        check = _instantiate_check(check_cls, check_name, project_config, repo_path)
         try:
             findings = _run_single_check(check, diff, pr_context, backend_config)
         except Exception:
@@ -129,6 +133,7 @@ def _instantiate_check(
     check_cls: type[BaseCheck],
     check_name: str,
     project_config: ProjectConfig,
+    repo_path: Path | str | None,
 ) -> BaseCheck:
     """Construct a check, passing config kwargs the class accepts."""
     if check_name == "api-misuse":
@@ -137,6 +142,7 @@ def _instantiate_check(
         return APIMisuseCheck(
             config=project_config.api_misuse,
             package_roots=project_config.context.package_roots,
+            repo_path=repo_path,
         )
     return check_cls()
 

@@ -355,6 +355,7 @@ def _run_cycle(
                                 check_pr_diff.raw_diff,
                                 project_config=pc,
                                 operator_config=operator_config,
+                                repo_path=repo_path,
                             )
                             if check_drafts:
                                 logger.info(

@@ -29,6 +29,8 @@ from franktheunicorn.review.checks import BaseCheck
 from franktheunicorn.review.prompt import build_user_message, finding_schema_json
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from franktheunicorn.config.models import APIMisuseConfig
     from franktheunicorn.review.backends.base import PRContext
 
@@ -95,16 +97,23 @@ class APIMisuseCheck(BaseCheck):
         config: APIMisuseConfig | None = None,
         *,
         package_roots: list[str] | None = None,
+        repo_path: Path | str | None = None,
     ) -> None:
         from franktheunicorn.config.models import APIMisuseConfig as _Cfg
 
         self._config = config if config is not None else _Cfg()
         self._package_roots = list(package_roots or [])
+        self._repo_path = repo_path
 
     def build_prompt(self, diff: str, pr_context: PRContext) -> tuple[str, str]:
         sites = extract_calls(diff, project_packages=self._package_roots)
         docs = (
-            resolve_call_docs(sites, self._config, diff=diff)
+            resolve_call_docs(
+                sites,
+                self._config,
+                diff=diff,
+                repo_path=self._repo_path,
+            )
             if (sites and self._config.enabled)
             else []
         )

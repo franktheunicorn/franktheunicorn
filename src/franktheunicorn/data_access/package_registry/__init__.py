@@ -17,6 +17,9 @@ from franktheunicorn.data_access.package_registry.build_files import (
     parse_pom_xml,
 )
 from franktheunicorn.data_access.package_registry.cache import DocsCache
+from franktheunicorn.data_access.package_registry.maven_tree import (
+    resolve_deps_from_checkout,
+)
 from franktheunicorn.data_access.package_registry.resolver import resolve_call_docs
 from franktheunicorn.data_access.package_registry.types import PackageDocs, Registry
 
@@ -31,4 +34,5 @@ __all__ = [
     "parse_build_sbt",
     "parse_pom_xml",
     "resolve_call_docs",
+    "resolve_deps_from_checkout",
 ]

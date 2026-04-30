@@ -22,6 +22,9 @@ from franktheunicorn.data_access.package_registry.build_files import (
 )
 from franktheunicorn.data_access.package_registry.cache import DocsCache
 from franktheunicorn.data_access.package_registry.maven import MavenDocsFetcher
+from franktheunicorn.data_access.package_registry.maven_tree import (
+    resolve_deps_from_checkout,
+)
 from franktheunicorn.data_access.package_registry.pypi import PyPIDocsFetcher
 from franktheunicorn.data_access.package_registry.types import PackageDocs, Registry
 from franktheunicorn.review.call_extraction.types import CallSite, Language
@@ -42,6 +45,7 @@ def resolve_call_docs(
     client: httpx.Client | None = None,
     diff: str = "",
     build_file_deps: list[BuildFileDep] | None = None,
+    repo_path: Path | str | None = None,
 ) -> list[PackageDocs]:
     """Return :class:`PackageDocs` for each call site (best-effort).
 
@@ -49,11 +53,13 @@ def resolve_call_docs(
     disabled in ``config.registries`` or whose package can't be looked
     up return ``None`` and are dropped from the result.
 
-    When ``diff`` is supplied, ``pom.xml`` / ``build.sbt`` content is
-    parsed out of it and used to map Java packages to Maven coordinates
-    in preference to the Solr fallback. ``build_file_deps`` lets callers
-    supply pre-parsed deps directly (e.g. fetched from the PR's base
-    branch) — these are merged with deps discovered in the diff.
+    Maven coordinate resolution prefers, in order:
+      1. ``mvn dependency:tree`` / ``gradle dependencies`` run against
+         ``repo_path`` (resolved transitive deps + parent POM inheritance).
+      2. ``pom.xml`` / ``build.sbt`` content parsed out of ``diff``
+         (covers deps newly added in this PR).
+      3. ``build_file_deps`` supplied by the caller.
+      4. ``search.maven.org`` Solr (fallback, in :mod:`maven`).
     """
     if not sites:
         return []
@@ -67,6 +73,8 @@ def resolve_call_docs(
     )
 
     deps: list[BuildFileDep] = []
+    if repo_path is not None:
+        deps.extend(resolve_deps_from_checkout(repo_path))
     if diff:
         deps.extend(collect_deps_from_diff(diff))
     if build_file_deps:
