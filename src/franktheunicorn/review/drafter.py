@@ -12,13 +12,13 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from franktheunicorn.core.models import ReviewDraft
+from franktheunicorn.core.models import AgentVibe, ReviewDraft
 from franktheunicorn.review.antipattern import (
     check_against_anti_patterns,
     record_anti_pattern_matches,
 )
 from franktheunicorn.review.backends import get_backend
-from franktheunicorn.review.backends.base import PRContext, ReviewFinding
+from franktheunicorn.review.backends.base import PRContext, ReviewFinding, ReviewResult
 from franktheunicorn.review.context_builder import build_context_strings
 from franktheunicorn.review.dedup import deduplicate_findings
 from franktheunicorn.review.tone_guard import apply_tone_guard_batch
@@ -320,20 +320,23 @@ def _run_single_backend(
     backend_config: LLMBackendConfig,
     diff: str,
     pr_context: PRContext,
-) -> tuple[str, list[ReviewFinding]]:
-    """Run one backend and return (source_name, findings)."""
+) -> tuple[str, ReviewResult]:
+    """Run one backend and return (source_name, ReviewResult)."""
     backend = get_backend(backend_config)
     source = backend_config.provider
     if source == "stub":
         source = "agent"
 
     try:
-        findings = backend.generate_findings(diff, pr_context)
+        if hasattr(backend, "generate_review"):
+            result = backend.generate_review(diff, pr_context)
+        else:
+            result = ReviewResult(findings=backend.generate_findings(diff, pr_context))
     except Exception:
         logger.exception("LLM backend '%s' failed.", backend_config.provider)
-        findings = []
+        result = ReviewResult()
 
-    return source, findings
+    return source, result
 
 
 def draft_review(
@@ -386,11 +389,24 @@ def draft_review(
     # Inject fine-tuned model if configured for this project (v2).
     backend_configs = _maybe_inject_fine_tuned_model(backend_configs, project_config)
 
-    # Collect findings from all backends.
+    # Collect findings from all backends, and persist each backend's vibe.
+    # The vibe key includes the model so two configured backends sharing a
+    # provider (e.g. fine-tuned model injection adding a second ollama entry)
+    # don't collide on the unique (pull_request, backend) constraint.
     all_findings: list[tuple[str, ReviewFinding]] = []
     for backend_config in backend_configs:
-        source, findings = _run_single_backend(backend_config, diff, pr_context)
-        for f in findings:
+        source, result = _run_single_backend(backend_config, diff, pr_context)
+        if result.overall_vibe:
+            vibe_backend = f"{source}/{backend_config.model}" if backend_config.model else source
+            try:
+                AgentVibe.objects.update_or_create(
+                    pull_request=pr,
+                    backend=vibe_backend,
+                    defaults={"vibe_text": result.overall_vibe},
+                )
+            except Exception:
+                logger.debug("Failed to persist agent vibe for %s", vibe_backend, exc_info=True)
+        for f in result.findings:
             all_findings.append((source, f))
 
     if not all_findings:

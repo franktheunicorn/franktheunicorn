@@ -20,6 +20,7 @@ from django.views.decorators.http import require_POST
 
 from franktheunicorn.core.models import (
     AgentFeedback,
+    AgentVibe,
     AntiPattern,
     CostRecord,
     DependencyChange,
@@ -364,6 +365,7 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
     )
     dep_changes = DependencyChange.objects.filter(pull_request=pr).order_by("package_name")
     test_runs = TestRun.objects.filter(pull_request=pr).order_by("-created_at")
+    agent_vibes = AgentVibe.objects.filter(pull_request=pr).order_by("backend")
 
     # Check if agent feedback is enabled (v1.25).
     feedback_enabled = _is_agent_feedback_enabled()
@@ -396,6 +398,7 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
             "suppressed_drafts": suppressed_drafts,
             "agent_drafts": agent_drafts,
             "coderabbit_drafts": coderabbit_drafts,
+            "agent_vibes": agent_vibes,
             "dep_changes": dep_changes,
             "test_runs": test_runs,
             "feedback_enabled": feedback_enabled,

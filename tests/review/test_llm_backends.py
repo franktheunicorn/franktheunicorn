@@ -13,6 +13,7 @@ from franktheunicorn.review.backends import get_backend
 from franktheunicorn.review.backends.base import (
     ReviewFinding,
     parse_llm_response,
+    parse_llm_review,
 )
 from franktheunicorn.review.backends.stub_backend import StubBackend
 from tests.conftest import make_pr_context
@@ -128,6 +129,44 @@ class TestParseResponse:
         findings = parse_llm_response(json.dumps(data))
         assert len(findings) == 1
         assert findings[0].confidence == 0.75
+
+
+class TestParseReview:
+    def test_extracts_overall_vibe_and_findings(self) -> None:
+        data = {
+            "overall_vibe": "Looks fine, minor nits.",
+            "findings": [
+                {"file_path": "a.py", "title": "T", "body": "B", "severity": "nit"},
+            ],
+        }
+        result = parse_llm_review(json.dumps(data))
+        assert result.overall_vibe == "Looks fine, minor nits."
+        assert len(result.findings) == 1
+        assert result.findings[0].file_path == "a.py"
+
+    def test_array_only_response_has_no_vibe(self) -> None:
+        data = [{"file_path": "a.py", "title": "T", "body": "B"}]
+        result = parse_llm_review(json.dumps(data))
+        assert result.overall_vibe == ""
+        assert len(result.findings) == 1
+
+    def test_empty_response(self) -> None:
+        result = parse_llm_review("")
+        assert result.overall_vibe == ""
+        assert result.findings == []
+
+    def test_non_string_vibe_ignored(self) -> None:
+        data = {"overall_vibe": 42, "findings": []}
+        result = parse_llm_review(json.dumps(data))
+        assert result.overall_vibe == ""
+
+    def test_stub_backend_emits_vibe(self) -> None:
+        config = LLMBackendConfig(provider="stub")
+        backend = get_backend(config)
+        ctx = make_pr_context()
+        result = backend.generate_review(_SAMPLE_DIFF, ctx)
+        assert result.overall_vibe.startswith("Overall vibes:")
+        assert len(result.findings) >= 1
 
 
 class TestGetBackend:

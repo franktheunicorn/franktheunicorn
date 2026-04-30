@@ -173,6 +173,17 @@
 </table>
 {% endif %}
 
+{% if agent_vibes %}
+<h3 style="margin-top: 1.5rem;">Agent Vibes</h3>
+<div class="agent-vibes">
+    {% for vibe in agent_vibes %}
+    <div style="margin-bottom: 0.5rem; padding: 0.75rem; background: #fffaf0; border-left: 3px solid #d97706; border-radius: 4px; font-size: 0.9rem;">
+        <strong>{{ vibe.backend }}:</strong> {{ vibe.vibe_text|linebreaksbr }}
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
 <h3 style="margin-top: 1.5rem;">{% if personality_name %}{{ personality_name }}'s Findings{% else %}Review Findings{% endif %}
     <button class="action-btn post" style="float: right;"
             hx-post="{% url 'dashboard:post_review' pr.pk %}"

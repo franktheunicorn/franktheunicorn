@@ -5,10 +5,18 @@ from __future__ import annotations
 import hashlib
 from typing import TYPE_CHECKING
 
-from franktheunicorn.review.backends.base import PRContext, ReviewFinding
+from franktheunicorn.review.backends.base import PRContext, ReviewFinding, ReviewResult
 
 if TYPE_CHECKING:
     from franktheunicorn.config.models import LLMBackendConfig
+
+_VIBES = [
+    "Overall vibes: solid change, no major concerns. Worth a closer look at edge cases.",
+    "Overall vibes: ambitious refactor — touches a lot, would benefit from extra tests.",
+    "Overall vibes: small focused PR, easy to review, looks ready once nits are addressed.",
+    "Overall vibes: useful feature but the design choices warrant a maintainer discussion.",
+    "Overall vibes: cleanup PR with reasonable scope. Nothing alarming jumps out.",
+]
 
 _TEMPLATES = [
     "Consider adding a test for this change.",
@@ -33,6 +41,13 @@ class StubBackend:
         diff: str,
         pr_context: PRContext,
     ) -> list[ReviewFinding]:
+        return self.generate_review(diff, pr_context).findings
+
+    def generate_review(
+        self,
+        diff: str,
+        pr_context: PRContext,
+    ) -> ReviewResult:
         file_paths = [line[6:] for line in diff.split("\n") if line.startswith("+++ b/")]
         if not file_paths:
             file_paths = ["unknown_file.py"]
@@ -55,4 +70,6 @@ class StubBackend:
                 )
             )
 
-        return findings
+        vibe_seed = f"vibe:{pr_context.pr_number}:{pr_context.project_name}"
+        vibe_bucket = int(hashlib.sha256(vibe_seed.encode()).hexdigest(), 16) % len(_VIBES)
+        return ReviewResult(overall_vibe=_VIBES[vibe_bucket], findings=findings)
