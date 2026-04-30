@@ -7,6 +7,7 @@ These models track ingested PRs, draft reviews, anti-patterns, and operator acti
 
 from __future__ import annotations
 
+import hashlib
 from decimal import Decimal
 
 from django.core.validators import MaxValueValidator, MinValueValidator
@@ -215,6 +216,18 @@ class ReviewDraft(models.Model):
 
     def __str__(self) -> str:
         return f"Draft for {self.pull_request} @ {self.file_path}:{self.line_number}"
+
+    @property
+    def github_diff_url(self) -> str:
+        """GitHub PR diff URL pointing at this finding's file and line."""
+        pr_files_url = f"{self.pull_request.url}/files"
+        if not self.file_path:
+            return pr_files_url
+        file_hash = hashlib.sha256(self.file_path.encode()).hexdigest()
+        url = f"{pr_files_url}#diff-{file_hash}"
+        if self.line_number:
+            url += f"R{self.line_number}"
+        return url
 
 
 class AntiPattern(models.Model):
