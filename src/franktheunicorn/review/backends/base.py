@@ -200,8 +200,9 @@ def _extract_json_blob(text: str) -> object | None:
 
     Models without strict JSON enforcement sometimes wrap output in prose
     ('Sure, here is the review: [...]' or '[...]\\n\\nLet me know!').
-    raw_decode handles trailing junk; we jump to each '{' or '[' via
-    str.find and decode in place — no per-character scan, no slicing.
+    raw_decode handles trailing junk; a single compiled regex jumps to
+    the next '{' or '[' candidate in C, so we decode in place without
+    per-character scanning or slicing.
     """
     decoder = json.JSONDecoder()
     pos = 0
