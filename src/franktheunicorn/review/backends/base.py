@@ -65,6 +65,14 @@ class ReviewFinding(BaseModel):
     severity: str = "medium"
 
 
+@dataclass
+class ReviewResult:
+    """A single backend's review of a PR: an overall vibe + line findings."""
+
+    overall_vibe: str = ""
+    findings: list[ReviewFinding] = field(default_factory=list)
+
+
 class LLMBackend(Protocol):
     """Protocol that all LLM backends must satisfy."""
 
@@ -73,6 +81,12 @@ class LLMBackend(Protocol):
         diff: str,
         pr_context: PRContext,
     ) -> list[ReviewFinding]: ...
+
+    def generate_review(
+        self,
+        diff: str,
+        pr_context: PRContext,
+    ) -> ReviewResult: ...
 
 
 def _log_backend_error(backend_name: str, exc: BaseException) -> None:
@@ -157,14 +171,21 @@ class BaseLLMBackend:
         diff: str,
         pr_context: PRContext,
     ) -> list[ReviewFinding]:
+        return self.generate_review(diff, pr_context).findings
+
+    def generate_review(
+        self,
+        diff: str,
+        pr_context: PRContext,
+    ) -> ReviewResult:
         if not self._sdk_available:
-            return []
+            return ReviewResult()
 
         api_key = self._resolve_api_key()
         if self._default_key_env and not api_key:
             key_env = self._config.api_key_env or self._default_key_env
             logger.error("API key not found in env var '%s'.", key_env)
-            return []
+            return ReviewResult()
 
         system_prompt = build_system_prompt(pr_context)
         user_message = build_user_message(diff, pr_context)
@@ -179,11 +200,11 @@ class BaseLLMBackend:
             raw_text = self._call_api(system_prompt, user_message, api_key)
         except Exception as exc:
             _log_backend_error(type(self).__name__, exc)
-            return []
+            return ReviewResult()
         finally:
             self._last_duration = time.monotonic() - start
 
-        return parse_llm_response(raw_text)
+        return parse_llm_review(raw_text)
 
     def record_cost(
         self,
@@ -265,15 +286,15 @@ def _extract_json_blob(text: str) -> object | None:
     return None
 
 
-def parse_llm_response(raw_text: str) -> list[ReviewFinding]:
-    """Parse JSON output from an LLM into validated ReviewFinding objects.
+def parse_llm_review(raw_text: str) -> ReviewResult:
+    """Parse JSON output from an LLM into a ReviewResult.
 
-    Expects either a JSON array of finding objects or a JSON object with
-    a ``findings`` key containing the array.
+    Expects either a JSON array of finding objects, or a JSON object with
+    a ``findings`` key (and optional ``overall_vibe`` text summary).
     """
     raw_text = raw_text.strip()
     if not raw_text:
-        return []
+        return ReviewResult()
 
     # Strip markdown code fences if present.
     fence_match = _CODE_FENCE_RE.search(raw_text)
@@ -288,15 +309,18 @@ def parse_llm_response(raw_text: str) -> list[ReviewFinding]:
         data = _extract_json_blob(raw_text)
         if data is None:
             logger.warning("LLM response is not valid JSON; returning empty findings.")
-            return []
+            return ReviewResult()
 
-    # Accept {"findings": [...]} or [...]
+    overall_vibe = ""
     if isinstance(data, dict):
+        raw_vibe = data.get("overall_vibe", "")
+        if isinstance(raw_vibe, str):
+            overall_vibe = raw_vibe.strip()
         data = data.get("findings", [])
 
     if not isinstance(data, list):
         logger.warning("LLM response JSON is not a list; returning empty findings.")
-        return []
+        return ReviewResult(overall_vibe=overall_vibe)
 
     findings: list[ReviewFinding] = []
     for item in data:
@@ -314,7 +338,12 @@ def parse_llm_response(raw_text: str) -> list[ReviewFinding]:
             logger.debug("Skipping invalid finding item: %s", item)
             continue
 
-    return findings
+    return ReviewResult(overall_vibe=overall_vibe, findings=findings)
+
+
+def parse_llm_response(raw_text: str) -> list[ReviewFinding]:
+    """Parse JSON LLM output into ReviewFindings (vibe-stripped wrapper)."""
+    return parse_llm_review(raw_text).findings
 
 
 _COST_PER_MTOK: dict[str, tuple[float, float]] = {
@@ -338,5 +367,7 @@ __all__ = [
     "LLMBackend",
     "PRContext",
     "ReviewFinding",
+    "ReviewResult",
     "parse_llm_response",
+    "parse_llm_review",
 ]

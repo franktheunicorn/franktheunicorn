@@ -217,6 +217,34 @@ class ReviewDraft(models.Model):
         return f"Draft for {self.pull_request} @ {self.file_path}:{self.line_number}"
 
 
+class AgentVibe(models.Model):
+    """One agent/backend's overall plain-text impression of a PR.
+
+    Sits alongside ReviewDraft rows: each backend produces an `AgentVibe`
+    per PR (the overall summary) plus zero or more `ReviewDraft` rows
+    (line-specific findings).
+    """
+
+    pull_request = models.ForeignKey(
+        PullRequest, on_delete=models.CASCADE, related_name="agent_vibes"
+    )
+    backend = models.CharField(max_length=100)
+    vibe_text = models.TextField()
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["backend", "-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["pull_request", "backend"], name="uniq_agentvibe_pr_backend"
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"Vibe from {self.backend} on {self.pull_request}"
+
+
 class AntiPattern(models.Model):
     """
     A pattern of review comment the operator doesn't want to make.

@@ -25,10 +25,13 @@ def finding_schema_json() -> str:
 def _finding_schema() -> str:
     """Generate the full schema instruction block for the default review prompt."""
     return (
-        "Return your review as a JSON array of finding objects matching this schema:\n"
+        "Return your review as a JSON object with two keys:\n"
+        '  - "overall_vibe": a short (1-3 sentence) plain-text impression of the PR\n'
+        "    overall — strengths, concerns, and your gut feel as a reviewer.\n"
+        '  - "findings": an array of finding objects matching this schema:\n'
         + finding_schema_json()
-        + "\n\nIf you have no findings, return an empty array: []"
-        '\nWrap the array in {"findings": [...]}.'
+        + '\n\nIf you have no line-specific findings, return "findings": [].'
+        ' Always include "overall_vibe" with at least one sentence.'
     )
 
 
