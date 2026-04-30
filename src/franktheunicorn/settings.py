@@ -122,3 +122,53 @@ DEFAULT_FROM_EMAIL: str = str(_resolved["email_from"])
 
 USE_TZ = True
 TIME_ZONE = "UTC"
+
+# --- Logging ---
+#
+# Configures the root logger and the franktheunicorn package logger via
+# Django's LOGGING dict, so structured log output works in all processes
+# (web, worker, management commands, tests).
+#
+# Level comes from operator.yaml's ``log_level`` (default: INFO).
+# Override at runtime with ``FRANK_LOG_LEVEL`` env var or the worker's
+# ``--log-level`` / ``--debug`` CLI flags.
+
+_LOG_LEVEL = FRANK_LOG_LEVEL  # already resolved above (str like "INFO")
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "frank": {
+            "format": "%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "frank",
+            # No level set — accepts all records that reach this handler.
+        },
+    },
+    "loggers": {
+        # franktheunicorn package — honour FRANK_LOG_LEVEL.
+        # propagate=True so pytest's caplog fixture can capture log records;
+        # the console handler on the root logger emits them.
+        "franktheunicorn": {
+            "level": _LOG_LEVEL,
+            "propagate": True,
+        },
+        # Django's own loggers — keep INFO in debug mode, WARNING otherwise.
+        "django": {
+            "level": "INFO" if DEBUG else "WARNING",
+            "propagate": True,
+        },
+    },
+    # Root logger: all propagated records arrive here.  Third-party library
+    # loggers below WARNING are effectively silenced because they inherit the
+    # root level (WARNING) and never create records in the first place.
+    "root": {
+        "handlers": ["console"],
+        "level": "WARNING",
+    },
+}

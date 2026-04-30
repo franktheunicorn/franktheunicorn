@@ -584,3 +584,90 @@ class TestModelRecommendations:
         ):
             hf, _ = recommend_hf_model()
         assert hf == "Qwen/Qwen2.5-Coder-3B-Instruct"
+
+
+class _HttpError(Exception):
+    """Minimal HTTP-like exception with a ``status_code`` for testing _log_backend_error."""
+
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"HTTP {status_code} error")
+        self.status_code = status_code
+
+
+class TestLogBackendError:
+    """Tests for _log_backend_error: correct level and message for HTTP 4xx."""
+
+    def test_401_logs_at_error_with_auth_hint(self, caplog: pytest.LogCaptureFixture) -> None:
+        from franktheunicorn.review.backends.base import _log_backend_error
+
+        with caplog.at_level("ERROR", logger="franktheunicorn"):
+            _log_backend_error("ClaudeBackend", _HttpError(401))
+
+        assert any(
+            "401" in r.message and "authentication" in r.message.lower() for r in caplog.records
+        )
+        assert any(r.levelname == "ERROR" for r in caplog.records)
+
+    def test_403_logs_at_error_with_permission_hint(self, caplog: pytest.LogCaptureFixture) -> None:
+        from franktheunicorn.review.backends.base import _log_backend_error
+
+        with caplog.at_level("ERROR", logger="franktheunicorn"):
+            _log_backend_error("ClaudeBackend", _HttpError(403))
+
+        assert any("403" in r.message and "permission" in r.message.lower() for r in caplog.records)
+        assert any(r.levelname == "ERROR" for r in caplog.records)
+
+    def test_429_logs_at_warning_with_rate_limit_hint(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from franktheunicorn.review.backends.base import _log_backend_error
+
+        with caplog.at_level("WARNING", logger="franktheunicorn"):
+            _log_backend_error("OpenAIBackend", _HttpError(429))
+
+        assert any("429" in r.message and "rate limit" in r.message.lower() for r in caplog.records)
+        assert any(r.levelname == "WARNING" for r in caplog.records)
+
+    def test_other_4xx_logs_at_error_with_status_code(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from franktheunicorn.review.backends.base import _log_backend_error
+
+        with caplog.at_level("ERROR", logger="franktheunicorn"):
+            _log_backend_error("GeminiBackend", _HttpError(422))
+
+        assert any("422" in r.message for r in caplog.records)
+        assert any(r.levelname == "ERROR" for r in caplog.records)
+
+    def test_no_status_code_logs_exception(self, caplog: pytest.LogCaptureFixture) -> None:
+        from franktheunicorn.review.backends.base import _log_backend_error
+
+        with caplog.at_level("ERROR", logger="franktheunicorn"):
+            _log_backend_error("OllamaBackend", ValueError("connection refused"))
+
+        assert any(r.levelname == "ERROR" for r in caplog.records)
+
+    def test_generate_findings_logs_401_on_api_error(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """generate_findings should emit an actionable 401 log, not a raw traceback."""
+        import os
+
+        from franktheunicorn.review.backends.claude_backend import ClaudeBackend
+
+        config = LLMBackendConfig(provider="claude", api_key_env="TEST_CLAUDE_401_KEY")
+        backend = ClaudeBackend(config)
+        ctx = make_pr_context()
+
+        with (
+            patch.dict(os.environ, {"TEST_CLAUDE_401_KEY": "sk-bad"}),
+            patch("anthropic.Anthropic") as mock_cls,
+            caplog.at_level("ERROR", logger="franktheunicorn"),
+        ):
+            mock_cls.return_value.messages.create.side_effect = _HttpError(401)
+            findings = backend.generate_findings(_SAMPLE_DIFF, ctx)
+
+        assert findings == []
+        assert any(
+            "401" in r.message and "authentication" in r.message.lower() for r in caplog.records
+        )
