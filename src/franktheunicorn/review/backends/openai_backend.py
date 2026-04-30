@@ -34,6 +34,43 @@ class OpenAIBackend(BaseLLMBackend):
     # fall back to a plain prompt-only JSON request and cache the result.
     _supports_json_object: bool = True
 
+    def __init__(self, config: Any) -> None:
+        super().__init__(config)
+        self._load_fallback_state()
+
+    def _load_fallback_state(self) -> None:
+        """Load persisted compatibility flags from DB into instance attributes."""
+        try:
+            from franktheunicorn.core.models import LLMBackendFallback
+
+            row = LLMBackendFallback.objects.filter(
+                provider="openai",
+                model=self._model,
+                base_url=self._config.base_url or "",
+            ).first()
+            if row is not None:
+                self._token_param = row.token_param
+                self._supports_json_object = row.supports_json_object
+        except Exception:
+            logger.debug("Could not load LLM fallback state from DB.", exc_info=True)
+
+    def _persist_fallback_state(self) -> None:
+        """Upsert current compatibility flags to DB."""
+        try:
+            from franktheunicorn.core.models import LLMBackendFallback
+
+            LLMBackendFallback.objects.update_or_create(
+                provider="openai",
+                model=self._model,
+                base_url=self._config.base_url or "",
+                defaults={
+                    "token_param": self._token_param,
+                    "supports_json_object": self._supports_json_object,
+                },
+            )
+        except Exception:
+            logger.debug("Could not persist LLM fallback state to DB.", exc_info=True)
+
     def _call_api(self, system_prompt: str, user_message: str, api_key: str) -> str:
         import openai
 
@@ -81,6 +118,7 @@ class OpenAIBackend(BaseLLMBackend):
                         self._model,
                     )
                     self._supports_json_object = False
+                    self._persist_fallback_state()
                     last_exc = exc
                     continue
                 alt = (
@@ -96,6 +134,7 @@ class OpenAIBackend(BaseLLMBackend):
                         self._model,
                     )
                     self._token_param = alt
+                    self._persist_fallback_state()
                     last_exc = exc
                     continue
                 raise
