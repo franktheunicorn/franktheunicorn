@@ -244,7 +244,14 @@ class GitLabClient(ForgeClient):
 
 
 def _normalize_mr(mr: dict[str, Any]) -> dict[str, Any]:
-    """Translate a GitLab MR JSON object into the GitHub-shaped dict the poller expects."""
+    """Translate a GitLab MR JSON object into the GitHub-shaped dict the poller expects.
+
+    Also stashes ``_gitlab_base_sha``, ``_gitlab_start_sha``, and
+    ``_gitlab_head_sha`` on the returned dict — these are an internal
+    carrier between ``get_pull_request`` and ``create_review`` (the
+    discussion position object needs all three SHAs). External callers
+    should treat them as private and not depend on them.
+    """
     out = dict(mr)
     # Number / id (frank uses iid as the user-visible PR number).
     if "iid" in out and "number" not in out:

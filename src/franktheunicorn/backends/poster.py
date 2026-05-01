@@ -69,9 +69,13 @@ class GitHubPoster:
         drafts: list[ReviewDraft] | None = None,
         event: str = "COMMENT",
     ) -> dict[str, Any] | None:
-        """Post approved drafts as a single GitHub review.
+        """Post approved drafts as a single review on the project's forge.
 
-        Returns the GitHub API response dict, or None if there's nothing to post.
+        Returns the forge's response dict, or None if there's nothing to
+        post. The response is expected to include
+        ``comment_ids: list[int]`` populated by the underlying
+        ``ForgeClient.create_review`` (see ``ForgeClient`` docs);
+        comment IDs are zipped against ``drafts`` in posting order.
         """
         if drafts is None:
             drafts = list(
