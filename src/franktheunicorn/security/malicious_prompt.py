@@ -243,16 +243,24 @@ def assess(text: str, backend: BaseLLMBackend | None = None) -> MaliciousPromptV
     if not hits:
         return MaliciousPromptVerdict(verdict="no")
 
+    regex_only = MaliciousPromptVerdict(verdict=_verdict_from_regex_only(hits), regex_hits=hits)
+
     if backend is None:
-        return MaliciousPromptVerdict(verdict=_verdict_from_regex_only(hits), regex_hits=hits)
+        return regex_only
+
+    api_key = backend._resolve_api_key()
+    if backend._default_key_env and not api_key:
+        logger.warning(
+            "Malicious-prompt LLM backend has no API key configured; using regex-only verdict."
+        )
+        return regex_only
 
     user_message = _build_user_message(text, hits)
     try:
-        api_key = backend._resolve_api_key()
         raw_response = backend._call_api(_LLM_SYSTEM_PROMPT, user_message, api_key)
     except Exception:
         logger.exception("Malicious-prompt LLM call failed; falling back to regex verdict.")
-        return MaliciousPromptVerdict(verdict=_verdict_from_regex_only(hits), regex_hits=hits)
+        return regex_only
 
     verdict, reasoning = _parse_verdict_json(raw_response)
     if verdict is None:

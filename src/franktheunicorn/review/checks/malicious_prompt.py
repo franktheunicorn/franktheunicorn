@@ -1,9 +1,9 @@
 """Malicious-prompt sub-check.
 
-Hits do not produce ReviewDrafts via the standard flow — they are filed
-as ``SecurityReport`` rows so the operator triages them in the security
-tab. The check returns an informational ``ReviewFinding`` so the PR
-detail page shows a breadcrumb pointing there.
+Hits are filed as ``SecurityReport`` rows so the operator triages them in
+the security tab. The check also returns an informational
+``ReviewFinding`` so the standard flow creates a ``ReviewDraft``
+breadcrumb on the PR detail page pointing there.
 """
 
 from __future__ import annotations
@@ -53,17 +53,24 @@ class MaliciousPromptCheck(BaseCheck):
         if not verdict.is_bad:
             return []
 
+        report_filed = False
         try:
             file_security_report(pr, diff, verdict)
+            report_filed = True
         except Exception:
             logger.exception(
                 "Failed to file security report for PR #%d malicious-prompt hit", pr.number
             )
 
         hit_summary = ", ".join(h.pattern_name for h in verdict.regex_hits) or "(LLM only)"
+        filing_status = (
+            "Filed in the security tab."
+            if report_filed
+            else "Attempted to file in the security tab, but filing failed."
+        )
         body = (
             f"Pre-filter flagged this PR as **{verdict.verdict}** for prompt-injection. "
-            f"Filed in the security tab. Regex hits: {hit_summary}."
+            f"{filing_status} Regex hits: {hit_summary}."
         )
         if verdict.llm_reasoning:
             body += f"\n\nReasoning: {verdict.llm_reasoning}"
