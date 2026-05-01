@@ -288,7 +288,9 @@ class TestGitLabClient:
             comments=[ReviewComment(path="a.py", body="nit", line=5)],
         )
         result = client.create_review("o", "r", 1, review)
-        assert result["comment_ids"] == []
+        # The dropped comment leaves a None placeholder so positional
+        # alignment with review.comments is preserved.
+        assert result["comment_ids"] == [None]
         # No discussion request should have been made.
         for r in httpx_mock.get_requests():
             assert not r.url.path.endswith("/discussions"), "should not have posted discussion"

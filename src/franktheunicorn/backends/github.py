@@ -88,12 +88,18 @@ class GitHubClient(ForgeClient):
         response.raise_for_status()
         result: dict[str, Any] = response.json()
 
-        comment_ids: list[int] = []
+        # 1:1 list aligned with review.comments. None entries flag
+        # comments whose ID could not be retrieved (we never drop
+        # GitHub-side; the server validates the whole submission).
+        comment_ids: list[int | None] = [None] * len(review.comments)
         review_id = result.get("id")
         if review_id and review.comments:
             try:
                 posted_comments = self.get_review_comments(owner, repo, pr_number, review_id)
-                comment_ids = [c["id"] for c in posted_comments if "id" in c]
+                fetched_ids = [c["id"] for c in posted_comments if "id" in c]
+                for i, fid in enumerate(fetched_ids):
+                    if i < len(comment_ids):
+                        comment_ids[i] = fid
             except Exception:
                 logger.warning(
                     "Could not fetch posted comment IDs for %s/%s#%d review %d",

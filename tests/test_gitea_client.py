@@ -142,6 +142,53 @@ class TestGiteaClient:
         sent = json.loads(post.content)
         assert sent["comments"] == []
 
+    def test_create_review_dropped_middle_comment_keeps_alignment(
+        self, httpx_mock: HTTPXMock, client: GiteaClient
+    ) -> None:
+        """If the middle comment can't be located, comment_ids stays 1:1.
+
+        Regression for an index-shift bug where dropping a middle
+        comment caused subsequent IDs to land on the wrong drafts and
+        recall could delete the wrong forge comment.
+        """
+        # Diff that locates lines 11 and 13 but not line 999.
+        diff = (
+            "diff --git a/foo.py b/foo.py\n"
+            "--- a/foo.py\n"
+            "+++ b/foo.py\n"
+            "@@ -10,4 +10,5 @@\n"
+            " ctx\n"
+            "+a\n"
+            " ctx2\n"
+            "+c\n"
+            " ctx3\n"
+        )
+        httpx_mock.add_response(
+            url="https://codeberg.test/api/v1/repos/org/repo/pulls/7.diff", text=diff
+        )
+        httpx_mock.add_response(
+            url="https://codeberg.test/api/v1/repos/org/repo/pulls/7/reviews",
+            method="POST",
+            json={"id": 50},
+        )
+        # Two posted comments → two IDs back, in posting order.
+        httpx_mock.add_response(
+            url="https://codeberg.test/api/v1/repos/org/repo/pulls/7/reviews/50/comments",
+            method="GET",
+            json=[{"id": 7001}, {"id": 7003}],
+        )
+
+        review = ReviewBody(
+            comments=[
+                ReviewComment(path="foo.py", body="first", line=11),
+                ReviewComment(path="foo.py", body="ghost", line=999),
+                ReviewComment(path="foo.py", body="third", line=13),
+            ],
+        )
+        result = client.create_review("org", "repo", 7, review)
+        # 1:1 alignment with input order; dropped middle comment is None.
+        assert result["comment_ids"] == [7001, None, 7003]
+
     def test_create_review_no_inline_skips_diff_fetch(
         self, httpx_mock: HTTPXMock, client: GiteaClient
     ) -> None:

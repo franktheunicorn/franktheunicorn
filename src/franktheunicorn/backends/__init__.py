@@ -27,9 +27,8 @@ def make_client(entry: ForgeRegistryEntry) -> ForgeClient:
     """Construct the appropriate ForgeClient for a registry entry.
 
     Gitea and Forgejo share the same underlying API, so both ``type``
-    values map to the same client implementation. GitLab and Gitea/Forgejo
-    clients are added in subsequent commits — referencing them now would
-    fail at import time.
+    values map to the same ``GiteaClient`` implementation. Raises
+    ``NotImplementedError`` for unrecognized forge types.
     """
     if entry.type == "github":
         from franktheunicorn.backends.github import GitHubClient

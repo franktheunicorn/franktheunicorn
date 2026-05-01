@@ -104,16 +104,20 @@ class GitHubPoster:
 
         now = datetime.now(tz=UTC)
 
-        # Per-comment IDs come back on the create_review response — each
-        # ForgeClient implementation populates ``comment_ids`` in posting
-        # order so the zip below is reliable across forges.
+        # Per-comment IDs come back on the create_review response in 1:1
+        # alignment with the comments we submitted. ``None`` entries flag
+        # comments that were dropped during translation (e.g. unlocatable
+        # diff position on Gitea, missing MR refs on GitLab) — for those
+        # drafts we mark ``posted`` but leave ``forge_comment_id`` unset,
+        # so a later recall doesn't accidentally delete a sibling
+        # draft's comment.
         raw_comment_ids = result.get("comment_ids") if result else []
-        comment_ids: list[int] = list(raw_comment_ids) if raw_comment_ids else []
+        comment_ids: list[int | None] = list(raw_comment_ids) if raw_comment_ids else []
 
         for i, draft in enumerate(drafts):
             draft.status = "posted"
             draft.posted_at = now
-            if i < len(comment_ids):
+            if i < len(comment_ids) and comment_ids[i] is not None:
                 draft.forge_comment_id = comment_ids[i]
             draft.save(update_fields=["status", "posted_at", "forge_comment_id", "updated_at"])
 

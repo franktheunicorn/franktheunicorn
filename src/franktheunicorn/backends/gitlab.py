@@ -141,8 +141,10 @@ class GitLabClient(ForgeClient):
 
         Body is posted as a single MR note. Each inline comment becomes a
         separate discussion with a text-position object. The returned
-        ``id`` field is the body note's ID; per-comment IDs are listed
-        under ``_comment_ids`` on the result for the poster.
+        ``id`` field is the body note's ID (or the first successfully
+        posted inline note when there's no body); per-comment IDs are
+        listed under ``comment_ids`` in 1:1 alignment with
+        ``review.comments`` (``None`` for any that were dropped).
         """
         pid = _project_id(owner, repo)
         result_id: int | None = None
@@ -154,13 +156,16 @@ class GitLabClient(ForgeClient):
             response.raise_for_status()
             result_id = response.json().get("id")
 
-        comment_ids: list[int] = []
+        # 1:1 list aligned with review.comments. None entries flag
+        # comments that were dropped (missing MR refs) or whose ID
+        # couldn't be retrieved from the discussion response.
+        comment_ids: list[int | None] = [None] * len(review.comments)
         if review.comments:
             mr = self.get_pull_request(owner, repo, pr_number)
             base_sha = mr.get("_gitlab_base_sha", "")
             start_sha = mr.get("_gitlab_start_sha", base_sha)
             head_sha = mr.get("_gitlab_head_sha", "")
-            for comment in review.comments:
+            for idx, comment in enumerate(review.comments):
                 discussion = _build_gitlab_discussion(
                     comment, base_sha=base_sha, start_sha=start_sha, head_sha=head_sha
                 )
@@ -178,11 +183,15 @@ class GitLabClient(ForgeClient):
                 # First note in the new discussion is the inline comment.
                 notes = disc_data.get("notes", [])
                 if notes:
-                    comment_ids.append(notes[0].get("id"))
+                    comment_ids[idx] = notes[0].get("id")
 
-        # Fallback id if no body was sent: synthesize from the first inline note.
-        if result_id is None and comment_ids:
-            result_id = comment_ids[0]
+        # Fallback id if no body was sent: synthesize from the first
+        # successfully-posted inline note.
+        if result_id is None:
+            for cid in comment_ids:
+                if cid is not None:
+                    result_id = cid
+                    break
 
         return {"id": result_id, "comment_ids": comment_ids}
 

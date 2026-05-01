@@ -90,8 +90,18 @@ class MockForgeClient(ForgeClient):
     def create_review(
         self, owner: str, repo: str, pr_number: int, review: ReviewBody
     ) -> dict[str, Any]:
-        """Return a canned review-create response."""
-        return {"id": 1, "state": "COMMENTED", "body": review.body, "comment_ids": []}
+        """Return a canned review-create response.
+
+        ``comment_ids`` is 1:1 aligned with ``review.comments`` per the
+        ForgeClient contract; mock mode has no real IDs to assign so all
+        entries are ``None``.
+        """
+        return {
+            "id": 1,
+            "state": "COMMENTED",
+            "body": review.body,
+            "comment_ids": [None] * len(review.comments),
+        }
 
     def get_review_comments(
         self, owner: str, repo: str, pr_number: int, review_id: int

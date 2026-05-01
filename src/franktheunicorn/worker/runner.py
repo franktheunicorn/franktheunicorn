@@ -1,10 +1,10 @@
 """
-Worker runner — polls GitHub on an interval and processes PRs.
+Worker runner — polls each configured forge on an interval and processes PRs.
 
 This is the main loop for the worker service. It:
 1. Loads operator and project configs from YAML
-2. Creates a GitHub client (real or mock)
-3. Polls each project for PRs
+2. Builds a ForgeClient per forge entry referenced by configured projects
+3. Polls each project against its forge for PRs
 4. Scores and stores results
 5. Runs the stub review drafter on new/updated PRs
 6. Sleeps and repeats
@@ -81,9 +81,11 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
 
     from django.conf import settings
 
-    from franktheunicorn.backends.github import GitHubClient
-    from franktheunicorn.backends.mock import MockGitHubClient
+    from franktheunicorn.backends import make_client
+    from franktheunicorn.backends.base import ForgeClient
+    from franktheunicorn.backends.mock import MockForgeClient
     from franktheunicorn.config.loader import load_operator_config, load_project_configs
+    from franktheunicorn.config.resolver import get_forge_entry
 
     # Precedence: --log-level CLI flag > FRANK_LOG_LEVEL env > operator.yaml > INFO.
     # The env var path is already applied inside the resolver, so reading
@@ -114,30 +116,78 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
         logger.warning("No project configs found in %s", settings.FRANK_PROJECTS_DIR)
         logger.info("The worker will keep running and check again each cycle.")
 
-    # Choose client based on mock mode
-    client: GitHubClient | MockGitHubClient
+    # Build one ForgeClient per forge entry referenced by configured
+    # projects. Projects sharing a forge share a client. In mock mode a
+    # single MockForgeClient serves all projects regardless of their
+    # ``forge:`` field.
+    clients: dict[str, ForgeClient] = {}
     if settings.FRANK_MOCK_MODE:
         logger.info("Running in MOCK mode — using fixture data")
-        client = MockGitHubClient(settings.FRANK_FIXTURES_DIR)
+        mock_client: ForgeClient = MockForgeClient(settings.FRANK_FIXTURES_DIR)
+        # Same instance used for every project's forge name.
+        for pc in project_configs:
+            from franktheunicorn.config.models import ProjectConfig
+
+            if isinstance(pc, ProjectConfig):
+                clients[pc.forge] = mock_client
+        if not clients:
+            clients["github"] = mock_client
     else:
-        if not settings.FRANK_GITHUB_TOKEN:
-            logger.error("FRANK_GITHUB_TOKEN not set and mock mode is off. Exiting.")
+        from franktheunicorn.config.models import ProjectConfig
+
+        forge_names_used = {
+            pc.forge for pc in project_configs if isinstance(pc, ProjectConfig) and pc.enabled
+        }
+        for forge_name in sorted(forge_names_used):
+            try:
+                entry = get_forge_entry(operator_config, forge_name)
+            except KeyError as exc:
+                logger.error(
+                    "Skipping forge %r: %s. Projects using this forge will not be polled.",
+                    forge_name,
+                    exc,
+                )
+                continue
+            try:
+                clients[forge_name] = make_client(entry)
+            except (NotImplementedError, ValueError) as exc:
+                logger.error(
+                    "Could not build client for forge %r (type=%s): %s",
+                    forge_name,
+                    entry.type,
+                    exc,
+                )
+                continue
+            logger.info(
+                "Forge %r ready (type=%s, base_url=%s)",
+                forge_name,
+                entry.type,
+                entry.base_url,
+            )
+        if not clients:
+            logger.error(
+                "No usable forge clients. Configure operator.yaml::forges or set "
+                "FRANK_MOCK_MODE=true. Exiting."
+            )
             sys.exit(1)
-        logger.info("Running with live GitHub API")
-        client = GitHubClient(token=settings.FRANK_GITHUB_TOKEN)
 
     poll_interval = settings.FRANK_POLL_INTERVAL
     logger.info("Worker starting. Poll interval: %ds", poll_interval)
 
     try:
         while True:
-            _run_cycle(client, project_configs, operator_config.github_username, operator_config)
+            _run_cycle(clients, project_configs, operator_config.github_username, operator_config)
             logger.info("Sleeping %ds until next poll...", poll_interval)
             time.sleep(poll_interval)
     except KeyboardInterrupt:
         logger.info("Worker shutting down.")
     finally:
-        client.close()
+        # Close each unique client exactly once (mock mode reuses one instance).
+        for c in {id(v): v for v in clients.values()}.values():
+            try:
+                c.close()
+            except Exception:
+                logger.debug("Error closing forge client", exc_info=True)
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         lock_fd.close()
 
@@ -209,12 +259,17 @@ def _build_repo_health_context(pr: object) -> str:
 
 
 def _run_cycle(
-    client: object,
+    clients: Mapping[str, object],
     project_configs: Sequence[object],
     operator_username: str,
     operator_config: OperatorConfig | None = None,
 ) -> None:
-    """Run one polling cycle across all configured projects."""
+    """Run one polling cycle across all configured projects.
+
+    ``clients`` maps forge-name → ``ForgeClient``. Projects are dispatched
+    to their respective forge client based on ``ProjectConfig.forge``.
+    Projects whose forge is not in the map are skipped with a warning.
+    """
     import httpx
     from django.conf import settings
 
@@ -231,6 +286,10 @@ def _run_cycle(
         cr_config = operator_config.coderabbit
 
     # Shared HTTP client for diff fetching (copypasta + dependency changelogs).
+    # NOTE: DiffFetcher is currently GitHub-specific (talks to api.github.com).
+    # For non-GitHub projects, the LLM-checks/copypasta/changelog code paths
+    # below will silently fall through. Tracked as a follow-up; see review
+    # comment on PR #75.
     diff_http = httpx.Client()
     diff_fetcher = DiffFetcher(client=diff_http)
     test_runner = TestRunner()
@@ -245,8 +304,17 @@ def _run_cycle(
                 getattr(pc, "owner", "?"),
             )
             continue
+        client = clients.get(pc.forge)
+        if client is None:
+            logger.warning(
+                "No client registered for forge %r; skipping %s/%s",
+                pc.forge,
+                pc.owner,
+                pc.repo,
+            )
+            continue
         try:
-            logger.info("Polling %s/%s ...", pc.owner, pc.repo)
+            logger.info("Polling %s/%s (forge=%s) ...", pc.owner, pc.repo, pc.forge)
 
             # Ensure local repo clone exists and is fetched (v1.25).
             repo_path: Path | None = None
