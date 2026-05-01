@@ -33,7 +33,7 @@ class TestGitHubPoster:
         assert result["id"] == 42
         draft.refresh_from_db()
         assert draft.status == "posted"
-        assert draft.github_comment_id == 101
+        assert draft.forge_comment_id == 101
         assert draft.posted_at is not None
         # Poster no longer fetches comment IDs separately.
         mock_client.get_review_comments.assert_not_called()
@@ -75,7 +75,7 @@ class TestGitHubPoster:
         assert result is not None
         draft.refresh_from_db()
         assert draft.status == "posted"
-        assert draft.github_comment_id is None
+        assert draft.forge_comment_id is None
 
 
 @pytest.mark.django_db
@@ -85,7 +85,7 @@ class TestRecallComment:
         draft = ReviewDraftFactory(
             pull_request=pr,
             status="posted",
-            github_comment_id=123,
+            forge_comment_id=123,
             posted_at=datetime.now(tz=UTC) - timedelta(hours=1),
         )
 
@@ -103,7 +103,7 @@ class TestRecallComment:
         draft = ReviewDraftFactory(
             pull_request=pr,
             status="posted",
-            github_comment_id=None,
+            forge_comment_id=None,
         )
         mock_client = MagicMock()
         poster = GitHubPoster(mock_client)
@@ -114,7 +114,7 @@ class TestRecallComment:
         draft = ReviewDraftFactory(
             pull_request=pr,
             status="posted",
-            github_comment_id=123,
+            forge_comment_id=123,
             posted_at=None,
         )
         mock_client = MagicMock()
@@ -126,7 +126,7 @@ class TestRecallComment:
         draft = ReviewDraftFactory(
             pull_request=pr,
             status="posted",
-            github_comment_id=123,
+            forge_comment_id=123,
             posted_at=datetime.now(tz=UTC) - timedelta(hours=25),
         )
         mock_client = MagicMock()
@@ -139,7 +139,7 @@ class TestRecallComment:
         draft = ReviewDraftFactory(
             pull_request=pr,
             status="posted",
-            github_comment_id=123,
+            forge_comment_id=123,
             posted_at=datetime.now(tz=UTC) - timedelta(hours=1),
         )
         mock_client = MagicMock()

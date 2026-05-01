@@ -712,7 +712,7 @@ class TestRecallDraft:
         assert b"Cannot recall" in response.content
 
     def test_recall_no_comment_id(self, client: Client, db_pr: PullRequest) -> None:
-        draft = ReviewDraftFactory(pull_request=db_pr, status="posted", github_comment_id=None)
+        draft = ReviewDraftFactory(pull_request=db_pr, status="posted", forge_comment_id=None)
         response = client.post(f"/draft/{draft.pk}/recall/")
         assert b"Cannot recall" in response.content
 
@@ -853,7 +853,7 @@ class TestRecallAndPostWithMock:
         draft = ReviewDraftFactory(
             pull_request=db_pr,
             status="posted",
-            github_comment_id=123,
+            forge_comment_id=123,
             posted_at=datetime.now(tz=UTC),
         )
 
@@ -876,7 +876,7 @@ class TestRecallAndPostWithMock:
         draft = ReviewDraftFactory(
             pull_request=db_pr,
             status="posted",
-            github_comment_id=123,
+            forge_comment_id=123,
             posted_at=datetime.now(tz=UTC),
         )
 

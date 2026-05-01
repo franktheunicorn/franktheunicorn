@@ -501,7 +501,7 @@ def edit_draft(request: HttpRequest, draft_id: int) -> HttpResponse:
 def recall_draft(request: HttpRequest, draft_id: int) -> HttpResponse:
     """Recall (delete) a posted comment from GitHub within the recall window."""
     draft = get_object_or_404(ReviewDraft, pk=draft_id)
-    if draft.status != "posted" or not draft.github_comment_id:
+    if draft.status != "posted" or not draft.forge_comment_id:
         return HttpResponse(
             '<div class="recall-result" style="color: #c00;">Cannot recall: not posted.</div>'
         )

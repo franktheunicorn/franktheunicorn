@@ -114,8 +114,8 @@ class GitHubPoster:
             draft.status = "posted"
             draft.posted_at = now
             if i < len(comment_ids):
-                draft.github_comment_id = comment_ids[i]
-            draft.save(update_fields=["status", "posted_at", "github_comment_id", "updated_at"])
+                draft.forge_comment_id = comment_ids[i]
+            draft.save(update_fields=["status", "posted_at", "forge_comment_id", "updated_at"])
 
         return result
 
@@ -124,8 +124,8 @@ class GitHubPoster:
 
         Returns True if the comment was successfully recalled.
         """
-        if not draft.github_comment_id:
-            logger.warning("Cannot recall draft %d: no github_comment_id", draft.pk)
+        if not draft.forge_comment_id:
+            logger.warning("Cannot recall draft %d: no forge_comment_id", draft.pk)
             return False
 
         if not draft.posted_at:
@@ -147,10 +147,10 @@ class GitHubPoster:
                 draft.pull_request.project.owner,
                 draft.pull_request.project.repo,
                 draft.pull_request.number,
-                draft.github_comment_id,
+                draft.forge_comment_id,
             )
         except Exception:
-            logger.exception("Failed to recall comment %d", draft.github_comment_id)
+            logger.exception("Failed to recall comment %d", draft.forge_comment_id)
             return False
 
         draft.status = "recalled"

@@ -227,8 +227,9 @@ class ReviewDraft(models.Model):
             status__in=cls.LINE_FINDING_STATUSES,
         )
 
-    # GitHub posting state
-    github_comment_id = models.BigIntegerField(null=True, blank=True)
+    # Forge posting state. The ID is whatever the source forge returned —
+    # GitHub review-comment ID, Gitea pull-comment ID, GitLab note ID.
+    forge_comment_id = models.BigIntegerField(null=True, blank=True)
     posted_at = models.DateTimeField(null=True, blank=True)
 
     created_at = models.DateTimeField(default=timezone.now)

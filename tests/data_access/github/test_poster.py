@@ -98,7 +98,7 @@ class TestGitHubPoster:
         draft.refresh_from_db()
         assert draft.status == "posted"
         assert draft.posted_at is not None
-        assert draft.github_comment_id == 101
+        assert draft.forge_comment_id == 101
 
     def test_post_review_returns_none_for_empty(self) -> None:
         poster, _ = self._make_poster()
@@ -133,7 +133,7 @@ class TestGitHubPoster:
             file_path="a.py",
             comment_body="Recall me.",
             status="posted",
-            github_comment_id=999,
+            forge_comment_id=999,
             posted_at=datetime.now(tz=UTC) - timedelta(hours=1),
         )
 
@@ -151,7 +151,7 @@ class TestGitHubPoster:
             file_path="a.py",
             comment_body="Too late.",
             status="posted",
-            github_comment_id=999,
+            forge_comment_id=999,
             posted_at=datetime.now(tz=UTC) - timedelta(hours=48),
         )
 
@@ -179,7 +179,7 @@ class TestGitHubPoster:
             pull_request=pr,
             comment_body="recall me",
             status="posted",
-            github_comment_id=999,
+            forge_comment_id=999,
             posted_at=datetime.now(tz=UTC) - timedelta(hours=1),
         )
 
