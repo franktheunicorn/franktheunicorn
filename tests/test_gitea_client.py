@@ -164,6 +164,45 @@ class TestGiteaClient:
         assert request is not None
         assert b"since=2026-01-01" in request.url.query
 
+    def test_create_review_multi_line_range_uses_end_line(
+        self, httpx_mock: HTTPXMock, client: GiteaClient
+    ) -> None:
+        """Range comments resolve to the end-of-range line in the diff."""
+        diff = (
+            "diff --git a/foo.py b/foo.py\n"
+            "--- a/foo.py\n"
+            "+++ b/foo.py\n"
+            "@@ -10,3 +10,5 @@\n"
+            " ctx\n"
+            "+added1\n"
+            "+added2\n"
+            "+added3\n"
+            " ctx2\n"
+        )
+        httpx_mock.add_response(
+            url="https://codeberg.test/api/v1/repos/org/repo/pulls/7.diff", text=diff
+        )
+        httpx_mock.add_response(
+            url="https://codeberg.test/api/v1/repos/org/repo/pulls/7/reviews",
+            method="POST",
+            json={"id": 1},
+        )
+        httpx_mock.add_response(
+            url="https://codeberg.test/api/v1/repos/org/repo/pulls/7/reviews/1/comments",
+            method="GET",
+            json=[],
+        )
+
+        review = ReviewBody(
+            comments=[ReviewComment(path="foo.py", body="multi", line=11, line_end=13)],
+        )
+        client.create_review("org", "repo", 7, review)
+
+        post = next(r for r in httpx_mock.get_requests() if r.method == "POST")
+        sent = json.loads(post.content)
+        # @@ +1, +added1=2, +added2=3, +added3=4 → end-of-range line 13 → position 4.
+        assert sent["comments"][0]["new_position"] == 4
+
     def test_delete_review_comment(self, httpx_mock: HTTPXMock, client: GiteaClient) -> None:
         httpx_mock.add_response(
             url="https://codeberg.test/api/v1/repos/org/repo/pulls/comments/123",

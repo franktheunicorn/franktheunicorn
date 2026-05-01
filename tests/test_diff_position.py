@@ -164,3 +164,17 @@ def test_invalid_side_raises() -> None:
 
 def test_empty_diff_returns_none() -> None:
     assert translate_line_to_position("", "foo.py", 10) is None
+
+
+def test_path_with_spaces() -> None:
+    diff = (
+        "diff --git a/src/my file.py b/src/my file.py\n"
+        "--- a/src/my file.py\n"
+        "+++ b/src/my file.py\n"
+        "@@ -5,2 +5,3 @@\n"
+        " ctx\n"
+        "+added\n"
+        " ctx2\n"
+    )
+    pos = translate_line_to_position(diff, "src/my file.py", 6, side="RIGHT")
+    assert pos == 2

@@ -170,3 +170,21 @@ class TestGitHubPoster:
 
         result = poster.recall_comment(draft)
         assert result is False
+
+    def test_recall_passes_pr_number_to_client(self) -> None:
+        """delete_review_comment is called with the parent PR number — GitLab needs it."""
+        poster, client = self._make_poster()
+        pr = PullRequestFactory(number=314)
+        draft = ReviewDraftFactory(
+            pull_request=pr,
+            comment_body="recall me",
+            status="posted",
+            github_comment_id=999,
+            posted_at=datetime.now(tz=UTC) - timedelta(hours=1),
+        )
+
+        poster.recall_comment(draft)
+
+        client.delete_review_comment.assert_called_once_with(
+            pr.project.owner, pr.project.repo, 314, 999
+        )

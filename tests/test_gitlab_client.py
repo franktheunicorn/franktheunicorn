@@ -22,6 +22,11 @@ def test_project_id_url_encodes() -> None:
     assert _project_id("acme/sub", "widget") == "acme%2Fsub%2Fwidget"
 
 
+def test_project_id_handles_deep_subgroups() -> None:
+    """GitLab supports nested groups; owner can have multiple slashes."""
+    assert _project_id("acme/team/sub", "widget") == "acme%2Fteam%2Fsub%2Fwidget"
+
+
 def test_normalize_base_url_appends_api_v4() -> None:
     assert _normalize_base_url("https://gitlab.com") == "https://gitlab.com/api/v4"
     assert _normalize_base_url("https://gitlab.com/api/v4") == "https://gitlab.com/api/v4"
@@ -75,6 +80,20 @@ class TestNormalizeMr:
     def test_reviewers_become_requested_reviewers(self) -> None:
         out = _normalize_mr({"reviewers": [{"username": "rev1"}, {"username": "rev2"}]})
         assert out["requested_reviewers"] == [{"login": "rev1"}, {"login": "rev2"}]
+
+    def test_handles_empty_dict(self) -> None:
+        """Defensive: don't crash on a near-empty MR response."""
+        out = _normalize_mr({})
+        # Required-ish defaults should be safe to access.
+        assert out.get("base", {}).get("ref", "") == ""
+        assert out.get("head", {}).get("sha", "") == ""
+        assert out.get("requested_reviewers", []) == []
+
+    def test_handles_null_author(self) -> None:
+        """A missing/null author shouldn't blow up the normalizer."""
+        out = _normalize_mr({"author": None})
+        # No KeyError; user is unset rather than raising.
+        assert out.get("user") in (None, {})
 
 
 class TestBuildDiscussion:
@@ -171,6 +190,19 @@ class TestGitLabClient:
             ("b.py", "added"),
             ("c.py", "removed"),
         ]
+
+    def test_get_pull_request_files_renamed(
+        self, httpx_mock: HTTPXMock, client: GitLabClient
+    ) -> None:
+        httpx_mock.add_response(
+            json={
+                "changes": [
+                    {"old_path": "old.py", "new_path": "new.py", "renamed_file": True},
+                ]
+            }
+        )
+        result = client.get_pull_request_files("o", "r", 1)
+        assert result == [{"filename": "new.py", "status": "renamed"}]
 
     def test_get_pull_request_diff_synthesizes_unified_diff(
         self, httpx_mock: HTTPXMock, client: GitLabClient
