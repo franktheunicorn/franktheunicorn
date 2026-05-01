@@ -112,7 +112,9 @@ _PATTERNS: tuple[tuple[str, Severity, re.Pattern[str]], ...] = (
     (
         "bidi-control",
         "medium",
-        re.compile(r"[‪-‮⁦-⁩]"),
+        # U+202A..U+202E (LRE/RLE/PDF/LRO/RLO) and U+2066..U+2069
+        # (LRI/RLI/FSI/PDI) — invisible bidi controls used to hide payloads.
+        re.compile(r"[\u202A-\u202E\u2066-\u2069]"),
     ),
     (
         "destructive-shell",
