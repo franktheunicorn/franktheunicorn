@@ -293,14 +293,19 @@ def score_pull_request_from_model(
             operator_review_posted_at = latest_posted_at.isoformat()
 
     if draft_findings_count is None:
-        from franktheunicorn.core.models import ReviewDraft
+        # Reuse a precomputed count if the caller (e.g., the dashboard or a
+        # batch poller pass) attached one — avoids a per-PR DB roundtrip in
+        # hot paths. Falls back to a single query keyed off the shared
+        # line_finding_q so the criteria can't drift from the dashboard.
+        precomputed = getattr(pr, "findings_count", None)
+        if isinstance(precomputed, int):
+            draft_findings_count = precomputed
+        else:
+            from franktheunicorn.core.models import ReviewDraft
 
-        draft_findings_count = ReviewDraft.objects.filter(
-            pull_request=pr,
-            line_number__isnull=False,
-            is_auto_suppressed=False,
-            status__in=["pending", "accepted", "edited", "posted"],
-        ).count()
+            draft_findings_count = ReviewDraft.objects.filter(
+                ReviewDraft.line_finding_q(), pull_request=pr
+            ).count()
 
     return score_pull_request(
         pr_dict,
