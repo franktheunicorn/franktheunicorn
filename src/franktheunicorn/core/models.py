@@ -12,6 +12,7 @@ from decimal import Decimal
 
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
+from django.db.models import Q
 from django.utils import timezone
 
 
@@ -207,6 +208,24 @@ class ReviewDraft(models.Model):
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
     edited_body = models.TextField(blank=True, default="")
     rejection_reason = models.TextField(blank=True, default="")
+
+    # Statuses counted as a "live" line-level finding for surfacing on the
+    # dashboard and for the draft_findings scoring signal. Excludes "rejected"
+    # (operator dismissed) and "recalled" (pulled from GitHub).
+    LINE_FINDING_STATUSES: tuple[str, ...] = ("pending", "accepted", "edited", "posted")
+
+    @classmethod
+    def line_finding_q(cls) -> Q:
+        """Q matching eligible line-level findings.
+
+        Single source of truth shared by the dashboard count and the
+        draft_findings scoring signal so they cannot drift.
+        """
+        return Q(
+            line_number__isnull=False,
+            is_auto_suppressed=False,
+            status__in=cls.LINE_FINDING_STATUSES,
+        )
 
     # GitHub posting state
     github_comment_id = models.BigIntegerField(null=True, blank=True)

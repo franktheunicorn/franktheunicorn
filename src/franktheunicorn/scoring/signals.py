@@ -29,6 +29,7 @@ WEIGHTS: dict[str, int] = {
     "downstream_impact": 20,
     "sentry_errors": 15,
     "cve_file_history": 25,
+    "draft_findings": 5,
 }
 
 MAX_SCORE: int = 100
@@ -307,3 +308,14 @@ def score_pending_response(
     if not operator_review_posted_at or not author_replies_after_review:
         return None
     return WEIGHTS["pending_response"]
+
+
+def score_draft_findings(draft_findings_count: int | None) -> int | None:
+    """Light boost when the agent found possible line-level review concerns.
+
+    Surfaces PRs the agent already has something to say about. Boolean signal —
+    the count itself drives the dashboard badge, not the score magnitude.
+    """
+    if not draft_findings_count or draft_findings_count <= 0:
+        return None
+    return WEIGHTS["draft_findings"]

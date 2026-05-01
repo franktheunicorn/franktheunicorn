@@ -286,6 +286,45 @@ class TestReEngagementFromModel:
         assert "updated_since_operator_review" in bd
 
 
+class TestDraftFindingsFromModel:
+    def test_auto_count_from_db(self, make_pr: Any, spark_project_config: ProjectConfig) -> None:
+        """score_pull_request_from_model counts eligible line-level drafts from the DB."""
+        from tests.factories import ReviewDraftFactory
+
+        pr = make_pr(author="alice")
+        ReviewDraftFactory(pull_request=pr, line_number=5, status="pending")
+        ReviewDraftFactory(pull_request=pr, line_number=10, status="accepted")
+        # Excluded: PR-level (no line_number), rejected, and auto-suppressed.
+        ReviewDraftFactory(pull_request=pr, line_number=None)
+        ReviewDraftFactory(pull_request=pr, line_number=20, status="rejected")
+        ReviewDraftFactory(pull_request=pr, line_number=30, is_auto_suppressed=True)
+
+        _, bd = score_pull_request_from_model(pr, spark_project_config, "holdenk")
+        assert bd.get("draft_findings", 0) > 0
+
+    def test_reuses_precomputed_findings_count(
+        self, make_pr: Any, spark_project_config: ProjectConfig
+    ) -> None:
+        """If pr.findings_count is set, the scorer uses it instead of querying."""
+        pr = make_pr(author="alice")
+        pr.findings_count = 3  # Caller-supplied (e.g., dashboard or batch poller).
+
+        _, bd = score_pull_request_from_model(pr, spark_project_config, "holdenk")
+        assert "draft_findings" in bd
+
+    def test_explicit_count_overrides_precomputed(
+        self, make_pr: Any, spark_project_config: ProjectConfig
+    ) -> None:
+        """Explicit draft_findings_count kwarg wins over pr.findings_count attr."""
+        pr = make_pr(author="alice")
+        pr.findings_count = 5
+
+        _, bd = score_pull_request_from_model(
+            pr, spark_project_config, "holdenk", draft_findings_count=0
+        )
+        assert "draft_findings" not in bd
+
+
 class TestCveFileHistoryInScorer:
     def test_cve_signal_in_breakdown(self) -> None:
         pr = {**_ALICE_PR, "changed_files": ["src/auth.py"]}

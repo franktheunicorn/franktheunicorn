@@ -127,7 +127,20 @@ def index(request: HttpRequest) -> HttpResponse:
     if parsed_project is not None:
         prs = prs.filter(project__owner=parsed_project[0], project__repo=parsed_project[1])
 
-    prs = prs[:100]
+    # Slice to displayed rows first, then fetch findings counts in a single
+    # grouped query keyed by those PR ids. Avoids a JOIN + GROUP BY across all
+    # open PRs (which would block index use for the order_by).
+    pr_list: list[PullRequest] = list(prs[:100])
+    if pr_list:
+        finding_counts = dict(
+            ReviewDraft.objects.filter(ReviewDraft.line_finding_q())
+            .filter(pull_request_id__in=[pr.pk for pr in pr_list])
+            .values("pull_request_id")
+            .annotate(c=Count("id"))
+            .values_list("pull_request_id", "c")
+        )
+        for pr in pr_list:
+            pr.findings_count = finding_counts.get(pr.pk, 0)  # type: ignore[attr-defined]
 
     # Count PRs per queue for tab badges (respects the same project/type filters).
     base_qs = PullRequest.objects.filter(state="open")
@@ -164,7 +177,7 @@ def index(request: HttpRequest) -> HttpResponse:
         request,
         "dashboard/pr_list.html",
         {
-            "pull_requests": prs,
+            "pull_requests": pr_list,
             "queue_tabs": QUEUE_TABS,
             "active_queue": queue,
             "queue_counts": queue_counts,
