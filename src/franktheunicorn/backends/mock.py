@@ -91,7 +91,7 @@ class MockForgeClient(ForgeClient):
         self, owner: str, repo: str, pr_number: int, review: ReviewBody
     ) -> dict[str, Any]:
         """Return a canned review-create response."""
-        return {"id": 1, "state": "COMMENTED", "body": review.body}
+        return {"id": 1, "state": "COMMENTED", "body": review.body, "comment_ids": []}
 
     def get_review_comments(
         self, owner: str, repo: str, pr_number: int, review_id: int

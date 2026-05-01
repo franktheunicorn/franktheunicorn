@@ -93,6 +93,12 @@ class TestGiteaClient:
             method="POST",
             json={"id": 99, "state": "COMMENTED"},
         )
+        # Third call: post-review fetch of comment IDs.
+        httpx_mock.add_response(
+            url="https://codeberg.test/api/v1/repos/org/repo/pulls/7/reviews/99/comments",
+            method="GET",
+            json=[{"id": 5001}],
+        )
 
         review = ReviewBody(
             event="COMMENT",
@@ -101,6 +107,7 @@ class TestGiteaClient:
         )
         result = client.create_review("org", "repo", 7, review)
         assert result["id"] == 99
+        assert result["comment_ids"] == [5001]
 
         post = next(r for r in httpx_mock.get_requests() if r.method == "POST")
         sent = json.loads(post.content)

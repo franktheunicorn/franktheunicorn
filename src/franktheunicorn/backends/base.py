@@ -31,6 +31,11 @@ class ReviewComment:
     line_end: int | None = None
     side: str = "RIGHT"
 
+    def __post_init__(self) -> None:
+        if self.line_end is not None and self.line is not None and self.line_end < self.line:
+            msg = f"ReviewComment.line_end ({self.line_end}) must be >= line ({self.line})"
+            raise ValueError(msg)
+
 
 @dataclass
 class ReviewBody:
@@ -68,7 +73,22 @@ class ForgeClient(ABC):
     @abstractmethod
     def create_review(
         self, owner: str, repo: str, pr_number: int, review: ReviewBody
-    ) -> dict[str, Any]: ...
+    ) -> dict[str, Any]:
+        """Submit a review payload and return the forge's response.
+
+        Implementations MUST populate two keys on the returned dict:
+
+        - ``id`` (int | None): the forge's identifier for the review or
+          (on GitLab) the body note. Used by ``GitHubPoster`` for
+          tracking; can be ``None`` if neither body nor comments produced
+          a top-level identifier.
+        - ``comment_ids`` (list[int]): per-inline-comment IDs, in the
+          same positional order as ``review.comments``. The poster zips
+          this against the in-memory drafts to populate
+          ``ReviewDraft.forge_comment_id``. Comments dropped during
+          translation (e.g. unlocatable diff position) do NOT contribute
+          an entry — the list may be shorter than ``review.comments``.
+        """
 
     @abstractmethod
     def get_review_comments(

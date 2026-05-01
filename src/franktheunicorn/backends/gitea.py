@@ -138,6 +138,22 @@ class GiteaClient(ForgeClient):
         response = self._client.post(url, json=payload)
         response.raise_for_status()
         result: dict[str, Any] = response.json()
+
+        comment_ids: list[int] = []
+        review_id = result.get("id")
+        if review_id and wire_comments:
+            try:
+                posted_comments = self.get_review_comments(owner, repo, pr_number, review_id)
+                comment_ids = [c["id"] for c in posted_comments if "id" in c]
+            except Exception:
+                logger.warning(
+                    "Could not fetch posted comment IDs for %s/%s#%d review %s",
+                    owner,
+                    repo,
+                    pr_number,
+                    review_id,
+                )
+        result["comment_ids"] = comment_ids
         return result
 
     def get_review_comments(

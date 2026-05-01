@@ -24,8 +24,7 @@ class TestGitHubPoster:
         )
 
         mock_client = MagicMock()
-        mock_client.create_review.return_value = {"id": 42}
-        mock_client.get_review_comments.return_value = [{"id": 101}]
+        mock_client.create_review.return_value = {"id": 42, "comment_ids": [101]}
 
         poster = GitHubPoster(mock_client)
         result = poster.post_review(pr, [draft])
@@ -36,6 +35,8 @@ class TestGitHubPoster:
         assert draft.status == "posted"
         assert draft.github_comment_id == 101
         assert draft.posted_at is not None
+        # Poster no longer fetches comment IDs separately.
+        mock_client.get_review_comments.assert_not_called()
 
     def test_post_review_api_failure(self) -> None:
         pr = PullRequestFactory()
@@ -59,13 +60,14 @@ class TestGitHubPoster:
         result = poster.post_review(pr, [])
         assert result is None
 
-    def test_post_review_comment_id_fetch_fails(self) -> None:
+    def test_post_review_no_comment_ids_in_response(self) -> None:
+        """If the client returns no comment_ids (e.g. inline-fetch failed inside
+        create_review), drafts are still marked posted but without IDs."""
         pr = PullRequestFactory()
         draft = ReviewDraftFactory(pull_request=pr, status="accepted")
 
         mock_client = MagicMock()
-        mock_client.create_review.return_value = {"id": 42}
-        mock_client.get_review_comments.side_effect = Exception("timeout")
+        mock_client.create_review.return_value = {"id": 42, "comment_ids": []}
 
         poster = GitHubPoster(mock_client)
         result = poster.post_review(pr, [draft])
@@ -73,7 +75,6 @@ class TestGitHubPoster:
         assert result is not None
         draft.refresh_from_db()
         assert draft.status == "posted"
-        # comment_id not set because fetch failed
         assert draft.github_comment_id is None
 
 

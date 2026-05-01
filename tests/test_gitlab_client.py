@@ -224,7 +224,7 @@ class TestGitLabClient:
         )
         result = client.create_review("o", "r", 1, review)
         assert result["id"] == 100
-        assert result["_inline_note_ids"] == [200]
+        assert result["comment_ids"] == [200]
 
         # Verify discussion payload.
         disc_post = next(
@@ -256,7 +256,7 @@ class TestGitLabClient:
             comments=[ReviewComment(path="a.py", body="nit", line=5)],
         )
         result = client.create_review("o", "r", 1, review)
-        assert result["_inline_note_ids"] == []
+        assert result["comment_ids"] == []
         # No discussion request should have been made.
         for r in httpx_mock.get_requests():
             assert not r.url.path.endswith("/discussions"), "should not have posted discussion"

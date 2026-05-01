@@ -51,8 +51,7 @@ class TestFormatCommentBody:
 class TestGitHubPoster:
     def _make_poster(self) -> tuple[GitHubPoster, MagicMock]:
         client = MagicMock()
-        client.create_review.return_value = {"id": 42}
-        client.get_review_comments.return_value = [{"id": 101}, {"id": 102}]
+        client.create_review.return_value = {"id": 42, "comment_ids": [101, 102]}
         return GitHubPoster(client), client
 
     def test_post_review_creates_review(self) -> None:
@@ -75,7 +74,7 @@ class TestGitHubPoster:
 
         result = poster.post_review(pr, [d1, d2])
 
-        assert result == {"id": 42}
+        assert result["id"] == 42
         client.create_review.assert_called_once()
         call_args = client.create_review.call_args
         body = call_args[0][3]

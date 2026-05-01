@@ -99,21 +99,12 @@ class GitHubPoster:
             return None
 
         now = datetime.now(tz=UTC)
-        review_id = result.get("id") if result else None
 
-        # Fetch the posted comment IDs from the review.
-        comment_ids: list[int] = []
-        if review_id:
-            try:
-                review_comments = self._client.get_review_comments(
-                    pr.project.owner,
-                    pr.project.repo,
-                    pr.number,
-                    review_id,
-                )
-                comment_ids = [c.get("id", 0) for c in review_comments]
-            except Exception:
-                logger.debug("Could not fetch review comment IDs", exc_info=True)
+        # Per-comment IDs come back on the create_review response — each
+        # ForgeClient implementation populates ``comment_ids`` in posting
+        # order so the zip below is reliable across forges.
+        raw_comment_ids = result.get("comment_ids") if result else []
+        comment_ids: list[int] = list(raw_comment_ids) if raw_comment_ids else []
 
         for i, draft in enumerate(drafts):
             draft.status = "posted"

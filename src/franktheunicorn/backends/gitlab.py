@@ -142,7 +142,7 @@ class GitLabClient(ForgeClient):
         Body is posted as a single MR note. Each inline comment becomes a
         separate discussion with a text-position object. The returned
         ``id`` field is the body note's ID; per-comment IDs are listed
-        under ``_inline_note_ids`` on the result for the poster.
+        under ``_comment_ids`` on the result for the poster.
         """
         pid = _project_id(owner, repo)
         result_id: int | None = None
@@ -154,7 +154,7 @@ class GitLabClient(ForgeClient):
             response.raise_for_status()
             result_id = response.json().get("id")
 
-        inline_note_ids: list[int] = []
+        comment_ids: list[int] = []
         if review.comments:
             mr = self.get_pull_request(owner, repo, pr_number)
             base_sha = mr.get("_gitlab_base_sha", "")
@@ -178,13 +178,13 @@ class GitLabClient(ForgeClient):
                 # First note in the new discussion is the inline comment.
                 notes = disc_data.get("notes", [])
                 if notes:
-                    inline_note_ids.append(notes[0].get("id"))
+                    comment_ids.append(notes[0].get("id"))
 
         # Fallback id if no body was sent: synthesize from the first inline note.
-        if result_id is None and inline_note_ids:
-            result_id = inline_note_ids[0]
+        if result_id is None and comment_ids:
+            result_id = comment_ids[0]
 
-        return {"id": result_id, "_inline_note_ids": inline_note_ids}
+        return {"id": result_id, "comment_ids": comment_ids}
 
     def get_review_comments(
         self, owner: str, repo: str, pr_number: int, review_id: int
