@@ -57,18 +57,20 @@ class ForgeClient(ABC):
     @abstractmethod
     def list_pull_requests(
         self, owner: str, repo: str, state: str = "open"
-    ) -> list[dict[str, Any]]: ...
+    ) -> list[dict[str, Any]]:
+        pass
 
     @abstractmethod
-    def get_pull_request(self, owner: str, repo: str, pr_number: int) -> dict[str, Any]: ...
+    def get_pull_request(self, owner: str, repo: str, pr_number: int) -> dict[str, Any]:
+        pass
 
     @abstractmethod
-    def get_pull_request_files(
-        self, owner: str, repo: str, pr_number: int
-    ) -> list[dict[str, Any]]: ...
+    def get_pull_request_files(self, owner: str, repo: str, pr_number: int) -> list[dict[str, Any]]:
+        pass
 
     @abstractmethod
-    def get_pull_request_diff(self, owner: str, repo: str, pr_number: int) -> str: ...
+    def get_pull_request_diff(self, owner: str, repo: str, pr_number: int) -> str:
+        pass
 
     @abstractmethod
     def create_review(
@@ -93,12 +95,14 @@ class ForgeClient(ABC):
     @abstractmethod
     def get_review_comments(
         self, owner: str, repo: str, pr_number: int, review_id: int
-    ) -> list[dict[str, Any]]: ...
+    ) -> list[dict[str, Any]]:
+        pass
 
     @abstractmethod
     def get_issue_comments(
         self, owner: str, repo: str, issue_number: int, since: str | None = None
-    ) -> list[dict[str, Any]]: ...
+    ) -> list[dict[str, Any]]:
+        pass
 
     @abstractmethod
     def delete_review_comment(self, owner: str, repo: str, pr_number: int, comment_id: int) -> None:
@@ -109,10 +113,12 @@ class ForgeClient(ABC):
         """
 
     @abstractmethod
-    def get_authenticated_user(self) -> dict[str, Any]: ...
+    def get_authenticated_user(self) -> dict[str, Any]:
+        pass
 
     @abstractmethod
-    def close(self) -> None: ...
+    def close(self) -> None:
+        pass
 
 
 def infer_username(client: ForgeClient) -> str:
