@@ -48,12 +48,14 @@ def _get_registry() -> dict[str, type[BaseCheck]]:
     """Lazy registry to avoid circular imports at module level."""
     from franktheunicorn.review.checks.coverage import CoverageCheck
     from franktheunicorn.review.checks.issue_link import IssueLinkCheck
+    from franktheunicorn.review.checks.malicious_prompt import MaliciousPromptCheck
     from franktheunicorn.review.checks.security import SecurityCheck
     from franktheunicorn.review.checks.security_context import SecurityContextCheck
 
     return {
         "coverage": CoverageCheck,
         "issue-link": IssueLinkCheck,
+        "malicious-prompt": MaliciousPromptCheck,
         "security": SecurityCheck,
         "security-context": SecurityContextCheck,
     }
@@ -103,7 +105,7 @@ def run_enabled_checks(
 
         check = check_cls()
         try:
-            findings = _run_single_check(check, diff, pr_context, backend_config)
+            findings = _run_check_dispatch(check, pr, diff, pr_context, backend_config)
         except Exception:
             logger.exception("LLM check '%s' failed.", check_name)
             continue
@@ -121,6 +123,22 @@ def run_enabled_checks(
         all_drafts.extend(drafts)
 
     return all_drafts
+
+
+def _run_check_dispatch(
+    check: BaseCheck,
+    pr: PullRequest,
+    diff: str,
+    pr_context: PRContext,
+    backend_config: LLMBackendConfig,
+) -> list[ReviewFinding]:
+    """Dispatch to a check's custom ``scan(pr, diff, backend_config)`` method
+    if it defines one; otherwise run the standard prompt-based pipeline."""
+    scan = getattr(check, "scan", None)
+    if callable(scan):
+        return list(scan(pr, diff, backend_config))
+
+    return _run_single_check(check, diff, pr_context, backend_config)
 
 
 def _run_single_check(
