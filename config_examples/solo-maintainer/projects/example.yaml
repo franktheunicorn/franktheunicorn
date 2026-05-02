@@ -1,5 +1,9 @@
 owner: "your-org"
 repo: "your-repo"
+# Which forge entry from operator.yaml::forges to use. Defaults to "github"
+# for back-compat; set to your forge name (e.g. "codeberg", "gitlab",
+# "work-gitea") for non-GitHub projects.
+# forge: "github"
 review_context: "general open-source"
 governance: "standard"
 tone: "direct"

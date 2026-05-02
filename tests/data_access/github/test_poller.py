@@ -9,10 +9,10 @@ from unittest.mock import patch
 
 import pytest
 
+from franktheunicorn.backends.mock import MockGitHubClient
+from franktheunicorn.backends.poller import _upsert_pull_request, poll_project
 from franktheunicorn.config.models import ProjectConfig
 from franktheunicorn.core.models import Project, PullRequest
-from franktheunicorn.github.mock import MockGitHubClient
-from franktheunicorn.github.poller import _upsert_pull_request, poll_project
 from tests.factories import ProjectFactory, ReviewDraftFactory
 
 

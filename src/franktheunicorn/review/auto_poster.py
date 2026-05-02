@@ -113,8 +113,8 @@ def auto_post_findings(
 
     # Post using the bot identity.
     try:
-        from franktheunicorn.github.client import GitHubClient
-        from franktheunicorn.github.poster import GitHubPoster
+        from franktheunicorn.backends.github import GitHubClient
+        from franktheunicorn.backends.poster import GitHubPoster
 
         client = GitHubClient(token=bot_token)
         try:

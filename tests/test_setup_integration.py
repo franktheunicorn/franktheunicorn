@@ -40,6 +40,7 @@ class TestWizardEndToEnd:
             "holdenk",  # github_username
             "direct but kind",  # review_style
             "7",  # provider: skip/stub
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
         ]
@@ -79,6 +80,7 @@ class TestWizardEndToEnd:
             "1",  # claude
             "claude-sonnet-4-20250514",  # model
             "0.3",  # temperature
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
         ]
@@ -118,6 +120,7 @@ class TestWizardEndToEnd:
             "http://localhost:11434",  # ollama base_url (asked first)
             "qwen2.5-coder:14b",  # ollama model (asked second, after discovery)
             "n",  # generate Docker Compose: no
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
         ]
@@ -180,6 +183,7 @@ class TestWizardEndToEnd:
             "1",  # claude
             "claude-sonnet-4-20250514",
             "0.3",
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "y",  # coderabbit: yes
         ]

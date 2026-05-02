@@ -197,6 +197,84 @@ frequent_contributors:
 enabled: true
 ```
 
+## 4b. Other forges (Forgejo, Gitea, GitLab)
+
+franktheunicorn talks to GitHub by default, but the same poll/draft/post
+pipeline works against any of these forges. Each project YAML names the
+forge it belongs to via `forge:`; operator-level `forges:` registers
+each instance with its base URL and token.
+
+### Mint a personal access token
+
+- **Forgejo / Codeberg:** Settings → Applications → Manage Access Tokens
+  → "Generate New Token". Scopes: `read:repository`, `write:issue`,
+  `write:repository`.
+- **Gitea (self-hosted):** Settings → Applications → "Generate New
+  Token". Same scopes as Forgejo.
+- **GitLab / GitLab.com:** User Settings → Access Tokens. Scopes:
+  `api` (or the narrower combo `read_api` + `write_repository`).
+
+Put the token in `.env`:
+
+```bash
+# .env
+FRANK_CODEBERG_TOKEN=cb_pat_...
+FRANK_GITEA_TOKEN=...
+FRANK_GITLAB_TOKEN=glpat-...
+```
+
+### Register the forge in operator.yaml
+
+```yaml
+# config/active/operator.yaml
+forges:
+  - name: github
+    type: github
+    token: ${FRANK_GITHUB_TOKEN}
+  - name: codeberg
+    type: forgejo
+    base_url: https://codeberg.org
+    token: ${FRANK_CODEBERG_TOKEN}
+  - name: work-gitea
+    type: gitea
+    base_url: https://git.work.example
+    token: ${FRANK_GITEA_TOKEN}
+  - name: gitlab
+    type: gitlab
+    base_url: https://gitlab.com
+    token: ${FRANK_GITLAB_TOKEN}
+```
+
+If you only use github.com you can omit `forges:` entirely — a default
+GitHub entry is synthesized from `github_token`/`github_username`.
+
+### Point a project at a non-GitHub forge
+
+```yaml
+# config/active/projects/codeberg-myproject.yaml
+owner: "myorg"
+repo: "myproject"
+forge: "codeberg"          # references forges[].name above
+review_context: "..."
+governance: "personal"
+```
+
+For GitLab, `owner` is the namespace path (e.g. `myorg` or
+`myorg/subgroup`) and `repo` is the project slug. The PR number frank
+displays for a GitLab project is the MR's project-internal `iid`.
+
+### Known v1 limitations
+
+- **Gitea/Forgejo recall:** the API path used to delete a posted review
+  comment varies between Gitea versions. Recall is best-effort.
+- **GitLab review grouping:** GitLab has no "review object" that bundles
+  inline comments together; each comment is posted as its own
+  discussion. The dashboard still groups by draft, the wire format just
+  differs.
+- **Mock mode** (`mock_mode: true`) ships only GitHub-shaped fixtures.
+  Forgejo/Gitea/GitLab project configs work in live mode but fall back
+  to GitHub-shaped demo data offline.
+
 ## 5. Configure workspaces
 
 Workspaces let you filter the dashboard by context — e.g., "work" vs "personal".

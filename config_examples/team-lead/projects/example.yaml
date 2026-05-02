@@ -1,5 +1,8 @@
 owner: "your-org"
 repo: "your-repo"
+# Defaults to "github". Set to a name from operator.yaml::forges to ingest
+# from a different forge (e.g. "codeberg", "gitlab", "work-gitea").
+# forge: "github"
 review_context: "Team project with CI/CD"
 governance: "standard"
 tone: "constructive"

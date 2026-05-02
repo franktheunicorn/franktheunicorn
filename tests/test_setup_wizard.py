@@ -24,6 +24,7 @@ class TestSetupLLMCommand:
             "testuser",  # github_username
             "direct",  # review_style
             "7",  # provider: skip/stub
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
         ]
@@ -44,6 +45,7 @@ class TestSetupLLMCommand:
             "1",  # provider: claude only
             "claude-sonnet-4-20250514",  # model (from discovery fallback prompt)
             "0.3",  # temperature
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
         ]
@@ -71,6 +73,7 @@ class TestSetupLLMCommand:
             "http://localhost:11434",  # ollama base_url
             "qwen2.5-coder:14b",  # ollama model (from discovery fallback)
             "n",  # generate Docker Compose: no
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
         ]
@@ -101,6 +104,7 @@ class TestSetupLLMCommand:
             "http://localhost:11434",  # base_url
             "qwen2.5-coder:14b",  # model (from discovery fallback)
             "n",  # generate Docker Compose: no
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
         ]
@@ -136,6 +140,7 @@ class TestSetupLLMCommand:
             "http://localhost:11434",  # base_url
             "qwen2.5-coder:14b",  # model
             "y",  # generate Docker Compose: yes
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
         ]
@@ -167,6 +172,7 @@ class TestSetupLLMCommand:
             "http://localhost:11434",  # base_url
             "qwen2.5-coder:14b",  # model
             "n",  # generate Docker Compose: no
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
         ]
@@ -190,6 +196,7 @@ class TestSetupLLMCommand:
             "testuser",  # github_username
             "direct",  # review_style
             "7",  # provider: skip/stub
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "y",  # coderabbit: yes
         ]
@@ -225,6 +232,7 @@ class TestDockerMode:
             "direct",  # review_style
             "4",  # provider: ollama
             "",  # model: accept recommended default
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
         ]
@@ -268,6 +276,7 @@ class TestDockerMode:
             "direct",  # review_style
             "5",  # provider: llama-cpp
             "my-model.gguf",  # GGUF filename
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
         ]
@@ -309,6 +318,7 @@ class TestDockerMode:
             "direct",  # review_style
             "6",  # provider: vllm
             "Qwen/Qwen2.5-Coder-14B",  # HuggingFace model name
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
         ]
@@ -348,6 +358,7 @@ class TestDockerMode:
             "direct",
             "4",  # ollama
             "",  # accept default model
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
         ]
@@ -403,6 +414,7 @@ class TestDockerMode:
             "direct",
             "4",  # ollama
             "",  # accept default model
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
         ]
@@ -436,6 +448,7 @@ class TestDockerMode:
             "testuser",
             "direct",
             "7",  # skip/stub
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "y",  # coderabbit: yes
         ]
@@ -529,6 +542,7 @@ class TestMissingTemplateWarnings:
             "direct",
             "4",  # ollama
             "",  # accept recommended default
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
         ]
@@ -556,6 +570,7 @@ class TestMissingTemplateWarnings:
             "direct",
             "5",  # llama-cpp
             "my-model.gguf",
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
         ]
@@ -583,6 +598,7 @@ class TestMissingTemplateWarnings:
             "direct",
             "6",  # vllm
             "Qwen/Qwen2.5-Coder-7B-Instruct",
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
         ]
@@ -648,6 +664,7 @@ class TestComposeGeneratorOSError:
             "direct",
             "4",  # ollama
             "",  # accept default
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
         ]
@@ -672,6 +689,7 @@ class TestComposeGeneratorOSError:
             "direct",
             "5",  # llama-cpp
             "my-model.gguf",
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
         ]
@@ -695,6 +713,7 @@ class TestComposeGeneratorOSError:
             "direct",
             "6",  # vllm
             "Qwen/Qwen2.5-Coder-7B-Instruct",
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
         ]
@@ -724,6 +743,7 @@ class TestCredentialDetectionIntegration:
             "",  # accept default provider choice (should be "1" from detection)
             "claude-sonnet-4-20250514",  # model
             "0.3",  # temperature
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
         ]
@@ -750,6 +770,7 @@ class TestCredentialDetectionIntegration:
             "0.3",  # claude temperature
             "gpt-4o",  # openai model
             "0.3",  # openai temperature
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
         ]
@@ -776,6 +797,7 @@ class TestCredentialDetectionIntegration:
             "testuser",  # github_username
             "direct",  # review_style
             "",  # accept default (should be "7")
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
         ]
@@ -805,6 +827,7 @@ class TestCredentialDetectionIntegration:
             "https://api.groq.com/openai/v1",  # base_url
             "llama-3.3-70b-versatile",  # model
             "0.3",  # temperature
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
         ]
@@ -843,6 +866,7 @@ class TestCredentialDetectionIntegration:
             "8",  # select detected ollama backend
             "",  # accept recommended model default
             "0.3",  # temperature
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
         ]
@@ -883,6 +907,7 @@ class TestCredentialDetectionIntegration:
             "8",
             "",  # accept recommended model
             "0.3",
+            "skip",  # additional forges: skip
             "",  # projects
             "n",  # coderabbit
         ]
@@ -919,6 +944,7 @@ class TestCredentialDetectionIntegration:
             "8",  # select detected llama-cpp
             "my-model.gguf",  # model name (no hardware default for openai-compat)
             "0.3",
+            "skip",  # additional forges: skip
             "",
             "n",
         ]
@@ -956,6 +982,7 @@ class TestModelDiscoveryIntegration:
             "1",  # provider: claude
             "1",  # select first model from discovery menu
             "0.3",  # temperature
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
         ]
@@ -985,6 +1012,7 @@ class TestModelDiscoveryIntegration:
             "1",  # provider: claude
             "claude-sonnet-4-20250514",  # typed model name
             "0.3",  # temperature
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
         ]
@@ -1010,6 +1038,7 @@ class TestLlamaCppProvider:
             "5",  # provider: llama-cpp
             "http://localhost:8080/v1",  # server URL
             "my-model",  # model name
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
         ]
@@ -1040,6 +1069,7 @@ class TestLlamaCppProvider:
             "5",  # provider: llama-cpp
             "http://localhost:8080/v1",  # server URL
             "my-model",  # model name
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
         ]
@@ -1070,6 +1100,7 @@ class TestLlamaCppProvider:
             "direct",  # review_style
             "5",  # provider: llama-cpp
             "",  # accept recommended default
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
         ]
@@ -1104,6 +1135,7 @@ class TestVLLMProvider:
             "6",  # provider: vllm
             "http://localhost:8081/v1",  # server URL
             "meta-llama/Llama-3-8b",  # model name
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
         ]
@@ -1138,6 +1170,7 @@ class TestVLLMProvider:
             "direct",  # review_style
             "6",  # provider: vllm
             "",  # accept recommended default
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
         ]
@@ -1173,6 +1206,7 @@ class TestCustomEndpointFallback:
             "https://my-llm.example.com/v1",  # custom endpoint URL
             "",  # no token needed
             "my-custom-model",  # model name
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
         ]
@@ -1207,6 +1241,7 @@ class TestCustomEndpointFallback:
             "MY_LLM_SERVER",  # env var name (fallback prompt)
             "MY_LLM_TOKEN",  # env var for token
             "my-model",  # model name
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
         ]
@@ -1239,6 +1274,7 @@ class TestCustomEndpointFallback:
             "https://api.example.com/v1",  # endpoint URL
             "sk-my-secret-token-value",  # raw token
             "my-model",  # model name
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
         ]
@@ -1266,6 +1302,7 @@ class TestCustomEndpointFallback:
             "direct",  # review_style
             "99",  # invalid choice
             "",  # skip custom endpoint
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
         ]
@@ -1294,6 +1331,7 @@ class TestCustomEndpointFallback:
             "NONEXISTENT_VAR",  # env var that doesn't exist
             "",  # no token
             "my-model",  # model name
+            "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
         ]

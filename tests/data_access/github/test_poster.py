@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from franktheunicorn.github.poster import (
+from franktheunicorn.backends.poster import (
     DEFAULT_ATTRIBUTION,
     MANAGED_MARKER,
     GitHubPoster,
@@ -51,8 +51,7 @@ class TestFormatCommentBody:
 class TestGitHubPoster:
     def _make_poster(self) -> tuple[GitHubPoster, MagicMock]:
         client = MagicMock()
-        client.create_review.return_value = {"id": 42}
-        client.get_review_comments.return_value = [{"id": 101}, {"id": 102}]
+        client.create_review.return_value = {"id": 42, "comment_ids": [101, 102]}
         return GitHubPoster(client), client
 
     def test_post_review_creates_review(self) -> None:
@@ -75,13 +74,13 @@ class TestGitHubPoster:
 
         result = poster.post_review(pr, [d1, d2])
 
-        assert result == {"id": 42}
+        assert result["id"] == 42
         client.create_review.assert_called_once()
         call_args = client.create_review.call_args
         body = call_args[0][3]
-        assert len(body["comments"]) == 2
-        assert body["comments"][0]["path"] == "a.py"
-        assert body["comments"][1]["path"] == "b.py"
+        assert len(body.comments) == 2
+        assert body.comments[0].path == "a.py"
+        assert body.comments[1].path == "b.py"
 
     def test_post_review_updates_draft_status(self) -> None:
         poster, _ = self._make_poster()
@@ -99,7 +98,7 @@ class TestGitHubPoster:
         draft.refresh_from_db()
         assert draft.status == "posted"
         assert draft.posted_at is not None
-        assert draft.github_comment_id == 101
+        assert draft.forge_comment_id == 101
 
     def test_post_review_returns_none_for_empty(self) -> None:
         poster, _ = self._make_poster()
@@ -122,9 +121,9 @@ class TestGitHubPoster:
         poster.post_review(pr, [draft])
 
         body = client.create_review.call_args[0][3]
-        comment = body["comments"][0]
-        assert comment["start_line"] == 10
-        assert comment["line"] == 15
+        comment = body.comments[0]
+        assert comment.line == 10
+        assert comment.line_end == 15
 
     def test_recall_within_window(self) -> None:
         poster, client = self._make_poster()
@@ -134,7 +133,7 @@ class TestGitHubPoster:
             file_path="a.py",
             comment_body="Recall me.",
             status="posted",
-            github_comment_id=999,
+            forge_comment_id=999,
             posted_at=datetime.now(tz=UTC) - timedelta(hours=1),
         )
 
@@ -152,7 +151,7 @@ class TestGitHubPoster:
             file_path="a.py",
             comment_body="Too late.",
             status="posted",
-            github_comment_id=999,
+            forge_comment_id=999,
             posted_at=datetime.now(tz=UTC) - timedelta(hours=48),
         )
 
@@ -171,3 +170,21 @@ class TestGitHubPoster:
 
         result = poster.recall_comment(draft)
         assert result is False
+
+    def test_recall_passes_pr_number_to_client(self) -> None:
+        """delete_review_comment is called with the parent PR number — GitLab needs it."""
+        poster, client = self._make_poster()
+        pr = PullRequestFactory(number=314)
+        draft = ReviewDraftFactory(
+            pull_request=pr,
+            comment_body="recall me",
+            status="posted",
+            forge_comment_id=999,
+            posted_at=datetime.now(tz=UTC) - timedelta(hours=1),
+        )
+
+        poster.recall_comment(draft)
+
+        client.delete_review_comment.assert_called_once_with(
+            pr.project.owner, pr.project.repo, 314, 999
+        )

@@ -51,6 +51,7 @@ def _get_registry() -> dict[str, type[BaseCheck]]:
     from franktheunicorn.review.checks.api_misuse import APIMisuseCheck
     from franktheunicorn.review.checks.coverage import CoverageCheck
     from franktheunicorn.review.checks.issue_link import IssueLinkCheck
+    from franktheunicorn.review.checks.malicious_prompt import MaliciousPromptCheck
     from franktheunicorn.review.checks.security import SecurityCheck
     from franktheunicorn.review.checks.security_context import SecurityContextCheck
 
@@ -58,6 +59,7 @@ def _get_registry() -> dict[str, type[BaseCheck]]:
         "api-misuse": APIMisuseCheck,
         "coverage": CoverageCheck,
         "issue-link": IssueLinkCheck,
+        "malicious-prompt": MaliciousPromptCheck,
         "security": SecurityCheck,
         "security-context": SecurityContextCheck,
     }
@@ -109,7 +111,7 @@ def run_enabled_checks(
 
         check = _instantiate_check(check_cls, check_name, project_config, repo_path)
         try:
-            findings = _run_single_check(check, diff, pr_context, backend_config)
+            findings = _run_check_dispatch(check, pr, diff, pr_context, backend_config)
         except Exception:
             logger.exception("LLM check '%s' failed.", check_name)
             continue
@@ -145,6 +147,22 @@ def _instantiate_check(
             repo_path=repo_path,
         )
     return check_cls()
+
+
+def _run_check_dispatch(
+    check: BaseCheck,
+    pr: PullRequest,
+    diff: str,
+    pr_context: PRContext,
+    backend_config: LLMBackendConfig,
+) -> list[ReviewFinding]:
+    """Dispatch to a check's custom ``scan(pr, diff, backend_config)`` method
+    if it defines one; otherwise run the standard prompt-based pipeline."""
+    scan = getattr(check, "scan", None)
+    if callable(scan):
+        return list(scan(pr, diff, backend_config))
+
+    return _run_single_check(check, diff, pr_context, backend_config)
 
 
 def _run_single_check(

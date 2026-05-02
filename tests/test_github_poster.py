@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from franktheunicorn.github.poster import GitHubPoster
+from franktheunicorn.backends.poster import GitHubPoster
 from tests.factories import PullRequestFactory, ReviewDraftFactory
 
 
@@ -24,8 +24,7 @@ class TestGitHubPoster:
         )
 
         mock_client = MagicMock()
-        mock_client.create_review.return_value = {"id": 42}
-        mock_client.get_review_comments.return_value = [{"id": 101}]
+        mock_client.create_review.return_value = {"id": 42, "comment_ids": [101]}
 
         poster = GitHubPoster(mock_client)
         result = poster.post_review(pr, [draft])
@@ -34,8 +33,10 @@ class TestGitHubPoster:
         assert result["id"] == 42
         draft.refresh_from_db()
         assert draft.status == "posted"
-        assert draft.github_comment_id == 101
+        assert draft.forge_comment_id == 101
         assert draft.posted_at is not None
+        # Poster no longer fetches comment IDs separately.
+        mock_client.get_review_comments.assert_not_called()
 
     def test_post_review_api_failure(self) -> None:
         pr = PullRequestFactory()
@@ -59,13 +60,14 @@ class TestGitHubPoster:
         result = poster.post_review(pr, [])
         assert result is None
 
-    def test_post_review_comment_id_fetch_fails(self) -> None:
+    def test_post_review_no_comment_ids_in_response(self) -> None:
+        """If the client returns no comment_ids (e.g. inline-fetch failed inside
+        create_review), drafts are still marked posted but without IDs."""
         pr = PullRequestFactory()
         draft = ReviewDraftFactory(pull_request=pr, status="accepted")
 
         mock_client = MagicMock()
-        mock_client.create_review.return_value = {"id": 42}
-        mock_client.get_review_comments.side_effect = Exception("timeout")
+        mock_client.create_review.return_value = {"id": 42, "comment_ids": []}
 
         poster = GitHubPoster(mock_client)
         result = poster.post_review(pr, [draft])
@@ -73,8 +75,36 @@ class TestGitHubPoster:
         assert result is not None
         draft.refresh_from_db()
         assert draft.status == "posted"
-        # comment_id not set because fetch failed
-        assert draft.github_comment_id is None
+        assert draft.forge_comment_id is None
+
+    def test_post_review_dropped_middle_comment_keeps_alignment(self) -> None:
+        """A None at position i means the comment was dropped; the i'th draft
+        is marked posted but doesn't claim a sibling's forge_comment_id.
+
+        Regression for the index-shift bug Copilot caught.
+        """
+        pr = PullRequestFactory()
+        d1 = ReviewDraftFactory(pull_request=pr, file_path="a.py", status="accepted")
+        d2 = ReviewDraftFactory(pull_request=pr, file_path="b.py", status="accepted")
+        d3 = ReviewDraftFactory(pull_request=pr, file_path="c.py", status="accepted")
+
+        mock_client = MagicMock()
+        mock_client.create_review.return_value = {
+            "id": 99,
+            "comment_ids": [1001, None, 1003],
+        }
+
+        poster = GitHubPoster(mock_client)
+        poster.post_review(pr, [d1, d2, d3])
+
+        d1.refresh_from_db()
+        d2.refresh_from_db()
+        d3.refresh_from_db()
+        assert d1.forge_comment_id == 1001
+        # d2 was dropped — must NOT inherit 1003 from d3.
+        assert d2.forge_comment_id is None
+        assert d2.status == "posted"
+        assert d3.forge_comment_id == 1003
 
 
 @pytest.mark.django_db
@@ -84,7 +114,7 @@ class TestRecallComment:
         draft = ReviewDraftFactory(
             pull_request=pr,
             status="posted",
-            github_comment_id=123,
+            forge_comment_id=123,
             posted_at=datetime.now(tz=UTC) - timedelta(hours=1),
         )
 
@@ -102,7 +132,7 @@ class TestRecallComment:
         draft = ReviewDraftFactory(
             pull_request=pr,
             status="posted",
-            github_comment_id=None,
+            forge_comment_id=None,
         )
         mock_client = MagicMock()
         poster = GitHubPoster(mock_client)
@@ -113,7 +143,7 @@ class TestRecallComment:
         draft = ReviewDraftFactory(
             pull_request=pr,
             status="posted",
-            github_comment_id=123,
+            forge_comment_id=123,
             posted_at=None,
         )
         mock_client = MagicMock()
@@ -125,7 +155,7 @@ class TestRecallComment:
         draft = ReviewDraftFactory(
             pull_request=pr,
             status="posted",
-            github_comment_id=123,
+            forge_comment_id=123,
             posted_at=datetime.now(tz=UTC) - timedelta(hours=25),
         )
         mock_client = MagicMock()
@@ -138,7 +168,7 @@ class TestRecallComment:
         draft = ReviewDraftFactory(
             pull_request=pr,
             status="posted",
-            github_comment_id=123,
+            forge_comment_id=123,
             posted_at=datetime.now(tz=UTC) - timedelta(hours=1),
         )
         mock_client = MagicMock()

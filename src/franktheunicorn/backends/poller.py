@@ -1,8 +1,9 @@
 """
 PR polling service.
 
-Loads configured projects, fetches PRs from GitHub (or mock),
-scores them, and stores results in the database.
+Loads configured projects, fetches PRs from a forge backend, scores them,
+and stores results in the database. Works with any ``ForgeClient``
+(GitHub, Forgejo, mock).
 """
 
 from __future__ import annotations
@@ -10,10 +11,11 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 from django.db import transaction
 
+from franktheunicorn.backends.base import ForgeClient
 from franktheunicorn.config.models import ProjectConfig
 from franktheunicorn.core.models import Project, PullRequest, ReviewDraft
 from franktheunicorn.core.session_detector import detect_agent_session
@@ -22,28 +24,8 @@ from franktheunicorn.scoring.scorer import score_pull_request_from_model
 logger = logging.getLogger(__name__)
 
 
-class GitHubClientProtocol(Protocol):
-    """Protocol for GitHub client (real or mock)."""
-
-    def list_pull_requests(
-        self, owner: str, repo: str, state: str = "open"
-    ) -> list[dict[str, Any]]: ...
-
-    def get_pull_request(self, owner: str, repo: str, pr_number: int) -> dict[str, Any]: ...
-
-    def get_pull_request_files(
-        self, owner: str, repo: str, pr_number: int
-    ) -> list[dict[str, Any]]: ...
-
-    def get_issue_comments(
-        self, owner: str, repo: str, issue_number: int, since: str | None = None
-    ) -> list[dict[str, Any]]: ...
-
-    def close(self) -> None: ...
-
-
 def poll_project(
-    client: GitHubClientProtocol,
+    client: ForgeClient,
     project_config: ProjectConfig,
     operator_username: str,
     *,

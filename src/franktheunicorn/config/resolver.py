@@ -16,7 +16,22 @@ import os
 from pathlib import Path
 
 from franktheunicorn.config.loader import load_operator_config
-from franktheunicorn.config.models import OperatorConfig
+from franktheunicorn.config.models import ForgeRegistryEntry, OperatorConfig
+
+
+def get_forge_entry(oc: OperatorConfig, name: str) -> ForgeRegistryEntry:
+    """Look up a forge by name in the operator's registry.
+
+    Raises ``KeyError`` if the name is not registered, listing the
+    available names — projects misconfigured against a missing forge
+    should fail loudly at config-resolution time, not silently.
+    """
+    for entry in oc.forges:
+        if entry.name == name:
+            return entry
+    available = ", ".join(e.name for e in oc.forges) or "(empty registry)"
+    msg = f"forge {name!r} not found in operator registry; available: {available}"
+    raise KeyError(msg)
 
 
 def resolve_operator_config_path(base_dir: Path) -> str:
@@ -71,7 +86,7 @@ def resolve_config(base_dir: Path) -> tuple[OperatorConfig, dict[str, str | int 
 
     # Infer GitHub username from token if not explicitly set.
     if not oc.github_username and oc.github_token and not oc.mock_mode:
-        from franktheunicorn.github.client import infer_github_username
+        from franktheunicorn.backends.github import infer_github_username
 
         inferred = infer_github_username(oc.github_token)
         if inferred:

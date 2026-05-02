@@ -27,7 +27,7 @@ class Command(BaseCommand):
             default_username = ""
             token = os.environ.get("FRANK_GITHUB_TOKEN", "")
             if token:
-                from franktheunicorn.github.client import infer_github_username
+                from franktheunicorn.backends.github import infer_github_username
 
                 default_username = infer_github_username(token)
                 if default_username:
