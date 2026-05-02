@@ -21,6 +21,18 @@ enabled: true
 #   workdir: /workspace
 #   test_command: "python -m pytest {tests} --tb=short -q"
 
+# Detect calls to third-party functions that are misused per their upstream
+# docs (deprecated APIs, complexity-on-large-input, etc.). To enable, set
+# llm_checks: ["api-misuse"] and flip enabled below. Issues network
+# requests to PyPI / Maven Central, so it is disabled by default.
+# llm_checks: ["api-misuse"]
+# api_misuse:
+#   enabled: false
+#   registries: ["pypi", "maven"]
+#   cache_ttl_days: 7
+#   max_calls_per_pr: 30
+#   scrape_hosted_docs: true
+
 # Known CVE-affected file paths/patterns (merged with auto-detected from git log):
 # cve_files:
 #   - "src/auth/"

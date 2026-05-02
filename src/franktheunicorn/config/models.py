@@ -144,6 +144,65 @@ class PerplexityConfig(BaseModel):
         return v
 
 
+KNOWN_API_MISUSE_REGISTRIES: frozenset[str] = frozenset({"pypi", "maven"})
+
+
+class APIMisuseConfig(BaseModel):
+    """Config for the api-misuse review check.
+
+    Looks up upstream docs for functions called in the diff and asks the LLM
+    to flag misuse (complexity-on-large-input, deprecated APIs, ignored
+    return values, etc.). Disabled by default; opt in via
+    ``llm_checks: ["api-misuse"]`` in the project YAML.
+    """
+
+    enabled: bool = False
+    registries: list[str] = Field(default_factory=lambda: ["pypi", "maven"])
+    cache_ttl_days: int = 7
+    max_calls_per_pr: int = 30
+    fetch_timeout_seconds: float = 10.0
+    # When True, also fetch hosted docs (readthedocs/javadoc.io). When False,
+    # use only registry metadata + docstrings (faster, no scraping).
+    scrape_hosted_docs: bool = True
+
+    @field_validator("registries")
+    @classmethod
+    def registries_must_be_known(cls, v: list[str]) -> list[str]:
+        normalized = [r.strip().lower() for r in v if r.strip()]
+        for r in normalized:
+            if r not in KNOWN_API_MISUSE_REGISTRIES:
+                logger.warning(
+                    "Unknown api-misuse registry '%s'; known: %s",
+                    r,
+                    ", ".join(sorted(KNOWN_API_MISUSE_REGISTRIES)),
+                )
+        return normalized
+
+    @field_validator("cache_ttl_days")
+    @classmethod
+    def cache_ttl_non_negative(cls, v: int) -> int:
+        if v < 0:
+            msg = "cache_ttl_days must be non-negative"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("max_calls_per_pr")
+    @classmethod
+    def max_calls_positive(cls, v: int) -> int:
+        if v <= 0:
+            msg = "max_calls_per_pr must be positive"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("fetch_timeout_seconds")
+    @classmethod
+    def timeout_positive(cls, v: float) -> float:
+        if v <= 0:
+            msg = "fetch_timeout_seconds must be positive"
+            raise ValueError(msg)
+        return v
+
+
 KNOWN_LLM_PROVIDERS: frozenset[str] = frozenset(
     {"stub", "claude", "openai", "gemini", "ollama", "llama-cpp", "vllm"}
 )
@@ -741,6 +800,7 @@ class ProjectConfig(BaseModel):
 
     # LLM sub-checks (v1) — e.g. ["coverage"]
     llm_checks: list[str] = Field(default_factory=list)
+    api_misuse: APIMisuseConfig = Field(default_factory=APIMisuseConfig)
 
     # Full-file + first-party-import context for review prompts (v1).
     context: ContextConfig = Field(default_factory=ContextConfig)
@@ -752,6 +812,7 @@ class ProjectConfig(BaseModel):
     @classmethod
     def llm_checks_warn_unknown(cls, v: list[str]) -> list[str]:
         known = {
+            "api-misuse",
             "coverage",
             "issue-link",
             "malicious-prompt",

@@ -12,6 +12,17 @@ frequent_contributors: []
 enabled: true
 llm_checks: ["coverage"]
 
+# Detect calls to third-party functions that are misused per their upstream
+# docs (deprecated APIs, complexity-on-large-input, etc.). To enable, add
+# "api-misuse" to llm_checks above and flip enabled below. Disabled by
+# default because it issues network requests to PyPI / Maven Central.
+# api_misuse:
+#   enabled: false
+#   registries: ["pypi", "maven"]
+#   cache_ttl_days: 7
+#   max_calls_per_pr: 30
+#   scrape_hosted_docs: true
+
 # v1.5+ features (uncomment when ready):
 # jira:
 #   enabled: false
