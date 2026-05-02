@@ -47,7 +47,7 @@ class MaliciousPromptCheck(BaseCheck):
             if isinstance(candidate, BaseLLMBackend):
                 backend = candidate
 
-        text = "\n\n".join(part for part in (pr.body or "", diff) if part)
+        text = "\n\n".join(part for part in (pr.title or "", pr.body or "", diff) if part)
         verdict = assess(text, backend)
 
         if not verdict.is_bad:
