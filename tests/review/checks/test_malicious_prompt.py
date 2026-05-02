@@ -54,7 +54,6 @@ class TestMaliciousPromptCheckScan:
         assert finding.severity in ("critical", "important")
         assert SecurityReport.objects.filter(project=pr.project).count() == 1
 
-
     def test_malicious_title_only_triggers_verdict(self, db: Any) -> None:
         from franktheunicorn.core.models import SecurityReport
         from tests.factories import PullRequestFactory
