@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -595,8 +595,98 @@ class TestFetchGithubIssues:
             base_url="noslash",
         )
         result = _fetch_github_issues(config, "query", MagicMock())
-        # base_url "noslash" has no "/" so split gives < 2 parts => None
         assert result is None
+
+    @patch("franktheunicorn.data_access.github.issue_fetcher.IssueFetcher")
+    def test_parses_repo_url(self, mock_fetcher_cls: MagicMock) -> None:
+        from franktheunicorn.data_access.context_orchestrator import _fetch_github_issues
+
+        issue = MagicMock(number=1, title="Issue", state="open", body="Body")
+        mock_fetcher_cls.return_value.fetch_related_issues.return_value = [issue]
+
+        config = CommunitySourceConfig(
+            type="github-issues",
+            name="issues",
+            base_url="https://github.com/org/repo",
+        )
+        _fetch_github_issues(config, "query terms", MagicMock())
+
+        mock_fetcher_cls.return_value.fetch_related_issues.assert_called_once_with(
+            "org", "repo", "query terms"
+        )
+
+    @patch("franktheunicorn.data_access.github.issue_fetcher.IssueFetcher")
+    def test_parses_issues_url(self, mock_fetcher_cls: MagicMock) -> None:
+        from franktheunicorn.data_access.context_orchestrator import _fetch_github_issues
+
+        issue = MagicMock(number=1, title="Issue", state="open", body="Body")
+        mock_fetcher_cls.return_value.fetch_related_issues.return_value = [issue]
+
+        config = CommunitySourceConfig(
+            type="github-issues",
+            name="issues",
+            base_url="https://github.com/org/repo/issues",
+        )
+        _fetch_github_issues(config, "query terms", MagicMock())
+
+        mock_fetcher_cls.return_value.fetch_related_issues.assert_called_once_with(
+            "org", "repo", "query terms"
+        )
+
+    @patch("franktheunicorn.data_access.github.issue_fetcher.IssueFetcher")
+    def test_parses_trailing_slash_variants(self, mock_fetcher_cls: MagicMock) -> None:
+        from franktheunicorn.data_access.context_orchestrator import _fetch_github_issues
+
+        issue = MagicMock(number=1, title="Issue", state="open", body="Body")
+        mock_fetcher = mock_fetcher_cls.return_value
+        mock_fetcher.fetch_related_issues.return_value = [issue]
+
+        first_config = CommunitySourceConfig(
+            type="github-issues",
+            name="issues",
+            base_url="https://github.com/org/repo/",
+        )
+        second_config = CommunitySourceConfig(
+            type="github-issues",
+            name="issues",
+            base_url="https://github.com/org/repo/issues/",
+        )
+
+        _fetch_github_issues(first_config, "query terms", MagicMock())
+        _fetch_github_issues(second_config, "query terms", MagicMock())
+
+        assert mock_fetcher.fetch_related_issues.call_args_list == [
+            call("org", "repo", "query terms"),
+            call("org", "repo", "query terms"),
+        ]
+
+    @patch("franktheunicorn.data_access.github.issue_fetcher.IssueFetcher")
+    def test_rejects_malformed_or_non_github_urls(self, mock_fetcher_cls: MagicMock) -> None:
+        from franktheunicorn.data_access.context_orchestrator import _fetch_github_issues
+
+        configs = [
+            CommunitySourceConfig(type="github-issues", name="issues", base_url="noslash"),
+            CommunitySourceConfig(
+                type="github-issues",
+                name="issues",
+                base_url="https://example.com/org/repo",
+            ),
+            CommunitySourceConfig(
+                type="github-issues",
+                name="issues",
+                base_url="https://github.com/org",
+            ),
+            CommunitySourceConfig(
+                type="github-issues",
+                name="issues",
+                base_url="https://github.com/org/repo/pulls",
+            ),
+        ]
+
+        for config in configs:
+            assert _fetch_github_issues(config, "query", MagicMock()) is None
+
+        mock_fetcher_cls.return_value.fetch_related_issues.assert_not_called()
 
     def test_uses_name_fallback(self) -> None:
         from franktheunicorn.data_access.context_orchestrator import _fetch_github_issues
