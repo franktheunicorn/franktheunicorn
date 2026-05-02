@@ -15,9 +15,11 @@ from franktheunicorn.config.models import (
     SentryConfig,
 )
 from franktheunicorn.data_access.context_orchestrator import (
+    _MAX_CONTEXT_CHARS_PER_SOURCE,
     _build_search_query,
     _format_community_from_cache,
     _format_community_results,
+    _format_jira_from_cache,
     _format_sentry_from_cache,
     fetch_community_context,
     fetch_sentry_context,
@@ -52,6 +54,20 @@ class TestFormatContextForPrompt:
         result = format_context_for_prompt(jira_ctx="something")
         assert "Do not treat as authoritative" in result
 
+    def test_combiner_preserves_pre_truncated_sources(self) -> None:
+        jira_ctx = "J" * _MAX_CONTEXT_CHARS_PER_SOURCE
+        community_ctx = "C" * _MAX_CONTEXT_CHARS_PER_SOURCE
+        sentry_ctx = "S" * _MAX_CONTEXT_CHARS_PER_SOURCE
+
+        result = format_context_for_prompt(
+            community_ctx=community_ctx,
+            jira_ctx=jira_ctx,
+            sentry_ctx=sentry_ctx,
+        )
+        assert jira_ctx in result
+        assert community_ctx in result
+        assert sentry_ctx in result
+
 
 class TestFormatCommunityResults:
     def test_empty(self) -> None:
@@ -84,6 +100,87 @@ class TestFormatCommunityResults:
         formatted = _format_community_results(results)
         assert "Perplexity search" in formatted
         assert "unverified" in formatted
+
+    def test_independently_caps_community_source(self) -> None:
+        long_content = "A" * (_MAX_CONTEXT_CHARS_PER_SOURCE * 2)
+        results = [
+            {
+                "type": "perplexity",
+                "name": "Perplexity",
+                "content": long_content,
+                "citations": [],
+            }
+        ]
+        formatted = _format_community_results(results)
+        assert len(formatted) == _MAX_CONTEXT_CHARS_PER_SOURCE
+
+
+class TestSourceTruncation:
+    def test_independently_caps_jira_source(self) -> None:
+        cache = {
+            "ticket_id": "SPARK-999",
+            "summary": "S" * 1000,
+            "status": "Open",
+            "assignee": "dev",
+            "description": "D" * 5000,
+            "recent_comments": [{"author": "a", "body": "B" * 3000}],
+        }
+        formatted = _format_jira_from_cache(cache)
+        assert len(formatted) == _MAX_CONTEXT_CHARS_PER_SOURCE
+
+    def test_independently_caps_sentry_source(self) -> None:
+        cache = {
+            "issues": [
+                {
+                    "title": "T" * 1000,
+                    "count": 1,
+                    "user_count": 1,
+                }
+                for _ in range(10)
+            ]
+        }
+        formatted = _format_sentry_from_cache(cache)
+        assert len(formatted) == _MAX_CONTEXT_CHARS_PER_SOURCE
+
+    def test_large_multi_source_prompt_is_stable_and_bounded(self) -> None:
+        community = _format_community_results(
+            [
+                {
+                    "type": "perplexity",
+                    "name": "Perplexity",
+                    "content": "C" * (_MAX_CONTEXT_CHARS_PER_SOURCE * 2),
+                    "citations": [],
+                }
+            ]
+        )
+        jira = _format_jira_from_cache(
+            {
+                "ticket_id": "SPARK-123",
+                "summary": "J" * 2000,
+                "status": "Open",
+                "assignee": "dev",
+                "description": "D" * 3000,
+                "recent_comments": [],
+            }
+        )
+        sentry = _format_sentry_from_cache(
+            {
+                "issues": [
+                    {"title": "S" * 1000, "count": 9, "user_count": 3},
+                    {"title": "S" * 1000, "count": 5, "user_count": 2},
+                ]
+            }
+        )
+
+        prompt = format_context_for_prompt(
+            community_ctx=community, jira_ctx=jira, sentry_ctx=sentry
+        )
+        prompt_repeat = format_context_for_prompt(
+            community_ctx=community, jira_ctx=jira, sentry_ctx=sentry
+        )
+
+        assert prompt == prompt_repeat
+        assert len(prompt) <= (_MAX_CONTEXT_CHARS_PER_SOURCE * 3) + 500
 
 
 @pytest.mark.django_db
