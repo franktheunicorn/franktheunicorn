@@ -51,7 +51,7 @@ class TestFormatCommentBody:
 class TestGitHubPoster:
     def _make_poster(self) -> tuple[GitHubPoster, MagicMock]:
         client = MagicMock()
-        client.create_review.return_value = {"id": 42, "comment_ids": [101, 102]}
+        client.create_review.return_value = {"id": 42, "comment_ids_by_key": {}}
         return GitHubPoster(client), client
 
     def test_post_review_creates_review(self) -> None:
@@ -83,7 +83,7 @@ class TestGitHubPoster:
         assert body.comments[1].path == "b.py"
 
     def test_post_review_updates_draft_status(self) -> None:
-        poster, _ = self._make_poster()
+        poster, client = self._make_poster()
         pr = PullRequestFactory()
         draft = ReviewDraftFactory(
             pull_request=pr,
@@ -93,6 +93,7 @@ class TestGitHubPoster:
             status="accepted",
         )
 
+        client.create_review.return_value = {"id": 42, "comment_ids_by_key": {str(draft.pk): 101}}
         poster.post_review(pr, [draft])
 
         draft.refresh_from_db()

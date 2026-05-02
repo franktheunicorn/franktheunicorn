@@ -15,6 +15,7 @@ from franktheunicorn.backends.base import (
 
 def test_review_comment_defaults() -> None:
     comment = ReviewComment(path="a.py", body="x")
+    assert comment.correlation_key == ""
     assert comment.line is None
     assert comment.line_end is None
     assert comment.side == "RIGHT"

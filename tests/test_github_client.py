@@ -30,8 +30,8 @@ class TestGitHubClient:
         httpx_mock.add_response(json={"id": 99})
         result = client.create_review("org", "repo", 42, ReviewBody(event="COMMENT"))
         assert result["id"] == 99
-        # No inline comments → no follow-up GET, comment_ids is empty.
-        assert result["comment_ids"] == []
+        # No inline comments → no follow-up GET, mapping is empty.
+        assert result["comment_ids_by_key"] == {}
 
     def test_create_review_translates_inline_comments(
         self, httpx_mock: HTTPXMock, client: GitHubClient
@@ -52,12 +52,14 @@ class TestGitHubClient:
             event="COMMENT",
             body="overall",
             comments=[
-                ReviewComment(path="a.py", body="single", line=5),
-                ReviewComment(path="b.py", body="range", line=10, line_end=15),
+                ReviewComment(path="a.py", body="single", correlation_key="c1", line=5),
+                ReviewComment(
+                    path="b.py", body="range", correlation_key="c2", line=10, line_end=15
+                ),
             ],
         )
         result = client.create_review("org", "repo", 42, review)
-        assert result["comment_ids"] == [1001, 1002]
+        assert result["comment_ids_by_key"] == {"c1": 1001, "c2": 1002}
 
         post_req = next(r for r in httpx_mock.get_requests() if r.method == "POST")
         import json as _json

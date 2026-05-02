@@ -117,11 +117,11 @@ class GiteaClient(ForgeClient):
                     pr_number,
                 )
 
-        # Track the source position of each posted comment so we can map
-        # fetched comment IDs back into a 1:1-aligned ``comment_ids`` list.
+        # Track correlation keys for each posted comment so we can map
+        # fetched IDs deterministically.
         wire_comments: list[dict[str, Any]] = []
-        posted_indices: list[int] = []
-        for idx, comment in enumerate(review.comments):
+        posted_keys: list[str] = []
+        for comment in review.comments:
             wire = _to_gitea_comment(comment, diff_text)
             if wire is None:
                 logger.warning(
@@ -131,7 +131,7 @@ class GiteaClient(ForgeClient):
                 )
                 continue
             wire_comments.append(wire)
-            posted_indices.append(idx)
+            posted_keys.append(comment.correlation_key)
 
         payload: dict[str, Any] = {"event": review.event}
         if review.body:
@@ -143,15 +143,15 @@ class GiteaClient(ForgeClient):
         response.raise_for_status()
         result: dict[str, Any] = response.json()
 
-        comment_ids: list[int | None] = [None] * len(review.comments)
+        comment_ids_by_key: dict[str, int] = {}
         review_id = result.get("id")
         if review_id and wire_comments:
             try:
                 posted_comments = self.get_review_comments(owner, repo, pr_number, review_id)
                 fetched_ids = [c["id"] for c in posted_comments if "id" in c]
-                for fetched_idx, source_idx in enumerate(posted_indices):
-                    if fetched_idx < len(fetched_ids):
-                        comment_ids[source_idx] = fetched_ids[fetched_idx]
+                for fetched_idx, key in enumerate(posted_keys):
+                    if fetched_idx < len(fetched_ids) and key:
+                        comment_ids_by_key[key] = fetched_ids[fetched_idx]
             except Exception:
                 logger.warning(
                     "Could not fetch posted comment IDs for %s/%s#%d review %s",
@@ -160,7 +160,7 @@ class GiteaClient(ForgeClient):
                     pr_number,
                     review_id,
                 )
-        result["comment_ids"] = comment_ids
+        result["comment_ids_by_key"] = comment_ids_by_key
         return result
 
     def get_review_comments(

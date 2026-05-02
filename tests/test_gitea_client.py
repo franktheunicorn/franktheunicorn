@@ -103,11 +103,11 @@ class TestGiteaClient:
         review = ReviewBody(
             event="COMMENT",
             body="overall",
-            comments=[ReviewComment(path="foo.py", body="nit", line=11)],
+            comments=[ReviewComment(path="foo.py", body="nit", correlation_key="k1", line=11)],
         )
         result = client.create_review("org", "repo", 7, review)
         assert result["id"] == 99
-        assert result["comment_ids"] == [5001]
+        assert result["comment_ids_by_key"] == {"k1": 5001}
 
         post = next(r for r in httpx_mock.get_requests() if r.method == "POST")
         sent = json.loads(post.content)
@@ -145,7 +145,7 @@ class TestGiteaClient:
     def test_create_review_dropped_middle_comment_keeps_alignment(
         self, httpx_mock: HTTPXMock, client: GiteaClient
     ) -> None:
-        """If the middle comment can't be located, comment_ids stays 1:1.
+        """If the middle comment can't be located, mapping stays deterministic.
 
         Regression for an index-shift bug where dropping a middle
         comment caused subsequent IDs to land on the wrong drafts and
@@ -180,14 +180,13 @@ class TestGiteaClient:
 
         review = ReviewBody(
             comments=[
-                ReviewComment(path="foo.py", body="first", line=11),
-                ReviewComment(path="foo.py", body="ghost", line=999),
-                ReviewComment(path="foo.py", body="third", line=13),
+                ReviewComment(path="foo.py", body="first", correlation_key="k1", line=11),
+                ReviewComment(path="foo.py", body="ghost", correlation_key="k2", line=999),
+                ReviewComment(path="foo.py", body="third", correlation_key="k3", line=13),
             ],
         )
         result = client.create_review("org", "repo", 7, review)
-        # 1:1 alignment with input order; dropped middle comment is None.
-        assert result["comment_ids"] == [7001, None, 7003]
+        assert result["comment_ids_by_key"] == {"k1": 7001, "k3": 7003}
 
     def test_create_review_no_inline_skips_diff_fetch(
         self, httpx_mock: HTTPXMock, client: GiteaClient

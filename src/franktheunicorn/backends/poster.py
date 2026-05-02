@@ -47,6 +47,7 @@ def _build_review_comment(draft: ReviewDraft, attribution: str) -> ReviewComment
     return ReviewComment(
         path=draft.file_path,
         body=_format_comment_body(draft, attribution),
+        correlation_key=str(draft.pk),
         line=draft.line_number if draft.line_number else None,
         line_end=draft.line_end if draft.line_end else None,
     )
@@ -73,9 +74,9 @@ class GitHubPoster:
 
         Returns the forge's response dict, or None if there's nothing to
         post. The response is expected to include
-        ``comment_ids: list[int]`` populated by the underlying
-        ``ForgeClient.create_review`` (see ``ForgeClient`` docs);
-        comment IDs are zipped against ``drafts`` in posting order.
+        ``comment_ids_by_key: dict[str, int]`` populated by the
+        underlying ``ForgeClient.create_review`` (see ``ForgeClient``
+        docs); IDs are matched deterministically by correlation key.
         """
         if drafts is None:
             drafts = list(
@@ -111,14 +112,17 @@ class GitHubPoster:
         # drafts we mark ``posted`` but leave ``forge_comment_id`` unset,
         # so a later recall doesn't accidentally delete a sibling
         # draft's comment.
-        raw_comment_ids = result.get("comment_ids") if result else []
-        comment_ids: list[int | None] = list(raw_comment_ids) if raw_comment_ids else []
+        raw_comment_ids = result.get("comment_ids_by_key") if result else {}
+        comment_ids_by_key: dict[str, int] = (
+            raw_comment_ids if isinstance(raw_comment_ids, dict) else {}
+        )
 
-        for i, draft in enumerate(drafts):
+        for draft in drafts:
             draft.status = "posted"
             draft.posted_at = now
-            if i < len(comment_ids) and comment_ids[i] is not None:
-                draft.forge_comment_id = comment_ids[i]
+            cid = comment_ids_by_key.get(str(draft.pk))
+            if cid is not None:
+                draft.forge_comment_id = cid
             draft.save(update_fields=["status", "posted_at", "forge_comment_id", "updated_at"])
 
         return result

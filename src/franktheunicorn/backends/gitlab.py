@@ -143,8 +143,8 @@ class GitLabClient(ForgeClient):
         separate discussion with a text-position object. The returned
         ``id`` field is the body note's ID (or the first successfully
         posted inline note when there's no body); per-comment IDs are
-        listed under ``comment_ids`` in 1:1 alignment with
-        ``review.comments`` (``None`` for any that were dropped).
+        listed under ``comment_ids_by_key`` keyed by each comment's
+        correlation key.
         """
         pid = _project_id(owner, repo)
         result_id: int | None = None
@@ -156,16 +156,13 @@ class GitLabClient(ForgeClient):
             response.raise_for_status()
             result_id = response.json().get("id")
 
-        # 1:1 list aligned with review.comments. None entries flag
-        # comments that were dropped (missing MR refs) or whose ID
-        # couldn't be retrieved from the discussion response.
-        comment_ids: list[int | None] = [None] * len(review.comments)
+        comment_ids_by_key: dict[str, int] = {}
         if review.comments:
             mr = self.get_pull_request(owner, repo, pr_number)
             base_sha = mr.get("_gitlab_base_sha", "")
             start_sha = mr.get("_gitlab_start_sha", base_sha)
             head_sha = mr.get("_gitlab_head_sha", "")
-            for idx, comment in enumerate(review.comments):
+            for comment in review.comments:
                 discussion = _build_gitlab_discussion(
                     comment, base_sha=base_sha, start_sha=start_sha, head_sha=head_sha
                 )
@@ -182,18 +179,18 @@ class GitLabClient(ForgeClient):
                 disc_data = response.json()
                 # First note in the new discussion is the inline comment.
                 notes = disc_data.get("notes", [])
-                if notes:
-                    comment_ids[idx] = notes[0].get("id")
+                if notes and comment.correlation_key and notes[0].get("id") is not None:
+                    comment_ids_by_key[comment.correlation_key] = notes[0]["id"]
 
         # Fallback id if no body was sent: synthesize from the first
         # successfully-posted inline note.
         if result_id is None:
-            for cid in comment_ids:
+            for cid in comment_ids_by_key.values():
                 if cid is not None:
                     result_id = cid
                     break
 
-        return {"id": result_id, "comment_ids": comment_ids}
+        return {"id": result_id, "comment_ids_by_key": comment_ids_by_key}
 
     def get_review_comments(
         self, owner: str, repo: str, pr_number: int, review_id: int

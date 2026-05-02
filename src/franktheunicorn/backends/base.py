@@ -27,6 +27,7 @@ class ReviewComment:
 
     path: str
     body: str
+    correlation_key: str = ""
     line: int | None = None
     line_end: int | None = None
     side: str = "RIGHT"
@@ -87,14 +88,10 @@ class ForgeClient(ABC):
           (on GitLab) the body note. Used by ``GitHubPoster`` for
           tracking; can be ``None`` if neither body nor comments produced
           a top-level identifier.
-        - ``comment_ids`` (list[int | None]): per-inline-comment IDs in
-          1:1 positional alignment with ``review.comments``. ``None`` at
-          position *i* means the comment at ``review.comments[i]`` was
-          dropped (e.g. unlocatable diff position on Gitea/Forgejo,
-          missing MR refs on GitLab) or its ID could not be retrieved.
-          The poster zips this against the in-memory drafts to populate
-          ``ReviewDraft.forge_comment_id``; entries set to ``None`` skip
-          the assignment so each draft only ever stores its own ID.
+        - ``comment_ids_by_key`` (dict[str, int]): mapping from each
+          inline comment's client-provided ``ReviewComment.correlation_key``
+          to the forge comment ID returned for that exact comment.
+          Comments dropped by the forge or missing IDs are omitted.
         """
 
     @abstractmethod

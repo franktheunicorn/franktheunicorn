@@ -24,7 +24,10 @@ class TestGitHubPoster:
         )
 
         mock_client = MagicMock()
-        mock_client.create_review.return_value = {"id": 42, "comment_ids": [101]}
+        mock_client.create_review.return_value = {
+            "id": 42,
+            "comment_ids_by_key": {str(draft.pk): 101},
+        }
 
         poster = GitHubPoster(mock_client)
         result = poster.post_review(pr, [draft])
@@ -67,7 +70,7 @@ class TestGitHubPoster:
         draft = ReviewDraftFactory(pull_request=pr, status="accepted")
 
         mock_client = MagicMock()
-        mock_client.create_review.return_value = {"id": 42, "comment_ids": []}
+        mock_client.create_review.return_value = {"id": 42, "comment_ids_by_key": {}}
 
         poster = GitHubPoster(mock_client)
         result = poster.post_review(pr, [draft])
@@ -77,21 +80,24 @@ class TestGitHubPoster:
         assert draft.status == "posted"
         assert draft.forge_comment_id is None
 
-    def test_post_review_dropped_middle_comment_keeps_alignment(self) -> None:
-        """A None at position i means the comment was dropped; the i'th draft
-        is marked posted but doesn't claim a sibling's forge_comment_id.
-
-        Regression for the index-shift bug Copilot caught.
-        """
+    def test_post_review_matches_ids_by_correlation_key(self) -> None:
+        """Returned IDs are matched by correlation key, not order/position."""
         pr = PullRequestFactory()
-        d1 = ReviewDraftFactory(pull_request=pr, file_path="a.py", status="accepted")
-        d2 = ReviewDraftFactory(pull_request=pr, file_path="b.py", status="accepted")
-        d3 = ReviewDraftFactory(pull_request=pr, file_path="c.py", status="accepted")
+        d1 = ReviewDraftFactory(
+            pull_request=pr, file_path="a.py", line_number=10, status="accepted"
+        )
+        d2 = ReviewDraftFactory(
+            pull_request=pr, file_path="a.py", line_number=10, status="accepted"
+        )
+        d3 = ReviewDraftFactory(
+            pull_request=pr, file_path="c.py", line_number=30, status="accepted"
+        )
 
         mock_client = MagicMock()
         mock_client.create_review.return_value = {
             "id": 99,
-            "comment_ids": [1001, None, 1003],
+            # Reordered result and dropped d2.
+            "comment_ids_by_key": {str(d3.pk): 1003, str(d1.pk): 1001},
         }
 
         poster = GitHubPoster(mock_client)
@@ -101,7 +107,7 @@ class TestGitHubPoster:
         d2.refresh_from_db()
         d3.refresh_from_db()
         assert d1.forge_comment_id == 1001
-        # d2 was dropped — must NOT inherit 1003 from d3.
+        # d2 was dropped — must not inherit any sibling ID.
         assert d2.forge_comment_id is None
         assert d2.status == "posted"
         assert d3.forge_comment_id == 1003
