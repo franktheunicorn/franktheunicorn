@@ -74,7 +74,7 @@ class GitHubClient(ForgeClient):
         """Create a pull request review with comments.
 
         Converts the forge-agnostic ``ReviewBody`` to GitHub's wire
-        format and populates ``comment_ids`` on the result by querying
+        format and populates ``comment_ids_by_key`` on the result by querying
         the review's comments after creation. GitHub returns review
         comments in posting order, so the IDs align with ``review.comments``.
         """
@@ -88,18 +88,17 @@ class GitHubClient(ForgeClient):
         response.raise_for_status()
         result: dict[str, Any] = response.json()
 
-        # 1:1 list aligned with review.comments. None entries flag
-        # comments whose ID could not be retrieved (we never drop
-        # GitHub-side; the server validates the whole submission).
-        comment_ids: list[int | None] = [None] * len(review.comments)
+        comment_ids_by_key: dict[str, int] = {}
         review_id = result.get("id")
         if review_id and review.comments:
             try:
                 posted_comments = self.get_review_comments(owner, repo, pr_number, review_id)
                 fetched_ids = [c["id"] for c in posted_comments if "id" in c]
                 for i, fid in enumerate(fetched_ids):
-                    if i < len(comment_ids):
-                        comment_ids[i] = fid
+                    if i < len(review.comments):
+                        key = review.comments[i].correlation_key
+                        if key:
+                            comment_ids_by_key[key] = fid
             except Exception:
                 logger.warning(
                     "Could not fetch posted comment IDs for %s/%s#%d review %d",
@@ -108,7 +107,7 @@ class GitHubClient(ForgeClient):
                     pr_number,
                     review_id,
                 )
-        result["comment_ids"] = comment_ids
+        result["comment_ids_by_key"] = comment_ids_by_key
         return result
 
     def get_review_comments(

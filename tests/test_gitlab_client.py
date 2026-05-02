@@ -252,11 +252,11 @@ class TestGitLabClient:
         review = ReviewBody(
             event="COMMENT",
             body="overall",
-            comments=[ReviewComment(path="a.py", body="nit", line=5)],
+            comments=[ReviewComment(path="a.py", body="nit", correlation_key="k1", line=5)],
         )
         result = client.create_review("o", "r", 1, review)
         assert result["id"] == 100
-        assert result["comment_ids"] == [200]
+        assert result["comment_ids_by_key"] == {"k1": 200}
 
         # Verify discussion payload.
         disc_post = next(
@@ -285,12 +285,10 @@ class TestGitLabClient:
 
         review = ReviewBody(
             body="overall",
-            comments=[ReviewComment(path="a.py", body="nit", line=5)],
+            comments=[ReviewComment(path="a.py", body="nit", correlation_key="k1", line=5)],
         )
         result = client.create_review("o", "r", 1, review)
-        # The dropped comment leaves a None placeholder so positional
-        # alignment with review.comments is preserved.
-        assert result["comment_ids"] == [None]
+        assert result["comment_ids_by_key"] == {}
         # No discussion request should have been made.
         for r in httpx_mock.get_requests():
             assert not r.url.path.endswith("/discussions"), "should not have posted discussion"
