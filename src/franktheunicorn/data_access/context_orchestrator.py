@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 import httpx
 
@@ -270,12 +271,26 @@ def _fetch_github_issues(
     if not isinstance(config, CommunitySourceConfig):
         return None
     fetcher = IssueFetcher(client=http_client)
-    # Extract owner/repo from base_url or archive_url if available.
-    parts = (config.base_url or config.archive_url).strip("/").split("/")
-    if len(parts) >= 2:
-        owner, repo = parts[-2], parts[-1]
-    else:
+    github_url = (config.base_url or config.archive_url).strip()
+    parsed_url = urlparse(github_url)
+    if parsed_url.netloc.lower() != "github.com":
+        logger.debug("Skipping github issues fetch: unsupported host in URL '%s'", github_url)
         return None
+
+    path_segments = [segment for segment in parsed_url.path.split("/") if segment]
+    owner: str
+    repo: str
+    if len(path_segments) == 2:
+        owner, repo = path_segments
+    elif len(path_segments) >= 3 and path_segments[2] == "issues":
+        owner, repo = path_segments[0], path_segments[1]
+    else:
+        logger.debug(
+            "Skipping github issues fetch: unsupported path format in URL '%s'",
+            github_url,
+        )
+        return None
+
     keyword_str = " ".join(query.split()[:5])
     results = fetcher.fetch_related_issues(owner, repo, keyword_str)
     if not results:
