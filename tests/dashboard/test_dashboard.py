@@ -712,7 +712,7 @@ class TestRecallDraft:
         assert b"Cannot recall" in response.content
 
     def test_recall_no_comment_id(self, client: Client, db_pr: PullRequest) -> None:
-        draft = ReviewDraftFactory(pull_request=db_pr, status="posted", github_comment_id=None)
+        draft = ReviewDraftFactory(pull_request=db_pr, status="posted", forge_comment_id=None)
         response = client.post(f"/draft/{draft.pk}/recall/")
         assert b"Cannot recall" in response.content
 
@@ -853,7 +853,7 @@ class TestRecallAndPostWithMock:
         draft = ReviewDraftFactory(
             pull_request=db_pr,
             status="posted",
-            github_comment_id=123,
+            forge_comment_id=123,
             posted_at=datetime.now(tz=UTC),
         )
 
@@ -861,8 +861,8 @@ class TestRecallAndPostWithMock:
         mock_poster.recall_comment.return_value = True
 
         with (
-            patch("franktheunicorn.github.client.GitHubClient"),
-            patch("franktheunicorn.github.poster.GitHubPoster", return_value=mock_poster),
+            patch("franktheunicorn.backends.github.GitHubClient"),
+            patch("franktheunicorn.backends.poster.GitHubPoster", return_value=mock_poster),
             patch("django.conf.settings.FRANK_GITHUB_TOKEN", "test-token", create=True),
         ):
             response = client.post(f"/draft/{draft.pk}/recall/")
@@ -876,7 +876,7 @@ class TestRecallAndPostWithMock:
         draft = ReviewDraftFactory(
             pull_request=db_pr,
             status="posted",
-            github_comment_id=123,
+            forge_comment_id=123,
             posted_at=datetime.now(tz=UTC),
         )
 
@@ -899,8 +899,8 @@ class TestRecallAndPostWithMock:
         mock_poster.post_review.return_value = {"id": 1}
 
         with (
-            patch("franktheunicorn.github.client.GitHubClient"),
-            patch("franktheunicorn.github.poster.GitHubPoster", return_value=mock_poster),
+            patch("franktheunicorn.backends.github.GitHubClient"),
+            patch("franktheunicorn.backends.poster.GitHubPoster", return_value=mock_poster),
             patch("django.conf.settings.FRANK_GITHUB_TOKEN", "test-token", create=True),
         ):
             response = client.post(f"/pr/{db_pr.pk}/post/")
@@ -919,7 +919,7 @@ class TestRecallAndPostWithMock:
 
         with (
             patch(
-                "franktheunicorn.github.client.GitHubClient",
+                "franktheunicorn.backends.github.GitHubClient",
                 side_effect=Exception("connection failed"),
             ),
             patch("django.conf.settings.FRANK_GITHUB_TOKEN", "test-token", create=True),
@@ -1039,7 +1039,7 @@ class TestMergePRView:
                 return_value=eligible,
             ),
             patch("franktheunicorn.worker.merge_queue.execute_merge", return_value=success_result),
-            patch("franktheunicorn.github.client.GitHubClient"),
+            patch("franktheunicorn.backends.github.GitHubClient"),
             patch("django.conf.settings.FRANK_GITHUB_TOKEN", "test-token", create=True),
         ):
             response = client.post(f"/pr/{pr.pk}/merge/")
@@ -1069,7 +1069,7 @@ class TestMergePRView:
                 return_value=eligible,
             ),
             patch("franktheunicorn.worker.merge_queue.execute_merge", return_value=fail_result),
-            patch("franktheunicorn.github.client.GitHubClient"),
+            patch("franktheunicorn.backends.github.GitHubClient"),
             patch("django.conf.settings.FRANK_GITHUB_TOKEN", "test-token", create=True),
         ):
             response = client.post(f"/pr/{pr.pk}/merge/")

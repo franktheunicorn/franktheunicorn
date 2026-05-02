@@ -203,7 +203,7 @@ class TestExecuteMergeAPI:
     def test_api_success(self) -> None:
         from unittest.mock import MagicMock
 
-        from franktheunicorn.github.client import GitHubClient
+        from franktheunicorn.backends.github import GitHubClient
         from franktheunicorn.worker.merge_queue import execute_merge_api
 
         pr = PullRequestFactory(number=42)
@@ -224,7 +224,7 @@ class TestExecuteMergeAPI:
     def test_api_failure_status(self) -> None:
         from unittest.mock import MagicMock
 
-        from franktheunicorn.github.client import GitHubClient
+        from franktheunicorn.backends.github import GitHubClient
         from franktheunicorn.worker.merge_queue import execute_merge_api
 
         pr = PullRequestFactory(number=42)
@@ -256,7 +256,7 @@ class TestExecuteMergeAPI:
     def test_api_exception(self) -> None:
         from unittest.mock import MagicMock
 
-        from franktheunicorn.github.client import GitHubClient
+        from franktheunicorn.backends.github import GitHubClient
         from franktheunicorn.worker.merge_queue import execute_merge_api
 
         pr = PullRequestFactory(number=42)

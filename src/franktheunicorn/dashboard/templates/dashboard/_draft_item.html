@@ -56,8 +56,8 @@
     {% elif draft.status == "posted" %}
     <div style="margin-top: 0.25rem; font-size: 0.75rem; color: var(--green);">
         Posted {{ draft.posted_at|timesince }} ago
-        {% if draft.github_comment_id %}(#{{ draft.github_comment_id }}){% endif %}
-        {% if draft.github_comment_id %}
+        {% if draft.forge_comment_id %}(#{{ draft.forge_comment_id }}){% endif %}
+        {% if draft.forge_comment_id %}
         <button class="action-btn recall"
                 hx-post="{% url 'dashboard:recall_draft' draft.pk %}"
                 hx-target="#draft-{{ draft.pk }}"

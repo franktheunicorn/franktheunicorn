@@ -8,6 +8,14 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from franktheunicorn.config.schema import GITHUB_NAME_PATTERN, KNOWN_GOVERNANCE_VALUES
 
+KNOWN_FORGE_TYPES: frozenset[str] = frozenset({"github", "gitea", "forgejo", "gitlab"})
+
+_DEFAULT_FORGE_BASE_URLS: dict[str, str] = {
+    "github": "https://api.github.com",
+    "gitlab": "https://gitlab.com",
+    "forgejo": "https://codeberg.org",
+}
+
 logger = logging.getLogger(__name__)
 
 
@@ -400,6 +408,54 @@ class SecurityTriageConfig(BaseModel):
     sandbox_enabled: bool = False  # allow sandbox POC execution
 
 
+class ForgeRegistryEntry(BaseModel):
+    """A single forge instance the operator wants to talk to.
+
+    Each project YAML references one of these by ``name``. ``type`` selects
+    the client implementation (``github``, ``gitea``, ``forgejo``, ``gitlab``).
+    Gitea and Forgejo share the same API and use the same client.
+    """
+
+    name: str
+    type: str = "github"
+    base_url: str = ""
+    token: str = ""
+    username: str = ""
+
+    @field_validator("name")
+    @classmethod
+    def name_not_empty(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            msg = "forge entry name must not be empty"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("type")
+    @classmethod
+    def type_must_be_known(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in KNOWN_FORGE_TYPES:
+            msg = f"unknown forge type {v!r}; must be one of {', '.join(sorted(KNOWN_FORGE_TYPES))}"
+            raise ValueError(msg)
+        return v
+
+    @model_validator(mode="after")
+    def fill_default_base_url(self) -> ForgeRegistryEntry:
+        """Apply the canonical base URL for the forge type, if unset.
+
+        Gitea has no canonical hosted instance, so a base_url is required.
+        """
+        if not self.base_url:
+            default = _DEFAULT_FORGE_BASE_URLS.get(self.type, "")
+            if default:
+                self.base_url = default
+            elif self.type == "gitea":
+                msg = f"forge {self.name!r} (type=gitea) requires base_url"
+                raise ValueError(msg)
+        return self
+
+
 class OperatorConfig(BaseModel):
     """Top-level operator config loaded from operator.yaml."""
 
@@ -437,12 +493,71 @@ class OperatorConfig(BaseModel):
     github_token: str = ""  # typically "${FRANK_GITHUB_TOKEN}"
     email: EmailConfig = Field(default_factory=EmailConfig)
 
+    # Multi-forge registry. Each entry is a named forge instance (a GitHub
+    # account, a Codeberg account, a self-hosted Gitea/GitLab, ...). Project
+    # YAMLs reference an entry by ``name`` via their ``forge:`` field. If
+    # left empty, a default ``github`` entry is synthesized from the legacy
+    # ``github_token``/``github_username`` fields.
+    forges: list[ForgeRegistryEntry] = Field(default_factory=list)
+
     @model_validator(mode="after")
     def migrate_legacy_llm(self) -> OperatorConfig:
         """Promote legacy ``llm:`` config into ``llm_backends`` list."""
         if self.llm is not None and not self.llm_backends:
             self.llm_backends = [self.llm]
             self.llm = None
+        return self
+
+    @model_validator(mode="after")
+    def synthesize_default_forge(self) -> OperatorConfig:
+        """Auto-create a ``github`` forge entry from legacy fields if missing.
+
+        Preserves backward compatibility with operator.yaml files written
+        before the multi-forge registry existed.
+        """
+        if not self.forges and self.github_token:
+            self.forges = [
+                ForgeRegistryEntry(
+                    name="github",
+                    type="github",
+                    base_url=_DEFAULT_FORGE_BASE_URLS["github"],
+                    token=self.github_token,
+                    username=self.github_username,
+                )
+            ]
+        return self
+
+    @model_validator(mode="after")
+    def forge_names_unique(self) -> OperatorConfig:
+        """Reject duplicate forge ``name`` entries — projects pick by name."""
+        seen: set[str] = set()
+        for entry in self.forges:
+            if entry.name in seen:
+                msg = f"duplicate forge name in registry: {entry.name!r}"
+                raise ValueError(msg)
+            seen.add(entry.name)
+        return self
+
+    @model_validator(mode="after")
+    def forge_tokens_set(self) -> OperatorConfig:
+        """Fail fast when a forge entry's token resolved to empty.
+
+        Tokens come from ``${VAR}`` substitution at YAML load time; an
+        empty value almost always means the referenced env var is not
+        set. Surface that here rather than waiting for a 401 from the
+        forge API. Bypassed when ``mock_mode`` is true.
+        """
+        if self.mock_mode:
+            return self
+        missing = [e.name for e in self.forges if not e.token]
+        if missing:
+            msg = (
+                f"forge entries with empty token (env var likely unset): "
+                f"{', '.join(missing)}. "
+                f"Set the referenced ${{...}} variables in .env, or enable "
+                f"mock_mode for offline use."
+            )
+            raise ValueError(msg)
         return self
 
     @field_validator("poll_interval_seconds")
@@ -587,6 +702,9 @@ class ProjectConfig(BaseModel):
 
     owner: str
     repo: str
+    # Name of the forge entry in OperatorConfig.forges to use for this
+    # project. Defaults to "github" for backward compatibility.
+    forge: str = "github"
     review_context: str = "general open-source"
     watched_paths: list[str] = Field(default_factory=list)
     ignore_paths: list[str] = Field(default_factory=list)

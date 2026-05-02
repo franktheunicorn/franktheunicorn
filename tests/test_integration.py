@@ -11,10 +11,10 @@ from typing import Any
 
 import pytest
 
+from franktheunicorn.backends.mock import MockGitHubClient
+from franktheunicorn.backends.poller import poll_project
 from franktheunicorn.config.models import ProjectConfig
 from franktheunicorn.core.models import PullRequest, ReviewDraft
-from franktheunicorn.github.mock import MockGitHubClient
-from franktheunicorn.github.poller import poll_project
 from franktheunicorn.review.drafter import draft_review
 
 

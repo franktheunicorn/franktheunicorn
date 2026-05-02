@@ -1,6 +1,8 @@
 """
-GitHub review posting — batch post approved findings as a single review.
+Forge review posting — batch post approved findings as a single review.
 
+Forge-agnostic: builds ``ReviewBody`` / ``ReviewComment`` dataclasses
+and lets each ``ForgeClient`` translate to its own wire format.
 Supports suggestion blocks, multi-line comments, attribution footer,
 and comment recall within a configurable window.
 """
@@ -11,6 +13,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from franktheunicorn.backends.base import ForgeClient, ReviewBody, ReviewComment
 from franktheunicorn.core.models import PullRequest, ReviewDraft
 
 logger = logging.getLogger(__name__)
@@ -39,26 +42,24 @@ def _format_comment_body(
     return body
 
 
-def _build_review_comment(draft: ReviewDraft, attribution: str) -> dict[str, Any]:
-    """Build a single review comment dict for the GitHub Reviews API."""
-    comment: dict[str, Any] = {
-        "path": draft.file_path,
-        "body": _format_comment_body(draft, attribution),
-    }
-
-    if draft.line_number:
-        comment["line"] = draft.line_number
-        if draft.line_end and draft.line_end > draft.line_number:
-            comment["start_line"] = draft.line_number
-            comment["line"] = draft.line_end
-
-    return comment
+def _build_review_comment(draft: ReviewDraft, attribution: str) -> ReviewComment:
+    """Build a normalized ReviewComment from a stored draft."""
+    return ReviewComment(
+        path=draft.file_path,
+        body=_format_comment_body(draft, attribution),
+        line=draft.line_number if draft.line_number else None,
+        line_end=draft.line_end if draft.line_end else None,
+    )
 
 
 class GitHubPoster:
-    """Posts review findings to GitHub as a single batch review."""
+    """Posts review findings to a forge as a single batch review.
 
-    def __init__(self, client: Any, attribution: str = DEFAULT_ATTRIBUTION) -> None:
+    The class name is kept for back-compat with existing imports; it now
+    works with any ``ForgeClient`` (GitHub, Forgejo, mock, ...).
+    """
+
+    def __init__(self, client: ForgeClient, attribution: str = DEFAULT_ATTRIBUTION) -> None:
         self._client = client
         self._attribution = attribution
 
@@ -68,9 +69,13 @@ class GitHubPoster:
         drafts: list[ReviewDraft] | None = None,
         event: str = "COMMENT",
     ) -> dict[str, Any] | None:
-        """Post approved drafts as a single GitHub review.
+        """Post approved drafts as a single review on the project's forge.
 
-        Returns the GitHub API response dict, or None if there's nothing to post.
+        Returns the forge's response dict, or None if there's nothing to
+        post. The response is expected to include
+        ``comment_ids: list[int]`` populated by the underlying
+        ``ForgeClient.create_review`` (see ``ForgeClient`` docs);
+        comment IDs are zipped against ``drafts`` in posting order.
         """
         if drafts is None:
             drafts = list(
@@ -84,46 +89,37 @@ class GitHubPoster:
             return None
 
         comments = [_build_review_comment(d, self._attribution) for d in drafts]
-
-        body = {
-            "event": event,
-            "comments": comments,
-        }
+        review = ReviewBody(event=event, comments=comments)
 
         try:
             result: dict[str, Any] = self._client.create_review(
                 pr.project.owner,
                 pr.project.repo,
                 pr.number,
-                body,
+                review,
             )
         except Exception:
             logger.exception("Failed to post review for PR #%d", pr.number)
             return None
 
         now = datetime.now(tz=UTC)
-        review_id = result.get("id") if result else None
 
-        # Fetch the posted comment IDs from the review.
-        comment_ids: list[int] = []
-        if review_id:
-            try:
-                review_comments = self._client.get_review_comments(
-                    pr.project.owner,
-                    pr.project.repo,
-                    pr.number,
-                    review_id,
-                )
-                comment_ids = [c.get("id", 0) for c in review_comments]
-            except Exception:
-                logger.debug("Could not fetch review comment IDs", exc_info=True)
+        # Per-comment IDs come back on the create_review response in 1:1
+        # alignment with the comments we submitted. ``None`` entries flag
+        # comments that were dropped during translation (e.g. unlocatable
+        # diff position on Gitea, missing MR refs on GitLab) — for those
+        # drafts we mark ``posted`` but leave ``forge_comment_id`` unset,
+        # so a later recall doesn't accidentally delete a sibling
+        # draft's comment.
+        raw_comment_ids = result.get("comment_ids") if result else []
+        comment_ids: list[int | None] = list(raw_comment_ids) if raw_comment_ids else []
 
         for i, draft in enumerate(drafts):
             draft.status = "posted"
             draft.posted_at = now
-            if i < len(comment_ids):
-                draft.github_comment_id = comment_ids[i]
-            draft.save(update_fields=["status", "posted_at", "github_comment_id", "updated_at"])
+            if i < len(comment_ids) and comment_ids[i] is not None:
+                draft.forge_comment_id = comment_ids[i]
+            draft.save(update_fields=["status", "posted_at", "forge_comment_id", "updated_at"])
 
         return result
 
@@ -132,8 +128,8 @@ class GitHubPoster:
 
         Returns True if the comment was successfully recalled.
         """
-        if not draft.github_comment_id:
-            logger.warning("Cannot recall draft %d: no github_comment_id", draft.pk)
+        if not draft.forge_comment_id:
+            logger.warning("Cannot recall draft %d: no forge_comment_id", draft.pk)
             return False
 
         if not draft.posted_at:
@@ -154,10 +150,11 @@ class GitHubPoster:
             self._client.delete_review_comment(
                 draft.pull_request.project.owner,
                 draft.pull_request.project.repo,
-                draft.github_comment_id,
+                draft.pull_request.number,
+                draft.forge_comment_id,
             )
         except Exception:
-            logger.exception("Failed to recall comment %d", draft.github_comment_id)
+            logger.exception("Failed to recall comment %d", draft.forge_comment_id)
             return False
 
         draft.status = "recalled"

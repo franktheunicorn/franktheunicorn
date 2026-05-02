@@ -5,7 +5,8 @@ from __future__ import annotations
 import pytest
 from pytest_httpx import HTTPXMock
 
-from franktheunicorn.github.client import GitHubClient, infer_github_username
+from franktheunicorn.backends.base import ReviewBody, ReviewComment
+from franktheunicorn.backends.github import GitHubClient, infer_github_username
 
 
 class TestGitHubClient:
@@ -27,8 +28,51 @@ class TestGitHubClient:
 
     def test_create_review(self, httpx_mock: HTTPXMock, client: GitHubClient) -> None:
         httpx_mock.add_response(json={"id": 99})
-        result = client.create_review("org", "repo", 42, {"event": "COMMENT", "comments": []})
+        result = client.create_review("org", "repo", 42, ReviewBody(event="COMMENT"))
         assert result["id"] == 99
+        # No inline comments → no follow-up GET, comment_ids is empty.
+        assert result["comment_ids"] == []
+
+    def test_create_review_translates_inline_comments(
+        self, httpx_mock: HTTPXMock, client: GitHubClient
+    ) -> None:
+        # POST review.
+        httpx_mock.add_response(
+            url="https://api.github.test/repos/org/repo/pulls/42/reviews",
+            method="POST",
+            json={"id": 1},
+        )
+        # Follow-up GET for comment IDs.
+        httpx_mock.add_response(
+            url="https://api.github.test/repos/org/repo/pulls/42/reviews/1/comments?per_page=100",
+            method="GET",
+            json=[{"id": 1001}, {"id": 1002}],
+        )
+        review = ReviewBody(
+            event="COMMENT",
+            body="overall",
+            comments=[
+                ReviewComment(path="a.py", body="single", line=5),
+                ReviewComment(path="b.py", body="range", line=10, line_end=15),
+            ],
+        )
+        result = client.create_review("org", "repo", 42, review)
+        assert result["comment_ids"] == [1001, 1002]
+
+        post_req = next(r for r in httpx_mock.get_requests() if r.method == "POST")
+        import json as _json
+
+        sent = _json.loads(post_req.content)
+        assert sent["event"] == "COMMENT"
+        assert sent["body"] == "overall"
+        assert sent["comments"][0] == {"path": "a.py", "body": "single", "line": 5, "side": "RIGHT"}
+        assert sent["comments"][1] == {
+            "path": "b.py",
+            "body": "range",
+            "line": 15,
+            "side": "RIGHT",
+            "start_line": 10,
+        }
 
     def test_get_review_comments(self, httpx_mock: HTTPXMock, client: GitHubClient) -> None:
         httpx_mock.add_response(json=[{"id": 1, "body": "nit"}])
@@ -50,8 +94,8 @@ class TestGitHubClient:
 
     def test_delete_review_comment(self, httpx_mock: HTTPXMock, client: GitHubClient) -> None:
         httpx_mock.add_response(status_code=204)
-        # Should not raise
-        client.delete_review_comment("org", "repo", 123)
+        # pr_number is unused on GitHub but required by the abstract signature.
+        client.delete_review_comment("org", "repo", 42, 123)
 
     def test_get_authenticated_user(self, httpx_mock: HTTPXMock, client: GitHubClient) -> None:
         httpx_mock.add_response(json={"login": "holdenk"})

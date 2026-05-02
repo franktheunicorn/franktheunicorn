@@ -221,7 +221,7 @@ class TestResolveConfigUsernameInference:
             'github_token: "ghp_test_token"\ngithub_username: ""\n'
         )
         with patch(
-            "franktheunicorn.github.client.infer_github_username",
+            "franktheunicorn.backends.github.infer_github_username",
             return_value="inferred-user",
         ):
             oc, _resolved = resolve_config(tmp_path)
@@ -234,7 +234,7 @@ class TestResolveConfigUsernameInference:
             'github_token: "ghp_test_token"\ngithub_username: "explicit-user"\n'
         )
         with patch(
-            "franktheunicorn.github.client.infer_github_username",
+            "franktheunicorn.backends.github.infer_github_username",
         ) as mock_infer:
             _oc, _resolved = resolve_config(tmp_path)
         mock_infer.assert_not_called()
@@ -247,7 +247,7 @@ class TestResolveConfigUsernameInference:
             'github_token: "ghp_test_token"\nmock_mode: true\n'
         )
         with patch(
-            "franktheunicorn.github.client.infer_github_username",
+            "franktheunicorn.backends.github.infer_github_username",
         ) as mock_infer:
             _oc, _resolved = resolve_config(tmp_path)
         mock_infer.assert_not_called()
@@ -257,7 +257,7 @@ class TestResolveConfigUsernameInference:
         config_dir.mkdir(parents=True)
         (config_dir / "operator.yaml").write_text('github_username: ""\n')
         with patch(
-            "franktheunicorn.github.client.infer_github_username",
+            "franktheunicorn.backends.github.infer_github_username",
         ) as mock_infer:
             _oc, _resolved = resolve_config(tmp_path)
         mock_infer.assert_not_called()
@@ -267,7 +267,7 @@ class TestResolveConfigUsernameInference:
         config_dir.mkdir(parents=True)
         (config_dir / "operator.yaml").write_text('github_token: "ghp_test_token"\n')
         with patch(
-            "franktheunicorn.github.client.infer_github_username",
+            "franktheunicorn.backends.github.infer_github_username",
             return_value="",
         ):
             oc, _resolved = resolve_config(tmp_path)

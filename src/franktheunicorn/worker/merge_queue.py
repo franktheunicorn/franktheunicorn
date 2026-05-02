@@ -147,7 +147,7 @@ def execute_merge_api(
     try:
         from django.db import transaction
 
-        from franktheunicorn.github.client import GitHubClient
+        from franktheunicorn.backends.github import GitHubClient
 
         if not isinstance(github_client, GitHubClient):
             return MergeResult(
