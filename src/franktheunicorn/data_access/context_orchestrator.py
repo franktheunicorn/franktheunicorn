@@ -441,7 +441,7 @@ def _format_community_results(results: list[dict[str, object]]) -> str:
                 content = str(source.get("content", ""))
                 if content:
                     parts.append("\n[Perplexity search, unverified]")
-                    parts.append(f"  {content[:500]}")
+                    parts.append(f"  {content}")
 
     return _truncate_source_block("\n".join(parts))
 

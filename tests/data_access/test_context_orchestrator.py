@@ -117,9 +117,10 @@ class TestFormatCommunityResults:
 
 class TestSourceTruncation:
     def test_independently_caps_jira_source(self) -> None:
+        # Summary is not inner-truncated, so a 2500-char summary alone exceeds the 2000-char cap.
         cache = {
             "ticket_id": "SPARK-999",
-            "summary": "S" * 1000,
+            "summary": "S" * 2500,
             "status": "Open",
             "assignee": "dev",
             "description": "D" * 5000,
