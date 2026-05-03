@@ -223,6 +223,21 @@ class TestExecuteMerge:
         assert result.ci_wait_state == "timeout"
         assert "Timed out" in result.error
 
+    def test_runs_restack_when_new_flag_enabled(self) -> None:
+        config = MergeQueueConfig(enabled=True, restack_enabled=True)
+        pr = PullRequestFactory(number=42)
+
+        with (
+            patch("franktheunicorn.worker.merge_queue.execute_merge_api") as mock_api,
+            patch("franktheunicorn.worker.merge_queue.execute_post_merge_restack") as mock_restack,
+        ):
+            mock_api.return_value = MergeResult(success=True, method="merge")
+            mock_restack.return_value.success = True
+            result = execute_merge(pr, config, github_client=object(), repo_path="/tmp/repo")
+
+        assert result.success is True
+        mock_restack.assert_called_once()
+
 
 @pytest.mark.django_db
 class TestRestackSelection:
@@ -248,13 +263,60 @@ class TestRestackSelection:
 
 @pytest.mark.django_db
 class TestPostMergeRestack:
+    def test_disabled_restack_skips_queue_lookup(self) -> None:
+        merged_pr = PullRequestFactory(state="merged")
+        config = MergeQueueConfig(restack_enabled=False)
+
+        with patch("franktheunicorn.worker.merge_queue.select_next_pr_to_restack") as mock_select:
+            result = execute_post_merge_restack(merged_pr, config, "/tmp/repo")
+
+        assert result.success is True
+        mock_select.assert_not_called()
+
     def test_no_next_pr_is_success(self) -> None:
         merged_pr = PullRequestFactory(state="merged")
-        config = MergeQueueConfig(post_merge_restack_enabled=True)
+        config = MergeQueueConfig(restack_enabled=True)
 
         result = execute_post_merge_restack(merged_pr, config, "/tmp/repo")
         assert result.success is True
         assert result.pr_number is None
+
+    def test_restack_uses_configurable_push_and_ci_timing(self) -> None:
+        merged_pr = PullRequestFactory(state="merged")
+        next_pr = PullRequestFactory(project=merged_pr.project, number=7, state="open")
+        config = MergeQueueConfig(
+            restack_enabled=True,
+            delete_stale_migrations=False,
+            push_force_with_lease=False,
+            ci_wait_timeout_seconds=120,
+            ci_poll_interval_seconds=10,
+        )
+
+        github_client = object()
+        with (
+            patch(
+                "franktheunicorn.worker.merge_queue.select_next_pr_to_restack", return_value=next_pr
+            ),
+            patch("franktheunicorn.worker.merge_queue._run_git_step") as mock_step,
+            patch(
+                "franktheunicorn.worker.merge_queue.wait_for_ci_green",
+                return_value=("success", "ok"),
+            ) as mock_wait,
+        ):
+            mock_step.return_value.success = True
+            mock_step.return_value.output = ""
+            mock_step.return_value.error = ""
+            result = execute_post_merge_restack(
+                merged_pr,
+                config,
+                "/tmp/repo",
+                github_client=github_client,
+            )
+
+        assert result.success is True
+        push_call = next(call for call in mock_step.call_args_list if call.args[0] == "push_branch")
+        assert "--force" in push_call.args[1]
+        mock_wait.assert_called_once_with(next_pr, github_client, timeout=120, poll_interval=10)
 
 
 @pytest.mark.django_db

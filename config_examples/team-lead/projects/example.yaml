@@ -37,7 +37,7 @@ llm_checks: ["coverage"]
 #   restack_target_branch: "main"
 #   # App-scoped migration globs are supported, e.g. "apps/*/migrations/*.py".
 #   migration_globs: ["*/migrations/*.py"]
-#   delete_stale_migrations: true
+#   delete_stale_migrations: false
 #   ci_wait_timeout_seconds: 900
 #   ci_poll_interval_seconds: 30
 #   push_force_with_lease: true

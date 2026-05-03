@@ -52,7 +52,7 @@ enabled: true
 #   restack_target_branch: "main"
 #   # Globs used when pruning stale migration files before regeneration.
 #   migration_globs: ["*/migrations/*.py"]
-#   delete_stale_migrations: true
+#   delete_stale_migrations: false
 #   ci_wait_timeout_seconds: 900
 #   ci_poll_interval_seconds: 30
 #   push_force_with_lease: true

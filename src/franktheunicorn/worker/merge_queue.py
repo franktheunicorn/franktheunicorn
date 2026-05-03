@@ -235,7 +235,8 @@ def execute_merge(
             error="No merge method available (no script and no GitHub client)",
         )
 
-    if merge_result.success and config.post_merge_restack_enabled and repo_path:
+    restack_enabled = config.restack_enabled or config.post_merge_restack_enabled
+    if merge_result.success and restack_enabled and repo_path:
         restack_result = execute_post_merge_restack(
             pr,
             config,
@@ -377,9 +378,9 @@ def execute_post_merge_restack(
     github_client: object | None = None,
 ) -> RestackExecutionResult:
     """Restack next queue PR branch after a successful merge."""
-    next_pr = select_next_pr_to_restack(merged_pr.project_id)
     if not config.restack_enabled:
         return RestackExecutionResult(success=True, target_branch=config.restack_target_branch)
+    next_pr = select_next_pr_to_restack(merged_pr.project_id)
     if next_pr is None:
         return RestackExecutionResult(success=True, target_branch=config.restack_target_branch)
 
