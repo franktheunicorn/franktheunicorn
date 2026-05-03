@@ -367,6 +367,10 @@ class MergeQueueConfig(BaseModel):
     merge_script: str = ""
     auto_merge: bool = False
     merge_method: str = "merge"
+    post_merge_restack_enabled: bool = False
+    restack_target_branch: str = "main"
+    stale_migration_strategy: str = "app-local-diff"
+    restack_commit_scope: str = "merge-queue"
 
     @field_validator("required_approvals")
     @classmethod
