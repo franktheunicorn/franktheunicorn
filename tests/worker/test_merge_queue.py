@@ -12,6 +12,8 @@ from franktheunicorn.worker.merge_queue import (
     evaluate_merge_eligibility,
     execute_merge,
     execute_merge_script,
+    execute_post_merge_restack,
+    select_next_pr_to_restack,
     update_merge_eligibility,
 )
 from tests.factories import PullRequestFactory
@@ -182,6 +184,53 @@ class TestExecuteMerge:
 
         assert result.success is True
         mock_api.assert_called_once()
+
+    def test_runs_restack_only_after_success_when_enabled(self) -> None:
+        config = MergeQueueConfig(enabled=True, post_merge_restack_enabled=True)
+        pr = PullRequestFactory(number=42)
+
+        with (
+            patch("franktheunicorn.worker.merge_queue.execute_merge_api") as mock_api,
+            patch("franktheunicorn.worker.merge_queue.execute_post_merge_restack") as mock_restack,
+        ):
+            mock_api.return_value = MergeResult(success=True, method="merge")
+            result = execute_merge(pr, config, github_client=object(), repo_path="/tmp/repo")
+
+        assert result.success is True
+        mock_restack.assert_called_once()
+
+
+@pytest.mark.django_db
+class TestRestackSelection:
+    def test_select_next_pr_to_restack_orders_queue(self) -> None:
+        base = PullRequestFactory(
+            merge_queue_eligible=True, state="open", interest_score=1.0, number=1
+        )
+        PullRequestFactory(
+            project=base.project,
+            merge_queue_eligible=True,
+            state="open",
+            interest_score=9.0,
+            number=2,
+        )
+        PullRequestFactory(
+            project=base.project, merge_queue_eligible=False, state="open", interest_score=10.0
+        )
+
+        next_pr = select_next_pr_to_restack(base.project_id)
+        assert next_pr is not None
+        assert next_pr.number == 2
+
+
+@pytest.mark.django_db
+class TestPostMergeRestack:
+    def test_no_next_pr_is_success(self) -> None:
+        merged_pr = PullRequestFactory(state="merged")
+        config = MergeQueueConfig(post_merge_restack_enabled=True)
+
+        result = execute_post_merge_restack(merged_pr, config, "/tmp/repo")
+        assert result.success is True
+        assert result.pr_number is None
 
 
 @pytest.mark.django_db

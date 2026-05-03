@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from django.utils import timezone
@@ -38,6 +39,29 @@ class MergeResult:
     success: bool = False
     method: str = ""
     output: str = ""
+    error: str = ""
+
+
+@dataclass
+class RestackStepResult:
+    """Single restack step execution result with logs."""
+
+    name: str
+    success: bool
+    stdout: str = ""
+    stderr: str = ""
+    command: list[str] = field(default_factory=list)
+
+
+@dataclass
+class RestackExecutionResult:
+    """Result for post-merge restack orchestration."""
+
+    success: bool = False
+    pr_number: int | None = None
+    branch: str = ""
+    target_branch: str = "main"
+    steps: list[RestackStepResult] = field(default_factory=list)
     error: str = ""
 
 
@@ -188,6 +212,8 @@ def execute_merge(
     pr: PullRequest,
     config: MergeQueueConfig,
     github_client: object | None = None,
+    *,
+    repo_path: str = "",
 ) -> MergeResult:
     """Execute a merge using the configured method.
 
@@ -195,10 +221,118 @@ def execute_merge(
     to the GitHub API.
     """
     if config.merge_script:
-        return execute_merge_script(pr, config.merge_script)
-    if github_client is not None:
-        return execute_merge_api(pr, config, github_client)
-    return MergeResult(
-        success=False,
-        error="No merge method available (no script and no GitHub client)",
+        merge_result = execute_merge_script(pr, config.merge_script)
+    elif github_client is not None:
+        merge_result = execute_merge_api(pr, config, github_client)
+    else:
+        return MergeResult(
+            success=False,
+            error="No merge method available (no script and no GitHub client)",
+        )
+
+    if merge_result.success and config.post_merge_restack_enabled and repo_path:
+        restack_result = execute_post_merge_restack(pr, config, repo_path)
+        if not restack_result.success:
+            merge_result.error = restack_result.error
+            merge_result.output = "\n".join(
+                [
+                    merge_result.output,
+                    f"post_merge_restack_failed for PR #{restack_result.pr_number}",
+                ]
+            ).strip()
+    return merge_result
+
+
+def select_next_pr_to_restack(project_id: int) -> PullRequest | None:
+    """Select next PR to restack in queue order after a merge.
+
+    Queue order: highest interest_score first, then oldest GitHub update.
+    """
+    from franktheunicorn.core.models import PullRequest
+
+    return (
+        PullRequest.objects.filter(
+            project_id=project_id,
+            state="open",
+            merge_queue_eligible=True,
+        )
+        .order_by("-interest_score", "github_updated_at", "number")
+        .first()
     )
+
+
+def _run_git_step(name: str, cmd: list[str], cwd: Path) -> RestackStepResult:
+    """Run a restack subprocess step and capture output."""
+    result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=300)
+    return RestackStepResult(
+        name=name,
+        success=result.returncode == 0,
+        stdout=result.stdout,
+        stderr=result.stderr,
+        command=cmd,
+    )
+
+
+def execute_post_merge_restack(
+    merged_pr: PullRequest,
+    config: MergeQueueConfig,
+    repo_path: str,
+) -> RestackExecutionResult:
+    """Restack next queue PR branch after a successful merge."""
+    next_pr = select_next_pr_to_restack(merged_pr.project_id)
+    if next_pr is None:
+        return RestackExecutionResult(success=True, target_branch=config.restack_target_branch)
+
+    branch_name = f"pr-{next_pr.number}"
+    target = config.restack_target_branch or "main"
+    repo_dir = Path(repo_path)
+    execution = RestackExecutionResult(
+        pr_number=next_pr.number,
+        branch=branch_name,
+        target_branch=target,
+    )
+    steps: list[tuple[str, list[str]]] = [
+        ("checkout_pr_branch", ["git", "checkout", "-B", branch_name, f"origin/{branch_name}"]),
+    ]
+    if config.stale_migration_strategy == "app-local-diff":
+        steps.append(
+            (
+                "delete_stale_migrations",
+                [
+                    "bash",
+                    "-lc",
+                    (
+                        "git diff --name-only origin/"
+                        f"{target}...HEAD -- '*/migrations/*.py' "
+                        "| xargs -r rm -f"
+                    ),
+                ],
+            )
+        )
+    steps.extend(
+        [
+            ("rebase_onto_target", ["git", "rebase", f"origin/{target}"]),
+            ("regenerate_migrations", ["python", "manage.py", "makemigrations"]),
+            (
+                "commit_restack",
+                [
+                    "git",
+                    "commit",
+                    "-am",
+                    f"chore({config.restack_commit_scope}): restack PR #{next_pr.number}",
+                ],
+            ),
+            ("push_branch", ["git", "push", "--force-with-lease", "origin", branch_name]),
+        ]
+    )
+
+    for step_name, cmd in steps:
+        step = _run_git_step(step_name, cmd, repo_dir)
+        execution.steps.append(step)
+        if not step.success:
+            execution.success = False
+            execution.error = f"Step failed: {step_name}"
+            return execution
+
+    execution.success = True
+    return execution
