@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from franktheunicorn.config.schema import GITHUB_NAME_PATTERN, KNOWN_GOVERNANCE_VALUES
 
@@ -367,8 +367,10 @@ class MergeQueueConfig(BaseModel):
     merge_script: str = ""
     auto_merge: bool = False
     merge_method: str = "merge"
+    model_config = ConfigDict(populate_by_name=True)
+
     post_merge_restack_enabled: bool = False
-    restack_enabled: bool = False
+    restack_enabled: bool = Field(default=False, alias="restack")
     restack_target_branch: str = "main"
     migration_globs: list[str] = Field(default_factory=lambda: ["*/migrations/*.py"])
     delete_stale_migrations: bool = True

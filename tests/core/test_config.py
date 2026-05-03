@@ -307,6 +307,28 @@ class TestConfigLoader:
         configs = load_project_configs(tmp_path / "nonexistent")
         assert configs == []
 
+    def test_load_project_configs_normalizes_legacy_merge_queue_keys(self, tmp_path: Path) -> None:
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        config_file = projects_dir / "legacy.yaml"
+        config_file.write_text(
+            "\n".join(
+                [
+                    "owner: apache",
+                    "repo: spark",
+                    "merge_queue:",
+                    "  enabled: true",
+                    "  restack: true",
+                    "  stale_migration_strategy: none",
+                ]
+            )
+        )
+
+        configs = load_project_configs(projects_dir)
+        assert len(configs) == 1
+        assert configs[0].merge_queue.restack_enabled is True
+        assert configs[0].merge_queue.delete_stale_migrations is False
+
 
 class TestYAMLErrorHandling:
     def test_load_operator_config_invalid_yaml(self, tmp_path: Path) -> None:
