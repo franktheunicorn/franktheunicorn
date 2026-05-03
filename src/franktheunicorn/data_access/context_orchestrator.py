@@ -29,6 +29,11 @@ _UNTRUSTED_HEADER = (
 _MAX_CONTEXT_CHARS_PER_SOURCE = 2000
 
 
+def _truncate_source_block(text: str) -> str:
+    """Apply the global per-source character cap to a formatted context block."""
+    return text[:_MAX_CONTEXT_CHARS_PER_SOURCE]
+
+
 def fetch_jira_context(
     pr: PullRequest,
     project_config: ProjectConfig,
@@ -91,7 +96,7 @@ def _format_jira_from_cache(cache: dict) -> str:  # type: ignore[type-arg]
         parts.append("Recent comments:")
         for c in comments[:3]:
             parts.append(f"  [{c.get('author', '')}] {c.get('body', '')[:200]}")
-    return "\n".join(parts)
+    return _truncate_source_block("\n".join(parts))
 
 
 def fetch_community_context(
@@ -390,7 +395,7 @@ def _format_sentry_from_cache(cache: dict) -> str:  # type: ignore[type-arg]
             f"  - {issue.get('title', '')} "
             f"(count: {issue.get('count', 0)}, users: {issue.get('user_count', 0)})"
         )
-    return "\n".join(parts)
+    return _truncate_source_block("\n".join(parts))
 
 
 def _format_community_from_cache(cache: dict) -> str:  # type: ignore[type-arg]
@@ -451,9 +456,9 @@ def _format_community_results(results: list[dict[str, object]]) -> str:
                 content = str(source.get("content", ""))
                 if content:
                     parts.append("\n[Perplexity search, unverified]")
-                    parts.append(f"  {content[:500]}")
+                    parts.append(f"  {content}")
 
-    return "\n".join(parts)
+    return _truncate_source_block("\n".join(parts))
 
 
 def format_context_for_prompt(
@@ -465,11 +470,11 @@ def format_context_for_prompt(
     sections: list[str] = []
 
     if jira_ctx:
-        sections.append(f"[JIRA ticket, unverified]\n{jira_ctx[:_MAX_CONTEXT_CHARS_PER_SOURCE]}")
+        sections.append(f"[JIRA ticket, unverified]\n{jira_ctx}")
     if community_ctx:
-        sections.append(community_ctx[:_MAX_CONTEXT_CHARS_PER_SOURCE])
+        sections.append(community_ctx)
     if sentry_ctx:
-        sections.append(f"[Sentry, 24h window]\n{sentry_ctx[:_MAX_CONTEXT_CHARS_PER_SOURCE]}")
+        sections.append(f"[Sentry, 24h window]\n{sentry_ctx}")
 
     if not sections:
         return ""
