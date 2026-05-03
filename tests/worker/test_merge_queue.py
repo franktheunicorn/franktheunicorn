@@ -264,10 +264,12 @@ class TestWaitForCIGreen:
 
         from franktheunicorn.backends.github import GitHubClient
 
-        pr = PullRequestFactory(base_branch="main", head_sha="abc123")
+        pr = PullRequestFactory(head_sha="abc123")
         client = GitHubClient(token="fake")
         client._client = MagicMock()
 
+        repo_resp = MagicMock(status_code=200)
+        repo_resp.json.return_value = {"default_branch": "main"}
         branch_resp = MagicMock(status_code=200)
         branch_resp.json.return_value = {
             "protection": {"required_status_checks": {"contexts": ["ci/test"]}}
@@ -278,7 +280,7 @@ class TestWaitForCIGreen:
         }
         statuses_resp = MagicMock(status_code=200)
         statuses_resp.json.return_value = {"statuses": []}
-        client._client.get.side_effect = [branch_resp, checks_resp, statuses_resp]
+        client._client.get.side_effect = [repo_resp, branch_resp, checks_resp, statuses_resp]
 
         state, reason = wait_for_ci_green(pr, client, timeout=1, poll_interval=1)
         assert state == "success"
@@ -290,10 +292,12 @@ class TestWaitForCIGreen:
 
         from franktheunicorn.backends.github import GitHubClient
 
-        pr = PullRequestFactory(base_branch="main", head_sha="abc123")
+        pr = PullRequestFactory(head_sha="abc123")
         client = GitHubClient(token="fake")
         client._client = MagicMock()
 
+        repo_resp = MagicMock(status_code=200)
+        repo_resp.json.return_value = {"default_branch": "main"}
         branch_resp = MagicMock(status_code=200)
         branch_resp.json.return_value = {
             "protection": {"required_status_checks": {"contexts": ["ci/test"]}}
@@ -304,7 +308,7 @@ class TestWaitForCIGreen:
         }
         statuses_resp = MagicMock(status_code=200)
         statuses_resp.json.return_value = {"statuses": []}
-        client._client.get.side_effect = [branch_resp, checks_resp, statuses_resp]
+        client._client.get.side_effect = [repo_resp, branch_resp, checks_resp, statuses_resp]
 
         state, reason = wait_for_ci_green(pr, client, timeout=2, poll_interval=1)
         assert state == "failure"

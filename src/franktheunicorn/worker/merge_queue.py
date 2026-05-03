@@ -301,10 +301,18 @@ def wait_for_ci_green(
     deadline = time.monotonic() + timeout
     repo = pr.project.full_name
     required_contexts: set[str] = set()
+    default_branch = "main"
 
     while time.monotonic() < deadline:
+        repo_resp = github_client._client.get(f"https://api.github.com/repos/{repo}")
+        if repo_resp.status_code == 200:
+            repo_data = repo_resp.json()
+            fetched_default = repo_data.get("default_branch")
+            if isinstance(fetched_default, str) and fetched_default:
+                default_branch = fetched_default
+
         branch_resp = github_client._client.get(
-            f"https://api.github.com/repos/{repo}/branches/{pr.base_branch}"
+            f"https://api.github.com/repos/{repo}/branches/{default_branch}"
         )
         if branch_resp.status_code == 200:
             branch_data = branch_resp.json()
