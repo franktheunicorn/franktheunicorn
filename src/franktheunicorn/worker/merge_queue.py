@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -40,6 +41,8 @@ class MergeResult:
     method: str = ""
     output: str = ""
     error: str = ""
+    ci_wait_state: str = ""
+    ci_wait_reason: str = ""
 
 
 @dataclass
@@ -63,6 +66,8 @@ class RestackExecutionResult:
     target_branch: str = "main"
     steps: list[RestackStepResult] = field(default_factory=list)
     error: str = ""
+    ci_wait_state: str = ""
+    ci_wait_reason: str = ""
 
 
 def evaluate_merge_eligibility(
@@ -231,8 +236,16 @@ def execute_merge(
         )
 
     if merge_result.success and config.post_merge_restack_enabled and repo_path:
-        restack_result = execute_post_merge_restack(pr, config, repo_path)
+        restack_result = execute_post_merge_restack(
+            pr,
+            config,
+            repo_path,
+            github_client=github_client,
+        )
+        merge_result.ci_wait_state = restack_result.ci_wait_state
+        merge_result.ci_wait_reason = restack_result.ci_wait_reason
         if not restack_result.success:
+            merge_result.success = False
             merge_result.error = restack_result.error
             merge_result.output = "\n".join(
                 [
@@ -273,10 +286,95 @@ def _run_git_step(name: str, cmd: list[str], cwd: Path) -> RestackStepResult:
     )
 
 
+def wait_for_ci_green(
+    pr: PullRequest,
+    github_client: object,
+    timeout: int,
+    poll_interval: int,
+) -> tuple[str, str]:
+    """Poll GitHub until required checks are successful, failed, or timed out."""
+    from franktheunicorn.backends.github import GitHubClient
+
+    if not isinstance(github_client, GitHubClient):
+        return ("failure", "GitHub client unavailable for CI status polling")
+
+    deadline = time.monotonic() + timeout
+    repo = pr.project.full_name
+    required_contexts: set[str] = set()
+    default_branch = "main"
+
+    while time.monotonic() < deadline:
+        repo_resp = github_client._client.get(f"https://api.github.com/repos/{repo}")
+        if repo_resp.status_code == 200:
+            repo_data = repo_resp.json()
+            fetched_default = repo_data.get("default_branch")
+            if isinstance(fetched_default, str) and fetched_default:
+                default_branch = fetched_default
+
+        branch_resp = github_client._client.get(
+            f"https://api.github.com/repos/{repo}/branches/{default_branch}"
+        )
+        if branch_resp.status_code == 200:
+            branch_data = branch_resp.json()
+            protection = branch_data.get("protection") or {}
+            required = protection.get("required_status_checks") or {}
+            contexts = required.get("contexts") or []
+            required_contexts = {ctx for ctx in contexts if isinstance(ctx, str)}
+
+        checks_resp = github_client._client.get(
+            f"https://api.github.com/repos/{repo}/commits/{pr.head_sha}/check-runs"
+        )
+        statuses_resp = github_client._client.get(
+            f"https://api.github.com/repos/{repo}/commits/{pr.head_sha}/status"
+        )
+        if checks_resp.status_code != 200 or statuses_resp.status_code != 200:
+            return ("failure", "Failed to fetch GitHub CI check status")
+
+        check_runs = checks_resp.json().get("check_runs", [])
+        status_data = statuses_resp.json().get("statuses", [])
+
+        check_run_by_name = {
+            run.get("name"): run
+            for run in check_runs
+            if isinstance(run, dict) and isinstance(run.get("name"), str)
+        }
+        status_by_context = {
+            item.get("context"): item.get("state")
+            for item in status_data
+            if isinstance(item, dict) and isinstance(item.get("context"), str)
+        }
+
+        pending_contexts: list[str] = []
+        for context in sorted(required_contexts):
+            run = check_run_by_name.get(context)
+            if run is not None:
+                conclusion = run.get("conclusion")
+                if conclusion == "success":
+                    continue
+                if conclusion in {"failure", "timed_out", "cancelled", "action_required"}:
+                    return ("failure", f"Required check failed: {context} ({conclusion})")
+                pending_contexts.append(context)
+                continue
+
+            state = status_by_context.get(context)
+            if state == "success":
+                continue
+            if state in {"failure", "error"}:
+                return ("failure", f"Required check failed: {context} ({state})")
+            pending_contexts.append(context)
+
+        if not pending_contexts:
+            return ("success", "All required checks passed")
+        time.sleep(poll_interval)
+
+    return ("timeout", "Timed out waiting for required checks to pass")
+
+
 def execute_post_merge_restack(
     merged_pr: PullRequest,
     config: MergeQueueConfig,
     repo_path: str,
+    github_client: object | None = None,
 ) -> RestackExecutionResult:
     """Restack next queue PR branch after a successful merge."""
     next_pr = select_next_pr_to_restack(merged_pr.project_id)
@@ -333,6 +431,25 @@ def execute_post_merge_restack(
             execution.success = False
             execution.error = f"Step failed: {step_name}"
             return execution
+        if step_name == "push_branch":
+            if github_client is None:
+                execution.success = False
+                execution.error = "Cannot wait for CI without GitHub client"
+                execution.ci_wait_state = "failure"
+                execution.ci_wait_reason = execution.error
+                return execution
+            ci_state, ci_reason = wait_for_ci_green(
+                next_pr,
+                github_client,
+                timeout=900,
+                poll_interval=30,
+            )
+            execution.ci_wait_state = ci_state
+            execution.ci_wait_reason = ci_reason
+            if ci_state != "success":
+                execution.success = False
+                execution.error = ci_reason
+                return execution
 
     execution.success = True
     return execution

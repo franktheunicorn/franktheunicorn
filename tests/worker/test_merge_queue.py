@@ -15,6 +15,7 @@ from franktheunicorn.worker.merge_queue import (
     execute_post_merge_restack,
     select_next_pr_to_restack,
     update_merge_eligibility,
+    wait_for_ci_green,
 )
 from tests.factories import PullRequestFactory
 
@@ -194,10 +195,33 @@ class TestExecuteMerge:
             patch("franktheunicorn.worker.merge_queue.execute_post_merge_restack") as mock_restack,
         ):
             mock_api.return_value = MergeResult(success=True, method="merge")
+            mock_restack.return_value.success = True
+            mock_restack.return_value.ci_wait_state = "success"
+            mock_restack.return_value.ci_wait_reason = "All required checks passed"
             result = execute_merge(pr, config, github_client=object(), repo_path="/tmp/repo")
 
         assert result.success is True
         mock_restack.assert_called_once()
+        assert result.ci_wait_state == "success"
+
+    def test_restack_failure_marks_merge_failed(self) -> None:
+        config = MergeQueueConfig(enabled=True, post_merge_restack_enabled=True)
+        pr = PullRequestFactory(number=42)
+
+        with (
+            patch("franktheunicorn.worker.merge_queue.execute_merge_api") as mock_api,
+            patch("franktheunicorn.worker.merge_queue.execute_post_merge_restack") as mock_restack,
+        ):
+            mock_api.return_value = MergeResult(success=True, method="merge")
+            mock_restack.return_value.success = False
+            mock_restack.return_value.error = "Timed out waiting for required checks"
+            mock_restack.return_value.ci_wait_state = "timeout"
+            mock_restack.return_value.ci_wait_reason = "Timed out waiting for required checks"
+            result = execute_merge(pr, config, github_client=object(), repo_path="/tmp/repo")
+
+        assert result.success is False
+        assert result.ci_wait_state == "timeout"
+        assert "Timed out" in result.error
 
 
 @pytest.mark.django_db
@@ -231,6 +255,64 @@ class TestPostMergeRestack:
         result = execute_post_merge_restack(merged_pr, config, "/tmp/repo")
         assert result.success is True
         assert result.pr_number is None
+
+
+@pytest.mark.django_db
+class TestWaitForCIGreen:
+    def test_wait_success(self) -> None:
+        from unittest.mock import MagicMock
+
+        from franktheunicorn.backends.github import GitHubClient
+
+        pr = PullRequestFactory(head_sha="abc123")
+        client = GitHubClient(token="fake")
+        client._client = MagicMock()
+
+        repo_resp = MagicMock(status_code=200)
+        repo_resp.json.return_value = {"default_branch": "main"}
+        branch_resp = MagicMock(status_code=200)
+        branch_resp.json.return_value = {
+            "protection": {"required_status_checks": {"contexts": ["ci/test"]}}
+        }
+        checks_resp = MagicMock(status_code=200)
+        checks_resp.json.return_value = {
+            "check_runs": [{"name": "ci/test", "conclusion": "success"}]
+        }
+        statuses_resp = MagicMock(status_code=200)
+        statuses_resp.json.return_value = {"statuses": []}
+        client._client.get.side_effect = [repo_resp, branch_resp, checks_resp, statuses_resp]
+
+        state, reason = wait_for_ci_green(pr, client, timeout=1, poll_interval=1)
+        assert state == "success"
+        assert "passed" in reason
+
+    @patch("franktheunicorn.worker.merge_queue.time.sleep")
+    def test_wait_failure(self, _: object) -> None:
+        from unittest.mock import MagicMock
+
+        from franktheunicorn.backends.github import GitHubClient
+
+        pr = PullRequestFactory(head_sha="abc123")
+        client = GitHubClient(token="fake")
+        client._client = MagicMock()
+
+        repo_resp = MagicMock(status_code=200)
+        repo_resp.json.return_value = {"default_branch": "main"}
+        branch_resp = MagicMock(status_code=200)
+        branch_resp.json.return_value = {
+            "protection": {"required_status_checks": {"contexts": ["ci/test"]}}
+        }
+        checks_resp = MagicMock(status_code=200)
+        checks_resp.json.return_value = {
+            "check_runs": [{"name": "ci/test", "conclusion": "failure"}]
+        }
+        statuses_resp = MagicMock(status_code=200)
+        statuses_resp.json.return_value = {"statuses": []}
+        client._client.get.side_effect = [repo_resp, branch_resp, checks_resp, statuses_resp]
+
+        state, reason = wait_for_ci_green(pr, client, timeout=2, poll_interval=1)
+        assert state == "failure"
+        assert "Required check failed" in reason
 
 
 @pytest.mark.django_db
