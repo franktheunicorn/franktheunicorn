@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from franktheunicorn.config.schema import GITHUB_NAME_PATTERN, KNOWN_GOVERNANCE_VALUES
 
-KNOWN_FORGE_TYPES: frozenset[str] = frozenset({"github", "gitea", "forgejo", "gitlab"})
+KNOWN_FORGE_TYPES: frozenset[str] = frozenset({"github", "gitea", "forgejo", "gitlab", "gerrit"})
 
 _DEFAULT_FORGE_BASE_URLS: dict[str, str] = {
     "github": "https://api.github.com",
@@ -507,14 +507,15 @@ class ForgeRegistryEntry(BaseModel):
     def fill_default_base_url(self) -> ForgeRegistryEntry:
         """Apply the canonical base URL for the forge type, if unset.
 
-        Gitea has no canonical hosted instance, so a base_url is required.
+        Gitea and Gerrit have no canonical hosted instance, so a
+        ``base_url`` is required for those forge types.
         """
         if not self.base_url:
             default = _DEFAULT_FORGE_BASE_URLS.get(self.type, "")
             if default:
                 self.base_url = default
-            elif self.type == "gitea":
-                msg = f"forge {self.name!r} (type=gitea) requires base_url"
+            elif self.type in ("gitea", "gerrit"):
+                msg = f"forge {self.name!r} (type={self.type}) requires base_url"
                 raise ValueError(msg)
         return self
 
