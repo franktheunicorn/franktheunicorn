@@ -378,6 +378,8 @@ def execute_post_merge_restack(
 ) -> RestackExecutionResult:
     """Restack next queue PR branch after a successful merge."""
     next_pr = select_next_pr_to_restack(merged_pr.project_id)
+    if not config.restack_enabled:
+        return RestackExecutionResult(success=True, target_branch=config.restack_target_branch)
     if next_pr is None:
         return RestackExecutionResult(success=True, target_branch=config.restack_target_branch)
 
@@ -392,7 +394,8 @@ def execute_post_merge_restack(
     steps: list[tuple[str, list[str]]] = [
         ("checkout_pr_branch", ["git", "checkout", "-B", branch_name, f"origin/{branch_name}"]),
     ]
-    if config.stale_migration_strategy == "app-local-diff":
+    if config.delete_stale_migrations:
+        migration_patterns = " ".join(f"'{pattern}'" for pattern in config.migration_globs)
         steps.append(
             (
                 "delete_stale_migrations",
@@ -401,7 +404,7 @@ def execute_post_merge_restack(
                     "-lc",
                     (
                         "git diff --name-only origin/"
-                        f"{target}...HEAD -- '*/migrations/*.py' "
+                        f"{target}...HEAD -- {migration_patterns} "
                         "| xargs -r rm -f"
                     ),
                 ],
@@ -420,7 +423,16 @@ def execute_post_merge_restack(
                     f"chore({config.restack_commit_scope}): restack PR #{next_pr.number}",
                 ],
             ),
-            ("push_branch", ["git", "push", "--force-with-lease", "origin", branch_name]),
+            (
+                "push_branch",
+                [
+                    "git",
+                    "push",
+                    "--force-with-lease" if config.push_force_with_lease else "--force",
+                    "origin",
+                    branch_name,
+                ],
+            ),
         ]
     )
 
@@ -441,8 +453,8 @@ def execute_post_merge_restack(
             ci_state, ci_reason = wait_for_ci_green(
                 next_pr,
                 github_client,
-                timeout=900,
-                poll_interval=30,
+                timeout=config.ci_wait_timeout_seconds,
+                poll_interval=config.ci_poll_interval_seconds,
             )
             execution.ci_wait_state = ci_state
             execution.ci_wait_reason = ci_reason

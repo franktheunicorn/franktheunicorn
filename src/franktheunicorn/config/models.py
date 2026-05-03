@@ -368,7 +368,13 @@ class MergeQueueConfig(BaseModel):
     auto_merge: bool = False
     merge_method: str = "merge"
     post_merge_restack_enabled: bool = False
+    restack_enabled: bool = False
     restack_target_branch: str = "main"
+    migration_globs: list[str] = Field(default_factory=lambda: ["*/migrations/*.py"])
+    delete_stale_migrations: bool = True
+    ci_wait_timeout_seconds: int = 900
+    ci_poll_interval_seconds: int = 30
+    push_force_with_lease: bool = True
     stale_migration_strategy: str = "app-local-diff"
     restack_commit_scope: str = "merge-queue"
 
@@ -388,6 +394,51 @@ class MergeQueueConfig(BaseModel):
             msg = f"merge_method must be one of: {', '.join(sorted(KNOWN_MERGE_METHODS))}"
             raise ValueError(msg)
         return v
+
+    @field_validator("restack_target_branch")
+    @classmethod
+    def restack_target_branch_not_empty(cls, v: str) -> str:
+        normalized = v.strip()
+        if not normalized:
+            msg = "restack_target_branch must not be empty"
+            raise ValueError(msg)
+        return normalized
+
+    @field_validator("migration_globs")
+    @classmethod
+    def migration_globs_not_empty(cls, v: list[str]) -> list[str]:
+        normalized = [glob.strip() for glob in v if glob.strip()]
+        if not normalized:
+            msg = "migration_globs must contain at least one non-empty glob pattern"
+            raise ValueError(msg)
+        return normalized
+
+    @field_validator("ci_wait_timeout_seconds")
+    @classmethod
+    def ci_wait_timeout_in_bounds(cls, v: int) -> int:
+        if v < 60 or v > 7200:
+            msg = "ci_wait_timeout_seconds must be between 60 and 7200"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("ci_poll_interval_seconds")
+    @classmethod
+    def ci_poll_interval_in_bounds(cls, v: int) -> int:
+        if v < 5 or v > 300:
+            msg = "ci_poll_interval_seconds must be between 5 and 300"
+            raise ValueError(msg)
+        return v
+
+    @model_validator(mode="after")
+    def normalize_restack_flags(self) -> MergeQueueConfig:
+        if self.post_merge_restack_enabled:
+            self.restack_enabled = True
+        if not self.restack_enabled:
+            self.delete_stale_migrations = False
+        if self.ci_poll_interval_seconds >= self.ci_wait_timeout_seconds:
+            msg = "ci_poll_interval_seconds must be lower than ci_wait_timeout_seconds"
+            raise ValueError(msg)
+        return self
 
 
 class SupportedAgentConfig(BaseModel):
