@@ -320,8 +320,8 @@ def _run_single_backend(
     backend_config: LLMBackendConfig,
     diff: str,
     pr_context: PRContext,
-) -> tuple[str, ReviewResult]:
-    """Run one backend and return (source_name, ReviewResult)."""
+) -> tuple[str, ReviewResult, bool]:
+    """Run one backend and return ``(source_name, result, failed)``."""
     backend = get_backend(backend_config)
     source = backend_config.provider
     if source == "stub":
@@ -333,10 +333,10 @@ def _run_single_backend(
         else:
             result = ReviewResult(findings=backend.generate_findings(diff, pr_context))
     except Exception:
-        logger.exception("LLM backend '%s' failed.", backend_config.provider)
         result = ReviewResult()
+        return source, result, True
 
-    return source, result
+    return source, result, False
 
 
 def draft_review(
@@ -394,8 +394,12 @@ def draft_review(
     # provider (e.g. fine-tuned model injection adding a second ollama entry)
     # don't collide on the unique (pull_request, backend) constraint.
     all_findings: list[tuple[str, ReviewFinding]] = []
+    failed_backends: list[str] = []
     for backend_config in backend_configs:
-        source, result = _run_single_backend(backend_config, diff, pr_context)
+        source, result, failed = _run_single_backend(backend_config, diff, pr_context)
+        if failed:
+            model_name = backend_config.model or "<default>"
+            failed_backends.append(f"{backend_config.provider}/{model_name}")
         if result.overall_vibe:
             vibe_backend = f"{source}/{backend_config.model}" if backend_config.model else source
             try:
@@ -408,6 +412,13 @@ def draft_review(
                 logger.debug("Failed to persist agent vibe for %s", vibe_backend, exc_info=True)
         for f in result.findings:
             all_findings.append((source, f))
+
+    if failed_backends:
+        logger.warning(
+            "LLM backend failures during review dispatch (%d): %s",
+            len(failed_backends),
+            ", ".join(failed_backends),
+        )
 
     if not all_findings:
         return []
