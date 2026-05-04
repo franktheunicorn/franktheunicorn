@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -267,8 +268,6 @@ class TestReEngagementFromModel:
         self, make_pr: Any, spark_project_config: ProjectConfig
     ) -> None:
         """score_pull_request_from_model auto-computes operator_review_posted_at."""
-        from datetime import UTC, datetime
-
         from tests.factories import ReviewDraftFactory
 
         pr = make_pr(
