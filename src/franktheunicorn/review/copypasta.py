@@ -213,9 +213,9 @@ def _check_symilar(
     # this breaks across versions.
     for i, ls1 in enumerate(sym.linesets):
         for ls2 in sym.linesets[i + 1 :]:
-            # Chunks are always appended first, so ls1 is a chunk iff both
-            # orderings can appear; the elif guard is kept for safety but
-            # cannot be reached in normal usage.
+            # Chunks are always appended before repo files, so ls1 will always
+            # be the chunk when a PR-vs-repo pair is encountered. Skip all
+            # repo-vs-repo and chunk-vs-chunk pairs.
             if ls1.name in chunk_names and ls2.name not in chunk_names:
                 pr_ls, repo_ls = ls1, ls2
             else:
