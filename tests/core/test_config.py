@@ -307,6 +307,28 @@ class TestConfigLoader:
         configs = load_project_configs(tmp_path / "nonexistent")
         assert configs == []
 
+    def test_load_project_configs_normalizes_legacy_merge_queue_keys(self, tmp_path: Path) -> None:
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        config_file = projects_dir / "legacy.yaml"
+        config_file.write_text(
+            "\n".join(
+                [
+                    "owner: apache",
+                    "repo: spark",
+                    "merge_queue:",
+                    "  enabled: true",
+                    "  restack: true",
+                    "  stale_migration_strategy: none",
+                ]
+            )
+        )
+
+        configs = load_project_configs(projects_dir)
+        assert len(configs) == 1
+        assert configs[0].merge_queue.restack_enabled is True
+        assert configs[0].merge_queue.delete_stale_migrations is False
+
 
 class TestYAMLErrorHandling:
     def test_load_operator_config_invalid_yaml(self, tmp_path: Path) -> None:
@@ -832,6 +854,41 @@ class TestMergeQueueConfig:
 
         with pytest.raises(ValidationError, match="merge_method"):
             MergeQueueConfig(merge_method="fast-forward")
+
+    def test_restack_defaults_and_legacy_flag(self) -> None:
+        from franktheunicorn.config.models import MergeQueueConfig
+
+        default_config = MergeQueueConfig()
+        assert default_config.restack_enabled is False
+        assert default_config.restack_target_branch == "main"
+        assert default_config.migration_globs == ["*/migrations/*.py"]
+        assert default_config.delete_stale_migrations is False
+        assert default_config.ci_wait_timeout_seconds == 900
+        assert default_config.ci_poll_interval_seconds == 30
+        assert default_config.push_force_with_lease is True
+
+        legacy_config = MergeQueueConfig(post_merge_restack_enabled=True)
+        assert legacy_config.restack_enabled is True
+
+    @pytest.mark.parametrize("timeout", [59, 7201])
+    def test_restack_ci_timeout_bounds(self, timeout: int) -> None:
+        from franktheunicorn.config.models import MergeQueueConfig
+
+        with pytest.raises(ValidationError, match="ci_wait_timeout_seconds"):
+            MergeQueueConfig(ci_wait_timeout_seconds=timeout)
+
+    @pytest.mark.parametrize("poll", [4, 301])
+    def test_restack_ci_poll_bounds(self, poll: int) -> None:
+        from franktheunicorn.config.models import MergeQueueConfig
+
+        with pytest.raises(ValidationError, match="ci_poll_interval_seconds"):
+            MergeQueueConfig(ci_poll_interval_seconds=poll, ci_wait_timeout_seconds=900)
+
+    def test_restack_ci_poll_must_be_less_than_timeout(self) -> None:
+        from franktheunicorn.config.models import MergeQueueConfig
+
+        with pytest.raises(ValidationError, match="must be lower"):
+            MergeQueueConfig(ci_poll_interval_seconds=60, ci_wait_timeout_seconds=60)
 
     def test_project_config_has_merge_queue(self) -> None:
         config = ProjectConfig(owner="apache", repo="spark")

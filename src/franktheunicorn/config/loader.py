@@ -36,6 +36,24 @@ def _expand_env_vars(data: Any) -> Any:
     return data
 
 
+def _normalize_project_config(data: dict[str, Any]) -> dict[str, Any]:
+    """Normalize legacy/alias project config keys before model parsing."""
+    merge_queue = data.get("merge_queue")
+    if isinstance(merge_queue, dict):
+        mq = dict(merge_queue)
+        if "restack" in mq and "restack_enabled" not in mq:
+            mq["restack_enabled"] = mq["restack"]
+        if mq.get("stale_migration_strategy") == "none" and "delete_stale_migrations" not in mq:
+            mq["delete_stale_migrations"] = False
+        if (
+            mq.get("stale_migration_strategy") == "app-local-diff"
+            and "delete_stale_migrations" not in mq
+        ):
+            mq["delete_stale_migrations"] = True
+        data = {**data, "merge_queue": mq}
+    return data
+
+
 def load_operator_config(path: str | Path) -> OperatorConfig:
     """Load operator config from a YAML file. Returns defaults if file doesn't exist."""
     p = Path(path)
@@ -66,6 +84,7 @@ def load_project_configs(directory: str | Path) -> list[ProjectConfig]:
             with yaml_file.open(encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
             data = _expand_env_vars(data)
+            data = _normalize_project_config(data)
             configs.append(ProjectConfig(**data))
         except yaml.YAMLError:
             logger.exception("Invalid YAML in project config: %s", yaml_file)
