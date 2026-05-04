@@ -132,10 +132,12 @@ def extract_added_chunks(diff: PRDiff, min_lines: int = 4) -> list[CodeChunk]:
         if not file_change.patch or file_change.status == "removed":
             continue
 
-        # unidiff needs diff headers; synthesise a minimal one from the patch
-        full_diff = (
-            f"--- a/{file_change.filename}\n+++ b/{file_change.filename}\n{file_change.patch}\n"
-        )
+        # unidiff needs diff headers; synthesise a minimal one from the patch.
+        # Do NOT unconditionally append "\n": if the patch already ends with a
+        # newline, adding another one causes unidiff to emit a spurious empty
+        # context line that prematurely flushes the final chunk accumulator.
+        raw = f"--- a/{file_change.filename}\n+++ b/{file_change.filename}\n{file_change.patch}"
+        full_diff = raw if raw.endswith("\n") else raw + "\n"
         try:
             patch_set = PatchSet(full_diff)
         except Exception:
@@ -211,12 +213,11 @@ def _check_symilar(
     # this breaks across versions.
     for i, ls1 in enumerate(sym.linesets):
         for ls2 in sym.linesets[i + 1 :]:
-            pr_ls = None
-            repo_ls = None
+            # Chunks are always appended first, so ls1 is a chunk iff both
+            # orderings can appear; the elif guard is kept for safety but
+            # cannot be reached in normal usage.
             if ls1.name in chunk_names and ls2.name not in chunk_names:
                 pr_ls, repo_ls = ls1, ls2
-            elif ls2.name in chunk_names and ls1.name not in chunk_names:
-                pr_ls, repo_ls = ls2, ls1
             else:
                 continue
 

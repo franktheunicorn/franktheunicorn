@@ -557,3 +557,299 @@ class TestCheckCopypasta:
         )
         drafts = check_copypasta(db_pr, diff, copypasta_config, repo_with_duplicate)
         assert len(drafts) == 0
+
+
+# -- Test _read_repo_files ---------------------------------------------------
+
+
+class TestReadRepoFiles:
+    """Tests for the _read_repo_files helper."""
+
+    def test_returns_files_filtered_by_extension(self, tmp_path) -> None:
+        import subprocess
+
+        from franktheunicorn.review.copypasta import _read_repo_files
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init"], cwd=repo, capture_output=True)
+        (repo / "main.py").write_text("print('hello')\n")
+        (repo / "notes.txt").write_text("some notes\n")
+        subprocess.run(["git", "add", "."], cwd=repo, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "init"],
+            cwd=repo,
+            capture_output=True,
+            env={
+                "GIT_AUTHOR_NAME": "t",
+                "GIT_AUTHOR_EMAIL": "t@t",
+                "GIT_COMMITTER_NAME": "t",
+                "GIT_COMMITTER_EMAIL": "t@t",
+                "HOME": str(tmp_path),
+            },
+        )
+
+        files = _read_repo_files(repo, extensions=[".py"], ignore_paths=[], exclude_files=None)
+        assert "main.py" in files
+        assert "notes.txt" not in files
+
+    def test_respects_ignore_paths(self, tmp_path) -> None:
+        import subprocess
+
+        from franktheunicorn.review.copypasta import _read_repo_files
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "vendor").mkdir()
+        subprocess.run(["git", "init"], cwd=repo, capture_output=True)
+        (repo / "main.py").write_text("x = 1\n")
+        (repo / "vendor" / "lib.py").write_text("y = 2\n")
+        subprocess.run(["git", "add", "."], cwd=repo, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "init"],
+            cwd=repo,
+            capture_output=True,
+            env={
+                "GIT_AUTHOR_NAME": "t",
+                "GIT_AUTHOR_EMAIL": "t@t",
+                "GIT_COMMITTER_NAME": "t",
+                "GIT_COMMITTER_EMAIL": "t@t",
+                "HOME": str(tmp_path),
+            },
+        )
+
+        files = _read_repo_files(
+            repo, extensions=[".py"], ignore_paths=["vendor/"], exclude_files=None
+        )
+        assert "main.py" in files
+        assert "vendor/lib.py" not in files
+
+    def test_excludes_pr_changed_files(self, tmp_path) -> None:
+        import subprocess
+
+        from franktheunicorn.review.copypasta import _read_repo_files
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init"], cwd=repo, capture_output=True)
+        (repo / "a.py").write_text("a = 1\n")
+        (repo / "b.py").write_text("b = 2\n")
+        subprocess.run(["git", "add", "."], cwd=repo, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "init"],
+            cwd=repo,
+            capture_output=True,
+            env={
+                "GIT_AUTHOR_NAME": "t",
+                "GIT_AUTHOR_EMAIL": "t@t",
+                "GIT_COMMITTER_NAME": "t",
+                "GIT_COMMITTER_EMAIL": "t@t",
+                "HOME": str(tmp_path),
+            },
+        )
+
+        files = _read_repo_files(repo, extensions=[".py"], ignore_paths=[], exclude_files={"a.py"})
+        assert "a.py" not in files
+        assert "b.py" in files
+
+    def test_git_failure_returns_empty(self, tmp_path) -> None:
+        """If git ls-files fails (e.g. not a repo), return empty dict."""
+        from franktheunicorn.review.copypasta import _read_repo_files
+
+        # Non-git directory
+        not_a_repo = tmp_path / "not_a_repo"
+        not_a_repo.mkdir()
+
+        files = _read_repo_files(not_a_repo, extensions=[".py"], ignore_paths=[])
+        assert files == {}
+
+    def test_oserror_reading_file_skips_gracefully(self, tmp_path) -> None:
+        """OSError when reading a file should be skipped without crashing."""
+        import subprocess
+        from unittest.mock import patch
+
+        from franktheunicorn.review.copypasta import _read_repo_files
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init"], cwd=repo, capture_output=True)
+        (repo / "main.py").write_text("x = 1\n")
+        subprocess.run(["git", "add", "."], cwd=repo, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "init"],
+            cwd=repo,
+            capture_output=True,
+            env={
+                "GIT_AUTHOR_NAME": "t",
+                "GIT_AUTHOR_EMAIL": "t@t",
+                "GIT_COMMITTER_NAME": "t",
+                "GIT_COMMITTER_EMAIL": "t@t",
+                "HOME": str(tmp_path),
+            },
+        )
+
+        with patch("pathlib.Path.read_text", side_effect=OSError("Permission denied")):
+            files = _read_repo_files(repo, extensions=[".py"], ignore_paths=[])
+
+        assert files == {}
+
+
+# -- Test LLM tier in check_copypasta ----------------------------------------
+
+
+@pytest.mark.django_db
+class TestCheckCopypastaLLMTier:
+    def test_llm_tier_enabled_calls_check_llm(
+        self,
+        db_pr,
+        repo_with_duplicate,
+    ) -> None:
+        """When copypasta_llm_enabled=True and chunks are not matched by symilar/winnowing,
+        _check_llm is called."""
+        from unittest.mock import patch
+
+        from franktheunicorn.config.models import ProjectConfig
+        from franktheunicorn.data_access.github.types import PRDiff, PRFileChange
+        from franktheunicorn.review.copypasta import check_copypasta
+
+        # Use unique code that doesn't exist in repo_with_duplicate
+        unique_patch = (
+            "@@ -0,0 +1,5 @@\n"
+            "+def totally_unique_function_xyz():\n"
+            "+    alpha = 42 * 7\n"
+            "+    beta = alpha + 13\n"
+            "+    gamma = beta / 3\n"
+            "+    return gamma\n"
+        )
+        diff = PRDiff(
+            pr_number=42,
+            raw_diff="",
+            files=(
+                PRFileChange(
+                    filename="new_module.py",
+                    status="added",
+                    additions=5,
+                    deletions=0,
+                    patch=unique_patch,
+                ),
+            ),
+        )
+
+        config = ProjectConfig(
+            owner="apache",
+            repo="spark",
+            copypasta_enabled=True,
+            copypasta_min_lines=4,
+            copypasta_scan_extensions=[".py"],
+            copypasta_llm_enabled=True,
+        )
+
+        with patch(
+            "franktheunicorn.review.copypasta._check_llm",
+            return_value=[],
+        ) as mock_llm:
+            check_copypasta(db_pr, diff, config, repo_with_duplicate)
+
+        # Unique code is not matched by symilar/winnowing → _check_llm must be called
+        mock_llm.assert_called_once()
+
+
+# -- Test extract_added_chunks: bad patch -----------------------------------
+
+
+class TestExtractAddedChunksBadPatch:
+    def test_unparseable_patch_is_skipped(self) -> None:
+        """An unparseable patch should be skipped without raising."""
+        from franktheunicorn.data_access.github.types import PRDiff, PRFileChange
+        from franktheunicorn.review.copypasta import extract_added_chunks
+
+        # A header-only hunk with no body causes unidiff to raise "Hunk is shorter than expected"
+        diff = PRDiff(
+            pr_number=1,
+            files=(
+                PRFileChange(
+                    filename="broken.py",
+                    status="modified",
+                    patch="@@ -1,2 +1,3 @@ HEADER_BUT_NO_CONTENT",
+                ),
+            ),
+        )
+        chunks = extract_added_chunks(diff, min_lines=1)
+        assert chunks == []
+
+
+# -- Test _create_drafts: single-line location --------------------------------
+
+
+@pytest.mark.django_db
+class TestCreateDraftsSingleLineLocation:
+    def test_single_line_source_omits_range(self, db_pr) -> None:
+        """When source_start_line == source_end_line, comment omits line range."""
+        from franktheunicorn.review.copypasta import CopyPastaMatch, _create_drafts
+
+        matches = [
+            CopyPastaMatch(
+                source_file="existing.py",
+                source_start_line=5,
+                source_end_line=5,  # same → single-line location
+                new_file="new.py",
+                new_start_line=1,
+                num_lines=4,
+                tier="symilar",
+            ),
+        ]
+        drafts = _create_drafts(db_pr, matches)
+        assert len(drafts) == 1
+        # Should not contain "lines X-Y" range, just the filename without a range
+        assert "existing.py" in drafts[0].comment_body
+        assert "lines 5" not in drafts[0].comment_body
+
+
+# -- Test _check_winnowing edge cases ----------------------------------------
+
+
+class TestCheckWinnowingEdgeCases:
+    def test_empty_content_repo_file_is_skipped(self) -> None:
+        """Repo files with only whitespace should be skipped gracefully."""
+        from franktheunicorn.review.copypasta import CodeChunk, _check_winnowing
+
+        chunks = [
+            CodeChunk(
+                file_path="new.py",
+                start_line=1,
+                lines=(
+                    "def foo():",
+                    "    x = 1",
+                    "    y = 2",
+                    "    return x + y",
+                ),
+            )
+        ]
+        repo_files = {"empty.py": "   \n\n  \n"}  # all whitespace
+        # Should not crash
+        matches = _check_winnowing(chunks, repo_files)
+        assert isinstance(matches, list)
+
+    def test_compare_files_exception_is_swallowed(self) -> None:
+        """An exception from copydetect.compare_files should be swallowed."""
+        from unittest.mock import patch
+
+        from franktheunicorn.review.copypasta import CodeChunk, _check_winnowing
+
+        code_lines = (
+            "def calculate_total(items):",
+            "    total = 0",
+            "    for item in items:",
+            "        total += item.price * item.quantity",
+            "    return total",
+        )
+        chunks = [CodeChunk(file_path="new.py", start_line=1, lines=code_lines)]
+        repo_files = {"existing.py": "\n".join(code_lines) + "\n"}
+
+        with patch(
+            "franktheunicorn.review.copypasta.compare_files",
+            side_effect=RuntimeError("comparison failed"),
+        ):
+            matches = _check_winnowing(chunks, repo_files)
+
+        assert matches == []

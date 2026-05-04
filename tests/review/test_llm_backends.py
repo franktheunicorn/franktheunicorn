@@ -710,3 +710,62 @@ class TestLogBackendError:
         assert any(
             "401" in r.message and "authentication" in r.message.lower() for r in caplog.records
         )
+
+
+class TestGeminiBackendCallApi:
+    """Tests for the Gemini backend _call_api method."""
+
+    def test_call_api_calls_genai_client(self) -> None:
+        from franktheunicorn.review.backends.gemini_backend import GeminiBackend
+
+        config = LLMBackendConfig(provider="gemini", model="gemini-2.5-flash")
+        backend = GeminiBackend(config)
+        backend._sdk_available = True
+
+        expected_text = '[{"file_path": "a.py", "line_number": 1, "title": "t", "body": "ok"}]'
+        mock_response = MagicMock()
+        mock_response.text = expected_text
+
+        with patch("google.genai.Client") as mock_client_cls:
+            mock_client_cls.return_value.models.generate_content.return_value = mock_response
+            result = backend._call_api(
+                system_prompt="You are a reviewer.",
+                user_message="Review this diff.",
+                api_key="fake-key",
+            )
+
+        assert result == expected_text
+        mock_client_cls.assert_called_once_with(api_key="fake-key")
+        mock_client_cls.return_value.models.generate_content.assert_called_once()
+
+    def test_call_api_returns_empty_string_on_none_text(self) -> None:
+        from franktheunicorn.review.backends.gemini_backend import GeminiBackend
+
+        config = LLMBackendConfig(provider="gemini", model="gemini-2.5-flash")
+        backend = GeminiBackend(config)
+        backend._sdk_available = True
+
+        mock_response = MagicMock()
+        mock_response.text = None
+
+        with patch("google.genai.Client") as mock_client_cls:
+            mock_client_cls.return_value.models.generate_content.return_value = mock_response
+            result = backend._call_api("sys", "user", "key")
+
+        assert result == ""
+
+    def test_missing_api_key_returns_empty_findings(self) -> None:
+        import os
+
+        from franktheunicorn.review.backends.gemini_backend import GeminiBackend
+
+        config = LLMBackendConfig(provider="gemini")
+        backend = GeminiBackend(config)
+        backend._sdk_available = True
+        ctx = make_pr_context()
+
+        with patch.dict(os.environ, {}, clear=True):
+            os.environ.pop("GOOGLE_API_KEY", None)
+            findings = backend.generate_findings(_SAMPLE_DIFF, ctx)
+
+        assert findings == []

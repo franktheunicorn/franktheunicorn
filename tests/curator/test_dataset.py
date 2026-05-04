@@ -7,33 +7,8 @@ from pathlib import Path
 
 from franktheunicorn.curator.classifier import ClassifiedComment
 from franktheunicorn.curator.dataset import CurationDecision, write_dataset
-from franktheunicorn.curator.scraper import RawComment
-
-
-def _make_raw(body: str = "Fix this bug", **kwargs) -> RawComment:
-    defaults = {
-        "author": "alice",
-        "body": body,
-        "diff_context": "@@ -1 +1 @@\n-old\n+new",
-        "file_path": "src/main.py",
-        "pr_number": 42,
-        "pr_title": "Fix bug",
-        "created_at": "2026-03-20T10:00:00Z",
-        "url": "https://github.com/org/repo/pull/42#r1",
-    }
-    defaults.update(kwargs)
-    return RawComment(**defaults)
-
-
-def _make_classified(
-    body: str = "Fix this bug", category: str = "correctness"
-) -> ClassifiedComment:
-    return ClassifiedComment(
-        raw=_make_raw(body=body),
-        category=category,
-        tone_flagged=False,
-        tone_flags=[],
-    )
+from tests.curator.helpers import make_classified_comment as _make_classified
+from tests.curator.helpers import make_raw_comment as _make_raw
 
 
 def _make_decision(

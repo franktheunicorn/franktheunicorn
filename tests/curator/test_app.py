@@ -6,37 +6,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from franktheunicorn.curator.app import CommentView, CuratorApp, EditScreen
-from franktheunicorn.curator.classifier import ClassifiedComment
-from franktheunicorn.curator.scraper import RawComment
-
-
-def _make_raw(body: str = "Fix this bug", **kwargs: object) -> RawComment:
-    defaults = {
-        "author": "alice",
-        "body": body,
-        "diff_context": "@@ -1 +1 @@\n-old\n+new",
-        "file_path": "src/main.py",
-        "pr_number": 42,
-        "pr_title": "Fix bug",
-        "created_at": "2026-03-20T10:00:00Z",
-        "url": "https://github.com/org/repo/pull/42#r1",
-    }
-    defaults.update(kwargs)
-    return RawComment(**defaults)
-
-
-def _make_classified(
-    body: str = "Fix this bug",
-    category: str = "correctness",
-    tone_flagged: bool = False,
-    tone_flags: list[str] | None = None,
-) -> ClassifiedComment:
-    return ClassifiedComment(
-        raw=_make_raw(body=body),
-        category=category,
-        tone_flagged=tone_flagged,
-        tone_flags=tone_flags or [],
-    )
+from tests.curator.helpers import make_classified_comment as _make_classified
 
 
 class TestCuratorAppInstantiation:

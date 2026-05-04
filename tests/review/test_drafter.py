@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -351,3 +351,437 @@ class TestMaybeInjectFineTunedModel:
         assert result[0].base_url == "http://localhost:11434"
         # Original backend should follow.
         assert result[1].provider == "stub"
+
+
+@pytest.mark.django_db
+class TestFetchLinkedIssuesContext:
+    """Tests for fetch_linked_issues_context."""
+
+    def test_no_hash_in_text_returns_empty(self, db_pr) -> None:
+        from franktheunicorn.review.drafter import fetch_linked_issues_context
+
+        db_pr.title = "Fix race condition"
+        db_pr.body = "No issue reference here"
+        db_pr.save()
+
+        result = fetch_linked_issues_context(db_pr)
+        assert result == ""
+
+    def test_hash_with_issues_returns_formatted_context(self, db_pr) -> None:
+        from franktheunicorn.review.drafter import fetch_linked_issues_context
+
+        db_pr.title = "Fix race condition"
+        db_pr.body = "Fixes #1234"
+        db_pr.save()
+
+        mock_issue = type(
+            "Issue",
+            (),
+            {"to_prompt_context": lambda self: "Issue #1234: Fix scheduler race condition"},
+        )()
+
+        # The import is inside the function, so patch the class at its definition site
+        with patch(
+            "franktheunicorn.data_access.github.issue_fetcher.IssueFetcher"
+        ) as mock_fetcher_cls:
+            mock_fetcher_cls.return_value.fetch_linked_issues.return_value = [mock_issue]
+            result = fetch_linked_issues_context(db_pr)
+
+        assert "Issue #1234" in result
+
+    def test_hash_with_no_issues_returns_empty(self, db_pr) -> None:
+        from franktheunicorn.review.drafter import fetch_linked_issues_context
+
+        db_pr.title = "Fix #42 race condition"
+        db_pr.body = ""
+        db_pr.save()
+
+        with patch(
+            "franktheunicorn.data_access.github.issue_fetcher.IssueFetcher"
+        ) as mock_fetcher_cls:
+            mock_fetcher_cls.return_value.fetch_linked_issues.return_value = []
+            result = fetch_linked_issues_context(db_pr)
+
+        assert result == ""
+
+    def test_exception_returns_empty(self, db_pr) -> None:
+        from franktheunicorn.review.drafter import fetch_linked_issues_context
+
+        db_pr.title = "Fix #42"
+        db_pr.body = ""
+        db_pr.save()
+
+        with patch(
+            "franktheunicorn.data_access.github.issue_fetcher.IssueFetcher",
+            side_effect=RuntimeError("API error"),
+        ):
+            result = fetch_linked_issues_context(db_pr)
+
+        assert result == ""
+
+
+@pytest.mark.django_db
+class TestBuildPRContextEdgeCases:
+    """Edge cases for build_pr_context exception handling."""
+
+    def test_anti_patterns_exception_is_swallowed(
+        self, db_pr, spark_project_config, operator_config
+    ) -> None:
+        """An exception loading anti-patterns should not crash build_pr_context."""
+        with patch(
+            "franktheunicorn.core.models.AntiPattern.objects.filter",
+            side_effect=RuntimeError("DB error"),
+        ):
+            ctx = build_pr_context(db_pr, spark_project_config, operator_config)
+        assert ctx.anti_patterns == []
+
+    def test_context_strings_exception_is_swallowed(
+        self, db_pr, spark_project_config, operator_config
+    ) -> None:
+        """An exception building context strings should not crash build_pr_context."""
+        with patch(
+            "franktheunicorn.review.drafter.build_context_strings",
+            side_effect=RuntimeError("IO error"),
+        ):
+            ctx = build_pr_context(db_pr, spark_project_config, operator_config)
+        assert ctx.full_file_context == ""
+        assert ctx.imported_modules_context == ""
+
+
+class TestGetPrDiff:
+    """Tests for _get_pr_diff."""
+
+    def test_returns_provided_diff(self) -> None:
+        from unittest.mock import MagicMock
+
+        from franktheunicorn.review.drafter import _get_pr_diff
+
+        pr = MagicMock()
+        result = _get_pr_diff(pr, diff="--- a/file.py\n+++ b/file.py\n")
+        assert result == "--- a/file.py\n+++ b/file.py\n"
+
+    def test_placeholder_from_changed_files(self) -> None:
+        from unittest.mock import MagicMock
+
+        from franktheunicorn.review.drafter import _get_pr_diff
+
+        pr = MagicMock()
+        pr.changed_files = ["src/main.py", "src/utils.py"]
+        result = _get_pr_diff(pr, diff="")
+        assert "+++ b/src/main.py" in result
+        assert "+++ b/src/utils.py" in result
+
+    def test_fallback_when_no_changed_files(self) -> None:
+        from unittest.mock import MagicMock
+
+        from franktheunicorn.review.drafter import _get_pr_diff
+
+        pr = MagicMock()
+        pr.changed_files = []
+        result = _get_pr_diff(pr, diff="")
+        assert result == "+++ b/unknown_file.py\n"
+
+
+class TestExtractCodeContext:
+    """Tests for _extract_code_context."""
+
+    def test_empty_diff_returns_empty(self) -> None:
+        from franktheunicorn.review.drafter import _extract_code_context
+
+        result = _extract_code_context("", "src/main.py", 10)
+        assert result == ""
+
+    def test_empty_file_path_returns_empty(self) -> None:
+        from franktheunicorn.review.drafter import _extract_code_context
+
+        result = _extract_code_context("--- a/file.py\n+++ b/file.py\n", "", 10)
+        assert result == ""
+
+    def test_none_line_number_returns_first_hunk(self) -> None:
+        from franktheunicorn.review.drafter import _extract_code_context
+
+        diff = (
+            "--- a/src/main.py\n"
+            "+++ b/src/main.py\n"
+            "@@ -1,3 +1,4 @@\n"
+            " import os\n"
+            "+import sys\n"
+            " def main():\n"
+            "     pass\n"
+        )
+        result = _extract_code_context(diff, "src/main.py", None)
+        assert isinstance(result, str)
+        assert len(result) > 0
+
+    def test_invalid_diff_returns_empty(self) -> None:
+        from franktheunicorn.review.drafter import _extract_code_context
+
+        result = _extract_code_context("this is not a diff", "src/main.py", 10)
+        assert result == ""
+
+    def test_no_hunk_match_returns_first_hunk(self) -> None:
+        """When line_number doesn't match any hunk, return the first hunk."""
+        from franktheunicorn.review.drafter import _extract_code_context
+
+        diff = (
+            "--- a/src/main.py\n"
+            "+++ b/src/main.py\n"
+            "@@ -1,3 +1,4 @@\n"
+            " import os\n"
+            "+import sys\n"
+            " def main():\n"
+            "     pass\n"
+        )
+        # Line 999 is beyond the hunk range, so falls back to first hunk
+        result = _extract_code_context(diff, "src/main.py", 999)
+        assert isinstance(result, str)
+        assert len(result) > 0
+
+
+@pytest.mark.django_db
+class TestRunSingleBackend:
+    """Tests for _run_single_backend."""
+
+    def test_uses_generate_review_when_available(self, db_pr) -> None:
+        from franktheunicorn.config.models import LLMBackendConfig
+        from franktheunicorn.review.backends.base import ReviewFinding, ReviewResult
+        from franktheunicorn.review.drafter import _run_single_backend
+        from tests.conftest import make_pr_context
+
+        backend_config = LLMBackendConfig(provider="stub")
+        pr_context = make_pr_context()
+        expected_result = ReviewResult(
+            overall_vibe="Looks good overall",
+            findings=[ReviewFinding(file_path="a.py", title="t", body="b", confidence=0.8)],
+        )
+
+        with patch(
+            "franktheunicorn.review.backends.stub_backend.StubBackend.generate_review",
+            return_value=expected_result,
+        ):
+            source, result = _run_single_backend(backend_config, "diff", pr_context)
+
+        assert source == "agent"  # stub maps to "agent"
+        assert result.overall_vibe == "Looks good overall"
+        assert len(result.findings) == 1
+
+    def test_backend_exception_returns_empty_result(self, db_pr) -> None:
+        from franktheunicorn.config.models import LLMBackendConfig
+        from franktheunicorn.review.backends.base import ReviewResult
+        from franktheunicorn.review.drafter import _run_single_backend
+        from tests.conftest import make_pr_context
+
+        backend_config = LLMBackendConfig(provider="stub")
+        pr_context = make_pr_context()
+
+        with patch(
+            "franktheunicorn.review.backends.stub_backend.StubBackend.generate_review",
+            side_effect=RuntimeError("LLM crashed"),
+        ):
+            _source, result = _run_single_backend(backend_config, "diff", pr_context)
+
+        assert isinstance(result, ReviewResult)
+        assert result.findings == []
+
+    def test_generate_findings_fallback_for_backend_without_generate_review(self) -> None:
+        """Backend without generate_review falls back to generate_findings."""
+        from franktheunicorn.config.models import LLMBackendConfig
+        from franktheunicorn.review.backends.base import ReviewFinding
+        from franktheunicorn.review.drafter import _run_single_backend
+        from tests.conftest import make_pr_context
+
+        backend_config = LLMBackendConfig(provider="stub")
+        pr_context = make_pr_context()
+
+        expected_findings = [ReviewFinding(file_path="b.py", title="t", body="b")]
+
+        # Create a mock backend with generate_findings but no generate_review
+        mock_backend = MagicMock(spec=["generate_findings"])
+        mock_backend.generate_findings.return_value = expected_findings
+
+        with patch("franktheunicorn.review.drafter.get_backend", return_value=mock_backend):
+            source, result = _run_single_backend(backend_config, "diff", pr_context)
+
+        # hasattr(mock_backend, "generate_review") is False → uses generate_findings
+        assert source == "agent"  # provider="stub" maps to "agent"
+        assert len(result.findings) == 1
+
+
+@pytest.mark.django_db
+class TestDraftReviewEdgeCases:
+    """Edge cases for draft_review."""
+
+    def test_returns_empty_when_all_backends_produce_no_findings(
+        self, db_pr, spark_project_config, operator_config
+    ) -> None:
+        from franktheunicorn.review.backends.base import ReviewResult
+
+        with patch(
+            "franktheunicorn.review.drafter._run_single_backend",
+            return_value=("agent", ReviewResult(findings=[])),
+        ):
+            from franktheunicorn.review.drafter import draft_review
+
+            drafts = draft_review(db_pr, spark_project_config, operator_config=operator_config)
+
+        assert drafts == []
+
+    def test_vibe_is_persisted_when_backend_produces_one(
+        self, db_pr, spark_project_config, operator_config
+    ) -> None:
+        from franktheunicorn.core.models import AgentVibe
+        from franktheunicorn.review.backends.base import ReviewFinding, ReviewResult
+        from franktheunicorn.review.drafter import draft_review
+
+        result_with_vibe = ReviewResult(
+            overall_vibe="Looks good, minor nits only",
+            findings=[
+                ReviewFinding(
+                    file_path="src/main.py",
+                    title="nit: trailing whitespace",
+                    body="Remove trailing space.",
+                    confidence=0.6,
+                )
+            ],
+        )
+
+        with patch(
+            "franktheunicorn.review.drafter._run_single_backend",
+            return_value=("agent", result_with_vibe),
+        ):
+            draft_review(db_pr, spark_project_config, operator_config=operator_config)
+
+        vibes = AgentVibe.objects.filter(pull_request=db_pr)
+        assert vibes.exists()
+        assert vibes.first().vibe_text == "Looks good, minor nits only"
+
+    def test_vibe_persistence_exception_does_not_crash(
+        self, db_pr, spark_project_config, operator_config
+    ) -> None:
+        from franktheunicorn.review.backends.base import ReviewFinding, ReviewResult
+        from franktheunicorn.review.drafter import draft_review
+
+        result_with_vibe = ReviewResult(
+            overall_vibe="Nice work",
+            findings=[
+                ReviewFinding(
+                    file_path="src/main.py",
+                    title="style: minor",
+                    body="Nit.",
+                    confidence=0.5,
+                )
+            ],
+        )
+
+        with (
+            patch(
+                "franktheunicorn.review.drafter._run_single_backend",
+                return_value=("agent", result_with_vibe),
+            ),
+            patch(
+                "franktheunicorn.core.models.AgentVibe.objects.update_or_create",
+                side_effect=RuntimeError("DB error"),
+            ),
+        ):
+            # Should not raise even though vibe persistence failed
+            drafts = draft_review(db_pr, spark_project_config, operator_config=operator_config)
+
+        assert isinstance(drafts, list)
+
+    def test_maybe_retrain_exception_does_not_crash(self, db_pr) -> None:
+        from franktheunicorn.review.backends.base import ReviewFinding
+        from franktheunicorn.review.drafter import create_drafts_from_findings
+
+        findings = [
+            ReviewFinding(
+                file_path="src/main.py",
+                title="style: minor",
+                body="Some nit.",
+                confidence=0.5,
+            )
+        ]
+
+        with patch(
+            "franktheunicorn.review.drafter.maybe_retrain",
+            side_effect=RuntimeError("retrain error"),
+        ):
+            # Should not raise
+            drafts = create_drafts_from_findings(
+                db_pr,
+                findings,
+                source="agent",
+                project=db_pr.project,
+            )
+
+        assert len(drafts) == 1
+
+
+@pytest.mark.django_db
+class TestToneGuardApplication:
+    """Tests for tone guard application in draft_review."""
+
+    def test_tone_guard_applied_when_non_stub_tone_backend(self, db_pr) -> None:
+        """When tone_backend.provider != 'stub', apply_tone_guard_batch is called."""
+        from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig, ProjectConfig
+        from franktheunicorn.review.backends.base import ReviewFinding, ReviewResult
+        from franktheunicorn.review.drafter import draft_review
+
+        project_config = ProjectConfig(owner="apache", repo="spark")
+        # A non-stub first backend means tone_backend.provider != "stub"
+        op_config = OperatorConfig(
+            github_username="holdenk",
+            llm_backends=[LLMBackendConfig(provider="claude")],
+        )
+
+        result_with_findings = ReviewResult(
+            findings=[
+                ReviewFinding(
+                    file_path="src/main.py",
+                    title="style: minor",
+                    body="Please change this.",
+                    confidence=0.6,
+                )
+            ]
+        )
+
+        with (
+            patch(
+                "franktheunicorn.review.drafter._run_single_backend",
+                return_value=("agent", result_with_findings),
+            ),
+            patch(
+                "franktheunicorn.review.drafter.apply_tone_guard_batch",
+                return_value=result_with_findings.findings,
+            ) as mock_tone,
+        ):
+            draft_review(db_pr, project_config, operator_config=op_config)
+
+        mock_tone.assert_called_once()
+
+
+@pytest.mark.django_db
+class TestGenerateFindingsFallback:
+    """Explicit test for _run_single_backend else-branch (generate_findings)."""
+
+    def test_else_branch_uses_generate_findings(self) -> None:
+        """When backend has no generate_review, generate_findings is called."""
+        from franktheunicorn.config.models import LLMBackendConfig
+        from franktheunicorn.review.backends.base import ReviewFinding
+        from franktheunicorn.review.drafter import _run_single_backend
+        from tests.conftest import make_pr_context
+
+        backend_config = LLMBackendConfig(provider="stub")
+        pr_context = make_pr_context()
+
+        expected_findings = [ReviewFinding(file_path="c.py", title="t", body="b")]
+
+        # Build a mock backend spec that excludes generate_review
+        mock_backend = MagicMock(spec=["generate_findings"])
+        mock_backend.generate_findings.return_value = expected_findings
+
+        # Must patch at the drafter module's binding, not the source module
+        with patch("franktheunicorn.review.drafter.get_backend", return_value=mock_backend):
+            _source, result = _run_single_backend(backend_config, "diff", pr_context)
+
+        mock_backend.generate_findings.assert_called_once_with("diff", pr_context)
+        assert len(result.findings) == 1

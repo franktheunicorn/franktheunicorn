@@ -10,22 +10,7 @@ from franktheunicorn.curator.classifier import (
     _keyword_tone_flags,
     classify_comments,
 )
-from franktheunicorn.curator.scraper import RawComment
-
-
-def _make_comment(body: str = "Looks good", **kwargs) -> RawComment:
-    defaults = {
-        "author": "alice",
-        "body": body,
-        "diff_context": "@@ -1 +1 @@\n-old\n+new",
-        "file_path": "src/main.py",
-        "pr_number": 42,
-        "pr_title": "Fix bug",
-        "created_at": "2026-03-20T10:00:00Z",
-        "url": "https://github.com/org/repo/pull/42#r1",
-    }
-    defaults.update(kwargs)
-    return RawComment(**defaults)
+from tests.curator.helpers import make_raw_comment as _make_comment
 
 
 class TestKeywordCategory:
