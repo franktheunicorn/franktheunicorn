@@ -567,17 +567,40 @@ def _run_shepherding_pass(
             logger.exception("Error in shepherding for PR #%d", pr.number)
 
 
+# API path suffixes that forge clients accept on ``base_url`` and normalize
+# internally. Clone URLs need the bare web host, so strip these.
+_FORGE_API_SUFFIXES: tuple[str, ...] = ("/api/v1", "/api/v3", "/api/v4", "/api")
+
+
+def _strip_forge_api_suffix(base_url: str) -> str:
+    """Trim a known API path suffix from a forge ``base_url``.
+
+    Mirrors the ``_normalize_base_url`` logic in the forge clients so we
+    don't accidentally bake ``/api/v1`` (gitea/forgejo), ``/api/v4``
+    (gitlab), or ``/api/v3`` (github enterprise) into a clone URL.
+    """
+    base = base_url.rstrip("/")
+    for suffix in _FORGE_API_SUFFIXES:
+        if base.endswith(suffix):
+            return base[: -len(suffix)]
+    return base
+
+
 def _clone_url_for_project(
     pc: object,
     operator_config: OperatorConfig | None,
 ) -> str:
-    """Derive a git clone URL from the project's configured forge entry.
+    """Derive a clone URL override from the project's forge entry.
 
-    The forge registry stores API base URLs (e.g. ``https://api.github.com``)
-    while git needs the web URL (``https://github.com/...``). This helper
-    bridges that gap per forge type. Falls back to a public GitHub URL when
-    the forge can't be located, matching ``RemoteExecutionConfig``'s
-    historical default.
+    Returns ``""`` when the executor's ``clone_url_template`` already
+    suffices (default GitHub, or no forge info available). Returns an
+    explicit URL only when the forge demands one — non-GitHub forges
+    (gitlab/gitea/forgejo) and self-hosted GitHub Enterprise.
+
+    Returning ``""`` for the common case preserves the
+    ``RemoteExecutionConfig.clone_url_template`` config knob: operators
+    can still set it to e.g. an SSH-style ``git@github.com:{owner}/{repo}.git``
+    template and have it apply.
     """
     owner = getattr(pc, "owner", "")
     repo = getattr(pc, "repo", "")
@@ -590,20 +613,24 @@ def _clone_url_for_project(
                 forge = entry
                 break
 
-    if forge is None or forge.type == "github":
-        base = (forge.base_url if forge is not None else "").rstrip("/")
-        # Default + GitHub Enterprise API URLs both need rewriting to the
-        # web host before they're usable as a clone URL.
-        if not base or base == "https://api.github.com":
-            host = "https://github.com"
-        elif base.endswith("/api/v3"):
-            host = base[: -len("/api/v3")]
-        else:
-            host = base
-        return f"{host}/{owner}/{repo}.git"
+    if forge is None:
+        # No forge config at all — let the template default apply.
+        return ""
 
-    # GitLab / Gitea / Forgejo all use ``base_url`` directly as the web host.
-    base = forge.base_url.rstrip("/")
+    base = _strip_forge_api_suffix(forge.base_url or "")
+
+    if forge.type == "github":
+        # Public github at the default API URL → template default works.
+        if not base or base == "https://api.github.com":
+            return ""
+        # GitHub Enterprise — must override.
+        return f"{base}/{owner}/{repo}.git"
+
+    # gitlab / gitea / forgejo all need the web host. Empty base_url is
+    # invalid for these forges (validated upstream for gitea); fall back
+    # to template default rather than emit a malformed URL.
+    if not base:
+        return ""
     return f"{base}/{owner}/{repo}.git"
 
 

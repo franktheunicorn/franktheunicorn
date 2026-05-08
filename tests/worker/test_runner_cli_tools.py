@@ -43,12 +43,14 @@ def _operator(*forges: ForgeRegistryEntry) -> OperatorConfig:
 
 
 class TestCloneUrlForProject:
-    def test_github_default(self) -> None:
+    def test_github_default_returns_empty_so_template_applies(self) -> None:
+        """Default github → return ""; ``clone_url_template`` (default
+        ``https://github.com/{owner}/{repo}.git``) does the work, and any
+        operator override of the template still applies."""
         op = _operator(
             ForgeRegistryEntry(name="github", type="github", token="x"),
         )
-        url = _clone_url_for_project(_project(), op)
-        assert url == "https://github.com/acme/widget.git"
+        assert _clone_url_for_project(_project(), op) == ""
 
     def test_github_enterprise_strips_api_v3(self) -> None:
         op = _operator(
@@ -62,7 +64,7 @@ class TestCloneUrlForProject:
         url = _clone_url_for_project(_project(), op)
         assert url == "https://github.example.com/acme/widget.git"
 
-    def test_gitlab(self) -> None:
+    def test_gitlab_web_url(self) -> None:
         op = _operator(
             ForgeRegistryEntry(
                 name="gl",
@@ -74,12 +76,38 @@ class TestCloneUrlForProject:
         url = _clone_url_for_project(_project(forge="gl"), op)
         assert url == "https://gitlab.com/acme/widget.git"
 
+    def test_gitlab_api_url_is_stripped(self) -> None:
+        """Operators may configure a forge with the API URL (``/api/v4``);
+        we must strip it before constructing a clone URL."""
+        op = _operator(
+            ForgeRegistryEntry(
+                name="gl",
+                type="gitlab",
+                base_url="https://gitlab.example.com/api/v4",
+                token="x",
+            ),
+        )
+        url = _clone_url_for_project(_project(forge="gl"), op)
+        assert url == "https://gitlab.example.com/acme/widget.git"
+
     def test_self_hosted_gitea(self) -> None:
         op = _operator(
             ForgeRegistryEntry(
                 name="gitea-self",
                 type="gitea",
                 base_url="https://git.example.com",
+                token="x",
+            ),
+        )
+        url = _clone_url_for_project(_project(forge="gitea-self"), op)
+        assert url == "https://git.example.com/acme/widget.git"
+
+    def test_gitea_api_url_is_stripped(self) -> None:
+        op = _operator(
+            ForgeRegistryEntry(
+                name="gitea-self",
+                type="gitea",
+                base_url="https://git.example.com/api/v1",
                 token="x",
             ),
         )
@@ -98,16 +126,15 @@ class TestCloneUrlForProject:
         url = _clone_url_for_project(_project(forge="codeberg"), op)
         assert url == "https://codeberg.org/acme/widget.git"
 
-    def test_no_operator_config_falls_back_to_github(self) -> None:
-        url = _clone_url_for_project(_project(), None)
-        assert url == "https://github.com/acme/widget.git"
+    def test_no_operator_config_returns_empty(self) -> None:
+        """No forge data → let the executor's template default apply."""
+        assert _clone_url_for_project(_project(), None) == ""
 
-    def test_unknown_forge_name_falls_back_to_github(self) -> None:
+    def test_unknown_forge_name_returns_empty(self) -> None:
         op = _operator(
             ForgeRegistryEntry(name="github", type="github", token="x"),
         )
-        url = _clone_url_for_project(_project(forge="nonexistent"), op)
-        assert url == "https://github.com/acme/widget.git"
+        assert _clone_url_for_project(_project(forge="nonexistent"), op) == ""
 
 
 # ---------------------------------------------------------------------------

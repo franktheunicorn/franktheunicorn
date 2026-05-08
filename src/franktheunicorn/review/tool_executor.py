@@ -155,6 +155,24 @@ class RemoteSSHExecutor:
         base = self.config.remote_workspace_dir.rstrip("/")
         return f"{base}/{owner}/{repo}"
 
+    @staticmethod
+    def _quote_remote_path(path: str) -> str:
+        """Shell-quote a remote path while letting a leading ``~`` expand.
+
+        ``shlex.quote`` wraps tilde-prefixed paths in single quotes, which
+        blocks the remote shell from expanding ``~`` to ``$HOME`` — so a
+        default ``~/.frank-remote`` would be cloned under a literal ``~``
+        directory. Rewriting to ``$HOME/...`` and emitting the prefix
+        inside double quotes lets the shell expand it while the suffix
+        stays safely quoted (adjacent quoted strings concatenate).
+        """
+        if path == "~":
+            return '"$HOME"'
+        if path.startswith("~/"):
+            suffix = path[1:]  # leading "/..."
+            return '"$HOME"' + shlex.quote(suffix)
+        return shlex.quote(path)
+
     def prepare_repo(
         self,
         owner: str,
@@ -168,15 +186,18 @@ class RemoteSSHExecutor:
         remote_dir = self._remote_repo_path(owner, repo)
         parent_dir = f"{self.config.remote_workspace_dir.rstrip('/')}/{owner}"
 
+        quoted_parent = self._quote_remote_path(parent_dir)
+        quoted_remote = self._quote_remote_path(remote_dir)
+
         # Idempotent: clone-or-fetch in a single round trip. Fetches all
         # branches so the tool can resolve origin/main, origin/master, etc.
         script = (
             f"set -e; "
-            f"mkdir -p {shlex.quote(parent_dir)}; "
-            f"if [ -d {shlex.quote(remote_dir)}/.git ]; then "
-            f"cd {shlex.quote(remote_dir)} && git fetch --quiet --all --prune; "
+            f"mkdir -p {quoted_parent}; "
+            f"if [ -d {quoted_remote}/.git ]; then "
+            f"cd {quoted_remote} && git fetch --quiet --all --prune; "
             f"else "
-            f"git clone --quiet {shlex.quote(clone_url)} {shlex.quote(remote_dir)}; "
+            f"git clone --quiet {shlex.quote(clone_url)} {quoted_remote}; "
             f"fi"
         )
 
@@ -219,9 +240,12 @@ class RemoteSSHExecutor:
     ) -> ExecResult | None:
         # Build a remote shell command: cd + the quoted argv. We quote
         # every argument so paths with spaces or shell metacharacters in
-        # ``cmd`` survive the trip through ssh's remote shell.
+        # ``cmd`` survive the trip through ssh's remote shell. ``cwd`` is
+        # whatever ``prepare_repo`` returned — typically a path under
+        # ``remote_workspace_dir``, which may start with ``~`` and needs
+        # the same expansion-aware quoting as ``prepare_repo``.
         quoted_cmd = " ".join(shlex.quote(part) for part in cmd)
-        remote_invocation = f"cd {shlex.quote(cwd)} && {quoted_cmd}"
+        remote_invocation = f"cd {self._quote_remote_path(cwd)} && {quoted_cmd}"
 
         try:
             result = subprocess.run(

@@ -132,6 +132,41 @@ class TestRemoteSSHExecutorPrepareRepo:
         executor = RemoteSSHExecutor(config=_ssh_config())
         assert executor.prepare_repo("acme", "widget") is None
 
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_tilde_workspace_expands_via_dollar_home(self, mock_run: Any) -> None:
+        """``~/.frank-remote`` must be emitted as ``"$HOME"/...`` so the
+        remote shell expands it instead of taking ``~`` literally
+        (shlex.quote single-quotes the path otherwise)."""
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        executor = RemoteSSHExecutor(
+            config=_ssh_config(remote_workspace_dir="~/.frank-remote"),
+        )
+        executor.prepare_repo("acme", "widget")
+
+        script = mock_run.call_args.args[0][-1]
+        # The workspace path should be emitted with $HOME unquoted (so the
+        # remote shell expands it) and the suffix safely shell-quoted.
+        assert '"$HOME"/.frank-remote/acme' in script
+        assert '"$HOME"/.frank-remote/acme/widget' in script
+        # And the literal "~" must NOT appear in single-quoted form.
+        assert "'~/" not in script
+        assert "'~'" not in script
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_absolute_workspace_uses_plain_quoting(self, mock_run: Any) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        executor = RemoteSSHExecutor(
+            config=_ssh_config(remote_workspace_dir="/srv/frank"),
+        )
+        executor.prepare_repo("acme", "widget")
+        script = mock_run.call_args.args[0][-1]
+        assert "/srv/frank/acme/widget" in script
+        assert "$HOME" not in script
+
 
 class TestRemoteSSHExecutorRun:
     @patch("franktheunicorn.review.tool_executor.subprocess.run")
@@ -176,6 +211,17 @@ class TestRemoteSSHExecutorRun:
         mock_run.side_effect = subprocess.TimeoutExpired(cmd="ssh", timeout=1)
         executor = RemoteSSHExecutor(config=_ssh_config())
         assert executor.run(["true"], cwd="/srv/frank", timeout=1) is None
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_run_tilde_cwd_expands_via_dollar_home(self, mock_run: Any) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        executor = RemoteSSHExecutor(config=_ssh_config())
+        executor.run(["true"], cwd="~/.frank-remote/acme/widget")
+        remote_cmd = mock_run.call_args.args[0][-1]
+        assert remote_cmd.startswith('cd "$HOME"/.frank-remote/acme/widget')
+        assert "'~/" not in remote_cmd
 
 
 # ---------------------------------------------------------------------------
