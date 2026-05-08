@@ -19,6 +19,62 @@ _DEFAULT_FORGE_BASE_URLS: dict[str, str] = {
 logger = logging.getLogger(__name__)
 
 
+_KNOWN_REMOTE_MODES: frozenset[str] = frozenset({"local", "ssh"})
+
+
+class RemoteExecutionConfig(BaseModel):
+    """Where to execute a CLI review tool — locally or on a remote SSH host.
+
+    When ``mode == "ssh"``, the worker SSHs to ``host`` and clones the
+    project's git repo into ``remote_workspace_dir`` (one path per
+    owner/repo) before invoking the CLI there. Subsequent runs ``git fetch``
+    instead of re-cloning. The remote host is responsible for having the
+    CLI tool installed and any required credentials.
+    """
+
+    mode: str = "local"
+    host: str = ""
+    user: str = ""
+    ssh_key_path: str = ""
+    ssh_extra_args: list[str] = Field(default_factory=list)
+    remote_workspace_dir: str = "~/.frank-remote"
+    clone_url_template: str = "https://github.com/{owner}/{repo}.git"
+    prepare_timeout_seconds: int = 600
+
+    @field_validator("mode")
+    @classmethod
+    def mode_must_be_known(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in _KNOWN_REMOTE_MODES:
+            msg = f"remote.mode must be one of {sorted(_KNOWN_REMOTE_MODES)}, got {v!r}"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("remote_workspace_dir")
+    @classmethod
+    def workspace_not_empty(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            msg = "remote_workspace_dir must not be empty"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("prepare_timeout_seconds")
+    @classmethod
+    def prepare_timeout_positive(cls, v: int) -> int:
+        if v <= 0:
+            msg = "prepare_timeout_seconds must be positive"
+            raise ValueError(msg)
+        return v
+
+    @model_validator(mode="after")
+    def host_required_for_ssh(self) -> RemoteExecutionConfig:
+        if self.mode == "ssh" and not self.host.strip():
+            msg = "remote.host is required when mode='ssh'"
+            raise ValueError(msg)
+        return self
+
+
 class CodeRabbitConfig(BaseModel):
     """Config for CodeRabbit CLI integration."""
 
@@ -26,6 +82,49 @@ class CodeRabbitConfig(BaseModel):
     cli_path: str = "coderabbit"
     extra_args: list[str] = Field(default_factory=list)
     deduplicate: bool = True
+    remote: RemoteExecutionConfig = Field(default_factory=RemoteExecutionConfig)
+
+
+class ClaudeCLIConfig(BaseModel):
+    """Config for invoking the Claude CLI as a code reviewer.
+
+    The Claude CLI does not ship a built-in PR-review subcommand, so we
+    wrap it in headless prompt mode (``claude -p ...``). Our prompt asks
+    Claude to emit findings in the same ``<file>:<line> - [Severity]
+    <title>`` block format CodeRabbit produces, so output parsing is
+    shared.
+    """
+
+    enabled: bool = False
+    cli_path: str = "claude"
+    model: str = ""
+    extra_args: list[str] = Field(default_factory=list)
+    timeout_seconds: int = 300
+    max_diff_chars: int = 60_000
+    remote: RemoteExecutionConfig = Field(default_factory=RemoteExecutionConfig)
+
+    @field_validator("timeout_seconds", "max_diff_chars")
+    @classmethod
+    def must_be_positive(cls, v: int) -> int:
+        if v <= 0:
+            msg = "must be positive"
+            raise ValueError(msg)
+        return v
+
+
+class SnowflakeReviewConfig(BaseModel):
+    """Config for the Snowflake code review CLI integration.
+
+    Mirrors the CodeRabbit shape: invokes ``snowflake-code-review review
+    --base-commit <sha> --prompt-only`` and parses the same finding block
+    format.
+    """
+
+    enabled: bool = False
+    cli_path: str = "snowflake-code-review"
+    extra_args: list[str] = Field(default_factory=list)
+    deduplicate: bool = True
+    remote: RemoteExecutionConfig = Field(default_factory=RemoteExecutionConfig)
 
 
 class JiraConfig(BaseModel):
@@ -585,6 +684,8 @@ class OperatorConfig(BaseModel):
     digest_enabled: bool = False
     workspaces: dict[str, object] = Field(default_factory=dict)
     coderabbit: CodeRabbitConfig = Field(default_factory=CodeRabbitConfig)
+    claude_cli: ClaudeCLIConfig = Field(default_factory=ClaudeCLIConfig)
+    snowflake_review: SnowflakeReviewConfig = Field(default_factory=SnowflakeReviewConfig)
     agent_feedback: AgentFeedbackConfig = Field(default_factory=AgentFeedbackConfig)
     sentry: SentryConfig = Field(default_factory=SentryConfig)
     perplexity: PerplexityConfig = Field(default_factory=PerplexityConfig)

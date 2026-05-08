@@ -24,6 +24,7 @@ from franktheunicorn.review.antipattern import (
 if TYPE_CHECKING:
     from franktheunicorn.config.models import CodeRabbitConfig
     from franktheunicorn.core.models import Project, PullRequest
+    from franktheunicorn.review.tool_executor import ToolExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -62,12 +63,17 @@ def run_coderabbit_review(
     repo_path: str | Path,
     base_commit: str,
     config: CodeRabbitConfig,
+    executor: ToolExecutor | None = None,
 ) -> list[CodeRabbitFinding]:
     """
     Run ``coderabbit review --prompt-only`` and return parsed findings.
 
     Returns an empty list (never raises) when the CLI is missing, times out,
     or exits with an error.
+
+    When ``executor`` is omitted the call falls through to ``subprocess.run``
+    directly, preserving the historical local-only path. Pass an executor
+    (e.g. ``RemoteSSHExecutor``) to run the CLI elsewhere.
     """
     cmd = [
         config.cli_path,
@@ -81,8 +87,21 @@ def run_coderabbit_review(
         *config.extra_args,
     ]
 
+    if executor is not None:
+        exec_result = executor.run(cmd, cwd=str(repo_path), timeout=_CLI_TIMEOUT_SECONDS)
+        if exec_result is None:
+            return []
+        if not exec_result.ok:
+            logger.error(
+                "CodeRabbit CLI exited with code %d: %s",
+                exec_result.returncode,
+                (exec_result.stderr or "")[:500] or "(no stderr)",
+            )
+            return []
+        return parse_prompt_only_output(exec_result.stdout)
+
     try:
-        result = subprocess.run(
+        proc = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
@@ -99,15 +118,15 @@ def run_coderabbit_review(
         )
         return []
 
-    if result.returncode != 0:
+    if proc.returncode != 0:
         logger.error(
             "CodeRabbit CLI exited with code %d: %s",
-            result.returncode,
-            result.stderr[:500] if result.stderr else "(no stderr)",
+            proc.returncode,
+            proc.stderr[:500] if proc.stderr else "(no stderr)",
         )
         return []
 
-    return parse_prompt_only_output(result.stdout)
+    return parse_prompt_only_output(proc.stdout)
 
 
 def parse_prompt_only_output(raw_output: str) -> list[CodeRabbitFinding]:

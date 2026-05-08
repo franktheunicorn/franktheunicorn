@@ -1,0 +1,27 @@
+src/auth/session.py:57 - [High] Token verified after use
+
+`current_user_id` is read from `session.user_id` before the JWT signature is
+validated on line 64. A request with a forged session cookie reaches the
+authorization check with attacker-chosen state.
+
+**Suggestion:** Move the `verify_jwt(session.token)` call to the very top of
+`load_session()`; bail out before touching any session fields.
+
+=============
+
+src/api/billing.py:142 - [Medium] Off-by-one in invoice pagination
+
+`offset = page * PAGE_SIZE` with 1-indexed pages skips the first page
+entirely — `?page=1` returns invoices 50–99 instead of 0–49.
+
+**Suggestion:** Use `(page - 1) * PAGE_SIZE`, and add a test that asserts
+`page=1` returns the first PAGE_SIZE rows.
+
+=============
+
+tests/api/test_billing.py:18 - [Nit] Test name doesn't describe behavior
+
+`test_billing_1` doesn't say what's being tested — when it fails, the report
+gives no clue about which behavior regressed.
+
+**Suggestion:** Rename to `test_invoice_pagination_includes_first_page`.

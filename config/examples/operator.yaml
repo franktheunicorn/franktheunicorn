@@ -121,14 +121,58 @@ digest_enabled: false
 #       feedback_method: api
 #       api_endpoint_env: CODEX_FEEDBACK_API
 
-# CodeRabbit CLI integration (optional, runs alongside LLM backends)
+# --- CLI review tools (optional) ---
+# All three integrations below are subprocess wrappers around external
+# code review CLIs. They run alongside the LLM backends; their findings
+# pass through anti-pattern filtering and appear in the dashboard
+# attributed by `sources` (e.g. ["coderabbit"], ["claude-cli"]).
+#
+# Each tool supports a `remote:` block that runs the CLI on a remote
+# host over SSH. The remote host clones the project's git repo into
+# `remote_workspace_dir` and runs the CLI there -- useful for
+# offloading heavy reviews to a dedicated build box.
+#
+# Common remote block (uncomment under any tool below):
+#   remote:
+#     mode: "ssh"                      # "local" (default) | "ssh"
+#     host: "review-worker.example.com"
+#     user: "frank"
+#     ssh_key_path: "/home/holden/.ssh/frank_review"
+#     ssh_extra_args: ["-o", "StrictHostKeyChecking=no"]
+#     remote_workspace_dir: "/srv/frank-remote"
+#     clone_url_template: "https://github.com/{owner}/{repo}.git"
+#     prepare_timeout_seconds: 600
+
+# CodeRabbit CLI integration
 # Install: npm install -g coderabbitai (or see https://docs.coderabbit.ai/cli)
-# Findings are attributed as [CodeRabbit] in the dashboard and still
-# pass through anti-pattern filtering.
 # coderabbit:
 #   enabled: true
 #   cli_path: "coderabbit"
 #   extra_args: []
+#   # remote: { mode: "ssh", host: "review-worker.example.com", ... }
+
+# Claude CLI integration
+# Wraps `claude -p` in headless prompt mode. Auth is whatever the Claude
+# CLI is configured with on the executing host (local user, or the SSH
+# remote when remote.mode == "ssh").
+# claude_cli:
+#   enabled: true
+#   cli_path: "claude"
+#   model: ""                          # empty = CLI default
+#   extra_args: []
+#   timeout_seconds: 300
+#   max_diff_chars: 60000              # diffs above this are truncated
+#   # remote: { mode: "ssh", host: "review-worker.example.com", ... }
+
+# Snowflake code review CLI integration
+# Mirrors CodeRabbit's invocation contract; expects the same
+# `<file>:<line> - [Severity] <title>` block output.
+# snowflake_review:
+#   enabled: true
+#   cli_path: "snowflake-code-review"
+#   extra_args: []
+#   deduplicate: true
+#   # remote: { mode: "ssh", host: "review-worker.example.com", ... }
 
 # --- Fine-Tuning Pipeline (v2) ---
 # Train a personal model on your review feedback using Axolotl QLoRA.

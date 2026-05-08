@@ -1,0 +1,28 @@
+src/etl/loader.py:84 - [Critical] Unbounded warehouse query
+
+The COPY INTO statement passes a user-supplied prefix straight into a SQL
+literal without escaping. A malicious prefix could break out of the quoted
+string and run arbitrary SQL with the warehouse's privileges.
+
+**Suggestion:** Bind ``prefix`` as a parameter via Snowpark's
+``session.sql(...).bind(...)`` instead of f-string interpolation.
+
+=============
+
+src/etl/transform.py:212 - [High] Cartesian join with downstream fact table
+
+`fact_orders` is joined to `dim_customer` without an ON clause, producing a
+cross join that explodes row count by ~1.4M× in production data.
+
+**Suggestion:** Add ``ON fact_orders.customer_id = dim_customer.id`` (and
+verify the join cardinality with ``EXPLAIN``).
+
+=============
+
+dags/refresh_orders.py:38 - [Medium] Missing retries on TASK creation
+
+The task is created without ``RETRY_ON_FAIL`` so a transient warehouse
+failure leaves the DAG in an inconsistent state.
+
+**Suggestion:** Set ``allow_overlapping_execution=False`` and
+``error_integration`` so failures are surfaced.

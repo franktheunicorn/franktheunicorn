@@ -202,7 +202,7 @@ class TestCreateDraftsFromCodeRabbit:
 @pytest.mark.django_db
 class TestWorkerCodeRabbitIntegration:
     @patch("franktheunicorn.worker.runner._resolve_base_ref", return_value="origin/main")
-    @patch("franktheunicorn.review.coderabbit.subprocess.run")
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
     def test_run_coderabbit_for_pr_creates_drafts(
         self,
         mock_subprocess: Any,
@@ -216,6 +216,11 @@ class TestWorkerCodeRabbitIntegration:
         # Caller passes an existing repo_path (as ensure_repo would produce).
         repo_path = tmp_path / "repos" / db_pr.project.full_name
         repo_path.mkdir(parents=True)
+
+        # Worker now fetches/checks-out PR head before invoking the tool;
+        # head_sha must be present for that path to succeed.
+        db_pr.head_sha = "deadbeef" * 5
+        db_pr.save()
 
         mock_subprocess.return_value = subprocess.CompletedProcess(
             args=[],
