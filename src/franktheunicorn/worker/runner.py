@@ -27,7 +27,12 @@ import django
 if TYPE_CHECKING:
     import httpx
 
-    from franktheunicorn.config.models import CodeRabbitConfig, OperatorConfig
+    from franktheunicorn.config.models import (
+        ClaudeCLIConfig,
+        CodeRabbitConfig,
+        OperatorConfig,
+        SnowflakeReviewConfig,
+    )
     from franktheunicorn.core.models import PullRequest
     from franktheunicorn.data_access.github.diff_fetcher import DiffFetcher
 
@@ -285,6 +290,15 @@ def _run_cycle(
     if operator_config is not None and operator_config.coderabbit.enabled:
         cr_config = operator_config.coderabbit
 
+    # Resolve Claude CLI + Snowflake review configs from operator config.
+    claude_cli_config: ClaudeCLIConfig | None = None
+    if operator_config is not None and operator_config.claude_cli.enabled:
+        claude_cli_config = operator_config.claude_cli
+
+    snowflake_config: SnowflakeReviewConfig | None = None
+    if operator_config is not None and operator_config.snowflake_review.enabled:
+        snowflake_config = operator_config.snowflake_review
+
     # Shared HTTP client for diff fetching (copypasta + dependency changelogs).
     # NOTE: DiffFetcher is currently GitHub-specific (talks to api.github.com).
     # For non-GitHub projects, the LLM-checks/copypasta/changelog code paths
@@ -411,6 +425,14 @@ def _run_cycle(
                     # Run CodeRabbit if enabled and no CR drafts exist yet.
                     if cr_config is not None:
                         _run_coderabbit_for_pr(pr, cr_config, repo_path)
+
+                    # Run Claude CLI review if enabled.
+                    if claude_cli_config is not None:
+                        _run_claude_cli_for_pr(pr, claude_cli_config, repo_path)
+
+                    # Run Snowflake code review CLI if enabled.
+                    if snowflake_config is not None:
+                        _run_snowflake_for_pr(pr, snowflake_config, repo_path)
 
                     # LLM sub-checks (coverage, etc.) — runs once alongside draft review.
                     if pc.llm_checks:
@@ -540,6 +562,58 @@ def _run_shepherding_pass(
             logger.exception("Error in shepherding for PR #%d", pr.number)
 
 
+def _resolve_cwd_for_tool(
+    pr: PullRequest,
+    remote_config: object,
+    local_repo_path: Path | None,
+    tool_name: str,
+) -> tuple[str, str] | None:
+    """
+    Resolve a working directory + base ref for one of the CLI review tools.
+
+    Returns ``(cwd, base_ref)`` ready to hand to the tool, or ``None`` when
+    no checkout could be prepared. ``remote_config`` is duck-typed as a
+    ``RemoteExecutionConfig`` (avoids a hard import at runtime).
+    """
+    from franktheunicorn.review.tool_executor import (
+        LocalExecutor,
+        RemoteSSHExecutor,
+        make_executor,
+    )
+
+    executor = make_executor(remote_config)  # type: ignore[arg-type]
+
+    if isinstance(executor, LocalExecutor):
+        if local_repo_path is None or not local_repo_path.exists():
+            logger.debug(
+                "Repo clone unavailable for %s; skipping %s for PR #%d",
+                pr.project.full_name,
+                tool_name,
+                pr.number,
+            )
+            return None
+        base_ref = _resolve_base_ref(local_repo_path, pr)
+        if base_ref is None:
+            return None
+        return str(local_repo_path), base_ref
+
+    # Remote execution: clone (or fetch) the repo on the remote host.
+    assert isinstance(executor, RemoteSSHExecutor)
+    remote_cwd = executor.prepare_repo(pr.project.owner, pr.project.repo)
+    if remote_cwd is None:
+        logger.debug(
+            "Remote prepare_repo failed for %s; skipping %s for PR #%d",
+            pr.project.full_name,
+            tool_name,
+            pr.number,
+        )
+        return None
+    base_ref = _resolve_remote_base_ref(executor, remote_cwd, pr)
+    if base_ref is None:
+        return None
+    return remote_cwd, base_ref
+
+
 def _run_coderabbit_for_pr(
     pr: PullRequest,
     cr_config: CodeRabbitConfig,
@@ -548,30 +622,23 @@ def _run_coderabbit_for_pr(
     """Run CodeRabbit CLI review for a single PR. Never raises.
 
     ``repo_path`` should be the path returned by ``ensure_repo`` for this
-    project. When ``None`` or missing on disk, CodeRabbit is skipped silently.
+    project. When the tool is configured for remote execution, that local
+    path may be ignored and the repo is cloned on the remote host instead.
     """
-    if repo_path is None or not repo_path.exists():
-        logger.debug(
-            "Repo clone unavailable for %s; skipping CodeRabbit for PR #%d",
-            pr.project.full_name,
-            pr.number,
-        )
-        return
-
     from franktheunicorn.review.coderabbit import (
         create_drafts_from_coderabbit,
         run_coderabbit_review,
     )
+    from franktheunicorn.review.tool_executor import make_executor
+
+    resolved = _resolve_cwd_for_tool(pr, cr_config.remote, repo_path, "CodeRabbit")
+    if resolved is None:
+        return
+    cwd, base_ref = resolved
 
     try:
-        # Determine the base ref for diffing. The repo manager keeps the
-        # working tree on the default branch, so origin/main or origin/master
-        # should be available.
-        base_ref = _resolve_base_ref(repo_path, pr)
-        if base_ref is None:
-            return
-
-        findings = run_coderabbit_review(repo_path, base_ref, cr_config)
+        executor = make_executor(cr_config.remote)
+        findings = run_coderabbit_review(cwd, base_ref, cr_config, executor=executor)
         if findings:
             drafts = create_drafts_from_coderabbit(pr, findings, pr.project)
             logger.info(
@@ -582,6 +649,98 @@ def _run_coderabbit_for_pr(
             )
     except Exception:
         logger.exception("CodeRabbit failed for PR #%d; continuing.", pr.number)
+
+
+def _run_claude_cli_for_pr(
+    pr: PullRequest,
+    claude_config: ClaudeCLIConfig,
+    repo_path: Path | None,
+) -> None:
+    """Run the Claude CLI review for a single PR. Never raises."""
+    from franktheunicorn.review.claude_cli import (
+        create_drafts_from_claude_cli,
+        run_claude_cli_review,
+    )
+    from franktheunicorn.review.tool_executor import make_executor
+
+    resolved = _resolve_cwd_for_tool(pr, claude_config.remote, repo_path, "Claude CLI")
+    if resolved is None:
+        return
+    cwd, base_ref = resolved
+
+    try:
+        executor = make_executor(claude_config.remote)
+        findings = run_claude_cli_review(cwd, base_ref, claude_config, executor=executor)
+        if findings:
+            drafts = create_drafts_from_claude_cli(pr, findings, pr.project)
+            logger.info(
+                "  PR #%d: %d Claude CLI findings → %d drafts",
+                pr.number,
+                len(findings),
+                len(drafts),
+            )
+    except Exception:
+        logger.exception("Claude CLI failed for PR #%d; continuing.", pr.number)
+
+
+def _run_snowflake_for_pr(
+    pr: PullRequest,
+    snowflake_config: SnowflakeReviewConfig,
+    repo_path: Path | None,
+) -> None:
+    """Run the Snowflake code review CLI for a single PR. Never raises."""
+    from franktheunicorn.review.snowflake_review import (
+        create_drafts_from_snowflake,
+        run_snowflake_review,
+    )
+    from franktheunicorn.review.tool_executor import make_executor
+
+    resolved = _resolve_cwd_for_tool(pr, snowflake_config.remote, repo_path, "Snowflake review")
+    if resolved is None:
+        return
+    cwd, base_ref = resolved
+
+    try:
+        executor = make_executor(snowflake_config.remote)
+        findings = run_snowflake_review(cwd, base_ref, snowflake_config, executor=executor)
+        if findings:
+            drafts = create_drafts_from_snowflake(pr, findings, pr.project)
+            logger.info(
+                "  PR #%d: %d Snowflake findings → %d drafts",
+                pr.number,
+                len(findings),
+                len(drafts),
+            )
+    except Exception:
+        logger.exception("Snowflake review failed for PR #%d; continuing.", pr.number)
+
+
+def _resolve_remote_base_ref(
+    executor: object,
+    remote_cwd: str,
+    pr: PullRequest,
+) -> str | None:
+    """Mirror of ``_resolve_base_ref`` for a remote checkout (over SSH)."""
+    from franktheunicorn.review.tool_executor import RemoteSSHExecutor
+
+    if not isinstance(executor, RemoteSSHExecutor):
+        return None
+
+    for candidate in ("origin/main", "origin/master"):
+        result = executor.run(
+            ["git", "rev-parse", "--verify", candidate],
+            cwd=remote_cwd,
+            timeout=15,
+        )
+        if result is not None and result.ok:
+            return candidate
+
+    logger.debug(
+        "Could not determine remote base ref for PR #%d in %s; skipping.",
+        pr.number,
+        remote_cwd,
+    )
+    return None
 
 
 def _resolve_base_ref(repo_path: Path, pr: PullRequest) -> str | None:
