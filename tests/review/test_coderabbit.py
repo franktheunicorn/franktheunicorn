@@ -217,6 +217,11 @@ class TestWorkerCodeRabbitIntegration:
         repo_path = tmp_path / "repos" / db_pr.project.full_name
         repo_path.mkdir(parents=True)
 
+        # Worker now fetches/checks-out PR head before invoking the tool;
+        # head_sha must be present for that path to succeed.
+        db_pr.head_sha = "deadbeef" * 5
+        db_pr.save()
+
         mock_subprocess.return_value = subprocess.CompletedProcess(
             args=[],
             returncode=0,

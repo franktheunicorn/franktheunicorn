@@ -422,17 +422,22 @@ def _run_cycle(
                         len(drafts),
                     )
 
+                    # Compute the per-project clone URL once; remote-mode
+                    # tools need it to clone non-GitHub forges (gitlab,
+                    # gitea, forgejo) on the SSH host.
+                    clone_url = _clone_url_for_project(pc, operator_config)
+
                     # Run CodeRabbit if enabled and no CR drafts exist yet.
                     if cr_config is not None:
-                        _run_coderabbit_for_pr(pr, cr_config, repo_path)
+                        _run_coderabbit_for_pr(pr, cr_config, repo_path, clone_url)
 
                     # Run Claude CLI review if enabled.
                     if claude_cli_config is not None:
-                        _run_claude_cli_for_pr(pr, claude_cli_config, repo_path)
+                        _run_claude_cli_for_pr(pr, claude_cli_config, repo_path, clone_url)
 
                     # Run Snowflake code review CLI if enabled.
                     if snowflake_config is not None:
-                        _run_snowflake_for_pr(pr, snowflake_config, repo_path)
+                        _run_snowflake_for_pr(pr, snowflake_config, repo_path, clone_url)
 
                     # LLM sub-checks (coverage, etc.) — runs once alongside draft review.
                     if pc.llm_checks:
@@ -562,18 +567,118 @@ def _run_shepherding_pass(
             logger.exception("Error in shepherding for PR #%d", pr.number)
 
 
+def _clone_url_for_project(
+    pc: object,
+    operator_config: OperatorConfig | None,
+) -> str:
+    """Derive a git clone URL from the project's configured forge entry.
+
+    The forge registry stores API base URLs (e.g. ``https://api.github.com``)
+    while git needs the web URL (``https://github.com/...``). This helper
+    bridges that gap per forge type. Falls back to a public GitHub URL when
+    the forge can't be located, matching ``RemoteExecutionConfig``'s
+    historical default.
+    """
+    owner = getattr(pc, "owner", "")
+    repo = getattr(pc, "repo", "")
+    forge_name = getattr(pc, "forge", "") or "github"
+
+    forge = None
+    if operator_config is not None:
+        for entry in operator_config.forges:
+            if entry.name == forge_name:
+                forge = entry
+                break
+
+    if forge is None or forge.type == "github":
+        base = (forge.base_url if forge is not None else "").rstrip("/")
+        # Default + GitHub Enterprise API URLs both need rewriting to the
+        # web host before they're usable as a clone URL.
+        if not base or base == "https://api.github.com":
+            host = "https://github.com"
+        elif base.endswith("/api/v3"):
+            host = base[: -len("/api/v3")]
+        else:
+            host = base
+        return f"{host}/{owner}/{repo}.git"
+
+    # GitLab / Gitea / Forgejo all use ``base_url`` directly as the web host.
+    base = forge.base_url.rstrip("/")
+    return f"{base}/{owner}/{repo}.git"
+
+
+def _checkout_pr_head(
+    executor: object,
+    cwd: str,
+    pr: PullRequest,
+) -> bool:
+    """Fetch and detach-checkout the PR's head commit in ``cwd``.
+
+    Required so review tools that diff ``HEAD`` against a base ref see the
+    PR's actual contents. Returns ``False`` (and logs) on any failure; the
+    caller should bail out.
+
+    Works through the executor abstraction so it covers both local and
+    remote checkouts.
+    """
+    head_sha = (pr.head_sha or "").strip()
+    if not head_sha:
+        logger.debug(
+            "PR #%d has no head_sha; cannot checkout head for review.",
+            pr.number,
+        )
+        return False
+
+    fetch = executor.run(  # type: ignore[attr-defined]
+        ["git", "fetch", "--quiet", "origin", head_sha],
+        cwd=cwd,
+        timeout=300,
+    )
+    if fetch is None or not fetch.ok:
+        logger.warning(
+            "Failed to fetch PR #%d head %s in %s; review tools will be skipped.",
+            pr.number,
+            head_sha[:12],
+            cwd,
+        )
+        return False
+
+    checkout = executor.run(  # type: ignore[attr-defined]
+        ["git", "checkout", "--quiet", "--detach", head_sha],
+        cwd=cwd,
+        timeout=30,
+    )
+    if checkout is None or not checkout.ok:
+        logger.warning(
+            "Failed to checkout PR #%d head %s in %s; review tools will be skipped.",
+            pr.number,
+            head_sha[:12],
+            cwd,
+        )
+        return False
+
+    return True
+
+
 def _resolve_cwd_for_tool(
     pr: PullRequest,
     remote_config: object,
     local_repo_path: Path | None,
     tool_name: str,
+    clone_url: str = "",
 ) -> tuple[str, str] | None:
     """
     Resolve a working directory + base ref for one of the CLI review tools.
 
     Returns ``(cwd, base_ref)`` ready to hand to the tool, or ``None`` when
     no checkout could be prepared. ``remote_config`` is duck-typed as a
-    ``RemoteExecutionConfig`` (avoids a hard import at runtime).
+    ``RemoteExecutionConfig`` (avoids a hard import at runtime). ``clone_url``
+    is used for remote mode when cloning a fresh repo on the SSH host.
+
+    After preparing the cwd this also fetches and detach-checks-out the PR's
+    head commit so downstream tools see PR-actual contents (otherwise their
+    ``git diff <base> HEAD`` calls produce empty diffs against the default
+    branch tip).
     """
     from franktheunicorn.review.tool_executor import (
         LocalExecutor,
@@ -595,11 +700,17 @@ def _resolve_cwd_for_tool(
         base_ref = _resolve_base_ref(local_repo_path, pr)
         if base_ref is None:
             return None
+        if not _checkout_pr_head(executor, str(local_repo_path), pr):
+            return None
         return str(local_repo_path), base_ref
 
     # Remote execution: clone (or fetch) the repo on the remote host.
     assert isinstance(executor, RemoteSSHExecutor)
-    remote_cwd = executor.prepare_repo(pr.project.owner, pr.project.repo)
+    remote_cwd = executor.prepare_repo(
+        pr.project.owner,
+        pr.project.repo,
+        clone_url=clone_url,
+    )
     if remote_cwd is None:
         logger.debug(
             "Remote prepare_repo failed for %s; skipping %s for PR #%d",
@@ -611,6 +722,8 @@ def _resolve_cwd_for_tool(
     base_ref = _resolve_remote_base_ref(executor, remote_cwd, pr)
     if base_ref is None:
         return None
+    if not _checkout_pr_head(executor, remote_cwd, pr):
+        return None
     return remote_cwd, base_ref
 
 
@@ -618,12 +731,14 @@ def _run_coderabbit_for_pr(
     pr: PullRequest,
     cr_config: CodeRabbitConfig,
     repo_path: Path | None,
+    clone_url: str = "",
 ) -> None:
     """Run CodeRabbit CLI review for a single PR. Never raises.
 
     ``repo_path`` should be the path returned by ``ensure_repo`` for this
     project. When the tool is configured for remote execution, that local
-    path may be ignored and the repo is cloned on the remote host instead.
+    path may be ignored and the repo is cloned on the remote host using
+    ``clone_url`` instead.
     """
     from franktheunicorn.review.coderabbit import (
         create_drafts_from_coderabbit,
@@ -631,7 +746,13 @@ def _run_coderabbit_for_pr(
     )
     from franktheunicorn.review.tool_executor import make_executor
 
-    resolved = _resolve_cwd_for_tool(pr, cr_config.remote, repo_path, "CodeRabbit")
+    resolved = _resolve_cwd_for_tool(
+        pr,
+        cr_config.remote,
+        repo_path,
+        "CodeRabbit",
+        clone_url=clone_url,
+    )
     if resolved is None:
         return
     cwd, base_ref = resolved
@@ -655,6 +776,7 @@ def _run_claude_cli_for_pr(
     pr: PullRequest,
     claude_config: ClaudeCLIConfig,
     repo_path: Path | None,
+    clone_url: str = "",
 ) -> None:
     """Run the Claude CLI review for a single PR. Never raises."""
     from franktheunicorn.review.claude_cli import (
@@ -663,7 +785,13 @@ def _run_claude_cli_for_pr(
     )
     from franktheunicorn.review.tool_executor import make_executor
 
-    resolved = _resolve_cwd_for_tool(pr, claude_config.remote, repo_path, "Claude CLI")
+    resolved = _resolve_cwd_for_tool(
+        pr,
+        claude_config.remote,
+        repo_path,
+        "Claude CLI",
+        clone_url=clone_url,
+    )
     if resolved is None:
         return
     cwd, base_ref = resolved
@@ -687,6 +815,7 @@ def _run_snowflake_for_pr(
     pr: PullRequest,
     snowflake_config: SnowflakeReviewConfig,
     repo_path: Path | None,
+    clone_url: str = "",
 ) -> None:
     """Run the Snowflake code review CLI for a single PR. Never raises."""
     from franktheunicorn.review.snowflake_review import (
@@ -695,7 +824,13 @@ def _run_snowflake_for_pr(
     )
     from franktheunicorn.review.tool_executor import make_executor
 
-    resolved = _resolve_cwd_for_tool(pr, snowflake_config.remote, repo_path, "Snowflake review")
+    resolved = _resolve_cwd_for_tool(
+        pr,
+        snowflake_config.remote,
+        repo_path,
+        "Snowflake review",
+        clone_url=clone_url,
+    )
     if resolved is None:
         return
     cwd, base_ref = resolved
