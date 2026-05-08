@@ -59,7 +59,6 @@ class ToolExecutor(Protocol):
         ``local_path``. For ``RemoteSSHExecutor`` this clones (or fetches)
         the repo onto the remote host. Returns ``None`` on failure.
         """
-        ...
 
     def run(
         self,
@@ -73,7 +72,6 @@ class ToolExecutor(Protocol):
         ``cmd`` arguments are passed verbatim — callers should not
         pre-quote them. ``stdin`` is fed to the process as text input.
         """
-        ...
 
 
 @dataclass
