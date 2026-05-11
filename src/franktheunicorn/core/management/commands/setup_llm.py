@@ -98,6 +98,10 @@ class Command(BaseCommand):
             default=existing_username,
         )
 
+        # Always write github_token so synthesize_default_forge stays working for
+        # hand-edited operator.yaml files that predate the explicit forges list.
+        config["github_token"] = "${FRANK_GITHUB_TOKEN}"
+
         # --- Review style ---
         config["review_style"] = self._ask(
             "Review style/tone (e.g. 'direct but kind', 'thorough and formal'): ",
@@ -176,14 +180,37 @@ class Command(BaseCommand):
         if llm_backends:
             config["llm_backends"] = llm_backends
 
-        # --- Additional forges (Forgejo / Gitea / GitLab) ---
-        forges = self._configure_additional_forges()
-        if forges:
-            config["forges"] = forges
+        # --- Forge registry ---
+        # Always include an explicit github entry so the worker can resolve
+        # forge 'github' without relying on backward-compat synthesis alone.
+        # Any already-present github entry in the existing config is preserved
+        # to avoid clobbering a user-customised token env-var name.
+        raw_forges: object = existing_config.get("forges") or []
+        existing_forges: list[dict[str, object]] = (
+            [f for f in raw_forges if isinstance(f, dict)] if isinstance(raw_forges, list) else []
+        )
+        existing_forge_names = {str(f.get("name", "")) for f in existing_forges}
+        if "github" not in existing_forge_names:
+            github_entry: dict[str, object] = {
+                "name": "github",
+                "type": "github",
+                "token": "${FRANK_GITHUB_TOKEN}",
+                "username": config["github_username"],
+            }
+            existing_forges = [github_entry, *existing_forges]
+        config["forges"] = existing_forges
+
+        additional_forges = self._configure_additional_forges()
+        if additional_forges:
+            existing_names = {str(f.get("name", "")) for f in existing_forges}
+            for af in additional_forges:
+                if str(af.get("name", "")) not in existing_names:
+                    existing_forges.append(af)
+            config["forges"] = existing_forges
 
         # --- Initial projects ---
         output_path_obj = self._output_path
-        forge_names: list[str] = ["github"] + [str(f["name"]) for f in forges]
+        forge_names: list[str] = [str(f.get("name", "")) for f in existing_forges if f.get("name")]
         self._configure_initial_projects(output_path_obj, forge_names=forge_names)
 
         # --- External review CLIs (CodeRabbit / Claude / Snowflake) ---

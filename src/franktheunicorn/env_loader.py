@@ -21,10 +21,14 @@ def load_dotenv(path: Path) -> None:
 
     Silently no-ops when the file is missing. Lines that don't parse as
     ``KEY=VALUE`` are skipped. Quotes around values are stripped. Keys
-    already present in the environment are left untouched.
+    already present in the environment are left untouched. When a key
+    appears multiple times in the file, the last occurrence wins — this
+    matches the behaviour of most shell dotenv loaders and prevents a
+    commented-out empty placeholder from shadowing the real value below it.
     """
     if not path.is_file():
         return
+    file_vars: dict[str, str] = {}
     for raw_line in path.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
@@ -40,6 +44,8 @@ def load_dotenv(path: Path) -> None:
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
             value = value[1:-1]
+        file_vars[key] = value
+    for key, value in file_vars.items():
         os.environ.setdefault(key, value)
 
 

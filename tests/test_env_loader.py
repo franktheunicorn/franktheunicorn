@@ -12,7 +12,7 @@ from franktheunicorn.env_loader import load_dotenv, load_project_dotenv
 
 @pytest.fixture
 def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    for key in ("FRANK_TEST_A", "FRANK_TEST_B", "FRANK_TEST_C", "FRANK_TEST_D"):
+    for key in ("FRANK_TEST_A", "FRANK_TEST_B", "FRANK_TEST_C", "FRANK_TEST_D", "FRANK_TEST_DUP"):
         monkeypatch.delenv(key, raising=False)
 
 
@@ -56,6 +56,24 @@ def test_load_dotenv_does_not_override_existing(
     env.write_text("FRANK_TEST_A=from-file\n")
     load_dotenv(env)
     assert os.environ["FRANK_TEST_A"] == "from-shell"
+
+
+def test_load_dotenv_last_value_wins_within_file(
+    tmp_path: Path,
+    clean_env: None,
+) -> None:
+    env = tmp_path / ".env"
+    env.write_text(
+        "\n".join(
+            [
+                "FRANK_TEST_DUP=",
+                "# FRANK_TEST_DUP=commented-out",
+                "FRANK_TEST_DUP=real-token",
+            ]
+        )
+    )
+    load_dotenv(env)
+    assert os.environ["FRANK_TEST_DUP"] == "real-token"
 
 
 def test_load_project_dotenv_walks_up_to_pyproject(
