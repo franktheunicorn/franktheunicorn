@@ -186,10 +186,23 @@ class Command(BaseCommand):
         forge_names: list[str] = ["github"] + [str(f["name"]) for f in forges]
         self._configure_initial_projects(output_path_obj, forge_names=forge_names)
 
-        # --- CodeRabbit ---
+        # --- External review CLIs (CodeRabbit / Claude / Snowflake) ---
         cr_config = self._configure_coderabbit()
         if cr_config:
             config["coderabbit"] = cr_config
+
+        claude_cli_config = self._configure_claude_cli()
+        if claude_cli_config:
+            config["claude_cli"] = claude_cli_config
+
+        snowflake_config = self._configure_snowflake_review()
+        if snowflake_config:
+            config["snowflake_review"] = snowflake_config
+
+        # --- Agent feedback channel (v1.25) ---
+        feedback_config = self._configure_agent_feedback()
+        if feedback_config:
+            config["agent_feedback"] = feedback_config
 
         self.stdout.write(f"\nConfig will be written to: {output_path_obj}\n")
 
@@ -873,4 +886,173 @@ class Command(BaseCommand):
             cli_path = self._ask("Path to coderabbit CLI: ", default="coderabbit")
             cr_config["cli_path"] = cli_path
 
+        remote_block = self._configure_remote_execution("CodeRabbit")
+        if remote_block:
+            cr_config["remote"] = remote_block
+
         return cr_config
+
+    def _configure_claude_cli(self) -> dict[str, object] | None:
+        """Optionally configure the Claude CLI as a review backend.
+
+        Wraps ``claude -p`` in headless prompt mode. Auth lives wherever the
+        CLI was set up (local user, or the remote SSH host when remote.mode
+        is ``"ssh"``) — we never handle the Claude credentials here.
+        """
+        self.stdout.write("\n--- Claude CLI (code review backend) ---\n")
+        self.stdout.write(
+            "  Runs the local ``claude`` CLI in headless prompt mode against\n"
+            "  each PR diff. Uses the auth the CLI is already configured with.\n"
+        )
+        enable = self._ask("Enable Claude CLI review integration? (y/N): ", default="n")
+        if enable.lower() not in ("y", "yes"):
+            return None
+
+        cc_config: dict[str, object] = {"enabled": True}
+
+        if self._docker_mode:
+            self.stdout.write(
+                "  In Docker mode the CLI must be installed in the worker image\n"
+                "  (set INSTALL_CLAUDE_CLI=true and rebuild) or invoked over SSH\n"
+                "  on a remote host. See https://docs.claude.com/en/docs/claude-code\n"
+            )
+            cc_config["cli_path"] = self._ask("  Path to claude CLI: ", default="claude")
+        elif shutil.which("claude"):
+            self.stdout.write(self.style.SUCCESS("  Found 'claude' on PATH.\n"))
+            cc_config["cli_path"] = "claude"
+        else:
+            self.stdout.write(
+                self.style.WARNING(
+                    "  'claude' not found on PATH.\n"
+                    "  Install: https://docs.claude.com/en/docs/claude-code\n"
+                )
+            )
+            cc_config["cli_path"] = self._ask("  Path to claude CLI: ", default="claude")
+
+        model = self._ask("  Model override (empty = CLI default): ", default="")
+        if model:
+            cc_config["model"] = model
+
+        remote_block = self._configure_remote_execution("Claude CLI")
+        if remote_block:
+            cc_config["remote"] = remote_block
+
+        return cc_config
+
+    def _configure_snowflake_review(self) -> dict[str, object] | None:
+        """Optionally configure the Snowflake code-review CLI integration."""
+        self.stdout.write("\n--- Snowflake code review CLI ---\n")
+        self.stdout.write(
+            "  Wraps ``snowflake-code-review`` and parses the same finding\n"
+            "  blocks CodeRabbit/Claude CLI produce.\n"
+        )
+        enable = self._ask("Enable Snowflake review integration? (y/N): ", default="n")
+        if enable.lower() not in ("y", "yes"):
+            return None
+
+        sf_config: dict[str, object] = {"enabled": True}
+
+        if self._docker_mode:
+            sf_config["cli_path"] = self._ask(
+                "  Path to snowflake-code-review CLI: ",
+                default="snowflake-code-review",
+            )
+        elif shutil.which("snowflake-code-review"):
+            self.stdout.write(self.style.SUCCESS("  Found 'snowflake-code-review' on PATH.\n"))
+            sf_config["cli_path"] = "snowflake-code-review"
+        else:
+            self.stdout.write(
+                self.style.WARNING(
+                    "  'snowflake-code-review' not found on PATH — set the\n"
+                    "  cli_path below to an explicit binary location.\n"
+                )
+            )
+            sf_config["cli_path"] = self._ask(
+                "  Path to snowflake-code-review CLI: ",
+                default="snowflake-code-review",
+            )
+
+        remote_block = self._configure_remote_execution("Snowflake review")
+        if remote_block:
+            sf_config["remote"] = remote_block
+
+        return sf_config
+
+    def _configure_remote_execution(self, tool_label: str) -> dict[str, object] | None:
+        """Prompt for an optional SSH remote-execution block.
+
+        Returns ``None`` for the local default, or a dict matching
+        ``RemoteExecutionConfig`` for SSH. We check that ``ssh`` is on PATH
+        before offering the option so the operator finds out *now* rather
+        than at the first review attempt.
+
+        Skipped in docker mode — the worker container's ssh availability
+        and key material are operator concerns better handled by manual
+        YAML editing than a wizard prompt.
+        """
+        if self._docker_mode:
+            return None
+        if not shutil.which("ssh"):
+            return None  # No ssh client — silently skip the option.
+
+        enable = self._ask(
+            f"  Run {tool_label} on a remote SSH host instead of locally? (y/N): ",
+            default="n",
+        )
+        if enable.lower() not in ("y", "yes"):
+            return None
+
+        host = self._ask("    Remote host (user@host or host): ", default="").strip()
+        if not host:
+            self.stdout.write(
+                self.style.WARNING("    No host given; falling back to local execution.\n")
+            )
+            return None
+
+        user = ""
+        if "@" in host:
+            user, _, host = host.partition("@")
+
+        remote: dict[str, object] = {"mode": "ssh", "host": host}
+        if user:
+            remote["user"] = user
+        ssh_key = self._ask("    SSH key path (Enter for default): ", default="")
+        if ssh_key:
+            remote["ssh_key_path"] = ssh_key
+        workspace = self._ask("    Remote workspace dir: ", default="~/.frank-remote")
+        if workspace:
+            remote["remote_workspace_dir"] = workspace
+        return remote
+
+    def _configure_agent_feedback(self) -> dict[str, object] | None:
+        """Optionally configure the v1.25 agent feedback channel.
+
+        Dashboard-only feature — surfaces a "Send feedback to session"
+        button when a PR description contains a recognised agent session
+        link. Defaults match the v1.25 design (Claude Code + Codex).
+        """
+        self.stdout.write("\n--- Agent feedback channel (v1.25) ---\n")
+        self.stdout.write(
+            "  When a PR description references a Claude Code or Codex session,\n"
+            "  the dashboard offers a button to send feedback back to that agent.\n"
+        )
+        enable = self._ask("Enable direct agent feedback links? (y/N): ", default="n")
+        if enable.lower() not in ("y", "yes"):
+            return None
+
+        return {
+            "direct_session_enabled": True,
+            "supported_agents": [
+                {
+                    "name": "claude-code",
+                    "session_pattern": (r"Session:\s*(https://claude\.ai/code/session/\S+)"),
+                    "feedback_method": "url-open",
+                },
+                {
+                    "name": "codex",
+                    "session_pattern": r"Task ID:\s*(task_\S+)",
+                    "feedback_method": "api",
+                    "api_endpoint_env": "CODEX_FEEDBACK_API",
+                },
+            ],
+        }

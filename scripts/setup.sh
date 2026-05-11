@@ -187,8 +187,10 @@ fi
 # Ollama
 if command -v ollama &>/dev/null; then
     ok "  ollama: found (optional, for local LLM)"
+    HAS_OLLAMA=true
 else
     info "  ollama: not found (optional, for local LLM)"
+    HAS_OLLAMA=false
 fi
 
 # llama.cpp
@@ -197,6 +199,48 @@ if command -v llama-server &>/dev/null; then
 else
     info "  llama.cpp: not found (optional, for local LLM)"
 fi
+
+# Claude CLI (optional review backend)
+if command -v claude &>/dev/null; then
+    ok "  claude CLI: found (optional, review backend)"
+    HAS_CLAUDE_CLI=true
+else
+    info "  claude CLI: not found (optional, https://docs.claude.com/en/docs/claude-code)"
+    HAS_CLAUDE_CLI=false
+fi
+
+# Snowflake code review CLI (optional review backend)
+if command -v snowflake-code-review &>/dev/null; then
+    ok "  snowflake-code-review: found (optional, review backend)"
+    HAS_SNOWFLAKE_REVIEW=true
+else
+    info "  snowflake-code-review: not found (optional, review backend)"
+    HAS_SNOWFLAKE_REVIEW=false
+fi
+
+# CodeRabbit CLI (optional review backend)
+if command -v coderabbit &>/dev/null; then
+    ok "  coderabbit: found (optional, review backend)"
+    HAS_CODERABBIT=true
+else
+    info "  coderabbit: not found (optional, https://docs.coderabbit.ai/cli)"
+    HAS_CODERABBIT=false
+fi
+
+# ssh client — only meaningful if the operator wants to run review CLIs
+# on a remote build box. We don't fail if missing; just surface it.
+if command -v ssh &>/dev/null; then
+    HAS_SSH=true
+else
+    info "  ssh: not found (optional, required only for remote CLI execution)"
+    HAS_SSH=false
+fi
+
+# Export so child Python processes can make informed defaults.
+export FRANK_SETUP_HAS_CLAUDE_CLI="$HAS_CLAUDE_CLI"
+export FRANK_SETUP_HAS_SNOWFLAKE_REVIEW="$HAS_SNOWFLAKE_REVIEW"
+export FRANK_SETUP_HAS_CODERABBIT="$HAS_CODERABBIT"
+export FRANK_SETUP_HAS_SSH="$HAS_SSH"
 
 echo ""
 

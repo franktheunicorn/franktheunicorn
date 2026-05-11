@@ -27,6 +27,9 @@ class TestSetupLLMCommand:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         with patch("builtins.input", side_effect=inputs), _NO_DISCOVERY:
             call_command("setup_llm", output=str(output_path))
@@ -48,6 +51,9 @@ class TestSetupLLMCommand:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         with (
             patch("builtins.input", side_effect=inputs),
@@ -76,6 +82,9 @@ class TestSetupLLMCommand:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         with (
             patch("builtins.input", side_effect=inputs),
@@ -107,6 +116,9 @@ class TestSetupLLMCommand:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         with (
             patch("builtins.input", side_effect=inputs),
@@ -143,6 +155,9 @@ class TestSetupLLMCommand:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         with (
             patch("builtins.input", side_effect=inputs),
@@ -175,6 +190,9 @@ class TestSetupLLMCommand:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         with (
             patch("builtins.input", side_effect=inputs),
@@ -199,6 +217,10 @@ class TestSetupLLMCommand:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "y",  # coderabbit: yes
+            "n",  # coderabbit remote: no (ssh detected via patched which)
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         with (
             patch("builtins.input", side_effect=inputs),
@@ -209,6 +231,77 @@ class TestSetupLLMCommand:
 
         config = yaml.safe_load(output_path.read_text())
         assert config["coderabbit"]["enabled"] is True
+
+    def test_claude_cli_enabled(self, tmp_path: Path) -> None:
+        output_path = tmp_path / "operator.yaml"
+        inputs = [
+            "testuser",  # github_username
+            "direct",  # review_style
+            "7",  # provider: skip/stub
+            "skip",  # additional forges: skip
+            "",  # projects: skip
+            "n",  # coderabbit: no
+            "y",  # claude_cli: yes
+            "",  # model override: blank
+            "n",  # remote ssh: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
+        ]
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch("shutil.which", return_value="/usr/bin/claude"),
+            _NO_DISCOVERY,
+        ):
+            call_command("setup_llm", output=str(output_path))
+
+        config = yaml.safe_load(output_path.read_text())
+        assert config["claude_cli"]["enabled"] is True
+        assert config["claude_cli"]["cli_path"] == "claude"
+
+    def test_snowflake_review_enabled(self, tmp_path: Path) -> None:
+        output_path = tmp_path / "operator.yaml"
+        inputs = [
+            "testuser",  # github_username
+            "direct",  # review_style
+            "7",  # provider: skip/stub
+            "skip",  # additional forges: skip
+            "",  # projects: skip
+            "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "y",  # snowflake_review: yes
+            "n",  # remote ssh: no
+            "n",  # agent_feedback: no
+        ]
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch("shutil.which", return_value="/usr/bin/snowflake-code-review"),
+            _NO_DISCOVERY,
+        ):
+            call_command("setup_llm", output=str(output_path))
+
+        config = yaml.safe_load(output_path.read_text())
+        assert config["snowflake_review"]["enabled"] is True
+
+    def test_agent_feedback_enabled(self, tmp_path: Path) -> None:
+        output_path = tmp_path / "operator.yaml"
+        inputs = [
+            "testuser",  # github_username
+            "direct",  # review_style
+            "7",  # provider: skip/stub
+            "skip",  # additional forges: skip
+            "",  # projects: skip
+            "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "y",  # agent_feedback: yes
+        ]
+        with patch("builtins.input", side_effect=inputs), _NO_DISCOVERY:
+            call_command("setup_llm", output=str(output_path))
+
+        config = yaml.safe_load(output_path.read_text())
+        assert config["agent_feedback"]["direct_session_enabled"] is True
+        names = {a["name"] for a in config["agent_feedback"]["supported_agents"]}
+        assert names == {"claude-code", "codex"}
 
 
 @pytest.mark.django_db
@@ -235,6 +328,9 @@ class TestDockerMode:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         with (
             patch("builtins.input", side_effect=inputs),
@@ -279,6 +375,9 @@ class TestDockerMode:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         with (
             patch("builtins.input", side_effect=inputs),
@@ -321,6 +420,9 @@ class TestDockerMode:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         with (
             patch("builtins.input", side_effect=inputs),
@@ -361,6 +463,9 @@ class TestDockerMode:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         # Patch shutil.which at the setup_llm module level — this only covers
         # the direct which("ollama") call in _configure_ollama, not the one
@@ -417,6 +522,9 @@ class TestDockerMode:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         with (
             patch("builtins.input", side_effect=inputs),
@@ -451,6 +559,9 @@ class TestDockerMode:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "y",  # coderabbit: yes
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         mock_which = patch(
             "franktheunicorn.core.management.commands.setup_llm.shutil.which",
@@ -545,6 +656,9 @@ class TestMissingTemplateWarnings:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         with (
             patch("builtins.input", side_effect=inputs),
@@ -573,6 +687,9 @@ class TestMissingTemplateWarnings:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         with (
             patch("builtins.input", side_effect=inputs),
@@ -601,6 +718,9 @@ class TestMissingTemplateWarnings:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         with (
             patch("builtins.input", side_effect=inputs),
@@ -667,6 +787,9 @@ class TestComposeGeneratorOSError:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         with (
             patch("builtins.input", side_effect=inputs),
@@ -692,6 +815,9 @@ class TestComposeGeneratorOSError:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         with (
             patch("builtins.input", side_effect=inputs),
@@ -716,6 +842,9 @@ class TestComposeGeneratorOSError:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         with (
             patch("builtins.input", side_effect=inputs),
@@ -746,6 +875,9 @@ class TestCredentialDetectionIntegration:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         with (
             patch("builtins.input", side_effect=inputs),
@@ -773,6 +905,9 @@ class TestCredentialDetectionIntegration:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         with (
             patch("builtins.input", side_effect=inputs),
@@ -800,6 +935,9 @@ class TestCredentialDetectionIntegration:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         # Clear all known LLM env vars to ensure clean state.
         clean_env = {
@@ -830,6 +968,9 @@ class TestCredentialDetectionIntegration:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         clean_env = {
             "ANTHROPIC_API_KEY": "",
@@ -869,6 +1010,9 @@ class TestCredentialDetectionIntegration:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         clean_env = {
             "ANTHROPIC_API_KEY": "",
@@ -910,6 +1054,9 @@ class TestCredentialDetectionIntegration:
             "skip",  # additional forges: skip
             "",  # projects
             "n",  # coderabbit
+            "n",  # claude_cli
+            "n",  # snowflake_review
+            "n",  # agent_feedback
         ]
         clean_env = {
             "ANTHROPIC_API_KEY": "",
@@ -946,7 +1093,10 @@ class TestCredentialDetectionIntegration:
             "0.3",
             "skip",  # additional forges: skip
             "",
-            "n",
+            "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         clean_env = {
             "ANTHROPIC_API_KEY": "",
@@ -985,6 +1135,9 @@ class TestModelDiscoveryIntegration:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         mock_models = [
             DiscoveredModel("claude-sonnet-4-20250514", "Claude Sonnet 4"),
@@ -1015,6 +1168,9 @@ class TestModelDiscoveryIntegration:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         with (
             patch("builtins.input", side_effect=inputs),
@@ -1041,6 +1197,9 @@ class TestLlamaCppProvider:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         with (
             patch("builtins.input", side_effect=inputs),
@@ -1072,6 +1231,9 @@ class TestLlamaCppProvider:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         with (
             patch("builtins.input", side_effect=inputs),
@@ -1103,6 +1265,9 @@ class TestLlamaCppProvider:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         with (
             patch("builtins.input", side_effect=inputs),
@@ -1138,6 +1303,9 @@ class TestVLLMProvider:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         with (
             patch("builtins.input", side_effect=inputs),
@@ -1173,6 +1341,9 @@ class TestVLLMProvider:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         with (
             patch("builtins.input", side_effect=inputs),
@@ -1209,6 +1380,9 @@ class TestCustomEndpointFallback:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         clean_env = {
             "ANTHROPIC_API_KEY": "",
@@ -1244,6 +1418,9 @@ class TestCustomEndpointFallback:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         custom_env = {
             "ANTHROPIC_API_KEY": "",
@@ -1277,6 +1454,9 @@ class TestCustomEndpointFallback:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         clean_env = {
             "ANTHROPIC_API_KEY": "",
@@ -1305,6 +1485,9 @@ class TestCustomEndpointFallback:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         clean_env = {
             "ANTHROPIC_API_KEY": "",
@@ -1334,6 +1517,9 @@ class TestCustomEndpointFallback:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         clean_env = {
             "ANTHROPIC_API_KEY": "",

@@ -43,6 +43,9 @@ class TestWizardEndToEnd:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         with patch("builtins.input", side_effect=inputs):
             call_command("setup_llm", output=str(output_path))
@@ -83,6 +86,9 @@ class TestWizardEndToEnd:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         with (
             patch("builtins.input", side_effect=inputs),
@@ -123,6 +129,9 @@ class TestWizardEndToEnd:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         with (
             patch("builtins.input", side_effect=inputs),
@@ -186,6 +195,10 @@ class TestWizardEndToEnd:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "y",  # coderabbit: yes
+            "n",  # coderabbit remote: no (ssh detected via patched which)
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
         ]
         with (
             patch("builtins.input", side_effect=inputs),
