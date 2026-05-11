@@ -415,9 +415,9 @@ class TestSetupLLMCommand:
         assert "port" not in remote
 
     def test_coderabbit_remote_ssh_custom_command_skips_port_parse(self, tmp_path: Path) -> None:
-        """With a custom ssh wrapper, the host string is passed through
-        verbatim — ``#port`` syntax is NOT parsed because wrappers may
-        treat '#' specially."""
+        """With a custom ssh wrapper, only the ``#port`` suffix is left
+        intact — ``user@`` is still parsed off the host. Wrappers may
+        treat '#' specially, so we don't second-guess it for them."""
         output_path = tmp_path / "operator.yaml"
         inputs = [
             "testuser",
@@ -447,6 +447,140 @@ class TestSetupLLMCommand:
         assert remote["user"] == "frank"
         assert "port" not in remote
         assert remote["ssh_command"] == "corp-ssh-helper"
+
+    def test_coderabbit_remote_ssh_ssh_with_args_still_parses_port(self, tmp_path: Path) -> None:
+        """Operator-entered ``ssh -F /path/to/config`` is still the bare
+        ssh binary — host syntax with ``#port`` must keep working."""
+        output_path = tmp_path / "operator.yaml"
+        inputs = [
+            "testuser",
+            "direct",
+            "7",
+            "skip",
+            "",
+            "y",
+            "y",
+            "ssh -F /tmp/conf",  # first argv element is ssh -> not a wrapper
+            "frank@review.example.com#2222",
+            "",
+            "",
+            "n",
+            "n",
+            "n",
+        ]
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch("shutil.which", return_value="/usr/bin/coderabbit"),
+            _NO_DISCOVERY,
+        ):
+            call_command("setup_llm", output=str(output_path))
+
+        remote = yaml.safe_load(output_path.read_text())["coderabbit"]["remote"]
+        assert remote["host"] == "review.example.com"
+        assert remote["port"] == 2222
+        # And nothing got written to ssh_command because basename is "ssh".
+        assert "ssh_command" not in remote
+
+    def test_coderabbit_remote_ssh_absolute_ssh_path_treated_as_default(
+        self, tmp_path: Path
+    ) -> None:
+        """``/usr/bin/ssh`` is still ssh — basename check, not full string."""
+        output_path = tmp_path / "operator.yaml"
+        inputs = [
+            "testuser",
+            "direct",
+            "7",
+            "skip",
+            "",
+            "y",
+            "y",
+            "/usr/bin/ssh",
+            "frank@review.example.com#2222",
+            "",
+            "",
+            "n",
+            "n",
+            "n",
+        ]
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch("shutil.which", return_value="/usr/bin/coderabbit"),
+            _NO_DISCOVERY,
+        ):
+            call_command("setup_llm", output=str(output_path))
+
+        remote = yaml.safe_load(output_path.read_text())["coderabbit"]["remote"]
+        assert remote["port"] == 2222
+        assert "ssh_command" not in remote
+
+    def test_coderabbit_remote_ssh_out_of_range_port_dropped(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """An out-of-range ``#port`` suffix is dropped with a warning so
+        the on-disk YAML always round-trips through Pydantic validation."""
+        output_path = tmp_path / "operator.yaml"
+        inputs = [
+            "testuser",
+            "direct",
+            "7",
+            "skip",
+            "",
+            "y",
+            "y",
+            "",  # default ssh
+            "frank@review.example.com#70000",
+            "",
+            "",
+            "n",
+            "n",
+            "n",
+        ]
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch("shutil.which", return_value="/usr/bin/coderabbit"),
+            _NO_DISCOVERY,
+        ):
+            call_command("setup_llm", output=str(output_path))
+
+        remote = yaml.safe_load(output_path.read_text())["coderabbit"]["remote"]
+        assert remote["host"] == "review.example.com"
+        assert remote["user"] == "frank"
+        assert "port" not in remote
+        captured = capsys.readouterr().out
+        assert "70000" in captured and "out of range" in captured
+
+    def test_coderabbit_remote_ssh_non_integer_port_dropped(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A non-integer ``#port`` suffix is dropped with a warning."""
+        output_path = tmp_path / "operator.yaml"
+        inputs = [
+            "testuser",
+            "direct",
+            "7",
+            "skip",
+            "",
+            "y",
+            "y",
+            "",
+            "frank@review.example.com#abc",
+            "",
+            "",
+            "n",
+            "n",
+            "n",
+        ]
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch("shutil.which", return_value="/usr/bin/coderabbit"),
+            _NO_DISCOVERY,
+        ):
+            call_command("setup_llm", output=str(output_path))
+
+        remote = yaml.safe_load(output_path.read_text())["coderabbit"]["remote"]
+        assert remote["host"] == "review.example.com"
+        assert "port" not in remote
+        assert "abc" in capsys.readouterr().out
 
     def test_agent_feedback_enabled(self, tmp_path: Path) -> None:
         output_path = tmp_path / "operator.yaml"

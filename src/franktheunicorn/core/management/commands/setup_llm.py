@@ -1003,11 +1003,15 @@ class Command(BaseCommand):
             return None
 
         # Custom ssh launcher (corp-ssh-helper, tsh, ...). We ask first
-        # because it changes what host syntax we accept: with bare ``ssh``
-        # we parse ``user@host#port``; with a custom wrapper we leave the
-        # host string alone since the wrapper may have its own conventions.
+        # because it changes what host syntax we can safely parse: with
+        # bare ``ssh`` we accept a ``#port`` suffix; with a custom wrapper
+        # we leave the ``#port`` suffix intact since wrappers may treat
+        # '#' specially. Match the model validator's whitespace-split,
+        # then basename the first arg so ``"ssh -F foo"`` and
+        # ``"/usr/bin/ssh"`` still count as the default ssh binary.
         ssh_command = self._ask("    Custom ssh command (Enter for 'ssh'): ", default="").strip()
-        using_custom_ssh = bool(ssh_command) and ssh_command != "ssh"
+        ssh_parts = ssh_command.split()
+        using_custom_ssh = bool(ssh_parts) and os.path.basename(ssh_parts[0]) != "ssh"
 
         if using_custom_ssh:
             host_prompt = "    Remote host (user@host or host): "
@@ -1025,16 +1029,20 @@ class Command(BaseCommand):
         if "@" in host:
             user, _, host = host.partition("@")
         # ``#port`` suffix is only parsed for the default ``ssh`` binary;
-        # custom wrappers may interpret '#' differently, so leave their
-        # host strings verbatim.
+        # custom wrappers may interpret '#' differently, so we leave the
+        # ``#...`` suffix in the host string for them to handle.
         if not using_custom_ssh and "#" in host:
             host, _, port_str = host.partition("#")
             try:
-                port = int(port_str)
-            except ValueError:
+                parsed_port = int(port_str)
+                if not 1 <= parsed_port <= 65535:
+                    msg = f"port {parsed_port} out of range 1-65535"
+                    raise ValueError(msg)
+                port = parsed_port
+            except ValueError as exc:
                 self.stdout.write(
                     self.style.WARNING(
-                        f"    Could not parse port {port_str!r}; ignoring port suffix.\n"
+                        f"    Could not parse port {port_str!r}: {exc}; ignoring port suffix.\n"
                     )
                 )
                 port = 0
