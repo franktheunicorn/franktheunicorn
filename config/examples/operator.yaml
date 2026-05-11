@@ -139,15 +139,26 @@ digest_enabled: false
 #     user: "frank"
 #     ssh_key_path: "/home/holden/.ssh/frank_review"
 #     ssh_extra_args: ["-o", "StrictHostKeyChecking=no"]
+#     # Custom ssh launcher -- some companies wrap ssh in their own helper
+#     # (corp-ssh-helper, teleport's tsh, assh, ...). Defaults to "ssh".
+#     # Accepts a string ("corp-ssh-helper --quiet") or a list
+#     # (["tsh", "ssh", "--cluster=prod"]).
+#     ssh_command: "ssh"
 #     remote_workspace_dir: "/srv/frank-remote"
 #     clone_url_template: "https://github.com/{owner}/{repo}.git"
 #     prepare_timeout_seconds: 600
+#
+# `cli_path` for each tool below accepts either a bare binary name
+# ("coderabbit") or a full command with arguments ("uv run --with
+# coderabbit coderabbit", "docker run --rm myorg/coderabbit", "corp-runner
+# coderabbit"). The string is shell-split, so quote paths containing
+# spaces: cli_path: '"/opt/my tools/coderabbit"'.
 
 # CodeRabbit CLI integration
 # Install: npm install -g coderabbitai (or see https://docs.coderabbit.ai/cli)
 # coderabbit:
 #   enabled: true
-#   cli_path: "coderabbit"
+#   cli_path: "coderabbit"             # or e.g. "uv run --with coderabbit coderabbit"
 #   extra_args: []
 #   # remote: { mode: "ssh", host: "review-worker.example.com", ... }
 
@@ -157,7 +168,7 @@ digest_enabled: false
 # remote when remote.mode == "ssh").
 # claude_cli:
 #   enabled: true
-#   cli_path: "claude"
+#   cli_path: "claude"                 # or "uv run claude", "corp-wrap claude", ...
 #   model: ""                          # empty = CLI default
 #   extra_args: []
 #   timeout_seconds: 300
@@ -169,7 +180,7 @@ digest_enabled: false
 # `<file>:<line> - [Severity] <title>` block output.
 # snowflake_review:
 #   enabled: true
-#   cli_path: "snowflake-code-review"
+#   cli_path: "snowflake-code-review"  # or "docker run --rm myorg/snowflake-cli"
 #   extra_args: []
 #   deduplicate: true
 #   # remote: { mode: "ssh", host: "review-worker.example.com", ... }

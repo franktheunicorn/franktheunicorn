@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import shlex
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -37,6 +38,11 @@ class RemoteExecutionConfig(BaseModel):
     user: str = ""
     ssh_key_path: str = ""
     ssh_extra_args: list[str] = Field(default_factory=list)
+    # Some companies wrap ssh in a custom helper (corp-ssh-helper, assh,
+    # teleport's tsh, etc.). ``ssh_command`` is the argv prefix used in
+    # place of bare ``ssh`` -- everything else (BatchMode, key path,
+    # extra args, target) is appended unchanged.
+    ssh_command: list[str] = Field(default_factory=lambda: ["ssh"])
     remote_workspace_dir: str = "~/.frank-remote"
     clone_url_template: str = "https://github.com/{owner}/{repo}.git"
     prepare_timeout_seconds: int = 600
@@ -59,6 +65,23 @@ class RemoteExecutionConfig(BaseModel):
             raise ValueError(msg)
         return v
 
+    @field_validator("ssh_command", mode="before")
+    @classmethod
+    def ssh_command_normalize(cls, v: object) -> list[str]:
+        # Accept a string for ergonomics ("corp-ssh-helper --quiet") and
+        # split on whitespace; lists pass through unchanged.
+        if isinstance(v, str):
+            parts = v.split()
+        elif isinstance(v, list):
+            parts = [str(p).strip() for p in v if str(p).strip()]
+        else:
+            msg = "ssh_command must be a string or list of strings"
+            raise ValueError(msg)
+        if not parts:
+            msg = "ssh_command must contain at least one argument"
+            raise ValueError(msg)
+        return parts
+
     @field_validator("prepare_timeout_seconds")
     @classmethod
     def prepare_timeout_positive(cls, v: int) -> int:
@@ -75,6 +98,34 @@ class RemoteExecutionConfig(BaseModel):
         return self
 
 
+def _parse_cli_path(cli_path: str) -> list[str]:
+    """Split a ``cli_path`` string into argv via shell quoting rules.
+
+    Lets operators wrap a CLI in a launcher (``corp-review-runner``,
+    ``uv run --with coderabbit coderabbit``, ``docker run --rm
+    myorg/coderabbit``, ...) without inventing a separate field. A bare
+    binary name still parses to a one-element list, so simple configs
+    are unchanged.
+    """
+    parts = shlex.split(cli_path) if cli_path else []
+    if not parts:
+        msg = "cli_path must contain at least one argument"
+        raise ValueError(msg)
+    return parts
+
+
+def _validate_cli_path(v: str) -> str:
+    """Pydantic-friendly validator for ``cli_path`` fields."""
+    if not v.strip():
+        msg = "cli_path must not be empty"
+        raise ValueError(msg)
+    try:
+        _parse_cli_path(v)
+    except ValueError:
+        raise
+    return v
+
+
 class CodeRabbitConfig(BaseModel):
     """Config for CodeRabbit CLI integration."""
 
@@ -83,6 +134,16 @@ class CodeRabbitConfig(BaseModel):
     extra_args: list[str] = Field(default_factory=list)
     deduplicate: bool = True
     remote: RemoteExecutionConfig = Field(default_factory=RemoteExecutionConfig)
+
+    @field_validator("cli_path")
+    @classmethod
+    def cli_path_parseable(cls, v: str) -> str:
+        return _validate_cli_path(v)
+
+    @property
+    def cli_argv(self) -> list[str]:
+        """``cli_path`` split into argv -- supports ``"cmd arg1 arg2"``."""
+        return _parse_cli_path(self.cli_path)
 
 
 class ClaudeCLIConfig(BaseModel):
@@ -111,6 +172,16 @@ class ClaudeCLIConfig(BaseModel):
             raise ValueError(msg)
         return v
 
+    @field_validator("cli_path")
+    @classmethod
+    def cli_path_parseable(cls, v: str) -> str:
+        return _validate_cli_path(v)
+
+    @property
+    def cli_argv(self) -> list[str]:
+        """``cli_path`` split into argv -- supports ``"cmd arg1 arg2"``."""
+        return _parse_cli_path(self.cli_path)
+
 
 class SnowflakeReviewConfig(BaseModel):
     """Config for the Snowflake code review CLI integration.
@@ -125,6 +196,16 @@ class SnowflakeReviewConfig(BaseModel):
     extra_args: list[str] = Field(default_factory=list)
     deduplicate: bool = True
     remote: RemoteExecutionConfig = Field(default_factory=RemoteExecutionConfig)
+
+    @field_validator("cli_path")
+    @classmethod
+    def cli_path_parseable(cls, v: str) -> str:
+        return _validate_cli_path(v)
+
+    @property
+    def cli_argv(self) -> list[str]:
+        """``cli_path`` split into argv -- supports ``"cmd arg1 arg2"``."""
+        return _parse_cli_path(self.cli_path)
 
 
 class JiraConfig(BaseModel):

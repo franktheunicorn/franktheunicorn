@@ -282,6 +282,69 @@ class TestSetupLLMCommand:
         config = yaml.safe_load(output_path.read_text())
         assert config["snowflake_review"]["enabled"] is True
 
+    def test_coderabbit_remote_ssh_with_custom_command(self, tmp_path: Path) -> None:
+        """Wizard accepts a custom ssh launcher when configuring SSH remote."""
+        output_path = tmp_path / "operator.yaml"
+        inputs = [
+            "testuser",  # github_username
+            "direct",  # review_style
+            "7",  # provider: skip/stub
+            "skip",  # additional forges: skip
+            "",  # projects: skip
+            "y",  # coderabbit: yes
+            "y",  # coderabbit remote: yes
+            "frank@review.example.com",  # remote host
+            "",  # ssh key path: default
+            "corp-ssh-helper",  # custom ssh command
+            "",  # remote workspace dir: default
+            "n",  # claude_cli: no
+            "n",  # snowflake_review: no
+            "n",  # agent_feedback: no
+        ]
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch("shutil.which", return_value="/usr/bin/coderabbit"),
+            _NO_DISCOVERY,
+        ):
+            call_command("setup_llm", output=str(output_path))
+
+        config = yaml.safe_load(output_path.read_text())
+        remote = config["coderabbit"]["remote"]
+        assert remote["mode"] == "ssh"
+        assert remote["host"] == "review.example.com"
+        assert remote["user"] == "frank"
+        assert remote["ssh_command"] == "corp-ssh-helper"
+
+    def test_coderabbit_remote_ssh_default_command_omitted(self, tmp_path: Path) -> None:
+        """When the operator accepts the default 'ssh', the wizard omits
+        ssh_command so the config stays clean."""
+        output_path = tmp_path / "operator.yaml"
+        inputs = [
+            "testuser",
+            "direct",
+            "7",
+            "skip",
+            "",
+            "y",  # coderabbit: yes
+            "y",  # coderabbit remote: yes
+            "frank@review.example.com",
+            "",  # ssh key path
+            "",  # ssh_command: default 'ssh' -> empty answer
+            "",  # workspace dir
+            "n",  # claude_cli
+            "n",  # snowflake_review
+            "n",  # agent_feedback
+        ]
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch("shutil.which", return_value="/usr/bin/coderabbit"),
+            _NO_DISCOVERY,
+        ):
+            call_command("setup_llm", output=str(output_path))
+
+        config = yaml.safe_load(output_path.read_text())
+        assert "ssh_command" not in config["coderabbit"]["remote"]
+
     def test_agent_feedback_enabled(self, tmp_path: Path) -> None:
         output_path = tmp_path / "operator.yaml"
         inputs = [

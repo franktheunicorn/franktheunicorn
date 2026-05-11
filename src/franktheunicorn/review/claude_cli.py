@@ -128,7 +128,7 @@ def run_claude_cli_review(
 
     prompt = _PROMPT_TEMPLATE.format(diff=diff)
 
-    cmd = [config.cli_path]
+    cmd = list(config.cli_argv)
     if config.model:
         cmd += ["--model", config.model]
     cmd += list(config.extra_args)

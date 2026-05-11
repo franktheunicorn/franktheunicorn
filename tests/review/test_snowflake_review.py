@@ -160,3 +160,17 @@ class TestSnowflakeRemoteConfig:
     def test_ssh_mode_accepts_host(self) -> None:
         cfg = RemoteExecutionConfig(mode="ssh", host="review.example.com")
         assert cfg.host == "review.example.com"
+
+
+class TestSnowflakeCliArgv:
+    def test_plain_binary(self) -> None:
+        cfg = SnowflakeReviewConfig(cli_path="snowflake-code-review")
+        assert cfg.cli_argv == ["snowflake-code-review"]
+
+    def test_wrapper_command_splits(self) -> None:
+        cfg = SnowflakeReviewConfig(cli_path="docker run --rm myorg/snowflake-cli")
+        assert cfg.cli_argv == ["docker", "run", "--rm", "myorg/snowflake-cli"]
+
+    def test_empty_rejected(self) -> None:
+        with pytest.raises(ValueError, match="cli_path"):
+            SnowflakeReviewConfig(cli_path="")

@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
 from franktheunicorn.config.models import RemoteExecutionConfig
 from franktheunicorn.review.tool_executor import (
     ExecResult,
@@ -166,6 +168,93 @@ class TestRemoteSSHExecutorPrepareRepo:
         script = mock_run.call_args.args[0][-1]
         assert "/srv/frank/acme/widget" in script
         assert "$HOME" not in script
+
+
+class TestRemoteSSHExecutorCustomCommand:
+    """Some companies wrap ssh in a corporate helper (corp-ssh-helper,
+    teleport's tsh, etc.). ``ssh_command`` must take the place of bare
+    ``ssh`` while everything else (BatchMode, key path, extra args)
+    appends as before."""
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_custom_ssh_command_replaces_ssh_binary(self, mock_run: Any) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        executor = RemoteSSHExecutor(
+            config=_ssh_config(ssh_command=["corp-ssh-helper"]),
+        )
+        executor.run(["true"], cwd="/srv/frank")
+        argv = mock_run.call_args.args[0]
+        assert argv[0] == "corp-ssh-helper"
+        assert "ssh" not in argv[:1]  # not "ssh" anymore
+        assert "-o" in argv and "BatchMode=yes" in argv
+        assert "frank@review.example.com" in argv
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_custom_ssh_command_supports_multi_arg_wrapper(self, mock_run: Any) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        executor = RemoteSSHExecutor(
+            config=_ssh_config(ssh_command=["tsh", "ssh", "--cluster=prod"]),
+        )
+        executor.run(["true"], cwd="/srv/frank")
+        argv = mock_run.call_args.args[0]
+        assert argv[:3] == ["tsh", "ssh", "--cluster=prod"]
+        # BatchMode etc. comes after the wrapper prefix.
+        assert argv[3:5] == ["-o", "BatchMode=yes"]
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_custom_ssh_command_accepts_string(self, mock_run: Any) -> None:
+        """A bare string for ergonomics -- shlex would be cleaner but
+        most configs come from YAML, so whitespace-split is enough."""
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        cfg = RemoteExecutionConfig(
+            mode="ssh", host="h.example.com", ssh_command="corp-ssh-helper --quiet"
+        )
+        executor = RemoteSSHExecutor(config=cfg)
+        executor.run(["true"], cwd="/srv/frank")
+        argv = mock_run.call_args.args[0]
+        assert argv[:2] == ["corp-ssh-helper", "--quiet"]
+
+    def test_empty_ssh_command_rejected(self) -> None:
+        with pytest.raises(ValueError, match="ssh_command"):
+            RemoteExecutionConfig(mode="ssh", host="h", ssh_command=[])
+
+    def test_empty_string_ssh_command_rejected(self) -> None:
+        with pytest.raises(ValueError, match="ssh_command"):
+            RemoteExecutionConfig(mode="ssh", host="h", ssh_command="")
+
+    def test_default_ssh_command_is_plain_ssh(self) -> None:
+        cfg = RemoteExecutionConfig(mode="ssh", host="h")
+        assert cfg.ssh_command == ["ssh"]
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_custom_ssh_command_used_for_prepare_repo(self, mock_run: Any) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        executor = RemoteSSHExecutor(
+            config=_ssh_config(ssh_command=["corp-ssh-helper"]),
+        )
+        executor.prepare_repo("acme", "widget")
+        argv = mock_run.call_args.args[0]
+        assert argv[0] == "corp-ssh-helper"
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_custom_ssh_command_missing_logs_binary_name(
+        self, mock_run: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        mock_run.side_effect = FileNotFoundError("no such binary")
+        executor = RemoteSSHExecutor(
+            config=_ssh_config(ssh_command=["corp-ssh-helper"]),
+        )
+        with caplog.at_level("WARNING"):
+            assert executor.run(["true"], cwd="/srv/frank") is None
+        assert "corp-ssh-helper" in caplog.text
 
 
 class TestRemoteSSHExecutorRun:

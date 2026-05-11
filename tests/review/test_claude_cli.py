@@ -203,3 +203,33 @@ class TestCreateDraftsFromClaudeCLI:
         findings = [ClaudeCLIFinding("a.py", 1, "blocker", "T", "T")]
         drafts = create_drafts_from_claude_cli(db_pr, findings)
         assert drafts[0].confidence == pytest.approx(0.5)
+
+
+class TestClaudeCLICliArgv:
+    """``cli_path`` can be a wrapper command like ``uv run claude`` so
+    operators don't need to bake the CLI into their PATH."""
+
+    def test_plain_binary(self) -> None:
+        cfg = ClaudeCLIConfig(cli_path="claude")
+        assert cfg.cli_argv == ["claude"]
+
+    def test_wrapper_command_splits(self) -> None:
+        cfg = ClaudeCLIConfig(cli_path="uv run claude")
+        assert cfg.cli_argv == ["uv", "run", "claude"]
+
+    def test_wrapper_propagates_to_subprocess(self) -> None:
+        diff_result = ExecResult(returncode=0, stdout="diff --git a/x b/x\n+pass\n", stderr="")
+        cli_result = ExecResult(returncode=0, stdout="", stderr="")
+        executor = _executor_returning(diff_result, cli_result)
+
+        cfg = ClaudeCLIConfig(enabled=True, cli_path="corp-wrap claude --headless")
+        run_claude_cli_review(cwd="/tmp/repo", base_commit="abc", config=cfg, executor=executor)
+
+        # The second executor.run call is the actual CLI invocation.
+        cli_call = executor.run.call_args_list[1]
+        cmd = cli_call.args[0]
+        assert cmd[:3] == ["corp-wrap", "claude", "--headless"]
+
+    def test_empty_rejected(self) -> None:
+        with pytest.raises(ValueError, match="cli_path"):
+            ClaudeCLIConfig(cli_path="")

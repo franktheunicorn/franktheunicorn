@@ -144,7 +144,7 @@ class RemoteSSHExecutor:
         return self.config.host
 
     def _ssh_command(self) -> list[str]:
-        cmd = ["ssh", "-o", "BatchMode=yes"]
+        cmd = [*self.config.ssh_command, "-o", "BatchMode=yes"]
         if self.config.ssh_key_path:
             cmd += ["-i", self.config.ssh_key_path]
         cmd += list(self.config.ssh_extra_args)
@@ -209,7 +209,10 @@ class RemoteSSHExecutor:
                 timeout=self.config.prepare_timeout_seconds,
             )
         except FileNotFoundError:
-            logger.warning("ssh binary not on PATH; remote execution unavailable")
+            logger.warning(
+                "ssh binary %r not on PATH; remote execution unavailable",
+                self.config.ssh_command[0],
+            )
             return None
         except subprocess.TimeoutExpired:
             logger.warning(
@@ -256,7 +259,10 @@ class RemoteSSHExecutor:
                 input=stdin,
             )
         except FileNotFoundError:
-            logger.warning("ssh binary not on PATH; remote execution unavailable")
+            logger.warning(
+                "ssh binary %r not on PATH; remote execution unavailable",
+                self.config.ssh_command[0],
+            )
             return None
         except subprocess.TimeoutExpired:
             logger.warning(
