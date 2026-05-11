@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from pytest_httpx import HTTPXMock
 
 from franktheunicorn.backends.base import ReviewBody, ReviewComment
-from franktheunicorn.backends.github import GitHubClient, infer_github_username
+from franktheunicorn.backends.github import (
+    GitHubClient,
+    _list_pull_requests_via_scrape,
+    infer_github_username,
+)
+
+_FIXTURES = Path(__file__).parent / "data_access" / "github" / "fixtures"
 
 
 class TestGitHubClient:
@@ -108,6 +116,154 @@ class TestGitHubClient:
         httpx_mock.add_response(text="diff --git a/file.py b/file.py\n")
         result = client.get_pull_request_diff("org", "repo", 42)
         assert "diff --git" in result
+
+
+class TestListPullRequestsAuthFallback:
+    """list_pull_requests falls back to scrape on 401/403 and logs suggestions."""
+
+    @pytest.fixture
+    def client(self) -> GitHubClient:
+        c = GitHubClient(token="bad-token", base_url="https://api.github.test")
+        yield c
+        c.close()
+
+    def test_401_logs_suggestions(
+        self, httpx_mock: HTTPXMock, client: GitHubClient, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        html = (_FIXTURES / "pulls_listing_scrape.html").read_text()
+        httpx_mock.add_response(
+            url="https://api.github.test/repos/apache/spark/pulls?state=open&per_page=50",
+            status_code=401,
+        )
+        httpx_mock.add_response(
+            url="https://github.com/apache/spark/pulls?q=is%3Apr&state=open",
+            text=html,
+        )
+        import logging
+
+        with caplog.at_level(logging.ERROR, logger="franktheunicorn.backends.github"):
+            client.list_pull_requests("apache", "spark")
+
+        combined = " ".join(caplog.messages)
+        assert "401" in combined
+        assert "GITHUB_TOKEN" in combined
+        assert "repo" in combined.lower()
+
+    def test_401_returns_scraped_prs(self, httpx_mock: HTTPXMock, client: GitHubClient) -> None:
+        html = (_FIXTURES / "pulls_listing_scrape.html").read_text()
+        httpx_mock.add_response(
+            url="https://api.github.test/repos/apache/spark/pulls?state=open&per_page=50",
+            status_code=401,
+        )
+        httpx_mock.add_response(
+            url="https://github.com/apache/spark/pulls?q=is%3Apr&state=open",
+            text=html,
+        )
+        results = client.list_pull_requests("apache", "spark")
+        assert len(results) == 2
+        numbers = {r["number"] for r in results}
+        assert numbers == {42, 99}
+        for r in results:
+            assert "title" in r
+            assert "user" in r
+            assert "html_url" in r
+
+    def test_401_scrape_also_fails_returns_empty(
+        self, httpx_mock: HTTPXMock, client: GitHubClient
+    ) -> None:
+        httpx_mock.add_response(
+            url="https://api.github.test/repos/apache/spark/pulls?state=open&per_page=50",
+            status_code=401,
+        )
+        httpx_mock.add_response(
+            url="https://github.com/apache/spark/pulls?q=is%3Apr&state=open",
+            status_code=503,
+        )
+        results = client.list_pull_requests("apache", "spark")
+        assert results == []
+
+    def test_403_logs_forbidden_and_falls_back(
+        self, httpx_mock: HTTPXMock, client: GitHubClient, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        html = (_FIXTURES / "pulls_listing_scrape.html").read_text()
+        httpx_mock.add_response(
+            url="https://api.github.test/repos/apache/spark/pulls?state=open&per_page=50",
+            status_code=403,
+            headers={"X-OAuth-Scopes": "read:user"},
+        )
+        httpx_mock.add_response(
+            url="https://github.com/apache/spark/pulls?q=is%3Apr&state=open",
+            text=html,
+        )
+        import logging
+
+        with caplog.at_level(logging.ERROR, logger="franktheunicorn.backends.github"):
+            results = client.list_pull_requests("apache", "spark")
+
+        combined = " ".join(caplog.messages)
+        assert "403" in combined
+        assert "public_repo" in combined or "repo" in combined
+        # Should include the granted scopes in the hint
+        assert "read:user" in combined
+        assert len(results) == 2
+
+    def test_403_no_scope_header_still_logs(
+        self, httpx_mock: HTTPXMock, client: GitHubClient, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        html = (_FIXTURES / "pulls_listing_scrape.html").read_text()
+        httpx_mock.add_response(
+            url="https://api.github.test/repos/apache/spark/pulls?state=open&per_page=50",
+            status_code=403,
+        )
+        httpx_mock.add_response(
+            url="https://github.com/apache/spark/pulls?q=is%3Apr&state=open",
+            text=html,
+        )
+        import logging
+
+        with caplog.at_level(logging.ERROR, logger="franktheunicorn.backends.github"):
+            results = client.list_pull_requests("apache", "spark")
+
+        combined = " ".join(caplog.messages)
+        assert "403" in combined
+        # Fine-grained PAT note should appear
+        assert "Pull requests" in combined
+        assert len(results) == 2
+
+
+class TestListPullRequestsViaScrape:
+    """Unit tests for the standalone scrape helper."""
+
+    def test_parses_pr_list_from_fixture(self, httpx_mock: HTTPXMock) -> None:
+        html = (_FIXTURES / "pulls_listing_scrape.html").read_text()
+        httpx_mock.add_response(
+            url="https://github.com/apache/spark/pulls?q=is%3Apr&state=open",
+            text=html,
+        )
+        results = _list_pull_requests_via_scrape("apache", "spark")
+        assert len(results) == 2
+        pr42 = next(r for r in results if r["number"] == 42)
+        assert pr42["title"] == "Fix flaky test in scheduler module"
+        assert pr42["user"]["login"] == "alice-dev"
+        assert pr42["state"] == "open"
+        assert pr42["html_url"] == "https://github.com/apache/spark/pull/42"
+        assert pr42["diff_url"] == "https://github.com/apache/spark/pull/42.diff"
+
+    def test_empty_html_returns_empty_list(self, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_response(
+            url="https://github.com/apache/spark/pulls?q=is%3Apr&state=open",
+            text="<html><body><p>No results</p></body></html>",
+        )
+        results = _list_pull_requests_via_scrape("apache", "spark")
+        assert results == []
+
+    def test_http_error_returns_empty_list(self, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_response(
+            url="https://github.com/apache/spark/pulls?q=is%3Apr&state=open",
+            status_code=503,
+        )
+        results = _list_pull_requests_via_scrape("apache", "spark")
+        assert results == []
 
 
 class TestInferGitHubUsername:

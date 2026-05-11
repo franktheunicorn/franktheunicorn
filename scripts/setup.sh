@@ -69,28 +69,53 @@ set_env() {
 }
 
 validate_github_token() {
-    # Validate a GitHub token by hitting GET /user. Returns 0 on success.
+    # Validate a GitHub token by hitting GET /user and checking PR-listing scopes.
     local token="$1"
     if ! command -v curl &>/dev/null; then
         warn "curl not found — skipping GitHub token validation"
         return 0
     fi
-    local http_code
-    http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+
+    local response_headers
+    response_headers=$(curl -sI \
         -H "Authorization: token ${token}" \
         -H "Accept: application/vnd.github+json" \
         https://api.github.com/user 2>/dev/null) || {
         warn "Could not reach api.github.com — skipping token validation"
         return 0
     }
-    if [ "$http_code" = "200" ]; then
-        ok "GitHub token is valid"
-        return 0
-    else
+
+    local http_code
+    http_code=$(echo "$response_headers" | grep -i "^HTTP/" | tail -1 | awk '{print $2}')
+
+    if [ "$http_code" != "200" ]; then
         err "GitHub token validation failed (HTTP $http_code)"
-        err "Check that the token is correct and has repo + read:org scopes."
+        err "Check that the token is correct and not expired."
+        err "Create a new token at: https://github.com/settings/tokens/new"
+        err "Required scopes: public_repo (public repos) or repo (private repos), read:org"
         return 1
     fi
+
+    # Check granted scopes from X-OAuth-Scopes header (classic PATs only;
+    # fine-grained PATs omit this header — skip scope check if absent).
+    local granted_scopes
+    granted_scopes=$(echo "$response_headers" | grep -i "^X-OAuth-Scopes:" | sed 's/^[^:]*: *//' | tr -d '\r')
+
+    if [ -n "$granted_scopes" ]; then
+        # Verify at least one of: repo, public_repo
+        if ! echo "$granted_scopes" | grep -qE '(^|, )(repo|public_repo)(,|$)'; then
+            err "Token is valid but lacks the scope needed to list pull requests."
+            err "Granted scopes: ${granted_scopes:-'(none)'}"
+            err "Add 'public_repo' (public repos) or 'repo' (private repos) at:"
+            err "  https://github.com/settings/tokens"
+            return 1
+        fi
+        ok "GitHub token is valid (scopes: ${granted_scopes})"
+    else
+        # Fine-grained PAT — no X-OAuth-Scopes header; can't verify scopes here.
+        ok "GitHub token is valid (fine-grained PAT — ensure 'Pull requests: Read' permission is set)"
+    fi
+    return 0
 }
 
 infer_github_username() {
