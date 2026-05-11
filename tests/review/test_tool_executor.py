@@ -257,6 +257,40 @@ class TestRemoteSSHExecutorCustomCommand:
         assert "corp-ssh-helper" in caplog.text
 
 
+class TestRemoteSSHExecutorPort:
+    """``port`` populates ``-p <port>`` in the ssh argv. Zero means
+    omit the flag entirely (let ssh / ~/.ssh/config pick the default)."""
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_port_emits_dash_p_flag(self, mock_run: Any) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        executor = RemoteSSHExecutor(config=_ssh_config(port=2222))
+        executor.run(["true"], cwd="/srv/frank")
+        argv = mock_run.call_args.args[0]
+        assert "-p" in argv
+        idx = argv.index("-p")
+        assert argv[idx + 1] == "2222"
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_default_port_omits_dash_p_flag(self, mock_run: Any) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        executor = RemoteSSHExecutor(config=_ssh_config())  # port defaults to 0
+        executor.run(["true"], cwd="/srv/frank")
+        assert "-p" not in mock_run.call_args.args[0]
+
+    def test_negative_port_rejected(self) -> None:
+        with pytest.raises(ValueError, match="port"):
+            RemoteExecutionConfig(mode="ssh", host="h", port=-1)
+
+    def test_port_out_of_range_rejected(self) -> None:
+        with pytest.raises(ValueError, match="port"):
+            RemoteExecutionConfig(mode="ssh", host="h", port=70_000)
+
+
 class TestRemoteSSHExecutorRun:
     @patch("franktheunicorn.review.tool_executor.subprocess.run")
     def test_run_quotes_args_for_remote_shell(self, mock_run: Any) -> None:

@@ -283,7 +283,11 @@ class TestSetupLLMCommand:
         assert config["snowflake_review"]["enabled"] is True
 
     def test_coderabbit_remote_ssh_with_custom_command(self, tmp_path: Path) -> None:
-        """Wizard accepts a custom ssh launcher when configuring SSH remote."""
+        """Wizard accepts a custom ssh launcher when configuring SSH remote.
+
+        Custom ssh command is asked first because it changes what host
+        syntax we accept downstream.
+        """
         output_path = tmp_path / "operator.yaml"
         inputs = [
             "testuser",  # github_username
@@ -293,9 +297,9 @@ class TestSetupLLMCommand:
             "",  # projects: skip
             "y",  # coderabbit: yes
             "y",  # coderabbit remote: yes
+            "corp-ssh-helper",  # custom ssh command (asked first)
             "frank@review.example.com",  # remote host
             "",  # ssh key path: default
-            "corp-ssh-helper",  # custom ssh command
             "",  # remote workspace dir: default
             "n",  # claude_cli: no
             "n",  # snowflake_review: no
@@ -327,9 +331,9 @@ class TestSetupLLMCommand:
             "",
             "y",  # coderabbit: yes
             "y",  # coderabbit remote: yes
+            "",  # ssh_command: default 'ssh' -> empty answer
             "frank@review.example.com",
             "",  # ssh key path
-            "",  # ssh_command: default 'ssh' -> empty answer
             "",  # workspace dir
             "n",  # claude_cli
             "n",  # snowflake_review
@@ -344,6 +348,105 @@ class TestSetupLLMCommand:
 
         config = yaml.safe_load(output_path.read_text())
         assert "ssh_command" not in config["coderabbit"]["remote"]
+
+    def test_coderabbit_remote_ssh_parses_user_host_port(self, tmp_path: Path) -> None:
+        """With the default ssh binary, ``user@host#port`` is parsed into
+        ``user``, ``host``, and ``port`` fields."""
+        output_path = tmp_path / "operator.yaml"
+        inputs = [
+            "testuser",
+            "direct",
+            "7",
+            "skip",
+            "",
+            "y",  # coderabbit: yes
+            "y",  # coderabbit remote: yes
+            "",  # ssh_command: default ssh
+            "frank@review.example.com#2222",  # user@host#port
+            "",  # ssh key path
+            "",  # workspace dir
+            "n",
+            "n",
+            "n",
+        ]
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch("shutil.which", return_value="/usr/bin/coderabbit"),
+            _NO_DISCOVERY,
+        ):
+            call_command("setup_llm", output=str(output_path))
+
+        config = yaml.safe_load(output_path.read_text())
+        remote = config["coderabbit"]["remote"]
+        assert remote["host"] == "review.example.com"
+        assert remote["user"] == "frank"
+        assert remote["port"] == 2222
+
+    def test_coderabbit_remote_ssh_bare_host(self, tmp_path: Path) -> None:
+        """A bare hostname (no user, no port) is accepted and emits no
+        ``user`` or ``port`` keys."""
+        output_path = tmp_path / "operator.yaml"
+        inputs = [
+            "testuser",
+            "direct",
+            "7",
+            "skip",
+            "",
+            "y",  # coderabbit
+            "y",  # remote
+            "",  # ssh_command default
+            "review.example.com",  # bare host
+            "",  # ssh key
+            "",  # workspace
+            "n",
+            "n",
+            "n",
+        ]
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch("shutil.which", return_value="/usr/bin/coderabbit"),
+            _NO_DISCOVERY,
+        ):
+            call_command("setup_llm", output=str(output_path))
+
+        remote = yaml.safe_load(output_path.read_text())["coderabbit"]["remote"]
+        assert remote["host"] == "review.example.com"
+        assert "user" not in remote
+        assert "port" not in remote
+
+    def test_coderabbit_remote_ssh_custom_command_skips_port_parse(self, tmp_path: Path) -> None:
+        """With a custom ssh wrapper, the host string is passed through
+        verbatim — ``#port`` syntax is NOT parsed because wrappers may
+        treat '#' specially."""
+        output_path = tmp_path / "operator.yaml"
+        inputs = [
+            "testuser",
+            "direct",
+            "7",
+            "skip",
+            "",
+            "y",  # coderabbit
+            "y",  # remote
+            "corp-ssh-helper",  # custom ssh command
+            "frank@review.example.com#tag",  # would-be port suffix; left alone
+            "",
+            "",
+            "n",
+            "n",
+            "n",
+        ]
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch("shutil.which", return_value="/usr/bin/coderabbit"),
+            _NO_DISCOVERY,
+        ):
+            call_command("setup_llm", output=str(output_path))
+
+        remote = yaml.safe_load(output_path.read_text())["coderabbit"]["remote"]
+        assert remote["host"] == "review.example.com#tag"
+        assert remote["user"] == "frank"
+        assert "port" not in remote
+        assert remote["ssh_command"] == "corp-ssh-helper"
 
     def test_agent_feedback_enabled(self, tmp_path: Path) -> None:
         output_path = tmp_path / "operator.yaml"

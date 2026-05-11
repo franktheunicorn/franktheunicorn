@@ -35,6 +35,9 @@ class RemoteExecutionConfig(BaseModel):
 
     mode: str = "local"
     host: str = ""
+    # Optional TCP port. 0 means "no -p flag" (use ssh's default / ~/.ssh/config).
+    # When set, emitted as ``-p <port>`` in the ssh argv.
+    port: int = 0
     user: str = ""
     ssh_key_path: str = ""
     ssh_extra_args: list[str] = Field(default_factory=list)
@@ -87,6 +90,14 @@ class RemoteExecutionConfig(BaseModel):
     def prepare_timeout_positive(cls, v: int) -> int:
         if v <= 0:
             msg = "prepare_timeout_seconds must be positive"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("port")
+    @classmethod
+    def port_in_range(cls, v: int) -> int:
+        if v < 0 or v > 65535:
+            msg = f"remote.port must be between 0 and 65535, got {v}"
             raise ValueError(msg)
         return v
 
