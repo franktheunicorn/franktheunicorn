@@ -1002,7 +1002,22 @@ class Command(BaseCommand):
         if enable.lower() not in ("y", "yes"):
             return None
 
-        host = self._ask("    Remote host (user@host or host): ", default="").strip()
+        # Custom ssh launcher (corp-ssh-helper, tsh, ...). We ask first
+        # because it changes what host syntax we can safely parse: with
+        # bare ``ssh`` we accept a ``#port`` suffix; with a custom wrapper
+        # we leave the ``#port`` suffix intact since wrappers may treat
+        # '#' specially. Match the model validator's whitespace-split,
+        # then basename the first arg so ``"ssh -F foo"`` and
+        # ``"/usr/bin/ssh"`` still count as the default ssh binary.
+        ssh_command = self._ask("    Custom ssh command (Enter for 'ssh'): ", default="").strip()
+        ssh_parts = ssh_command.split()
+        using_custom_ssh = bool(ssh_parts) and os.path.basename(ssh_parts[0]) != "ssh"
+
+        if using_custom_ssh:
+            host_prompt = "    Remote host (user@host or host): "
+        else:
+            host_prompt = "    Remote host (user@host, host, or user@host#port): "
+        host = self._ask(host_prompt, default="").strip()
         if not host:
             self.stdout.write(
                 self.style.WARNING("    No host given; falling back to local execution.\n")
@@ -1010,20 +1025,38 @@ class Command(BaseCommand):
             return None
 
         user = ""
+        port = 0
         if "@" in host:
             user, _, host = host.partition("@")
+        # ``#port`` suffix is only parsed for the default ``ssh`` binary;
+        # custom wrappers may interpret '#' differently, so we leave the
+        # ``#...`` suffix in the host string for them to handle.
+        if not using_custom_ssh and "#" in host:
+            host, _, port_str = host.partition("#")
+            try:
+                parsed_port = int(port_str)
+                if not 1 <= parsed_port <= 65535:
+                    msg = f"port {parsed_port} out of range 1-65535"
+                    raise ValueError(msg)
+                port = parsed_port
+            except ValueError as exc:
+                self.stdout.write(
+                    self.style.WARNING(
+                        f"    Could not parse port {port_str!r}: {exc}; ignoring port suffix.\n"
+                    )
+                )
+                port = 0
 
         remote: dict[str, object] = {"mode": "ssh", "host": host}
         if user:
             remote["user"] = user
+        if port:
+            remote["port"] = port
+        if using_custom_ssh:
+            remote["ssh_command"] = ssh_command
         ssh_key = self._ask("    SSH key path (Enter for default): ", default="")
         if ssh_key:
             remote["ssh_key_path"] = ssh_key
-        # Custom ssh launcher (corp-ssh-helper, tsh, ...). Default 'ssh' is
-        # almost always right -- only volunteer the prompt, don't require it.
-        ssh_command = self._ask("    Custom ssh command (Enter for 'ssh'): ", default="").strip()
-        if ssh_command and ssh_command != "ssh":
-            remote["ssh_command"] = ssh_command
         workspace = self._ask("    Remote workspace dir: ", default="~/.frank-remote")
         if workspace:
             remote["remote_workspace_dir"] = workspace

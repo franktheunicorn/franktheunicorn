@@ -145,6 +145,8 @@ class RemoteSSHExecutor:
 
     def _ssh_command(self) -> list[str]:
         cmd = [*self.config.ssh_command, "-o", "BatchMode=yes"]
+        if self.config.port:
+            cmd += ["-p", str(self.config.port)]
         if self.config.ssh_key_path:
             cmd += ["-i", self.config.ssh_key_path]
         cmd += list(self.config.ssh_extra_args)
