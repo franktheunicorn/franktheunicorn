@@ -96,7 +96,9 @@ class TestWizardEndToEnd:
         ]
         with (
             patch("builtins.input", side_effect=inputs),
-            patch.dict("os.environ", {"ANTHROPIC_API_KEY": "sk-test", "FRANK_GITHUB_TOKEN": "ghp_test"}),
+            patch.dict(
+                "os.environ", {"ANTHROPIC_API_KEY": "sk-test", "FRANK_GITHUB_TOKEN": "ghp_test"}
+            ),
         ):
             call_command("setup_llm", output=str(output_path))
 
@@ -140,7 +142,9 @@ class TestWizardEndToEnd:
         ]
         with (
             patch("builtins.input", side_effect=inputs),
-            patch.dict("os.environ", {"ANTHROPIC_API_KEY": "sk-test", "FRANK_GITHUB_TOKEN": "ghp_test"}),
+            patch.dict(
+                "os.environ", {"ANTHROPIC_API_KEY": "sk-test", "FRANK_GITHUB_TOKEN": "ghp_test"}
+            ),
             patch("shutil.which", return_value="/usr/bin/ollama"),
             patch(
                 "franktheunicorn.review.backends.ollama_backend.recommend_local_model",
@@ -208,7 +212,9 @@ class TestWizardEndToEnd:
         ]
         with (
             patch("builtins.input", side_effect=inputs),
-            patch.dict("os.environ", {"ANTHROPIC_API_KEY": "sk-test", "FRANK_GITHUB_TOKEN": "ghp_test"}),
+            patch.dict(
+                "os.environ", {"ANTHROPIC_API_KEY": "sk-test", "FRANK_GITHUB_TOKEN": "ghp_test"}
+            ),
             patch("shutil.which", return_value="/usr/bin/coderabbit"),
         ):
             call_command("setup_llm", output=str(output_path))
