@@ -8,13 +8,15 @@ format internally, so callers can target any forge uniformly.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from typing import Any
 
 import httpx
+from bs4 import BeautifulSoup
 
 from franktheunicorn.backends.base import ForgeClient, ReviewBody, ReviewComment, infer_username
-from franktheunicorn.data_access.base import GITHUB_API_BASE
+from franktheunicorn.data_access.base import GITHUB_API_BASE, GITHUB_WEB_BASE
 
 logger = logging.getLogger(__name__)
 
@@ -38,9 +40,22 @@ class GitHubClient(ForgeClient):
     def list_pull_requests(
         self, owner: str, repo: str, state: str = "open"
     ) -> list[dict[str, Any]]:
-        """Fetch open pull requests for a repository."""
+        """Fetch open pull requests for a repository.
+
+        Falls back to HTML scraping when the API returns 401, and logs
+        actionable suggestions to help the operator fix their token.
+        """
         url = f"/repos/{owner}/{repo}/pulls"
         response = self._client.get(url, params={"state": state, "per_page": 50})
+        if response.status_code in (401, 403):
+            _log_auth_suggestions(owner, repo, response)
+            logger.info(
+                "Falling back to HTML scrape for %s/%s PR listing (API returned %d)",
+                owner,
+                repo,
+                response.status_code,
+            )
+            return _list_pull_requests_via_scrape(owner, repo, state=state)
         response.raise_for_status()
         result: list[dict[str, Any]] = response.json()
         return result
@@ -157,6 +172,152 @@ class GitHubClient(ForgeClient):
 
     def close(self) -> None:
         self._client.close()
+
+
+_REQUIRED_SCOPES = {"repo", "public_repo"}
+_FINE_GRAINED_NOTE = "Fine-grained PAT: enable 'Pull requests: Read' under repository permissions."
+
+
+def _log_auth_suggestions(owner: str, repo: str, response: httpx.Response | None = None) -> None:
+    """Log actionable suggestions when the GitHub API returns 401 or 403."""
+    status = response.status_code if response is not None else 401
+
+    # Parse granted scopes from the response header when available.
+    granted: set[str] = set()
+    missing_scope_hint = ""
+    if response is not None:
+        raw_scopes = response.headers.get("X-OAuth-Scopes", "")
+        if raw_scopes:
+            granted = {s.strip() for s in raw_scopes.split(",") if s.strip()}
+            if not granted & _REQUIRED_SCOPES:
+                missing_scope_hint = (
+                    f"\n  -> Your token has scopes: {raw_scopes or '(none)'}. "
+                    f"Add 'public_repo' (public repos) or 'repo' (private repos)."
+                )
+
+    if status == 403:
+        logger.error(
+            "GitHub API returned 403 Forbidden for %s/%s. Possible causes:\n"
+            "  1. Classic PAT: token is valid but lacks required scope.%s\n"
+            "  2. %s\n"
+            "  3. Organization SSO: token needs SSO authorization at "
+            "https://github.com/settings/tokens\n"
+            "  4. Repository is private and token only has 'public_repo' scope.",
+            owner,
+            repo,
+            missing_scope_hint,
+            _FINE_GRAINED_NOTE,
+        )
+    else:
+        logger.error(
+            "GitHub API returned 401 Unauthorized for %s/%s. Possible causes:\n"
+            "  1. GITHUB_TOKEN is not set or is empty — check your .env file.\n"
+            "  2. Token has expired or been revoked — generate a new one at "
+            "https://github.com/settings/tokens\n"
+            "  3. Classic PAT missing 'public_repo' (public) or 'repo' (private) scope.%s\n"
+            "  4. Token is for a different GitHub account that cannot access %s/%s.\n"
+            "  5. %s",
+            owner,
+            repo,
+            missing_scope_hint,
+            owner,
+            repo,
+            _FINE_GRAINED_NOTE,
+        )
+
+
+def _list_pull_requests_via_scrape(
+    owner: str, repo: str, state: str = "open"
+) -> list[dict[str, Any]]:
+    """Scrape the GitHub pulls listing page as a fallback when the API is unavailable.
+
+    Returns a list of minimal PR dicts with the same keys that poller.py reads:
+    number, title, user.login, state, html_url, diff_url, labels,
+    requested_reviewers, assignees, draft, additions, deletions.
+    Missing numeric fields default to 0; missing lists default to [].
+    """
+    url = f"{GITHUB_WEB_BASE}/{owner}/{repo}/pulls"
+    params: dict[str, str] = {"q": "is:pr", "state": state}
+    try:
+        with httpx.Client(
+            headers={"User-Agent": "franktheunicorn/scrape-fallback"}, timeout=30.0
+        ) as scrape_client:
+            response = scrape_client.get(url, params=params, follow_redirects=True)
+            response.raise_for_status()
+    except httpx.HTTPError as exc:
+        logger.warning("Scrape fallback also failed for %s/%s: %s", owner, repo, exc)
+        return []
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    results: list[dict[str, Any]] = []
+
+    # GitHub's PR list items use the classic .js-issue-row selector or are
+    # nested inside a div[data-issue-and-pr-hovercards-enabled] container.
+    pr_items = soup.select(
+        "div[data-issue-and-pr-hovercards-enabled] [id^='issue_'], .js-issue-row"
+    )
+    if not pr_items:
+        # Broader fallback: any element whose id starts with "issue_"
+        pr_items = soup.select("[id^='issue_']")
+
+    for item in pr_items:
+        # PR number from the id attribute (issue_42 → 42) or from the link.
+        pr_number = 0
+        item_id = item.get("id", "")
+        if isinstance(item_id, str) and item_id.startswith("issue_"):
+            with contextlib.suppress(ValueError, IndexError):
+                pr_number = int(item_id.split("_", 1)[1])
+
+        # Fallback: parse number from the PR link href.
+        if pr_number == 0:
+            link = item.select_one("a[href*='/pull/']")
+            if link:
+                href = link.get("href", "")
+                if isinstance(href, str):
+                    parts = href.rstrip("/").split("/")
+                    with contextlib.suppress(ValueError, IndexError):
+                        pr_number = int(parts[-1])
+
+        if pr_number == 0:
+            continue
+
+        title_el = item.select_one(".js-issue-title, a[data-hovercard-type='pull_request']")
+        title = title_el.get_text(strip=True) if title_el else f"PR #{pr_number}"
+
+        author_el = item.select_one("a.muted-link[href*='/'], .opened-by a")
+        author = author_el.get_text(strip=True) if author_el else ""
+
+        pr_url = f"{GITHUB_WEB_BASE}/{owner}/{repo}/pull/{pr_number}"
+        results.append(
+            {
+                "number": pr_number,
+                "id": 0,
+                "title": title,
+                "user": {"login": author},
+                "state": state,
+                "html_url": pr_url,
+                "diff_url": f"{pr_url}.diff",
+                "body": "",
+                "labels": [],
+                "requested_reviewers": [],
+                "assignees": [],
+                "draft": False,
+                "additions": 0,
+                "deletions": 0,
+                "created_at": "",
+                "updated_at": "",
+            }
+        )
+
+    if not results:
+        logger.warning(
+            "Scrape fallback for %s/%s returned 0 PRs — GitHub HTML structure may have changed",
+            owner,
+            repo,
+        )
+    else:
+        logger.info("Scrape fallback for %s/%s found %d PR(s)", owner, repo, len(results))
+    return results
 
 
 def _to_github_comment(comment: ReviewComment) -> dict[str, Any]:
