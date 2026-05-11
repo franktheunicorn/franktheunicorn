@@ -47,7 +47,10 @@ class TestWizardEndToEnd:
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
-        with patch("builtins.input", side_effect=inputs):
+        with (
+            patch("builtins.input", side_effect=inputs),
+            patch.dict("os.environ", {"FRANK_GITHUB_TOKEN": "ghp_test"}),
+        ):
             call_command("setup_llm", output=str(output_path))
 
         # Step 1: Wizard wrote valid YAML
@@ -55,8 +58,9 @@ class TestWizardEndToEnd:
         raw = yaml.safe_load(output_path.read_text())
         assert isinstance(raw, dict)
 
-        # Step 2: Config loader can parse it
-        config = load_operator_config(output_path)
+        # Step 2: Config loader can parse it (FRANK_GITHUB_TOKEN must be set)
+        with patch.dict("os.environ", {"FRANK_GITHUB_TOKEN": "ghp_test"}):
+            config = load_operator_config(output_path)
         assert config.github_username == "holdenk"
         assert config.review_style == "direct but kind"
         assert config.llm_backends == []  # stub = no backends
@@ -92,12 +96,15 @@ class TestWizardEndToEnd:
         ]
         with (
             patch("builtins.input", side_effect=inputs),
-            patch.dict("os.environ", {"ANTHROPIC_API_KEY": "sk-test"}),
+            patch.dict(
+                "os.environ", {"ANTHROPIC_API_KEY": "sk-test", "FRANK_GITHUB_TOKEN": "ghp_test"}
+            ),
         ):
             call_command("setup_llm", output=str(output_path))
 
         # Load and validate
-        config = load_operator_config(output_path)
+        with patch.dict("os.environ", {"FRANK_GITHUB_TOKEN": "ghp_test"}):
+            config = load_operator_config(output_path)
         assert len(config.llm_backends) == 1
         assert config.llm_backends[0].provider == "claude"
         assert config.llm_backends[0].model == "claude-sonnet-4-20250514"
@@ -135,7 +142,9 @@ class TestWizardEndToEnd:
         ]
         with (
             patch("builtins.input", side_effect=inputs),
-            patch.dict("os.environ", {"ANTHROPIC_API_KEY": "sk-test"}),
+            patch.dict(
+                "os.environ", {"ANTHROPIC_API_KEY": "sk-test", "FRANK_GITHUB_TOKEN": "ghp_test"}
+            ),
             patch("shutil.which", return_value="/usr/bin/ollama"),
             patch(
                 "franktheunicorn.review.backends.ollama_backend.recommend_local_model",
@@ -149,7 +158,8 @@ class TestWizardEndToEnd:
             call_command("setup_llm", output=str(output_path))
 
         # Load and validate
-        config = load_operator_config(output_path)
+        with patch.dict("os.environ", {"FRANK_GITHUB_TOKEN": "ghp_test"}):
+            config = load_operator_config(output_path)
         assert len(config.llm_backends) == 2
 
         # Both backends initialise
@@ -202,12 +212,15 @@ class TestWizardEndToEnd:
         ]
         with (
             patch("builtins.input", side_effect=inputs),
-            patch.dict("os.environ", {"ANTHROPIC_API_KEY": "sk-test"}),
+            patch.dict(
+                "os.environ", {"ANTHROPIC_API_KEY": "sk-test", "FRANK_GITHUB_TOKEN": "ghp_test"}
+            ),
             patch("shutil.which", return_value="/usr/bin/coderabbit"),
         ):
             call_command("setup_llm", output=str(output_path))
 
-        config = load_operator_config(output_path)
+        with patch.dict("os.environ", {"FRANK_GITHUB_TOKEN": "ghp_test"}):
+            config = load_operator_config(output_path)
         assert len(config.llm_backends) == 1
         assert config.coderabbit.enabled is True
         assert config.coderabbit.cli_path == "coderabbit"
