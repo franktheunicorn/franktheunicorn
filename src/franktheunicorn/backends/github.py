@@ -31,6 +31,14 @@ class GitHubClient(ForgeClient):
         }
         if token:
             headers["Authorization"] = f"Bearer {token}"
+            logger.debug(
+                "GitHub token loaded: %s...%s (%d chars)",
+                token[:2],
+                token[-2:],
+                len(token),
+            )
+        else:
+            logger.debug("GitHub client created with no token (unauthenticated)")
         self._client = httpx.Client(
             base_url=base_url,
             headers=headers,
@@ -229,15 +237,16 @@ def _log_auth_suggestions(owner: str, repo: str, response: httpx.Response | None
 def _list_pull_requests_via_scrape(
     owner: str, repo: str, state: str = "open"
 ) -> list[dict[str, Any]]:
-    """Scrape the GitHub pulls listing page as a fallback when the API is unavailable.
+    """Scrape the GitHub issues search page as a fallback when the API is unavailable.
 
     Returns a list of minimal PR dicts with the same keys that poller.py reads:
     number, title, user.login, state, html_url, diff_url, labels,
     requested_reviewers, assignees, draft, additions, deletions.
     Missing numeric fields default to 0; missing lists default to [].
     """
-    url = f"{GITHUB_WEB_BASE}/{owner}/{repo}/pulls"
-    params: dict[str, str] = {"q": "is:pr", "state": state}
+    # GitHub now redirects /pulls to /issues?q=is:open+is:pr; go there directly.
+    url = f"{GITHUB_WEB_BASE}/{owner}/{repo}/issues"
+    params: dict[str, str] = {"q": "is:open is:pr" if state == "open" else f"is:{state} is:pr"}
     try:
         with httpx.Client(
             headers={"User-Agent": "franktheunicorn/scrape-fallback"}, timeout=30.0
@@ -251,41 +260,34 @@ def _list_pull_requests_via_scrape(
     soup = BeautifulSoup(response.text, "html.parser")
     results: list[dict[str, Any]] = []
 
-    # GitHub's PR list items use the classic .js-issue-row selector or are
-    # nested inside a div[data-issue-and-pr-hovercards-enabled] container.
-    pr_items = soup.select(
-        "div[data-issue-and-pr-hovercards-enabled] [id^='issue_'], .js-issue-row"
-    )
-    if not pr_items:
-        # Broader fallback: any element whose id starts with "issue_"
-        pr_items = soup.select("[id^='issue_']")
+    # Current GitHub DOM: each PR row has exactly one anchor with
+    # data-testid="issue-pr-title-link" whose href contains /pull/<number>.
+    title_links = soup.select("a[data-testid='issue-pr-title-link']")
+    for title_el in title_links:
+        href = title_el.get("href", "")
+        if not isinstance(href, str) or "/pull/" not in href:
+            continue
 
-    for item in pr_items:
-        # PR number from the id attribute (issue_42 → 42) or from the link.
         pr_number = 0
-        item_id = item.get("id", "")
-        if isinstance(item_id, str) and item_id.startswith("issue_"):
-            with contextlib.suppress(ValueError, IndexError):
-                pr_number = int(item_id.split("_", 1)[1])
-
-        # Fallback: parse number from the PR link href.
-        if pr_number == 0:
-            link = item.select_one("a[href*='/pull/']")
-            if link:
-                href = link.get("href", "")
-                if isinstance(href, str):
-                    parts = href.rstrip("/").split("/")
-                    with contextlib.suppress(ValueError, IndexError):
-                        pr_number = int(parts[-1])
-
+        with contextlib.suppress(ValueError, IndexError):
+            pr_number = int(href.rstrip("/").split("/")[-1])
         if pr_number == 0:
             continue
 
-        title_el = item.select_one(".js-issue-title, a[data-hovercard-type='pull_request']")
-        title = title_el.get_text(strip=True) if title_el else f"PR #{pr_number}"
+        title = title_el.get_text(strip=True) or f"PR #{pr_number}"
 
-        author_el = item.select_one("a.muted-link[href*='/'], .opened-by a")
-        author = author_el.get_text(strip=True) if author_el else ""
+        # Author link: walk up the DOM until we find an ancestor that contains
+        # the author%3A link (appears in the same row container).
+        author = ""
+        node = title_el.parent
+        for _ in range(12):
+            if node is None:
+                break
+            author_el = node.select_one("a[href*='author%3A']")
+            if author_el:
+                author = author_el.get_text(strip=True)
+                break
+            node = node.parent
 
         pr_url = f"{GITHUB_WEB_BASE}/{owner}/{repo}/pull/{pr_number}"
         results.append(

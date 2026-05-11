@@ -136,7 +136,7 @@ class TestListPullRequestsAuthFallback:
             status_code=401,
         )
         httpx_mock.add_response(
-            url="https://github.com/apache/spark/pulls?q=is%3Apr&state=open",
+            url="https://github.com/apache/spark/issues?q=is%3Aopen+is%3Apr",
             text=html,
         )
         import logging
@@ -156,7 +156,7 @@ class TestListPullRequestsAuthFallback:
             status_code=401,
         )
         httpx_mock.add_response(
-            url="https://github.com/apache/spark/pulls?q=is%3Apr&state=open",
+            url="https://github.com/apache/spark/issues?q=is%3Aopen+is%3Apr",
             text=html,
         )
         results = client.list_pull_requests("apache", "spark")
@@ -176,7 +176,7 @@ class TestListPullRequestsAuthFallback:
             status_code=401,
         )
         httpx_mock.add_response(
-            url="https://github.com/apache/spark/pulls?q=is%3Apr&state=open",
+            url="https://github.com/apache/spark/issues?q=is%3Aopen+is%3Apr",
             status_code=503,
         )
         results = client.list_pull_requests("apache", "spark")
@@ -192,7 +192,7 @@ class TestListPullRequestsAuthFallback:
             headers={"X-OAuth-Scopes": "read:user"},
         )
         httpx_mock.add_response(
-            url="https://github.com/apache/spark/pulls?q=is%3Apr&state=open",
+            url="https://github.com/apache/spark/issues?q=is%3Aopen+is%3Apr",
             text=html,
         )
         import logging
@@ -216,7 +216,7 @@ class TestListPullRequestsAuthFallback:
             status_code=403,
         )
         httpx_mock.add_response(
-            url="https://github.com/apache/spark/pulls?q=is%3Apr&state=open",
+            url="https://github.com/apache/spark/issues?q=is%3Aopen+is%3Apr",
             text=html,
         )
         import logging
@@ -237,7 +237,7 @@ class TestListPullRequestsViaScrape:
     def test_parses_pr_list_from_fixture(self, httpx_mock: HTTPXMock) -> None:
         html = (_FIXTURES / "pulls_listing_scrape.html").read_text()
         httpx_mock.add_response(
-            url="https://github.com/apache/spark/pulls?q=is%3Apr&state=open",
+            url="https://github.com/apache/spark/issues?q=is%3Aopen+is%3Apr",
             text=html,
         )
         results = _list_pull_requests_via_scrape("apache", "spark")
@@ -251,7 +251,7 @@ class TestListPullRequestsViaScrape:
 
     def test_empty_html_returns_empty_list(self, httpx_mock: HTTPXMock) -> None:
         httpx_mock.add_response(
-            url="https://github.com/apache/spark/pulls?q=is%3Apr&state=open",
+            url="https://github.com/apache/spark/issues?q=is%3Aopen+is%3Apr",
             text="<html><body><p>No results</p></body></html>",
         )
         results = _list_pull_requests_via_scrape("apache", "spark")
@@ -259,7 +259,7 @@ class TestListPullRequestsViaScrape:
 
     def test_http_error_returns_empty_list(self, httpx_mock: HTTPXMock) -> None:
         httpx_mock.add_response(
-            url="https://github.com/apache/spark/pulls?q=is%3Apr&state=open",
+            url="https://github.com/apache/spark/issues?q=is%3Aopen+is%3Apr",
             status_code=503,
         )
         results = _list_pull_requests_via_scrape("apache", "spark")
