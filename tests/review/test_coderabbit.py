@@ -272,3 +272,41 @@ class TestWorkerCodeRabbitIntegration:
 
         assert mock_subprocess.call_count == 0
         assert not ReviewDraft.objects.filter(pull_request=db_pr).exists()
+
+
+# ---------------------------------------------------------------------------
+# cli_path argv parsing -- supports "wrapper cmd arg1 arg2" for corporate
+# launchers (uv run, docker run, custom wrappers, etc.).
+# ---------------------------------------------------------------------------
+
+
+class TestCodeRabbitCliArgv:
+    def test_plain_binary_stays_one_element(self) -> None:
+        cfg = CodeRabbitConfig(cli_path="coderabbit")
+        assert cfg.cli_argv == ["coderabbit"]
+
+    def test_command_with_args_splits(self) -> None:
+        cfg = CodeRabbitConfig(cli_path="uv run --with coderabbit coderabbit")
+        assert cfg.cli_argv == ["uv", "run", "--with", "coderabbit", "coderabbit"]
+
+    def test_quoted_path_with_spaces(self) -> None:
+        cfg = CodeRabbitConfig(cli_path='"/opt/my tools/coderabbit"')
+        assert cfg.cli_argv == ["/opt/my tools/coderabbit"]
+
+    def test_empty_cli_path_rejected(self) -> None:
+        with pytest.raises(ValueError, match="cli_path"):
+            CodeRabbitConfig(cli_path="")
+
+    def test_whitespace_only_cli_path_rejected(self) -> None:
+        with pytest.raises(ValueError, match="cli_path"):
+            CodeRabbitConfig(cli_path="   ")
+
+    @patch("franktheunicorn.review.coderabbit.subprocess.run")
+    def test_wrapper_command_propagates_to_subprocess(self, mock_run: Any) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        cfg = CodeRabbitConfig(enabled=True, cli_path="corp-review-runner coderabbit")
+        run_coderabbit_review("/tmp/repo", "abc123", cfg)
+        argv = mock_run.call_args.args[0]
+        assert argv[:3] == ["corp-review-runner", "coderabbit", "review"]

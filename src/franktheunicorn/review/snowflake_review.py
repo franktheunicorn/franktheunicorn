@@ -70,7 +70,7 @@ def run_snowflake_review(
         executor = LocalExecutor()
 
     cmd = [
-        config.cli_path,
+        *config.cli_argv,
         "review",
         "--prompt-only",
         "--no-color",

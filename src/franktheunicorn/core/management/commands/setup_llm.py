@@ -1019,6 +1019,11 @@ class Command(BaseCommand):
         ssh_key = self._ask("    SSH key path (Enter for default): ", default="")
         if ssh_key:
             remote["ssh_key_path"] = ssh_key
+        # Custom ssh launcher (corp-ssh-helper, tsh, ...). Default 'ssh' is
+        # almost always right -- only volunteer the prompt, don't require it.
+        ssh_command = self._ask("    Custom ssh command (Enter for 'ssh'): ", default="").strip()
+        if ssh_command and ssh_command != "ssh":
+            remote["ssh_command"] = ssh_command
         workspace = self._ask("    Remote workspace dir: ", default="~/.frank-remote")
         if workspace:
             remote["remote_workspace_dir"] = workspace

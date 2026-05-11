@@ -76,7 +76,7 @@ def run_coderabbit_review(
     (e.g. ``RemoteSSHExecutor``) to run the CLI elsewhere.
     """
     cmd = [
-        config.cli_path,
+        *config.cli_argv,
         "review",
         "--prompt-only",
         "--no-color",
