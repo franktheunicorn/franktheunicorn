@@ -356,6 +356,43 @@ class TestDeleteStaleMigrations:
         assert not stale.exists()
         assert keep.exists()
 
+    def test_unlink_oserror_fails_step(self, tmp_path: Path) -> None:
+        """A permission/IO error during unlink must fail the step.
+
+        Letting the restack continue with leftover migration files would
+        produce a dirty tree that ``makemigrations`` then misinterprets.
+        """
+        from franktheunicorn.worker.merge_queue import _delete_stale_migrations_step
+
+        app_dir = tmp_path / "core" / "migrations"
+        app_dir.mkdir(parents=True)
+        target_file = app_dir / "0042_stale.py"
+        target_file.write_text("# migration\n")
+
+        class _FakeCompleted:
+            returncode = 0
+            stdout = "core/migrations/0042_stale.py\0"
+            stderr = ""
+
+        def _boom(self: Path) -> None:
+            raise PermissionError("read-only filesystem")
+
+        with (
+            patch(
+                "franktheunicorn.worker.merge_queue.subprocess.run",
+                return_value=_FakeCompleted(),
+            ),
+            patch.object(Path, "unlink", _boom),
+        ):
+            step = _delete_stale_migrations_step(
+                target="main",
+                migration_globs=["*/migrations/*.py"],
+                repo_dir=tmp_path,
+            )
+
+        assert step.success is False
+        assert "failed to delete" in step.stderr
+
     def test_skips_paths_escaping_repo_root(self, tmp_path: Path) -> None:
         """Pathological diff output that traverses outside the repo is ignored."""
         from franktheunicorn.worker.merge_queue import _delete_stale_migrations_step

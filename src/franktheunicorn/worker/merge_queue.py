@@ -334,9 +334,18 @@ def _delete_stale_migrations_step(
             candidate.unlink()
             deleted.append(relpath)
         except FileNotFoundError:
+            # ``git diff`` listed a path that's already gone (rename, manual
+            # cleanup, etc.). Not an error — there's nothing to delete.
             continue
         except OSError as exc:
-            logger.warning("Could not delete %s: %s", relpath, exc)
+            # Permission denied / read-only FS / inode locks etc. Bail out:
+            # downstream steps assume these files are gone, and pushing a
+            # restacked branch with leftover migrations creates a worse
+            # state than failing here.
+            logger.error("Could not delete stale migration %s: %s", relpath, exc)
+            step.success = False
+            step.stderr = (step.stderr + f"\nfailed to delete {relpath}: {exc}").strip()
+            return step
     if deleted:
         step.stdout = (step.stdout + "\n" + "\n".join(deleted)).strip()
     return step
