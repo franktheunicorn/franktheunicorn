@@ -12,9 +12,11 @@ When the verdict is bad, ``file_security_report`` records a
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
@@ -144,15 +146,37 @@ _SCAN_TEXT_MAX = 200_000
 _LLM_TEXT_MAX = 20_000
 
 
+def _normalize_for_scan(text: str) -> str:
+    """Fold common obfuscation tricks before regex scanning.
+
+    - NFKC normalization collapses fullwidth/compatibility forms
+      (e.g. fullwidth `<` U+FF1C → `<`) so attackers can't hide tags.
+    - HTML entity unescape catches payloads pasted from rendered
+      web sources (``&lt;system&gt;``).
+
+    The Unicode-tag and bidi-control patterns still scan the raw text,
+    so this normalization never hides those signals — see ``regex_scan``.
+    """
+    return html.unescape(unicodedata.normalize("NFKC", text))
+
+
 def regex_scan(text: str) -> list[RegexHit]:
-    """Run all patterns over ``text`` and return the hits."""
+    """Run all patterns over ``text`` and return the hits.
+
+    Patterns run against both the raw text (so invisible Unicode-tag and
+    bidi controls are detectable) and a normalized form (so fullwidth
+    or HTML-entity-obfuscated payloads still match).
+    """
     if not text:
         return []
     text = text[:_SCAN_TEXT_MAX]
+    normalized = _normalize_for_scan(text)
     hits: list[RegexHit] = []
+    seen_names: set[str] = set()
     for name, severity, pattern in _PATTERNS:
-        match = pattern.search(text)
-        if match:
+        match = pattern.search(text) or (pattern.search(normalized) if normalized != text else None)
+        if match and name not in seen_names:
+            seen_names.add(name)
             snippet = match.group(0)
             if len(snippet) > _SNIPPET_MAX:
                 snippet = snippet[:_SNIPPET_MAX] + "..."

@@ -241,6 +241,20 @@ class TestIsDjangoProject:
         (repo / "myapp" / "migrations" / "0001_initial.py").write_text("")
         assert is_django_project(repo) is False
 
+    def test_symlinked_app_dir_is_not_traversed(self, tmp_path: Path) -> None:
+        """A symlinked directory must not escape the bounded walk."""
+        outside = tmp_path / "outside"
+        _write_migration(outside / "evil" / "migrations", "0001_initial", dependencies=[])
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "main.py").write_text("print('hi')\n")
+        try:
+            (repo / "linked").symlink_to(outside, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlinks not supported on this platform")
+        assert is_django_project(repo) is False
+
 
 # ---------------------------------------------------------------------------
 # detect_migration_conflicts

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -317,6 +318,72 @@ class TestPostMergeRestack:
         push_call = next(call for call in mock_step.call_args_list if call.args[0] == "push_branch")
         assert "--force" in push_call.args[1]
         mock_wait.assert_called_once_with(next_pr, github_client, timeout=120, poll_interval=10)
+
+
+class TestDeleteStaleMigrations:
+    """Direct coverage for the safe-deletion helper used by restack."""
+
+    def test_deletes_only_files_matched_by_diff(self, tmp_path: Path) -> None:
+        from franktheunicorn.worker.merge_queue import _delete_stale_migrations_step
+
+        # Layout: two migration files exist on disk; git diff (mocked) only
+        # lists one, so only that one should be removed.
+        app_dir = tmp_path / "core" / "migrations"
+        app_dir.mkdir(parents=True)
+        stale = app_dir / "0042_stale.py"
+        keep = app_dir / "0041_keep.py"
+        stale.write_text("# migration\n")
+        keep.write_text("# migration\n")
+
+        diff_stdout = "core/migrations/0042_stale.py\0"
+
+        class _FakeCompleted:
+            returncode = 0
+            stdout = diff_stdout
+            stderr = ""
+
+        with patch(
+            "franktheunicorn.worker.merge_queue.subprocess.run",
+            return_value=_FakeCompleted(),
+        ):
+            step = _delete_stale_migrations_step(
+                target="main",
+                migration_globs=["*/migrations/*.py"],
+                repo_dir=tmp_path,
+            )
+
+        assert step.success is True
+        assert not stale.exists()
+        assert keep.exists()
+
+    def test_skips_paths_escaping_repo_root(self, tmp_path: Path) -> None:
+        """Pathological diff output that traverses outside the repo is ignored."""
+        from franktheunicorn.worker.merge_queue import _delete_stale_migrations_step
+
+        outside = tmp_path / "outside_file"
+        outside.write_text("sensitive\n")
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        kept_outside = outside  # captured by reference
+
+        class _FakeCompleted:
+            returncode = 0
+            stdout = "../outside_file\0"
+            stderr = ""
+
+        with patch(
+            "franktheunicorn.worker.merge_queue.subprocess.run",
+            return_value=_FakeCompleted(),
+        ):
+            step = _delete_stale_migrations_step(
+                target="main",
+                migration_globs=["*"],
+                repo_dir=repo,
+            )
+
+        assert step.success is True
+        assert kept_outside.exists()
 
 
 @pytest.mark.django_db

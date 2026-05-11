@@ -169,7 +169,12 @@ def _iter_migration_dirs(repo_path: Path) -> Iterator[Path]:
 
 
 def _walk_limited(root: Path, *, max_depth: int) -> Iterator[Path]:
-    """Yield directories under ``root`` up to ``max_depth`` levels deep."""
+    """Yield directories under ``root`` up to ``max_depth`` levels deep.
+
+    Symlinks are skipped — target repos are untrusted, and a symlink
+    pointing outside the checkout could escape the bounded walk or trip
+    the per-app migration parser on unrelated files.
+    """
     stack: list[tuple[Path, int]] = [(root, 0)]
     while stack:
         current, depth = stack.pop()
@@ -180,7 +185,7 @@ def _walk_limited(root: Path, *, max_depth: int) -> Iterator[Path]:
         except (PermissionError, OSError):
             continue
         for child in entries:
-            if not child.is_dir():
+            if child.is_symlink() or not child.is_dir():
                 continue
             if child.name in _SKIP_DIRS or child.name.startswith("."):
                 continue

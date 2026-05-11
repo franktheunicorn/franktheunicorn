@@ -287,6 +287,61 @@ def _run_git_step(name: str, cmd: list[str], cwd: Path) -> RestackStepResult:
     )
 
 
+def _delete_stale_migrations_step(
+    target: str,
+    migration_globs: list[str],
+    repo_dir: Path,
+) -> RestackStepResult:
+    """Delete migration files added on the branch that aren't on ``target``.
+
+    Pure Python file deletion driven by ``git diff --name-only -z``. We
+    intentionally avoid ``bash -lc`` + ``xargs rm`` here so glob patterns
+    and branch names containing shell metacharacters can't escape the
+    intended command.
+    """
+    diff_cmd: list[str] = [
+        "git",
+        "diff",
+        "--name-only",
+        "-z",
+        f"origin/{target}...HEAD",
+        "--",
+        *migration_globs,
+    ]
+    result = subprocess.run(diff_cmd, cwd=repo_dir, capture_output=True, text=True, timeout=120)
+    step = RestackStepResult(
+        name="delete_stale_migrations",
+        success=result.returncode == 0,
+        stdout=result.stdout,
+        stderr=result.stderr,
+        command=diff_cmd,
+    )
+    if not step.success:
+        return step
+
+    repo_root = repo_dir.resolve()
+    deleted: list[str] = []
+    for relpath in result.stdout.split("\0"):
+        if not relpath:
+            continue
+        candidate = (repo_dir / relpath).resolve()
+        try:
+            candidate.relative_to(repo_root)
+        except ValueError:
+            logger.warning("Skipping stale-migration path outside repo: %s", relpath)
+            continue
+        try:
+            candidate.unlink()
+            deleted.append(relpath)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            logger.warning("Could not delete %s: %s", relpath, exc)
+    if deleted:
+        step.stdout = (step.stdout + "\n" + "\n".join(deleted)).strip()
+    return step
+
+
 def wait_for_ci_green(
     pr: PullRequest,
     github_client: object,
@@ -392,50 +447,48 @@ def execute_post_merge_restack(
         branch=branch_name,
         target_branch=target,
     )
-    steps: list[tuple[str, list[str]]] = [
-        ("checkout_pr_branch", ["git", "checkout", "-B", branch_name, f"origin/{branch_name}"]),
-    ]
-    if config.delete_stale_migrations:
-        migration_patterns = " ".join(f"'{pattern}'" for pattern in config.migration_globs)
-        steps.append(
-            (
-                "delete_stale_migrations",
-                [
-                    "bash",
-                    "-lc",
-                    (
-                        "git diff --name-only origin/"
-                        f"{target}...HEAD -- {migration_patterns} "
-                        "| xargs -r rm -f"
-                    ),
-                ],
-            )
-        )
-    steps.extend(
-        [
-            ("rebase_onto_target", ["git", "rebase", f"origin/{target}"]),
-            ("regenerate_migrations", ["python", "manage.py", "makemigrations"]),
-            (
-                "commit_restack",
-                [
-                    "git",
-                    "commit",
-                    "-am",
-                    f"chore({config.restack_commit_scope}): restack PR #{next_pr.number}",
-                ],
-            ),
-            (
-                "push_branch",
-                [
-                    "git",
-                    "push",
-                    "--force-with-lease" if config.push_force_with_lease else "--force",
-                    "origin",
-                    branch_name,
-                ],
-            ),
-        ]
+    checkout_step = _run_git_step(
+        "checkout_pr_branch",
+        ["git", "checkout", "-B", branch_name, f"origin/{branch_name}"],
+        repo_dir,
     )
+    execution.steps.append(checkout_step)
+    if not checkout_step.success:
+        execution.success = False
+        execution.error = "Step failed: checkout_pr_branch"
+        return execution
+
+    if config.delete_stale_migrations:
+        delete_step = _delete_stale_migrations_step(target, list(config.migration_globs), repo_dir)
+        execution.steps.append(delete_step)
+        if not delete_step.success:
+            execution.success = False
+            execution.error = "Step failed: delete_stale_migrations"
+            return execution
+
+    steps: list[tuple[str, list[str]]] = [
+        ("rebase_onto_target", ["git", "rebase", f"origin/{target}"]),
+        ("regenerate_migrations", ["python", "manage.py", "makemigrations"]),
+        (
+            "commit_restack",
+            [
+                "git",
+                "commit",
+                "-am",
+                f"chore({config.restack_commit_scope}): restack PR #{next_pr.number}",
+            ],
+        ),
+        (
+            "push_branch",
+            [
+                "git",
+                "push",
+                "--force-with-lease" if config.push_force_with_lease else "--force",
+                "origin",
+                branch_name,
+            ],
+        ),
+    ]
 
     for step_name, cmd in steps:
         step = _run_git_step(step_name, cmd, repo_dir)
