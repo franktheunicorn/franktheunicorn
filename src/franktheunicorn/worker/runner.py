@@ -177,11 +177,23 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
             sys.exit(1)
 
     poll_interval = settings.FRANK_POLL_INTERVAL
-    logger.info("Worker starting. Poll interval: %ds", poll_interval)
+    logger.info(
+        "Worker starting as %s. Poll interval: %ds",
+        operator_config.github_username or "(username not set)",
+        poll_interval,
+    )
+
+    disabled_backends = _check_backends(operator_config)
 
     try:
         while True:
-            _run_cycle(clients, project_configs, operator_config.github_username, operator_config)
+            _run_cycle(
+                clients,
+                project_configs,
+                operator_config.github_username,
+                operator_config,
+                disabled_backends,
+            )
             logger.info("Sleeping %ds until next poll...", poll_interval)
             time.sleep(poll_interval)
     except KeyboardInterrupt:
@@ -195,6 +207,103 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
                 logger.debug("Error closing forge client", exc_info=True)
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         lock_fd.close()
+
+
+def _mask_key(key: str) -> str:
+    """Return a masked version of an API key for safe logging: first 2 + last 2 chars."""
+    if len(key) <= 4:
+        return "*" * len(key)
+    return key[:2] + "…" + key[-2:]
+
+
+def _check_backends(operator_config: OperatorConfig) -> frozenset[int]:
+    """Probe each configured LLM backend and return indices of those that fail.
+
+    Logs provider, URL, and masked API key for every backend checked.
+    Backends that pass are logged at INFO; failures at WARNING.
+    Skips providers that need no API key (stub, ollama).
+    """
+    import os
+
+    disabled: set[int] = set()
+
+    for idx, bc in enumerate(operator_config.llm_backends):
+        provider = bc.provider.lower()
+        if provider in ("stub", "ollama"):
+            continue
+
+        key_env = bc.api_key_env or {
+            "claude": "ANTHROPIC_API_KEY",
+            "openai": "OPENAI_API_KEY",
+            "gemini": "GOOGLE_API_KEY",
+        }.get(provider, "")
+        api_key = os.environ.get(key_env, "") if key_env else ""
+
+        base_url = bc.base_url or {
+            "claude": "https://api.anthropic.com",
+            "openai": "https://api.openai.com",
+            "gemini": "https://generativelanguage.googleapis.com",
+        }.get(provider, "(default)")
+
+        if not api_key:
+            logger.warning(
+                "Backend[%d] %s (%s): no API key in env var %r — backend disabled for this run",
+                idx,
+                provider,
+                base_url,
+                key_env or "(unset)",
+            )
+            disabled.add(idx)
+            continue
+
+        masked = _mask_key(api_key)
+        try:
+            if provider == "claude":
+                import anthropic
+
+                anthropic.Anthropic(api_key=api_key).models.list()
+            elif provider == "openai":
+                import openai
+
+                kwargs: dict[str, str] = {"api_key": api_key}
+                if bc.base_url:
+                    kwargs["base_url"] = bc.base_url
+                openai.OpenAI(**kwargs).models.list()  # type: ignore[arg-type]
+            elif provider == "gemini":
+                from google import genai
+
+                genai.Client(api_key=api_key).models.list()
+            else:
+                logger.debug(
+                    "Backend[%d] %s (%s key=%s): no preflight check for this provider",
+                    idx,
+                    provider,
+                    base_url,
+                    masked,
+                )
+                continue
+        except Exception as exc:
+            logger.warning(
+                "Backend[%d] %s (%s key=%s): preflight check failed — %s — "
+                "backend disabled for this run",
+                idx,
+                provider,
+                base_url,
+                masked,
+                exc,
+            )
+            disabled.add(idx)
+            continue
+
+        logger.info(
+            "Backend[%d] %s (%s key=%s): OK",
+            idx,
+            provider,
+            base_url,
+            masked,
+        )
+
+    return frozenset(disabled)
 
 
 _HEALTH_STALE_DAYS = 7
@@ -268,12 +377,15 @@ def _run_cycle(
     project_configs: Sequence[object],
     operator_username: str,
     operator_config: OperatorConfig | None = None,
+    disabled_backends: frozenset[int] = frozenset(),
 ) -> None:
     """Run one polling cycle across all configured projects.
 
     ``clients`` maps forge-name → ``ForgeClient``. Projects are dispatched
     to their respective forge client based on ``ProjectConfig.forge``.
     Projects whose forge is not in the map are skipped with a warning.
+    ``disabled_backends`` is a set of indices into ``operator_config.llm_backends``
+    that failed preflight and should be excluded for this run.
     """
     import httpx
     from django.conf import settings
@@ -328,14 +440,20 @@ def _run_cycle(
             )
             continue
         try:
-            logger.info("Polling %s/%s (forge=%s) ...", pc.owner, pc.repo, pc.forge)
+            logger.info(
+                "PR poll: %s/%s (forge=%s, as=%s)",
+                pc.owner,
+                pc.repo,
+                pc.forge,
+                operator_username or "?",
+            )
 
             # Ensure local repo clone exists and is fetched (v1.25).
             repo_path: Path | None = None
             try:
                 from franktheunicorn.worker.repo_manager import ensure_repo
 
-                logger.debug("Ensuring local repo clone for %s/%s ...", pc.owner, pc.repo)
+                logger.info("Repo sync: %s/%s — ensuring local clone ...", pc.owner, pc.repo)
                 repo_path = ensure_repo(Path(settings.FRANK_REPOS_DIR), pc.owner, pc.repo)
                 logger.debug("Repo clone ready at %s", repo_path)
             except Exception:
@@ -405,10 +523,23 @@ def _run_cycle(
                     # Build repo health context for this PR's changed files.
                     health_ctx = _build_repo_health_context(pr)
 
+                    # Apply preflight-disabled backends: build a filtered copy of
+                    # operator_config with failing backends removed for this run.
+                    effective_config = operator_config
+                    if disabled_backends and operator_config is not None:
+                        active = [
+                            bc
+                            for i, bc in enumerate(operator_config.llm_backends)
+                            if i not in disabled_backends
+                        ]
+                        effective_config = operator_config.model_copy(
+                            update={"llm_backends": active}
+                        )
+
                     drafts = draft_review(
                         pr,
                         pc,
-                        operator_config=operator_config,
+                        operator_config=effective_config,
                         repo_health_context=health_ctx,
                         community_context=community_ctx,
                         jira_context=jira_ctx,

@@ -107,20 +107,25 @@ def _update_default_branch(repo_path: Path) -> None:
     logger.debug("Could not determine default branch for %s", repo_path)
 
 
-def _git_fetch(repo_path: Path) -> bool:
-    """Fetch all refs from origin. Returns True on success."""
+_GIT_FETCH_CMD = ["git", "fetch", "origin"]
+
+
+def _git_fetch(repo_path: Path) -> tuple[bool, str, str]:
+    """Fetch all refs from origin. Returns (success, stdout, stderr)."""
     try:
-        subprocess.run(
-            ["git", "fetch", "origin"],
+        result = subprocess.run(
+            _GIT_FETCH_CMD,
             capture_output=True,
             text=True,
             check=True,
             cwd=str(repo_path),
             timeout=120,
         )
-        return True
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        return False
+        return True, result.stdout, result.stderr
+    except subprocess.CalledProcessError as exc:
+        return False, exc.stdout or "", exc.stderr or ""
+    except subprocess.TimeoutExpired as exc:
+        return False, "", f"timed out after {exc.timeout}s"
 
 
 _FETCH_BACKOFF_DELAYS = (5, 15, 60, 300)
@@ -128,22 +133,26 @@ _FETCH_BACKOFF_DELAYS = (5, 15, 60, 300)
 
 def _git_fetch_with_backoff(repo_path: Path, owner: str, repo: str) -> bool:
     """Fetch all refs from origin with exponential backoff. Returns True on success."""
-    cumulative_sleep = 0
+    cmd_str = " ".join(_GIT_FETCH_CMD)
     for attempt, _sentinel in enumerate((*_FETCH_BACKOFF_DELAYS, None)):
-        if _git_fetch(repo_path):
+        ok, stdout, stderr = _git_fetch(repo_path)
+        if ok:
             return True
         if _sentinel is None:
             break
         delay = _sentinel
-        cumulative_sleep += delay
         if delay >= 60:
             logger.warning(
-                "Backing off %ds after git fetch failure for %s/%s (attempt %d/%d)",
+                "Backing off %ds after git fetch failure for %s/%s (attempt %d/%d)"
+                " — cmd: %s; stdout: %s; stderr: %s",
                 delay,
                 owner,
                 repo,
                 attempt + 1,
                 len(_FETCH_BACKOFF_DELAYS),
+                cmd_str,
+                stdout[:300] if stdout else "(empty)",
+                stderr[:300] if stderr else "(empty)",
             )
         else:
             logger.debug(

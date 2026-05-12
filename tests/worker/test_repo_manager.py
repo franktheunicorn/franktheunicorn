@@ -106,15 +106,18 @@ class TestEnsureRefAvailable:
 
 class TestGitFetch:
     def test_fetch_failure(self, tmp_path: Path) -> None:
-        """Fetch on a non-repo dir returns False."""
-        assert _git_fetch(tmp_path) is False
+        """Fetch on a non-repo dir returns (False, ..., ...)."""
+        ok, _stdout, stderr = _git_fetch(tmp_path)
+        assert ok is False
+        assert stderr  # git emits an error message
 
     def test_fetch_success(self, tmp_path: Path, bare_repo: Path) -> None:
         repos_dir = tmp_path / "repos"
         repos_dir.mkdir()
         repo = ensure_repo(repos_dir, "org", "repo", clone_url=str(bare_repo))
         assert repo is not None
-        assert _git_fetch(repo) is True
+        ok, _stdout, _stderr = _git_fetch(repo)
+        assert ok is True
 
 
 class TestFetchRef:
@@ -165,7 +168,10 @@ class TestGitFetchWithBackoff:
         from unittest.mock import patch
 
         with (
-            patch("franktheunicorn.worker.repo_manager._git_fetch", return_value=False),
+            patch(
+                "franktheunicorn.worker.repo_manager._git_fetch",
+                return_value=(False, "", "fatal: not a git repo"),
+            ),
             patch("franktheunicorn.worker.repo_manager.time.sleep"),
         ):
             assert _git_fetch_with_backoff(tmp_path, "org", "repo") is False
@@ -175,7 +181,8 @@ class TestGitFetchWithBackoff:
 
         with (
             patch(
-                "franktheunicorn.worker.repo_manager._git_fetch", return_value=False
+                "franktheunicorn.worker.repo_manager._git_fetch",
+                return_value=(False, "", "error"),
             ) as mock_fetch,
             patch("franktheunicorn.worker.repo_manager.time.sleep"),
         ):
@@ -188,7 +195,8 @@ class TestGitFetchWithBackoff:
 
         with (
             patch(
-                "franktheunicorn.worker.repo_manager._git_fetch", side_effect=[False, True]
+                "franktheunicorn.worker.repo_manager._git_fetch",
+                side_effect=[(False, "", "error"), (True, "", "")],
             ) as mock_fetch,
             patch("franktheunicorn.worker.repo_manager.time.sleep") as mock_sleep,
         ):
@@ -203,7 +211,10 @@ class TestGitFetchWithBackoff:
         from unittest.mock import patch
 
         with (
-            patch("franktheunicorn.worker.repo_manager._git_fetch", return_value=False),
+            patch(
+                "franktheunicorn.worker.repo_manager._git_fetch",
+                return_value=(False, "", "connection refused"),
+            ),
             patch("franktheunicorn.worker.repo_manager.time.sleep"),
             caplog.at_level("WARNING"),
         ):

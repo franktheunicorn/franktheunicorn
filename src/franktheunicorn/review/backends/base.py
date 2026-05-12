@@ -110,12 +110,24 @@ def _log_backend_error(backend_name: str, exc: BaseException) -> None:
             exc_info=True,
         )
     elif status_code == 403:
-        logger.error(
-            "%s: permission denied (HTTP 403) — check that your API key has the "
-            "required permissions and that your account is in good standing.",
-            backend_name,
-            exc_info=True,
-        )
+        body = str(exc).lower()
+        is_html = "<html" in body or "<!doctype" in body
+        mentions_api = "api" in body
+        if is_html and not mentions_api:
+            logger.error(
+                "%s: received an HTML 403 response — this looks like a proxy or CDN "
+                "block rather than an API key issue. Check network access, VPN, or "
+                "firewall rules for the backend URL.",
+                backend_name,
+                exc_info=True,
+            )
+        else:
+            logger.error(
+                "%s: permission denied (HTTP 403) — check that your API key has the "
+                "required permissions and that your account is in good standing.",
+                backend_name,
+                exc_info=True,
+            )
     elif status_code == 429:
         logger.warning(
             "%s: rate limited (HTTP 429) — the API quota was exceeded. "

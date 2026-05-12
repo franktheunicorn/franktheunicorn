@@ -275,17 +275,9 @@ class RemoteSSHExecutor:
             else:
                 error_kind = "remote command error"
 
-            logger.debug(
-                "Remote git %s failed for %s/%s on %s (%s, rc=%d); command: %s; stderr: %s",
-                op_name,
-                owner,
-                repo,
-                self.config.host,
-                error_kind,
-                result.returncode,
-                " ".join(ssh_argv),
-                (result.stderr or "")[:300],
-            )
+            cmd_str = " ".join(ssh_argv)
+            stdout_snippet = (result.stdout or "")[:300]
+            stderr_snippet = (result.stderr or "")[:300]
 
             if _sentinel is None:
                 break
@@ -293,7 +285,8 @@ class RemoteSSHExecutor:
             cumulative_sleep += delay
             if delay >= 60:
                 logger.warning(
-                    "Backing off %ds after remote git %s %s for %s/%s on %s (attempt %d/%d)",
+                    "Backing off %ds after remote git %s %s for %s/%s on %s (attempt %d/%d)"
+                    " — cmd: %s; stdout: %s; stderr: %s",
                     delay,
                     op_name,
                     error_kind,
@@ -302,27 +295,40 @@ class RemoteSSHExecutor:
                     self.config.host,
                     attempt + 1,
                     len(backoff_delays),
+                    cmd_str,
+                    stdout_snippet or "(empty)",
+                    stderr_snippet or "(empty)",
                 )
             else:
                 logger.debug(
-                    "Retrying remote git %s for %s/%s after %ds (attempt %d/%d) ...",
+                    "Remote git %s failed for %s/%s on %s (%s, rc=%d); retrying in %ds"
+                    " (attempt %d/%d) — cmd: %s; stdout: %s; stderr: %s",
                     op_name,
                     owner,
                     repo,
+                    self.config.host,
+                    error_kind,
+                    result.returncode,
                     delay,
                     attempt + 1,
                     len(backoff_delays),
+                    cmd_str,
+                    stdout_snippet or "(empty)",
+                    stderr_snippet or "(empty)",
                 )
             time.sleep(delay)
 
         logger.warning(
-            "Remote git %s failed for %s/%s on %s after %d attempts: %s",
+            "Remote git %s failed for %s/%s on %s after %d attempts"
+            " — cmd: %s; stdout: %s; stderr: %s",
             op_name,
             owner,
             repo,
             self.config.host,
             len(backoff_delays) + 1,
-            (result.stderr or "")[:300] if result is not None else "",
+            " ".join(ssh_argv),
+            (result.stdout or "")[:300] if result is not None else "(no result)",
+            (result.stderr or "")[:300] if result is not None else "(no result)",
         )
         return None
 
