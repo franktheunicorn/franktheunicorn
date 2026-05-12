@@ -216,6 +216,47 @@ def _mask_key(key: str) -> str:
     return key[:2] + "…" + key[-2:]
 
 
+def _openai_chat_preflight(
+    openai: object,
+    client_kwargs: dict[str, str],
+    model: str,
+    base_url: str,
+    idx: int,
+    masked: str,
+    disabled: set[int],
+) -> None:
+    """Verify an OpenAI-compatible endpoint that doesn't support /models via a minimal chat call.
+
+    Mutates ``disabled`` on failure. Logs OK or WARNING.
+    """
+    try:
+        import openai as _openai
+
+        client = _openai.OpenAI(**client_kwargs)  # type: ignore[arg-type]
+        client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=1,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Backend[%d] openai (%s key=%s): preflight chat check failed — %s — "
+            "backend disabled for this run",
+            idx,
+            base_url,
+            masked,
+            exc,
+        )
+        disabled.add(idx)
+        return
+    logger.info(
+        "Backend[%d] openai (%s key=%s): OK (no /models endpoint; chat check passed)",
+        idx,
+        base_url,
+        masked,
+    )
+
+
 def _check_backends(operator_config: OperatorConfig) -> frozenset[int]:
     """Probe each configured LLM backend and return indices of those that fail.
 
@@ -268,7 +309,15 @@ def _check_backends(operator_config: OperatorConfig) -> frozenset[int]:
                 kwargs: dict[str, str] = {"api_key": api_key}
                 if bc.base_url:
                     kwargs["base_url"] = bc.base_url
-                openai.OpenAI(**kwargs).models.list()  # type: ignore[arg-type]
+                try:
+                    openai.OpenAI(**kwargs).models.list()  # type: ignore[arg-type]
+                except openai.NotFoundError:
+                    # Some OpenAI-compatible endpoints (e.g. Snowflake Cortex)
+                    # don't implement /models. Fall back to a minimal chat call.
+                    _openai_chat_preflight(
+                        openai, kwargs, bc.model or "gpt-4o", base_url, idx, masked, disabled
+                    )
+                    continue
             elif provider == "gemini":
                 from google import genai
 
