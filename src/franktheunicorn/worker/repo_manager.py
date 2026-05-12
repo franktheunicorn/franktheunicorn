@@ -11,6 +11,7 @@ import hashlib
 import logging
 import re
 import subprocess
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -35,7 +36,8 @@ def ensure_repo(
 
     if repo_path.is_dir() and (repo_path / ".git").is_dir():
         # Already cloned — fetch latest and fast-forward the default branch.
-        _git_fetch(repo_path)
+        if not _git_fetch_with_backoff(repo_path, owner, repo):
+            logger.warning("git fetch failed for %s/%s; using stale clone", owner, repo)
         _update_default_branch(repo_path)
         return repo_path
 
@@ -119,6 +121,41 @@ def _git_fetch(repo_path: Path) -> bool:
         return True
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return False
+
+
+_FETCH_BACKOFF_DELAYS = (5, 15, 60, 300)
+
+
+def _git_fetch_with_backoff(repo_path: Path, owner: str, repo: str) -> bool:
+    """Fetch all refs from origin with exponential backoff. Returns True on success."""
+    cumulative_sleep = 0
+    for attempt, _sentinel in enumerate((*_FETCH_BACKOFF_DELAYS, None)):
+        if _git_fetch(repo_path):
+            return True
+        if _sentinel is None:
+            break
+        delay = _sentinel
+        cumulative_sleep += delay
+        if delay >= 60:
+            logger.warning(
+                "Backing off %ds after git fetch failure for %s/%s (attempt %d/%d)",
+                delay,
+                owner,
+                repo,
+                attempt + 1,
+                len(_FETCH_BACKOFF_DELAYS),
+            )
+        else:
+            logger.debug(
+                "Retrying git fetch for %s/%s after %ds (attempt %d/%d) ...",
+                owner,
+                repo,
+                delay,
+                attempt + 1,
+                len(_FETCH_BACKOFF_DELAYS),
+            )
+        time.sleep(delay)
+    return False
 
 
 def ensure_ref_available(repo_path: Path, sha: str) -> bool:
