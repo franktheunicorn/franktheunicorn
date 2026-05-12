@@ -216,6 +216,21 @@ def _mask_key(key: str) -> str:
     return key[:2] + "…" + key[-2:]
 
 
+def _seed_token_param_fallback(model: str, base_url: str, token_param: str) -> None:
+    """Persist the discovered token param name so OpenAIBackend skips its own first-attempt error."""
+    try:
+        from franktheunicorn.core.models import LLMBackendFallback
+
+        LLMBackendFallback.objects.update_or_create(
+            provider="openai",
+            model=model,
+            base_url=base_url,
+            defaults={"token_param": token_param},
+        )
+    except Exception:
+        logger.debug("Could not seed LLM token-param fallback state to DB.", exc_info=True)
+
+
 def _openai_chat_preflight(
     openai: object,
     client_kwargs: dict[str, str],
@@ -227,34 +242,61 @@ def _openai_chat_preflight(
 ) -> None:
     """Verify an OpenAI-compatible endpoint that doesn't support /models via a minimal chat call.
 
+    Tries ``max_tokens`` first; if the server rejects it with a deprecation error (e.g. Snowflake
+    Cortex requires ``max_completion_tokens``), retries once with the alternative param name.
+    On success after retry, seeds ``LLMBackendFallback`` so ``OpenAIBackend`` starts with the
+    right param name and avoids its own first-attempt failure.
+
     Mutates ``disabled`` on failure. Logs OK or WARNING.
     """
-    try:
-        import openai as _openai
+    import openai as _openai
 
-        client = _openai.OpenAI(**client_kwargs)  # type: ignore[arg-type]
-        client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": "hi"}],
-            max_tokens=1,
-        )
-    except Exception as exc:
-        logger.warning(
-            "Backend[%d] openai (%s key=%s): preflight chat check failed — %s — "
-            "backend disabled for this run",
-            idx,
-            base_url,
-            masked,
-            exc,
-        )
-        disabled.add(idx)
-        return
-    logger.info(
-        "Backend[%d] openai (%s key=%s): OK (no /models endpoint; chat check passed)",
-        idx,
-        base_url,
-        masked,
-    )
+    client = _openai.OpenAI(**client_kwargs)  # type: ignore[arg-type]
+    token_param = "max_tokens"
+
+    for attempt in range(2):
+        try:
+            client.chat.completions.create(  # type: ignore[call-overload]
+                model=model,
+                messages=[{"role": "user", "content": "hi"}],
+                **{token_param: 1},
+            )
+        except _openai.BadRequestError as exc:
+            msg = str(exc).lower()
+            if attempt == 0 and ("max_tokens" in msg or "max_completion_tokens" in msg):
+                token_param = "max_completion_tokens"
+                continue
+            logger.warning(
+                "Backend[%d] openai (%s key=%s): preflight chat check failed — %s — "
+                "backend disabled for this run",
+                idx,
+                base_url,
+                masked,
+                exc,
+            )
+            disabled.add(idx)
+            return
+        except Exception as exc:
+            logger.warning(
+                "Backend[%d] openai (%s key=%s): preflight chat check failed — %s — "
+                "backend disabled for this run",
+                idx,
+                base_url,
+                masked,
+                exc,
+            )
+            disabled.add(idx)
+            return
+        else:
+            if token_param != "max_tokens":
+                _seed_token_param_fallback(model, base_url, token_param)
+            logger.info(
+                "Backend[%d] openai (%s key=%s): OK (no /models endpoint; chat check passed)",
+                idx,
+                base_url,
+                masked,
+            )
+            return
 
 
 def _check_backends(operator_config: OperatorConfig) -> frozenset[int]:
