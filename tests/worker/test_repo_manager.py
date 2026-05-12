@@ -10,6 +10,7 @@ import pytest
 from franktheunicorn.worker.repo_manager import (
     _ensure_fork_remote,
     _git_fetch,
+    _git_fetch_with_backoff,
     ensure_ref_available,
     ensure_repo,
     ensure_sha_fetched,
@@ -150,6 +151,65 @@ class TestEnsureRepoTimeout:
         ):
             result = ensure_repo(repos_dir, "org", "slow-repo")
         assert result is None
+
+
+class TestGitFetchWithBackoff:
+    def test_succeeds_on_first_attempt(self, tmp_path: Path, bare_repo: Path) -> None:
+        repos_dir = tmp_path / "repos"
+        repos_dir.mkdir()
+        repo = ensure_repo(repos_dir, "org", "repo", clone_url=str(bare_repo))
+        assert repo is not None
+        assert _git_fetch_with_backoff(repo, "org", "repo") is True
+
+    def test_returns_false_after_exhausting_retries(self, tmp_path: Path) -> None:
+        from unittest.mock import patch
+
+        with (
+            patch("franktheunicorn.worker.repo_manager._git_fetch", return_value=False),
+            patch("franktheunicorn.worker.repo_manager.time.sleep"),
+        ):
+            assert _git_fetch_with_backoff(tmp_path, "org", "repo") is False
+
+    def test_retries_correct_number_of_times(self, tmp_path: Path) -> None:
+        from unittest.mock import patch
+
+        with (
+            patch(
+                "franktheunicorn.worker.repo_manager._git_fetch", return_value=False
+            ) as mock_fetch,
+            patch("franktheunicorn.worker.repo_manager.time.sleep"),
+        ):
+            _git_fetch_with_backoff(tmp_path, "org", "repo")
+        # 4 delays in _FETCH_BACKOFF_DELAYS → 5 total attempts
+        assert mock_fetch.call_count == 5
+
+    def test_succeeds_on_second_attempt(self, tmp_path: Path) -> None:
+        from unittest.mock import patch
+
+        with (
+            patch(
+                "franktheunicorn.worker.repo_manager._git_fetch", side_effect=[False, True]
+            ) as mock_fetch,
+            patch("franktheunicorn.worker.repo_manager.time.sleep") as mock_sleep,
+        ):
+            result = _git_fetch_with_backoff(tmp_path, "org", "repo")
+        assert result is True
+        assert mock_fetch.call_count == 2
+        mock_sleep.assert_called_once()
+
+    def test_backoff_warning_fires_for_60s_delay(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from unittest.mock import patch
+
+        with (
+            patch("franktheunicorn.worker.repo_manager._git_fetch", return_value=False),
+            patch("franktheunicorn.worker.repo_manager.time.sleep"),
+            caplog.at_level("WARNING"),
+        ):
+            _git_fetch_with_backoff(tmp_path, "org", "repo")
+        backoff_warnings = [r for r in caplog.records if "Backing off" in r.message]
+        assert backoff_warnings, "Expected 'Backing off' warning when delay >= 60s"
 
 
 def _add_commit(work: Path, filename: str, content: str, message: str) -> str:

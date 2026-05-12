@@ -365,6 +365,161 @@ class TestMakeExecutor:
         assert isinstance(make_executor(cfg), RemoteSSHExecutor)
 
 
+class TestRemoteSSHExecutorPrepareRepoRetry:
+    """Backoff and clone/fetch distinction in prepare_repo."""
+
+    @patch("franktheunicorn.review.tool_executor.time.sleep")
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_retries_on_failure_and_returns_none(self, mock_run: Any, mock_sleep: Any) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=128, stdout="op=fetch", stderr="Connection closed"
+        )
+        executor = RemoteSSHExecutor(config=_ssh_config())
+        assert executor.prepare_repo("acme", "widget") is None
+        assert mock_run.call_count == 5  # 4 delays + 1 final attempt
+
+    @patch("franktheunicorn.review.tool_executor.time.sleep")
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_succeeds_on_second_attempt(self, mock_run: Any, mock_sleep: Any) -> None:
+        mock_run.side_effect = [
+            subprocess.CompletedProcess(
+                args=[], returncode=1, stdout="op=fetch", stderr="transient"
+            ),
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="op=fetch", stderr=""),
+        ]
+        executor = RemoteSSHExecutor(config=_ssh_config())
+        assert executor.prepare_repo("acme", "widget") == "/srv/frank/acme/widget"
+        assert mock_run.call_count == 2
+        mock_sleep.assert_called_once()
+
+    @patch("franktheunicorn.review.tool_executor.time.sleep")
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_clone_label_in_warning(
+        self, mock_run: Any, mock_sleep: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="op=clone", stderr="clone error"
+        )
+        executor = RemoteSSHExecutor(config=_ssh_config())
+        with caplog.at_level("WARNING"):
+            executor.prepare_repo("acme", "widget")
+        assert "clone" in caplog.text
+        assert "fetch" not in caplog.text.replace("git fetch", "")
+
+    @patch("franktheunicorn.review.tool_executor.time.sleep")
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_fetch_label_in_warning(
+        self, mock_run: Any, mock_sleep: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="op=fetch", stderr="fetch error"
+        )
+        executor = RemoteSSHExecutor(config=_ssh_config())
+        with caplog.at_level("WARNING"):
+            executor.prepare_repo("acme", "widget")
+        final_warnings = [
+            r for r in caplog.records if "failed" in r.message and "fetch" in r.message
+        ]
+        assert final_warnings
+
+    @patch("franktheunicorn.review.tool_executor.time.sleep")
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_backoff_warning_fires_when_delay_exceeds_60s(
+        self, mock_run: Any, mock_sleep: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # All attempts fail; the 3rd inter-attempt sleep is 60s, triggering warning.
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="op=fetch", stderr="err"
+        )
+        executor = RemoteSSHExecutor(config=_ssh_config())
+        with caplog.at_level("WARNING"):
+            executor.prepare_repo("acme", "widget")
+        backoff_warnings = [r for r in caplog.records if "Backing off" in r.message]
+        assert backoff_warnings, "Expected at least one 'Backing off' warning log"
+
+    @patch("franktheunicorn.review.tool_executor.time.sleep")
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_shell_script_emits_op_markers(self, mock_run: Any, mock_sleep: Any) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="op=fetch", stderr=""
+        )
+        executor = RemoteSSHExecutor(config=_ssh_config())
+        executor.prepare_repo("acme", "widget")
+        script = mock_run.call_args.args[0][-1]
+        assert "op=fetch" in script
+        assert "op=clone" in script
+
+    @patch("franktheunicorn.review.tool_executor.time.sleep")
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_ssh_url_gets_https_fallback_in_clone_script(
+        self, mock_run: Any, mock_sleep: Any
+    ) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="op=clone", stderr=""
+        )
+        executor = RemoteSSHExecutor(
+            config=_ssh_config(clone_url_template="git@github.com:{owner}/{repo}.git")
+        )
+        executor.prepare_repo("acme", "widget")
+        script = mock_run.call_args.args[0][-1]
+        assert "git@github.com:acme/widget.git" in script
+        assert "https://github.com/acme/widget.git" in script
+
+    @patch("franktheunicorn.review.tool_executor.time.sleep")
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_https_url_gets_no_fallback(self, mock_run: Any, mock_sleep: Any) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="op=clone", stderr=""
+        )
+        executor = RemoteSSHExecutor(
+            config=_ssh_config(clone_url_template="https://github.com/{owner}/{repo}.git")
+        )
+        executor.prepare_repo("acme", "widget")
+        script = mock_run.call_args.args[0][-1]
+        # Only one clone URL — no || fallback
+        assert script.count("git clone") == 1
+
+    @patch("franktheunicorn.review.tool_executor.time.sleep")
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_rc255_logged_as_ssh_connection_error(
+        self, mock_run: Any, mock_sleep: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=255, stdout="op=fetch", stderr="Connection closed"
+        )
+        executor = RemoteSSHExecutor(config=_ssh_config())
+        with caplog.at_level("DEBUG"):
+            executor.prepare_repo("acme", "widget")
+        assert any("SSH connection error" in r.message for r in caplog.records)
+
+    @patch("franktheunicorn.review.tool_executor.time.sleep")
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_nonzero_nonconn_logged_as_remote_command_error(
+        self, mock_run: Any, mock_sleep: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=128, stdout="op=clone", stderr="repository not found"
+        )
+        executor = RemoteSSHExecutor(config=_ssh_config())
+        with caplog.at_level("DEBUG"):
+            executor.prepare_repo("acme", "widget")
+        assert any("remote command error" in r.message for r in caplog.records)
+
+    @patch("franktheunicorn.review.tool_executor.time.sleep")
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_ssh_command_logged_in_debug_on_failure(
+        self, mock_run: Any, mock_sleep: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=128, stdout="op=fetch", stderr="err"
+        )
+        executor = RemoteSSHExecutor(config=_ssh_config())
+        with caplog.at_level("DEBUG", logger="franktheunicorn.review.tool_executor"):
+            executor.prepare_repo("acme", "widget")
+        # The debug log should contain the ssh command itself
+        assert any("command:" in r.getMessage() for r in caplog.records)
+
+
 class TestExecResult:
     def test_ok_property(self) -> None:
         assert ExecResult(returncode=0, stdout="", stderr="").ok

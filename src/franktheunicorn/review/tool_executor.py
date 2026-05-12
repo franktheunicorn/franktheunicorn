@@ -12,8 +12,10 @@ tool wrappers don't have to know which one they're using.
 from __future__ import annotations
 
 import logging
+import re
 import shlex
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -175,6 +177,19 @@ class RemoteSSHExecutor:
             return '"$HOME"' + shlex.quote(suffix)
         return shlex.quote(path)
 
+    @staticmethod
+    def _https_fallback_url(url: str) -> str:
+        """Derive an HTTPS clone URL from a git+ssh URL, or return empty string.
+
+        Returns empty string when the URL is already HTTPS or doesn't look like
+        a git@host:owner/repo.git SSH URL (no fallback needed).
+        """
+        m = re.match(r"^git@([^:]+):(.+?)(?:\.git)?$", url)
+        if not m:
+            return ""
+        host, path = m.group(1), m.group(2)
+        return f"https://{host}/{path}.git"
+
     def prepare_repo(
         self,
         owner: str,
@@ -185,6 +200,8 @@ class RemoteSSHExecutor:
         if not clone_url:
             clone_url = self.config.clone_url_template.format(owner=owner, repo=repo)
 
+        https_fallback = self._https_fallback_url(clone_url)
+
         remote_dir = self._remote_repo_path(owner, repo)
         parent_dir = f"{self.config.remote_workspace_dir.rstrip('/')}/{owner}"
 
@@ -193,48 +210,121 @@ class RemoteSSHExecutor:
 
         # Idempotent: clone-or-fetch in a single round trip. Fetches all
         # branches so the tool can resolve origin/main, origin/master, etc.
+        # Emits "op=clone" or "op=fetch" to stdout so callers can distinguish
+        # which operation failed when the exit code is non-zero.
+        # When the primary clone URL is git+ssh, we fall back to HTTPS so a
+        # missing SSH deploy key on the remote doesn't permanently block cloning.
+        if https_fallback:
+            clone_cmd = (
+                f"git clone --quiet {shlex.quote(clone_url)} {quoted_remote} "
+                f"|| git clone --quiet {shlex.quote(https_fallback)} {quoted_remote}"
+            )
+        else:
+            clone_cmd = f"git clone --quiet {shlex.quote(clone_url)} {quoted_remote}"
+
         script = (
             f"set -e; "
             f"mkdir -p {quoted_parent}; "
             f"if [ -d {quoted_remote}/.git ]; then "
+            f"echo 'op=fetch'; "
             f"cd {quoted_remote} && git fetch --quiet --all --prune; "
             f"else "
-            f"git clone --quiet {shlex.quote(clone_url)} {quoted_remote}; "
+            f"echo 'op=clone'; "
+            f"{clone_cmd}; "
             f"fi"
         )
 
-        try:
-            result = subprocess.run(
-                [*self._ssh_command(), script],
-                capture_output=True,
-                text=True,
-                timeout=self.config.prepare_timeout_seconds,
-            )
-        except FileNotFoundError:
-            logger.warning(
-                "ssh binary %r not on PATH; remote execution unavailable",
-                self.config.ssh_command[0],
-            )
-            return None
-        except subprocess.TimeoutExpired:
-            logger.warning(
-                "Remote prepare_repo timed out after %ds for %s/%s",
-                self.config.prepare_timeout_seconds,
-                owner,
-                repo,
-            )
-            return None
+        backoff_delays = (5, 15, 60, 300)
+        cumulative_sleep = 0
+        op_name = "clone/fetch"
+        result = None
+        ssh_argv = [*self._ssh_command(), script]
+        for attempt, _sentinel in enumerate((*backoff_delays, None)):
+            try:
+                result = subprocess.run(
+                    ssh_argv,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.config.prepare_timeout_seconds,
+                )
+            except FileNotFoundError:
+                logger.warning(
+                    "SSH connection error: binary %r not on PATH; remote execution unavailable",
+                    self.config.ssh_command[0],
+                )
+                return None
+            except subprocess.TimeoutExpired:
+                logger.warning(
+                    "SSH connection to %s timed out after %ds while preparing %s/%s",
+                    self.config.host,
+                    self.config.prepare_timeout_seconds,
+                    owner,
+                    repo,
+                )
+                return None
 
-        if result.returncode != 0:
-            logger.warning(
-                "Remote git clone/fetch failed for %s/%s on %s: %s",
+            op_name = "clone" if "op=clone" in (result.stdout or "") else "fetch"
+
+            if result.returncode == 0:
+                return remote_dir
+
+            # SSH itself failed (connection refused, unreachable, auth error)
+            # when exit code is 255; anything else is a remote command failure.
+            if result.returncode == 255:
+                error_kind = "SSH connection error"
+            else:
+                error_kind = "remote command error"
+
+            logger.debug(
+                "Remote git %s failed for %s/%s on %s (%s, rc=%d); command: %s; stderr: %s",
+                op_name,
                 owner,
                 repo,
                 self.config.host,
+                error_kind,
+                result.returncode,
+                " ".join(ssh_argv),
                 (result.stderr or "")[:300],
             )
-            return None
-        return remote_dir
+
+            if _sentinel is None:
+                break
+            delay = _sentinel
+            cumulative_sleep += delay
+            if delay >= 60:
+                logger.warning(
+                    "Backing off %ds after remote git %s %s for %s/%s on %s (attempt %d/%d)",
+                    delay,
+                    op_name,
+                    error_kind,
+                    owner,
+                    repo,
+                    self.config.host,
+                    attempt + 1,
+                    len(backoff_delays),
+                )
+            else:
+                logger.debug(
+                    "Retrying remote git %s for %s/%s after %ds (attempt %d/%d) ...",
+                    op_name,
+                    owner,
+                    repo,
+                    delay,
+                    attempt + 1,
+                    len(backoff_delays),
+                )
+            time.sleep(delay)
+
+        logger.warning(
+            "Remote git %s failed for %s/%s on %s after %d attempts: %s",
+            op_name,
+            owner,
+            repo,
+            self.config.host,
+            len(backoff_delays) + 1,
+            (result.stderr or "")[:300] if result is not None else "",
+        )
+        return None
 
     def run(
         self,

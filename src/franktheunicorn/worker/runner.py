@@ -493,6 +493,7 @@ def _run_cycle(
                             "Repo clone not found at %s, skipping copy-pasta check",
                             repo_path,
                         )
+                logger.debug("Finished processing PR #%d (%s/%s)", pr.number, pc.owner, pc.repo)
         except Exception:
             logger.exception("Error polling %s/%s", pc.owner, pc.repo)
 
