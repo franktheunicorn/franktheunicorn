@@ -231,6 +231,22 @@ class GitLabClient(ForgeClient):
         response = self._client.delete(url)
         response.raise_for_status()
 
+    def list_contributors(self, owner: str, repo: str) -> list[str]:
+        """Fetch contributor logins via the GitLab repository members API."""
+        pid = _project_id(owner, repo)
+        url = f"/projects/{pid}/repository/contributors"
+        try:
+            response = self._client.get(url, params={"per_page": 100})
+            response.raise_for_status()
+            data: list[dict[str, Any]] = response.json()
+            return [
+                entry.get("login", entry.get("name", ""))
+                for entry in data
+                if entry.get("login") or entry.get("name")
+            ]
+        except Exception:
+            return []
+
     def get_authenticated_user(self) -> dict[str, Any]:
         """Fetch the authenticated user. GitLab returns ``username``; map to ``login``."""
         response = self._client.get("/user")

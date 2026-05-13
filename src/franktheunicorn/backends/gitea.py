@@ -199,6 +199,17 @@ class GiteaClient(ForgeClient):
         response = self._client.delete(url)
         response.raise_for_status()
 
+    def list_contributors(self, owner: str, repo: str) -> list[str]:
+        """Fetch contributor logins via the Gitea contributors API."""
+        url = f"/repos/{owner}/{repo}/contributors"
+        try:
+            response = self._client.get(url, params={"limit": 100})
+            response.raise_for_status()
+            data: list[dict[str, Any]] = response.json()
+            return [entry.get("login", "") for entry in data if entry.get("login")]
+        except Exception:
+            return []
+
     def get_authenticated_user(self) -> dict[str, Any]:
         response = self._client.get("/user")
         response.raise_for_status()

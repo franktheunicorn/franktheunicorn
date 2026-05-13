@@ -92,13 +92,19 @@ def score_mentioned_or_assigned(
     body: str,
     assignees: list[str],
     operator_username: str,
+    comment_bodies: list[str] | None = None,
 ) -> int | None:
-    """Operator @-mentioned in PR body or listed as assignee."""
+    """Operator @-mentioned in PR body, a comment, or listed as assignee."""
     op = operator_username.lower()
     if op in _lowered(assignees or []):
         return WEIGHTS["mentioned_or_assigned"]
-    if re.search(rf"@{re.escape(operator_username)}\b", body or "", re.IGNORECASE):
+    pattern = re.compile(rf"@{re.escape(operator_username)}\b", re.IGNORECASE)
+    if pattern.search(body or ""):
         return WEIGHTS["mentioned_or_assigned"]
+    if comment_bodies:
+        for cb in comment_bodies:
+            if pattern.search(cb or ""):
+                return WEIGHTS["mentioned_or_assigned"]
     return None
 
 

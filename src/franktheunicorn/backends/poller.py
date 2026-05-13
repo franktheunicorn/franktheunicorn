@@ -53,6 +53,28 @@ def poll_project(
         project_config.owner,
         project_config.repo,
     )
+
+    # Fetch and cache the contributor list from the forge so new-contributor
+    # detection works even when the local DB is sparse (e.g. fresh setup).
+    try:
+        forge_contributors = client.list_contributors(project_config.owner, project_config.repo)
+        if forge_contributors:
+            project.contributors_cache = forge_contributors
+            project.save(update_fields=["contributors_cache"])
+            logger.debug(
+                "Cached %d contributor(s) for %s/%s",
+                len(forge_contributors),
+                project_config.owner,
+                project_config.repo,
+            )
+    except Exception:
+        logger.debug(
+            "Could not fetch contributors for %s/%s",
+            project_config.owner,
+            project_config.repo,
+            exc_info=True,
+        )
+
     results: list[PullRequest] = []
 
     for pr_data in raw_prs:
@@ -178,36 +200,40 @@ def poll_project(
             except Exception:
                 logger.debug("CVE history fetch failed for PR #%d", pr_number, exc_info=True)
 
-        # Gather re-engagement data: check if operator has posted reviews
-        # and if the author has replied since.
+        # Fetch all PR comments once: used for both mention scoring and
+        # pending-response detection. The since filter is applied below only
+        # for the author-reply subset.
         operator_review_posted_at: str | None = None
         author_replies: list[str] | None = None
+        comment_bodies: list[str] | None = None
 
-        latest_posted_at = (
-            ReviewDraft.objects.filter(
-                pull_request=pr_obj, status="posted", posted_at__isnull=False
+        try:
+            all_comments = client.get_issue_comments(
+                project_config.owner,
+                project_config.repo,
+                pr_number,
             )
-            .order_by("-posted_at")
-            .values_list("posted_at", flat=True)
-            .first()
-        )
-        if latest_posted_at is not None:
-            operator_review_posted_at = latest_posted_at.isoformat()
-            try:
-                issue_comments = client.get_issue_comments(
-                    project_config.owner,
-                    project_config.repo,
-                    pr_number,
-                    since=operator_review_posted_at,
+            comment_bodies = [str(c.get("body", "")) for c in all_comments if c.get("body")]
+
+            latest_posted_at = (
+                ReviewDraft.objects.filter(
+                    pull_request=pr_obj, status="posted", posted_at__isnull=False
                 )
+                .order_by("-posted_at")
+                .values_list("posted_at", flat=True)
+                .first()
+            )
+            if latest_posted_at is not None:
+                operator_review_posted_at = latest_posted_at.isoformat()
                 pr_author = pr_obj.author.lower()
                 author_replies = [
                     c["created_at"]
-                    for c in issue_comments
+                    for c in all_comments
                     if c.get("user", {}).get("login", "").lower() == pr_author
+                    and c.get("created_at", "") >= operator_review_posted_at
                 ]
-            except Exception:
-                logger.debug("Could not fetch comments for PR #%d", pr_number)
+        except Exception:
+            logger.debug("Could not fetch comments for PR #%d", pr_number)
 
         # Score the PR
         score, breakdown = score_pull_request_from_model(
@@ -218,12 +244,13 @@ def poll_project(
             cve_affected_files=cve_affected_files,
             operator_review_posted_at=operator_review_posted_at,
             author_replies_after_review=author_replies,
+            comment_bodies=comment_bodies,
         )
         pr_obj.interest_score = score
         pr_obj.score_breakdown = breakdown
 
         # Compute moderation flags and route to queue (§2.2).
-        _route_pr_to_queue(pr_obj, operator_username)
+        _route_pr_to_queue(pr_obj, operator_username, list(project.contributors_cache or []))
 
         pr_obj.save(
             update_fields=[
@@ -246,7 +273,11 @@ def poll_project(
     return results
 
 
-def _route_pr_to_queue(pr_obj: PullRequest, operator_username: str) -> None:
+def _route_pr_to_queue(
+    pr_obj: PullRequest,
+    operator_username: str,
+    forge_contributors: list[str] | None = None,
+) -> None:
     """Set queue and boolean flags based on moderation flags."""
     from franktheunicorn.scoring.moderation import compute_moderation_flags
 
@@ -266,12 +297,15 @@ def _route_pr_to_queue(pr_obj: PullRequest, operator_username: str) -> None:
         age = (datetime.now(tz=UTC) - pr_obj.github_created_at).days
         pr_dict["pr_age_days"] = age
 
-    known_authors = list(
+    db_authors = list(
         PullRequest.objects.filter(project=pr_obj.project)
         .exclude(pk=pr_obj.pk)
         .values_list("author", flat=True)
         .distinct()
     )
+    # Union DB authors with forge contributor list so known contributors aren't
+    # incorrectly flagged as new when the local DB is sparse.
+    known_authors = list({*db_authors, *(forge_contributors or [])})
 
     flags = compute_moderation_flags(pr_dict, operator_username, known_authors)
 

@@ -50,6 +50,16 @@
 
 {% if agent_run_summary %}
 <h3 style="margin-top: 1.5rem;">Agent Run Summary</h3>
+<div style="margin-bottom: 0.75rem;">
+    <button class="action-btn"
+            hx-post="{% url 'dashboard:run_agents' pr.pk %}"
+            hx-target="#run-agents-result"
+            hx-swap="innerHTML"
+            hx-confirm="Run all configured agents on this PR now?">
+        Force Run Agents Now
+    </button>
+    <div id="run-agents-result"></div>
+</div>
 <table style="font-size: 0.85rem;">
     <thead>
         <tr>

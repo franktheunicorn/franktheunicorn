@@ -171,6 +171,23 @@ class GitHubClient(ForgeClient):
         response = self._client.delete(url)
         response.raise_for_status()
 
+    def list_contributors(self, owner: str, repo: str) -> list[str]:
+        """Fetch contributor logins from the GitHub contributors API.
+
+        Returns up to 100 contributors by commit count. On any error
+        (e.g. empty repo, auth failure) returns an empty list so the caller
+        can fall back to DB-only known-author detection.
+        """
+        url = f"/repos/{owner}/{repo}/contributors"
+        try:
+            response = self._client.get(url, params={"per_page": 100, "anon": "false"})
+            response.raise_for_status()
+            data: list[dict[str, Any]] = response.json()
+            return [entry["login"] for entry in data if entry.get("login")]
+        except Exception:
+            logger.debug("Could not fetch contributors for %s/%s", owner, repo, exc_info=True)
+            return []
+
     def get_authenticated_user(self) -> dict[str, Any]:
         """Fetch the authenticated user's profile (GET /user)."""
         response = self._client.get("/user")

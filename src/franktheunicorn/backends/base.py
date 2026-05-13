@@ -115,6 +115,16 @@ class ForgeClient(ABC):
         """
 
     @abstractmethod
+    def list_contributors(self, owner: str, repo: str) -> list[str]:
+        """Return login names of contributors to the repository.
+
+        Implementations should return at least the top contributors. Order
+        and completeness are best-effort — the result is used only for
+        new-contributor detection, so false negatives (missing someone) are
+        acceptable but should be minimised.
+        """
+
+    @abstractmethod
     def get_authenticated_user(self) -> dict[str, Any]:
         pass
 

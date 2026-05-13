@@ -1190,6 +1190,33 @@ def _ingest_single_pr(owner: str, repo: str, pr_number: int) -> PullRequest:
     return pr_obj
 
 
+@require_POST
+def run_agents(request: HttpRequest, pr_id: int) -> HttpResponse:
+    """Trigger on-demand LLM agent review for a PR (htmx)."""
+    pr = get_object_or_404(PullRequest.objects.select_related("project"), pk=pr_id)
+    try:
+        from franktheunicorn.config.loader import get_operator_config, get_project_config
+        from franktheunicorn.review.drafter import draft_review
+
+        operator_config = get_operator_config()
+        project_config = get_project_config(pr.project.full_name)
+        if not project_config:
+            return HttpResponse(
+                '<div class="run-agents-result" style="color: #c00;">'
+                "No project config found for this repo.</div>"
+            )
+        drafts = draft_review(pr, project_config, operator_config)
+        return HttpResponse(
+            f'<div class="run-agents-result" style="color: #2e7d32;">'
+            f"Generated {len(drafts)} finding(s). Reload the page to see updated results.</div>"
+        )
+    except Exception:
+        logger.exception("Failed to run agents for PR #%d", pr.pk)
+        return HttpResponse(
+            '<div class="run-agents-result" style="color: #c00;">Agent run failed.</div>'
+        )
+
+
 def lookup_pr(request: HttpRequest) -> HttpResponse:
     """Look up a PR by project + number; ingest on-demand if not yet in the DB."""
     if request.method != "POST":

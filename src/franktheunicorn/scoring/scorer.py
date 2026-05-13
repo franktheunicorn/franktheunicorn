@@ -61,6 +61,7 @@ def score_pull_request(
     sentry_error_count: int | None = None,
     cve_affected_files: list[str] | None = None,
     draft_findings_count: int | None = None,
+    comment_bodies: list[str] | None = None,
 ) -> tuple[float, dict[str, float]]:
     """Score a PR for operator interest. Pure function — no Django imports.
 
@@ -98,7 +99,10 @@ def score_pull_request(
         breakdown[name] = float(value)
 
     _add("path_overlap", score_path_overlap(changed_files, watched))
-    _add("mentioned_or_assigned", score_mentioned_or_assigned(body, assignees, operator_username))
+    _add(
+        "mentioned_or_assigned",
+        score_mentioned_or_assigned(body, assignees, operator_username, comment_bodies),
+    )
     _add("has_review_request", score_has_review_request(reviewers, operator_username))
     _add(
         "new_human_contributor",
@@ -226,6 +230,7 @@ def score_pull_request_from_model(
     sentry_error_count: int | None = None,
     cve_affected_files: list[str] | None = None,
     draft_findings_count: int | None = None,
+    comment_bodies: list[str] | None = None,
 ) -> tuple[float, dict[str, float]]:
     """Django-aware wrapper: converts models to dicts, resolves known_authors."""
     pr_dict: dict[str, object] = {
@@ -323,4 +328,5 @@ def score_pull_request_from_model(
         sentry_error_count=sentry_error_count,
         cve_affected_files=cve_affected_files,
         draft_findings_count=draft_findings_count,
+        comment_bodies=comment_bodies,
     )

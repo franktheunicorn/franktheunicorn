@@ -207,12 +207,14 @@ class TestReEngagementDataInPoller:
         called_prs = [call[2] for call in client.issue_comments_calls]
         assert 42 in called_prs
 
-    def test_issue_comments_not_fetched_for_unreviewed_pr(self, tmp_path: Any) -> None:
-        """get_issue_comments is NOT called for PRs without posted ReviewDrafts."""
+    def test_issue_comments_fetched_for_all_prs(self, tmp_path: Any) -> None:
+        """get_issue_comments is called for every PR (needed for @mention scoring)."""
         client = _TrackingMockClient(tmp_path)
         config = ProjectConfig(owner="apache", repo="spark")
-        poll_project(client, config, operator_username="holdenk")
-        assert len(client.issue_comments_calls) == 0
+        prs = poll_project(client, config, operator_username="holdenk")
+        # Comments are always fetched now so @mention scoring works even before
+        # the operator has posted a review.
+        assert len(client.issue_comments_calls) == len(prs)
 
     def test_author_replies_boost_score(self, tmp_path: Any) -> None:
         """PRs with author replies after operator review get higher scores."""

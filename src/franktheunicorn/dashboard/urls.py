@@ -17,6 +17,7 @@ urlpatterns = [
     path("draft/<int:draft_id>/edit/", views.edit_draft, name="edit_draft"),
     path("draft/<int:draft_id>/recall/", views.recall_draft, name="recall_draft"),
     path("pr/<int:pr_id>/post/", views.post_review, name="post_review"),
+    path("pr/<int:pr_id>/run-agents/", views.run_agents, name="run_agents"),
     # Agent feedback (v1.25)
     path("pr/<int:pr_id>/compose-feedback/", views.compose_feedback, name="compose_feedback"),
     path("pr/<int:pr_id>/send-feedback/", views.send_feedback, name="send_feedback"),

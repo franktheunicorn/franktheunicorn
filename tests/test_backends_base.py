@@ -113,6 +113,9 @@ def test_forge_client_concrete_subclass_works() -> None:
         ) -> None:
             pass
 
+        def list_contributors(self, owner: str, repo: str) -> list[str]:
+            return []
+
         def get_authenticated_user(self) -> dict[str, Any]:
             return {"login": "stub"}
 

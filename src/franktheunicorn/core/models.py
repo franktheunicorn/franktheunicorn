@@ -32,6 +32,7 @@ class Project(models.Model):
     enabled = models.BooleanField(default=True)
     repo_health_snapshot = models.JSONField(default=dict, blank=True)
     repo_health_analyzed_at = models.DateTimeField(null=True, blank=True)
+    contributors_cache = models.JSONField(default=list, blank=True)
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
 

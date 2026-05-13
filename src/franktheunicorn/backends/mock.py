@@ -124,6 +124,14 @@ class MockForgeClient(ForgeClient):
     def delete_review_comment(self, owner: str, repo: str, pr_number: int, comment_id: int) -> None:
         """No-op in mock mode."""
 
+    def list_contributors(self, owner: str, repo: str) -> list[str]:
+        """Load contributors from fixture or return empty list."""
+        fixture_path = self._fixtures_dir / f"{owner}_{repo}_contributors.json"
+        if fixture_path.exists():
+            data = _load_json_fixture(fixture_path)
+            return [entry["login"] for entry in data if entry.get("login")]
+        return []
+
     def get_authenticated_user(self) -> dict[str, Any]:
         """Return a mock authenticated user."""
         return {"login": "mock-user", "id": 0, "type": "User"}
