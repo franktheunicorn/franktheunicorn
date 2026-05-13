@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from franktheunicorn.config.models import OperatorConfig, ProjectConfig
 
+from django.contrib import messages
 from django.db.models import Count, Q, Sum
 from django.http import HttpRequest, HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
@@ -1132,3 +1133,90 @@ def _find_project_config(project: Project) -> ProjectConfig | None:
         (c for c in configs if c.owner == project.owner and c.repo == project.repo),
         None,
     )
+
+
+def _ingest_single_pr(owner: str, repo: str, pr_number: int) -> PullRequest:
+    """Fetch a single PR from the forge, score it, and store it in the DB."""
+    from franktheunicorn.backends import make_client
+    from franktheunicorn.backends.poller import _route_pr_to_queue, _upsert_pull_request
+    from franktheunicorn.config.loader import get_operator_config, get_project_config
+    from franktheunicorn.config.resolver import get_forge_entry
+    from franktheunicorn.scoring.scorer import score_pull_request_from_model
+
+    operator_config = get_operator_config()
+    project_config = get_project_config(f"{owner}/{repo}")
+    forge_name = getattr(project_config, "forge", None) or "github"
+    entry = get_forge_entry(operator_config, forge_name)
+    client = make_client(entry)
+
+    project, _ = Project.objects.update_or_create(
+        owner=owner,
+        repo=repo,
+        defaults={"review_context": getattr(project_config, "review_context", "") or ""},
+    )
+
+    pr_data = client.get_pull_request(owner, repo, pr_number)
+    try:
+        files_data = client.get_pull_request_files(owner, repo, pr_number)
+        changed_files = [f["filename"] for f in files_data]
+    except Exception:
+        logger.warning("Could not fetch files for PR #%d during on-demand ingest", pr_number)
+        changed_files = []
+
+    pr_obj = _upsert_pull_request(project, pr_data, changed_files)
+
+    if project_config:
+        score, breakdown = score_pull_request_from_model(
+            pr=pr_obj,
+            project_config=project_config,
+            operator_username=operator_config.github_username or "",
+        )
+        pr_obj.interest_score = score
+        pr_obj.score_breakdown = breakdown
+
+    _route_pr_to_queue(pr_obj, operator_config.github_username or "")
+
+    pr_obj.save(
+        update_fields=[
+            "interest_score",
+            "score_breakdown",
+            "queue",
+            "is_operator_pr",
+            "is_new_contributor",
+            "is_low_context",
+            "is_likely_unowned",
+        ]
+    )
+    return pr_obj
+
+
+def lookup_pr(request: HttpRequest) -> HttpResponse:
+    """Look up a PR by project + number; ingest on-demand if not yet in the DB."""
+    if request.method != "POST":
+        return redirect("dashboard:index")
+
+    project_str = request.POST.get("project", "").strip()
+    raw_number = request.POST.get("pr_number", "").strip()
+
+    if "/" not in project_str or not raw_number.isdigit():
+        messages.error(request, "Enter a valid project and PR number.")
+        return redirect("dashboard:index")
+
+    owner, repo = project_str.split("/", 1)
+    pr_number = int(raw_number)
+
+    try:
+        pr = PullRequest.objects.select_related("project").get(
+            project__owner=owner, project__repo=repo, number=pr_number
+        )
+        return redirect("dashboard:pr_detail", pr_id=pr.pk)
+    except PullRequest.DoesNotExist:
+        pass
+
+    try:
+        pr = _ingest_single_pr(owner, repo, pr_number)
+        return redirect("dashboard:pr_detail", pr_id=pr.pk)
+    except Exception as exc:
+        logger.warning("On-demand ingest failed for %s/%s#%d: %s", owner, repo, pr_number, exc)
+        messages.error(request, f"Could not fetch PR #{pr_number} from {owner}/{repo}.")
+        return redirect("dashboard:index")

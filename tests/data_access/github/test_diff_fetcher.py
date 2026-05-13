@@ -73,6 +73,20 @@ class TestDiffFetcherScrape:
         with pytest.raises(NotFoundError):
             diff_fetcher.fetch_via_scrape("apache", "spark", 999)
 
+    def test_follows_302_redirect(
+        self, httpx_mock: HTTPXMock, diff_fetcher: DiffFetcher, pr_diff_text: str
+    ) -> None:
+        redirect_url = "https://patch-diff.githubusercontent.com/raw/apache/spark/pull/42.diff"
+        httpx_mock.add_response(
+            url="https://github.com/apache/spark/pull/42.diff",
+            status_code=302,
+            headers={"Location": redirect_url},
+        )
+        httpx_mock.add_response(url=redirect_url, text=pr_diff_text)
+        result = diff_fetcher.fetch_via_scrape("apache", "spark", 42)
+        assert result.fetched_via == FetchMethod.SCRAPE
+        assert len(result.files) == 2
+
     def test_new_file_detected_as_added(
         self, httpx_mock: HTTPXMock, diff_fetcher: DiffFetcher
     ) -> None:

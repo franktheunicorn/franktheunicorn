@@ -102,7 +102,7 @@ class DataFetcher(ABC, Generic[T]):  # noqa: UP046
 
     def _scrape_get(self, url: str) -> httpx.Response:
         """GET for scrape path with 404 handling."""
-        response = self._client.get(url)
+        response = self._client.get(url, follow_redirects=True)
         if response.status_code == 404:
             raise NotFoundError(f"Not found: {url}", method=FetchMethod.SCRAPE, status_code=404)
         response.raise_for_status()

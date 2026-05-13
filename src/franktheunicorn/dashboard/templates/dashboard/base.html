@@ -100,6 +100,9 @@
         .filter-bar { display: flex; gap: 0.75rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; font-size: 0.85rem; }
         .filter-bar label { color: var(--muted); white-space: nowrap; }
         .filter-bar select { font-size: 0.8rem; padding: 0.2rem; }
+        .pr-lookup { display: flex; gap: 0.4rem; align-items: center; margin-left: auto; }
+        .pr-lookup select, .pr-lookup input { font-size: 0.8rem; padding: 0.2rem 0.3rem; }
+        .flash { padding: 0.4rem 0.75rem; border-radius: 4px; margin-bottom: 0.75rem; font-size: 0.85rem; background: var(--red-bg); color: var(--red); }
     </style>
 </head>
 <body>
@@ -110,9 +113,23 @@
             <a href="{% url 'dashboard:anti_patterns' %}" {% if request.resolver_match.url_name == 'anti_patterns' %}class="active"{% endif %}>Anti-Patterns</a>
             <a href="{% url 'dashboard:security_list' %}" {% if request.resolver_match.url_name|slice:":8" == 'security' %}class="active"{% endif %}>Security</a>
             <a href="{% url 'dashboard:stats' %}" {% if request.resolver_match.url_name == 'stats' %}class="active"{% endif %}>Stats</a>
+            {% if nav_projects %}
+            <form class="pr-lookup" method="post" action="{% url 'dashboard:lookup_pr' %}">
+                {% csrf_token %}
+                <select name="project" required>
+                    <option value="" disabled selected>project</option>
+                    {% for proj in nav_projects %}
+                        <option value="{{ proj.owner }}/{{ proj.repo }}">{{ proj.owner }}/{{ proj.repo }}</option>
+                    {% endfor %}
+                </select>
+                <input type="number" name="pr_number" placeholder="PR #" min="1" required style="width:5rem">
+                <button type="submit" class="action-btn">Go</button>
+            </form>
+            {% endif %}
         </nav>
     </header>
     <main>
+        {% if messages %}{% for msg in messages %}<p class="flash">{{ msg }}</p>{% endfor %}{% endif %}
         {% block content %}{% endblock %}
     </main>
     <div id="shortcut-help">
