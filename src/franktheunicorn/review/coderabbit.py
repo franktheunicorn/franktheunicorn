@@ -202,6 +202,8 @@ def create_drafts_from_coderabbit(
     pr: PullRequest,
     findings: list[CodeRabbitFinding],
     project: Project | None = None,
+    *,
+    diff_source: str = "",
 ) -> list[ReviewDraft]:
     """
     Convert CodeRabbit findings into ``ReviewDraft`` objects.
@@ -234,6 +236,7 @@ def create_drafts_from_coderabbit(
             confidence=confidence,
             status="pending",
             sources=["coderabbit"],
+            diff_source=diff_source,
         )
         drafts.append(draft)
 

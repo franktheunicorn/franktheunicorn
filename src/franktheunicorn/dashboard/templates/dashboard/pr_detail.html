@@ -48,9 +48,7 @@
 </dl>
 {% endif %}
 
-{% if agent_run_summary %}
-<h3 style="margin-top: 1.5rem;">Agent Run Summary</h3>
-<div style="margin-bottom: 0.75rem;">
+<div style="margin-bottom: 0.75rem; margin-top: 1.5rem;">
     <button class="action-btn"
             hx-post="{% url 'dashboard:run_agents' pr.pk %}"
             hx-target="#run-agents-result"
@@ -60,12 +58,16 @@
     </button>
     <div id="run-agents-result"></div>
 </div>
+
+{% if agent_run_summary %}
+<h3>Agent Run Summary</h3>
 <table style="font-size: 0.85rem;">
     <thead>
         <tr>
             <th>Agent</th>
             <th>Status</th>
             <th>Findings</th>
+            <th>Diff Source</th>
             <th>Line Summaries</th>
         </tr>
     </thead>
@@ -101,6 +103,17 @@
             {% if agent.pending %}&middot; <span style="color: var(--muted);">{{ agent.pending }} pending</span>{% endif %}
             {% else %}
             &mdash;
+            {% endif %}
+        </td>
+        <td>
+            {% if agent.diff_source == "local_git_merged" %}
+            <span style="color: var(--green);">Local git ✓</span>
+            {% elif agent.diff_source == "github_api" %}
+            <span>GitHub API</span>
+            {% elif agent.diff_source == "github_scrape" %}
+            <span style="color: var(--orange);">GitHub (scrape)</span>
+            {% else %}
+            <span style="color: #bbb;">—</span>
             {% endif %}
         </td>
         <td>

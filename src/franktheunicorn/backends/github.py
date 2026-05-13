@@ -195,6 +195,32 @@ class GitHubClient(ForgeClient):
         result: dict[str, Any] = response.json()
         return result
 
+    def search_prs_involving(self, username: str, max_results: int = 100) -> list[dict[str, Any]]:
+        """Search for open PRs where ``username`` is mentioned, assigned, or requested as reviewer.
+
+        Uses GitHub search query: ``involves:{username} type:pr state:open``.
+        The ``involves:`` qualifier matches @mentions, assignments, and review requests.
+        Returns raw search-API items; each has a ``pull_request`` key and ``repository_url``.
+        Returns [] gracefully on rate-limit (403/422/429) or any other failure.
+        """
+        url = "/search/issues"
+        query = f"involves:{username} type:pr state:open"
+        try:
+            response = self._client.get(url, params={"q": query, "per_page": max_results})
+            if response.status_code in (403, 422, 429):
+                logger.info(
+                    "GitHub search rate-limited or unavailable (status %d); skipping mention scan.",
+                    response.status_code,
+                )
+                return []
+            response.raise_for_status()
+            data: dict[str, Any] = response.json()
+            items: list[dict[str, Any]] = data.get("items", [])
+            return items
+        except Exception:
+            logger.debug("PR mention scan failed for %s", username, exc_info=True)
+            return []
+
     def close(self) -> None:
         self._client.close()
 

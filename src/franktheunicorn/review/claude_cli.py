@@ -164,6 +164,8 @@ def create_drafts_from_claude_cli(
     pr: PullRequest,
     findings: list[ClaudeCLIFinding],
     project: Project | None = None,
+    *,
+    diff_source: str = "",
 ) -> list[ReviewDraft]:
     """
     Convert Claude CLI findings into ``ReviewDraft`` rows.
@@ -195,6 +197,7 @@ def create_drafts_from_claude_cli(
             confidence=confidence,
             status="pending",
             sources=["claude-cli"],
+            diff_source=diff_source,
         )
         drafts.append(draft)
 

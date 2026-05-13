@@ -177,6 +177,7 @@ def create_drafts_from_findings(
     tone_guard_applied: bool = False,
     diff: str = "",
     governance: str = "standard",
+    diff_source: str = "",
 ) -> list[ReviewDraft]:
     """Convert ReviewFinding objects into ReviewDraft rows.
 
@@ -277,6 +278,7 @@ def create_drafts_from_findings(
                 code_context=code_context,
                 rejection_probability=rejection_probability,
                 is_auto_suppressed=is_auto_suppressed,
+                diff_source=diff_source,
             )
             drafts.append(draft)
 

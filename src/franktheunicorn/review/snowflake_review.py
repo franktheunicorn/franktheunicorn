@@ -111,6 +111,8 @@ def create_drafts_from_snowflake(
     pr: PullRequest,
     findings: list[SnowflakeFinding],
     project: Project | None = None,
+    *,
+    diff_source: str = "",
 ) -> list[ReviewDraft]:
     """
     Convert Snowflake findings into ``ReviewDraft`` rows, gated by
@@ -140,6 +142,7 @@ def create_drafts_from_snowflake(
             confidence=confidence,
             status="pending",
             sources=["snowflake-review"],
+            diff_source=diff_source,
         )
         drafts.append(draft)
 

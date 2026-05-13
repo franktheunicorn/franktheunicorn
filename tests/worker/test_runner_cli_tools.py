@@ -19,7 +19,7 @@ from franktheunicorn.config.models import (
 from franktheunicorn.core.models import PullRequest
 from franktheunicorn.review.tool_executor import ExecResult
 from franktheunicorn.worker.runner import (
-    _checkout_pr_head,
+    _checkout_pr_head_with_merge,
     _clone_url_for_project,
     _run_coderabbit_for_pr,
 )
@@ -138,37 +138,43 @@ class TestCloneUrlForProject:
 
 
 # ---------------------------------------------------------------------------
-# _checkout_pr_head
+# _checkout_pr_head_with_merge
 # ---------------------------------------------------------------------------
 
 
-class TestCheckoutPrHead:
+class TestCheckoutPrHeadWithMerge:
     def _pr(self, head_sha: str = "abc1234567890") -> PullRequest:
         pr = MagicMock(spec=PullRequest)
         pr.number = 42
         pr.head_sha = head_sha
         return pr
 
-    def test_runs_fetch_then_checkout(self) -> None:
+    def test_merge_succeeds_returns_branch_name(self) -> None:
         executor = MagicMock()
         executor.run.side_effect = [
             ExecResult(returncode=0, stdout="", stderr=""),  # fetch
-            ExecResult(returncode=0, stdout="", stderr=""),  # checkout
+            ExecResult(returncode=0, stdout="", stderr=""),  # checkout -b
+            ExecResult(returncode=0, stdout="", stderr=""),  # merge
         ]
-        ok = _checkout_pr_head(executor, "/srv/repo", self._pr("deadbeef"))
+        ok, branch = _checkout_pr_head_with_merge(
+            executor, "/srv/repo", self._pr("deadbeef"), "origin/main"
+        )
         assert ok is True
-        assert executor.run.call_count == 2
+        assert branch == "franktheunicorn-review-42"
         first_cmd = executor.run.call_args_list[0].args[0]
-        second_cmd = executor.run.call_args_list[1].args[0]
         assert first_cmd[:3] == ["git", "fetch", "--quiet"]
         assert "deadbeef" in first_cmd
-        assert second_cmd[:4] == ["git", "checkout", "--quiet", "--detach"]
-        assert "deadbeef" in second_cmd
+        merge_cmd = executor.run.call_args_list[2].args[0]
+        assert "merge" in merge_cmd
+        assert "origin/main" in merge_cmd
 
     def test_skips_when_head_sha_empty(self) -> None:
         executor = MagicMock()
-        ok = _checkout_pr_head(executor, "/srv/repo", self._pr(head_sha=""))
+        ok, branch = _checkout_pr_head_with_merge(
+            executor, "/srv/repo", self._pr(head_sha=""), "origin/main"
+        )
         assert ok is False
+        assert branch is None
         executor.run.assert_not_called()
 
     def test_returns_false_on_fetch_failure(self) -> None:
@@ -176,22 +182,46 @@ class TestCheckoutPrHead:
         executor.run.side_effect = [
             ExecResult(returncode=128, stdout="", stderr="not found"),
         ]
-        assert _checkout_pr_head(executor, "/srv/repo", self._pr()) is False
-        # Should have stopped after the failed fetch.
+        ok, branch = _checkout_pr_head_with_merge(
+            executor, "/srv/repo", self._pr(), "origin/main"
+        )
+        assert ok is False
+        assert branch is None
         assert executor.run.call_count == 1
-
-    def test_returns_false_on_executor_error(self) -> None:
-        executor = MagicMock()
-        executor.run.side_effect = [None]  # ssh missing or timeout
-        assert _checkout_pr_head(executor, "/srv/repo", self._pr()) is False
 
     def test_returns_false_on_checkout_failure(self) -> None:
         executor = MagicMock()
         executor.run.side_effect = [
-            ExecResult(returncode=0, stdout="", stderr=""),  # fetch ok
-            ExecResult(returncode=1, stdout="", stderr="conflict"),  # checkout fails
+            ExecResult(returncode=0, stdout="", stderr=""),   # fetch ok
+            ExecResult(returncode=1, stdout="", stderr="err"),  # checkout -b fails
         ]
-        assert _checkout_pr_head(executor, "/srv/repo", self._pr()) is False
+        ok, branch = _checkout_pr_head_with_merge(
+            executor, "/srv/repo", self._pr(), "origin/main"
+        )
+        assert ok is False
+        assert branch is None
+
+    def test_merge_conflict_returns_true_none_and_cleans_up(self) -> None:
+        executor = MagicMock()
+        ok_result = ExecResult(returncode=0, stdout="", stderr="")
+        fail_result = ExecResult(returncode=1, stdout="", stderr="conflict")
+        executor.run.side_effect = [
+            ok_result,   # fetch
+            ok_result,   # checkout -b
+            fail_result, # merge fails
+            ok_result,   # merge --abort
+            ok_result,   # checkout --detach
+            ok_result,   # branch -D
+        ]
+        ok, branch = _checkout_pr_head_with_merge(
+            executor, "/srv/repo", self._pr(), "origin/main"
+        )
+        assert ok is True
+        assert branch is None
+        # Confirm cleanup: abort + detach + delete
+        cmds = [call.args[0] for call in executor.run.call_args_list]
+        assert any("--abort" in cmd for cmd in cmds)
+        assert any("-D" in cmd for cmd in cmds)
 
 
 # ---------------------------------------------------------------------------

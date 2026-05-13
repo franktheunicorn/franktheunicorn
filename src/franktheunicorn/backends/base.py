@@ -132,6 +132,14 @@ class ForgeClient(ABC):
     def close(self) -> None:
         pass
 
+    def search_prs_involving(self, username: str, max_results: int = 100) -> list[dict[str, Any]]:
+        """Search for open PRs where ``username`` is involved (mention/assign/review-request).
+
+        Default implementation returns an empty list. Forge clients that support
+        a search API (currently only GitHub) should override this.
+        """
+        return []
+
 
 def infer_username(client: ForgeClient) -> str:
     """Infer the authenticated user's login from any ForgeClient.

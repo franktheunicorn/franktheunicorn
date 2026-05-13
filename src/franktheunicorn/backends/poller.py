@@ -380,3 +380,61 @@ def _upsert_pull_request(
         defaults=defaults,
     )
     return pr_obj
+
+
+def ingest_single_pr(owner: str, repo: str, pr_number: int) -> PullRequest:
+    """Fetch a single PR from the forge, score it, and store it in the DB.
+
+    Creates the Project row if it doesn't exist yet. Safe to call repeatedly —
+    uses update_or_create internally so it acts as a refresh when the PR is
+    already in the DB.
+    """
+    from franktheunicorn.backends import make_client
+    from franktheunicorn.config.loader import get_operator_config, get_project_config
+    from franktheunicorn.config.resolver import get_forge_entry
+
+    operator_config = get_operator_config()
+    project_config = get_project_config(f"{owner}/{repo}")
+    forge_name = getattr(project_config, "forge", None) or "github"
+    entry = get_forge_entry(operator_config, forge_name)
+    client = make_client(entry)
+
+    project, _ = Project.objects.update_or_create(
+        owner=owner,
+        repo=repo,
+        defaults={"review_context": getattr(project_config, "review_context", "") or ""},
+    )
+
+    pr_data = client.get_pull_request(owner, repo, pr_number)
+    try:
+        files_data = client.get_pull_request_files(owner, repo, pr_number)
+        changed_files = [f["filename"] for f in files_data]
+    except Exception:
+        logger.warning("Could not fetch files for PR #%d during on-demand ingest", pr_number)
+        changed_files = []
+
+    pr_obj = _upsert_pull_request(project, pr_data, changed_files)
+
+    if project_config:
+        score, breakdown = score_pull_request_from_model(
+            pr=pr_obj,
+            project_config=project_config,
+            operator_username=operator_config.github_username or "",
+        )
+        pr_obj.interest_score = score
+        pr_obj.score_breakdown = breakdown
+
+    _route_pr_to_queue(pr_obj, operator_config.github_username or "")
+
+    pr_obj.save(
+        update_fields=[
+            "interest_score",
+            "score_breakdown",
+            "queue",
+            "is_operator_pr",
+            "is_new_contributor",
+            "is_low_context",
+            "is_likely_unowned",
+        ]
+    )
+    return pr_obj

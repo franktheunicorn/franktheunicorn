@@ -81,3 +81,32 @@ class TestLookupPR:
             response = client.post("/lookup/", {"project": "other/proj", "pr_number": "42"})
         mock_ingest.assert_called_once_with("other", "proj", 42)
         assert response.status_code == 302
+
+
+@pytest.mark.django_db
+class TestPrByCoords:
+    def test_existing_pr_redirects(self, client: Client, db_pr: PullRequest) -> None:
+        response = client.get("/pr/github/apache/spark/42/")
+        assert response.status_code == 302
+        assert response["Location"] == f"/pr/{db_pr.pk}/"
+
+    def test_missing_pr_triggers_ingest(self, client: Client, db_pr: PullRequest) -> None:
+        stub_pr = db_pr
+        with patch(
+            "franktheunicorn.dashboard.views._ingest_single_pr", return_value=stub_pr
+        ) as mock_ingest:
+            response = client.get("/pr/github/apache/spark/9999/")
+        mock_ingest.assert_called_once_with("apache", "spark", 9999)
+        assert response.status_code == 302
+        assert response["Location"] == f"/pr/{stub_pr.pk}/"
+
+    def test_ingest_failure_redirects_to_index_with_error(self, client: Client) -> None:
+        with patch(
+            "franktheunicorn.dashboard.views._ingest_single_pr",
+            side_effect=RuntimeError("forge down"),
+        ):
+            response = client.get("/pr/github/apache/spark/555/")
+        assert response.status_code == 302
+        assert response["Location"] == "/"
+        msgs = list(response.wsgi_request._messages)  # type: ignore[attr-defined]
+        assert any("555" in str(m) for m in msgs)

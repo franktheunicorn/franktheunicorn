@@ -651,15 +651,30 @@ def _run_cycle(
 
                     # Run CodeRabbit if enabled and no CR drafts exist yet.
                     if cr_config is not None:
-                        _run_coderabbit_for_pr(pr, cr_config, repo_path, clone_url)
+                        _run_coderabbit_for_pr(
+                            pr, cr_config, repo_path, clone_url,
+                            project_config=pc,
+                            operator_config=effective_config,
+                            diff_http=diff_http,
+                        )
 
                     # Run Claude CLI review if enabled.
                     if claude_cli_config is not None:
-                        _run_claude_cli_for_pr(pr, claude_cli_config, repo_path, clone_url)
+                        _run_claude_cli_for_pr(
+                            pr, claude_cli_config, repo_path, clone_url,
+                            project_config=pc,
+                            operator_config=effective_config,
+                            diff_http=diff_http,
+                        )
 
                     # Run Snowflake code review CLI if enabled.
                     if snowflake_config is not None:
-                        _run_snowflake_for_pr(pr, snowflake_config, repo_path, clone_url)
+                        _run_snowflake_for_pr(
+                            pr, snowflake_config, repo_path, clone_url,
+                            project_config=pc,
+                            operator_config=effective_config,
+                            diff_http=diff_http,
+                        )
 
                     # LLM sub-checks (coverage, etc.) — runs once alongside draft review.
                     if pc.llm_checks:
@@ -730,7 +745,169 @@ def _run_cycle(
     if operator_config is not None:
         _poll_security_emails(operator_config)
 
+    # Mention scan: ingest open PRs where the operator is involved but that
+    # aren't in a configured project (mentioned, assigned, review-requested).
+    if operator_username:
+        _scan_mentioned_prs(clients, operator_username, operator_config)
+
+    # Backfill pass: draft reviews for open PRs that were ingested (e.g. via
+    # lookup_pr) but never reached the main poll loop above.
+    _backfill_unreviewed_prs(
+        already_polled_pks={getattr(pr, "pk", None) for pr in all_prs},
+        project_configs=project_configs,
+        operator_config=operator_config,
+        disabled_backends=disabled_backends,
+        diff_http=diff_http,
+    )
+
     diff_http.close()
+
+
+def _scan_mentioned_prs(
+    clients: Mapping[str, object],
+    operator_username: str,
+    operator_config: OperatorConfig | None,
+) -> None:
+    """Ingest open PRs where the operator is involved (mentioned/assigned/review-requested).
+
+    Iterates every configured forge client and calls ``search_prs_involving``.
+    Each found PR is ingested via ``ingest_single_pr`` (idempotent upsert).
+    Failures per-PR are caught individually so one bad PR doesn't stop the rest.
+    """
+    from franktheunicorn.backends.poller import ingest_single_pr
+
+    total_found = 0
+    total_ingested = 0
+
+    for _forge_name, client in clients.items():
+        if not hasattr(client, "search_prs_involving"):
+            continue
+        try:
+            items = client.search_prs_involving(operator_username)
+        except Exception:
+            logger.debug("search_prs_involving failed for forge %s", _forge_name, exc_info=True)
+            continue
+
+        total_found += len(items)
+        for item in items:
+            # Skip plain issues — only process actual PRs.
+            if not item.get("pull_request"):
+                continue
+
+            # Parse owner/repo from repository_url:
+            # e.g. "https://api.github.com/repos/apache/spark"
+            repo_url: str = item.get("repository_url", "")
+            parts = repo_url.rstrip("/").rsplit("/", 2)
+            if len(parts) < 3:
+                logger.debug("Could not parse repository_url %r; skipping", repo_url)
+                continue
+            owner, repo = parts[-2], parts[-1]
+            pr_number: int | None = item.get("number")
+            if not pr_number:
+                continue
+
+            try:
+                ingest_single_pr(owner, repo, pr_number)
+                total_ingested += 1
+            except Exception:
+                logger.debug(
+                    "Failed to ingest mentioned PR %s/%s#%d",
+                    owner, repo, pr_number,
+                    exc_info=True,
+                )
+
+    if total_found:
+        logger.info(
+            "Mention scan: %d PR(s) found involving %s, %d ingested/refreshed.",
+            total_found,
+            operator_username,
+            total_ingested,
+        )
+
+
+def _backfill_unreviewed_prs(
+    already_polled_pks: set[int | None],
+    project_configs: Sequence[object],
+    operator_config: OperatorConfig | None,
+    disabled_backends: frozenset[int],
+    diff_http: httpx.Client,
+) -> None:
+    """Draft reviews for open PRs in the DB that have no review drafts yet.
+
+    Handles PRs ingested via lookup_pr or other paths that bypass the normal
+    poll cycle (which only sees PRs currently open on the forge).
+    """
+    from django.db.models import Count
+
+    from franktheunicorn.config.loader import get_project_config
+    from franktheunicorn.config.models import ProjectConfig
+    from franktheunicorn.core.models import PullRequest as PullRequestModel
+    from franktheunicorn.review.drafter import draft_review
+
+    backfill_qs = (
+        PullRequestModel.objects.filter(state="open")
+        .exclude(pk__in={pk for pk in already_polled_pks if pk is not None})
+        .annotate(draft_count=Count("review_drafts"))
+        .filter(draft_count=0)
+        .select_related("project")
+    )
+
+    # Build a quick lookup: full_name → ProjectConfig, from the configs that
+    # were already loaded for this cycle.
+    config_by_name: dict[str, ProjectConfig] = {}
+    for pc in project_configs:
+        if isinstance(pc, ProjectConfig) and pc.enabled:
+            config_by_name[f"{pc.owner}/{pc.repo}"] = pc
+
+    for pr in backfill_qs:
+        full_name = pr.project.full_name if hasattr(pr.project, "full_name") else str(pr.project)
+        pc = config_by_name.get(full_name) or get_project_config(full_name)
+        if not isinstance(pc, ProjectConfig):
+            logger.debug("No project config for %s, skipping backfill of PR #%d", full_name, pr.number)
+            continue
+
+        logger.info("Backfilling review for PR #%d (%s)", pr.number, full_name)
+
+        community_ctx = ""
+        jira_ctx = ""
+        sentry_ctx = ""
+        try:
+            from franktheunicorn.data_access.context_orchestrator import (
+                fetch_community_context,
+                fetch_jira_context,
+                fetch_sentry_context,
+            )
+
+            jira_ctx = fetch_jira_context(pr, pc, http_client=diff_http)
+            community_ctx = fetch_community_context(pr, pc, operator_config, http_client=diff_http)
+            sentry_ctx = fetch_sentry_context(pr, operator_config, http_client=diff_http)
+        except Exception:
+            logger.debug("External context fetch failed for backfill PR #%d", pr.number, exc_info=True)
+
+        health_ctx = _build_repo_health_context(pr)
+
+        effective_config = operator_config
+        if disabled_backends and operator_config is not None:
+            active = [
+                bc
+                for i, bc in enumerate(operator_config.llm_backends)
+                if i not in disabled_backends
+            ]
+            effective_config = operator_config.model_copy(update={"llm_backends": active})
+
+        try:
+            drafts = draft_review(
+                pr,
+                pc,
+                operator_config=effective_config,
+                repo_health_context=health_ctx,
+                community_context=community_ctx,
+                jira_context=jira_ctx,
+                sentry_context=sentry_ctx,
+            )
+            logger.info("  Backfill PR #%d: %d drafts generated", pr.number, len(drafts))
+        except Exception:
+            logger.exception("Error backfilling review for PR #%d", pr.number)
 
 
 def _run_shepherding_pass(
@@ -857,27 +1034,28 @@ def _clone_url_for_project(
     return f"{base}/{owner}/{repo}.git"
 
 
-def _checkout_pr_head(
+def _checkout_pr_head_with_merge(
     executor: object,
     cwd: str,
     pr: PullRequest,
-) -> bool:
-    """Fetch and detach-checkout the PR's head commit in ``cwd``.
+    base_ref: str,
+) -> tuple[bool, str | None]:
+    """Fetch, create a temp branch on head_sha, and merge base_ref into it.
 
-    Required so review tools that diff ``HEAD`` against a base ref see the
-    PR's actual contents. Returns ``False`` (and logs) on any failure; the
-    caller should bail out.
+    Returns ``(ok, temp_branch_name)``:
+    - ``(False, None)``: fatal failure (fetch or checkout failed); caller should abort.
+    - ``(True, branch_name)``: merge succeeded; caller must clean up via
+      ``_cleanup_review_branch`` after the review tools finish.
+    - ``(True, None)``: merge conflict; caller should skip the local tool and
+      fall back to the GitHub diff.
 
-    Works through the executor abstraction so it covers both local and
-    remote checkouts.
+    The temp branch is named ``franktheunicorn-review-{pr.number}`` to avoid
+    collisions with real branches.
     """
     head_sha = (pr.head_sha or "").strip()
     if not head_sha:
-        logger.debug(
-            "PR #%d has no head_sha; cannot checkout head for review.",
-            pr.number,
-        )
-        return False
+        logger.debug("PR #%d has no head_sha; cannot checkout head for review.", pr.number)
+        return False, None
 
     fetch = executor.run(  # type: ignore[attr-defined]
         ["git", "fetch", "--quiet", "origin", head_sha],
@@ -891,23 +1069,46 @@ def _checkout_pr_head(
             head_sha[:12],
             cwd,
         )
-        return False
+        return False, None
 
+    branch_name = f"franktheunicorn-review-{pr.number}"
     checkout = executor.run(  # type: ignore[attr-defined]
-        ["git", "checkout", "--quiet", "--detach", head_sha],
+        ["git", "checkout", "-b", branch_name, head_sha],
         cwd=cwd,
         timeout=30,
     )
     if checkout is None or not checkout.ok:
         logger.warning(
-            "Failed to checkout PR #%d head %s in %s; review tools will be skipped.",
+            "Failed to create review branch for PR #%d in %s; review tools will be skipped.",
             pr.number,
-            head_sha[:12],
             cwd,
         )
-        return False
+        return False, None
 
-    return True
+    merge = executor.run(  # type: ignore[attr-defined]
+        ["git", "merge", "--no-edit", "--no-ff", base_ref],
+        cwd=cwd,
+        timeout=120,
+    )
+    if merge is None or not merge.ok:
+        logger.warning(
+            "PR #%d: merge conflict with %s; skipping local tool, will fall back to GitHub diff.",
+            pr.number,
+            base_ref,
+        )
+        # Abort the failed merge and clean up the temp branch before returning.
+        executor.run(["git", "merge", "--abort"], cwd=cwd, timeout=15)  # type: ignore[attr-defined]
+        executor.run(["git", "checkout", "--detach", head_sha], cwd=cwd, timeout=15)  # type: ignore[attr-defined]
+        executor.run(["git", "branch", "-D", branch_name], cwd=cwd, timeout=15)  # type: ignore[attr-defined]
+        return True, None
+
+    return True, branch_name
+
+
+def _cleanup_review_branch(executor: object, cwd: str, temp_branch: str) -> None:
+    """Detach HEAD and delete the temporary review branch created by _checkout_pr_head_with_merge."""
+    executor.run(["git", "checkout", "--detach", "HEAD"], cwd=cwd, timeout=15)  # type: ignore[attr-defined]
+    executor.run(["git", "branch", "-D", temp_branch], cwd=cwd, timeout=15)  # type: ignore[attr-defined]
 
 
 def _resolve_cwd_for_tool(
@@ -916,19 +1117,20 @@ def _resolve_cwd_for_tool(
     local_repo_path: Path | None,
     tool_name: str,
     clone_url: str = "",
-) -> tuple[str, str] | None:
+) -> tuple[str, str, str | None] | None:
     """
     Resolve a working directory + base ref for one of the CLI review tools.
 
-    Returns ``(cwd, base_ref)`` ready to hand to the tool, or ``None`` when
-    no checkout could be prepared. ``remote_config`` is duck-typed as a
-    ``RemoteExecutionConfig`` (avoids a hard import at runtime). ``clone_url``
-    is used for remote mode when cloning a fresh repo on the SSH host.
+    Returns ``(cwd, base_ref, temp_branch)`` or ``None`` when no checkout
+    could be prepared:
+    - ``None``: fatal failure; caller should skip.
+    - ``(cwd, base_ref, branch_name)``: ready to run; caller must call
+      ``_cleanup_review_branch`` after the tool finishes.
+    - ``(cwd, base_ref, None)``: merge conflict (local path only); caller
+      should skip the local tool and fall back to GitHub diff.
 
-    After preparing the cwd this also fetches and detach-checks-out the PR's
-    head commit so downstream tools see PR-actual contents (otherwise their
-    ``git diff <base> HEAD`` calls produce empty diffs against the default
-    branch tip).
+    For remote execution (SSH), ``temp_branch`` is always ``None`` — no
+    merge-before-diff is attempted remotely and no cleanup is needed.
     """
     from franktheunicorn.review.tool_executor import (
         LocalExecutor,
@@ -950,11 +1152,13 @@ def _resolve_cwd_for_tool(
         base_ref = _resolve_base_ref(local_repo_path, pr)
         if base_ref is None:
             return None
-        if not _checkout_pr_head(executor, str(local_repo_path), pr):
+        ok, temp_branch = _checkout_pr_head_with_merge(executor, str(local_repo_path), pr, base_ref)
+        if not ok:
             return None
-        return str(local_repo_path), base_ref
+        return str(local_repo_path), base_ref, temp_branch
 
     # Remote execution: clone (or fetch) the repo on the remote host.
+    # No merge-before-diff remotely — temp_branch is always None.
     assert isinstance(executor, RemoteSSHExecutor)
     remote_cwd = executor.prepare_repo(
         pr.project.owner,
@@ -972,9 +1176,53 @@ def _resolve_cwd_for_tool(
     base_ref = _resolve_remote_base_ref(executor, remote_cwd, pr)
     if base_ref is None:
         return None
-    if not _checkout_pr_head(executor, remote_cwd, pr):
-        return None
-    return remote_cwd, base_ref
+    # Remote: checkout head but don't attempt merge (no conflict tracking).
+    head_sha = (pr.head_sha or "").strip()
+    if head_sha:
+        fetch = executor.run(
+            ["git", "fetch", "--quiet", "origin", head_sha], cwd=remote_cwd, timeout=300
+        )
+        if fetch is None or not fetch.ok:
+            logger.warning(
+                "Failed to fetch PR #%d head in remote %s; skipping %s.",
+                pr.number, remote_cwd, tool_name,
+            )
+            return None
+        checkout = executor.run(
+            ["git", "checkout", "--quiet", "--detach", head_sha], cwd=remote_cwd, timeout=30
+        )
+        if checkout is None or not checkout.ok:
+            logger.warning(
+                "Failed to checkout PR #%d head in remote %s; skipping %s.",
+                pr.number, remote_cwd, tool_name,
+            )
+            return None
+    return remote_cwd, base_ref, None
+
+
+def _run_github_diff_fallback(
+    pr: PullRequest,
+    project_config: object,
+    operator_config: OperatorConfig | None,
+    diff_http: httpx.Client,
+) -> None:
+    """Fall back to a GitHub-fetched diff review when the local merge conflicted.
+
+    Calls draft_review() the same way the main cycle does, which will produce
+    ReviewDraft rows without a diff_source (blank = main LLM pipeline path).
+    """
+    from franktheunicorn.config.models import ProjectConfig
+    from franktheunicorn.review.drafter import draft_review
+
+    if not isinstance(project_config, ProjectConfig):
+        logger.debug("No ProjectConfig for fallback review of PR #%d; skipping.", pr.number)
+        return
+
+    logger.info("PR #%d: running GitHub-diff fallback review after local merge conflict.", pr.number)
+    try:
+        draft_review(pr, project_config, operator_config)
+    except Exception:
+        logger.exception("GitHub diff fallback review failed for PR #%d", pr.number)
 
 
 def _run_coderabbit_for_pr(
@@ -982,6 +1230,9 @@ def _run_coderabbit_for_pr(
     cr_config: CodeRabbitConfig,
     repo_path: Path | None,
     clone_url: str = "",
+    project_config: object = None,
+    operator_config: OperatorConfig | None = None,
+    diff_http: httpx.Client | None = None,
 ) -> None:
     """Run CodeRabbit CLI review for a single PR. Never raises.
 
@@ -1005,13 +1256,24 @@ def _run_coderabbit_for_pr(
     )
     if resolved is None:
         return
-    cwd, base_ref = resolved
+    cwd, base_ref, temp_branch = resolved
 
+    if temp_branch is None:
+        # Merge conflict — skip local tool and fall back to GitHub diff.
+        if pr.mergeable is not False:
+            pr.mergeable = False
+            pr.save(update_fields=["mergeable", "updated_at"])
+        if diff_http is not None:
+            _run_github_diff_fallback(pr, project_config, operator_config, diff_http)
+        return
+
+    executor = make_executor(cr_config.remote)
     try:
-        executor = make_executor(cr_config.remote)
         findings = run_coderabbit_review(cwd, base_ref, cr_config, executor=executor)
         if findings:
-            drafts = create_drafts_from_coderabbit(pr, findings, pr.project)
+            drafts = create_drafts_from_coderabbit(
+                pr, findings, pr.project, diff_source="local_git_merged"
+            )
             logger.info(
                 "  PR #%d: %d CodeRabbit findings → %d drafts",
                 pr.number,
@@ -1020,6 +1282,8 @@ def _run_coderabbit_for_pr(
             )
     except Exception:
         logger.exception("CodeRabbit failed for PR #%d; continuing.", pr.number)
+    finally:
+        _cleanup_review_branch(executor, cwd, temp_branch)
 
 
 def _run_claude_cli_for_pr(
@@ -1027,6 +1291,9 @@ def _run_claude_cli_for_pr(
     claude_config: ClaudeCLIConfig,
     repo_path: Path | None,
     clone_url: str = "",
+    project_config: object = None,
+    operator_config: OperatorConfig | None = None,
+    diff_http: httpx.Client | None = None,
 ) -> None:
     """Run the Claude CLI review for a single PR. Never raises."""
     from franktheunicorn.review.claude_cli import (
@@ -1044,13 +1311,23 @@ def _run_claude_cli_for_pr(
     )
     if resolved is None:
         return
-    cwd, base_ref = resolved
+    cwd, base_ref, temp_branch = resolved
 
+    if temp_branch is None:
+        if pr.mergeable is not False:
+            pr.mergeable = False
+            pr.save(update_fields=["mergeable", "updated_at"])
+        if diff_http is not None:
+            _run_github_diff_fallback(pr, project_config, operator_config, diff_http)
+        return
+
+    executor = make_executor(claude_config.remote)
     try:
-        executor = make_executor(claude_config.remote)
         findings = run_claude_cli_review(cwd, base_ref, claude_config, executor=executor)
         if findings:
-            drafts = create_drafts_from_claude_cli(pr, findings, pr.project)
+            drafts = create_drafts_from_claude_cli(
+                pr, findings, pr.project, diff_source="local_git_merged"
+            )
             logger.info(
                 "  PR #%d: %d Claude CLI findings → %d drafts",
                 pr.number,
@@ -1059,6 +1336,8 @@ def _run_claude_cli_for_pr(
             )
     except Exception:
         logger.exception("Claude CLI failed for PR #%d; continuing.", pr.number)
+    finally:
+        _cleanup_review_branch(executor, cwd, temp_branch)
 
 
 def _run_snowflake_for_pr(
@@ -1066,6 +1345,9 @@ def _run_snowflake_for_pr(
     snowflake_config: SnowflakeReviewConfig,
     repo_path: Path | None,
     clone_url: str = "",
+    project_config: object = None,
+    operator_config: OperatorConfig | None = None,
+    diff_http: httpx.Client | None = None,
 ) -> None:
     """Run the Snowflake code review CLI for a single PR. Never raises."""
     from franktheunicorn.review.snowflake_review import (
@@ -1083,13 +1365,23 @@ def _run_snowflake_for_pr(
     )
     if resolved is None:
         return
-    cwd, base_ref = resolved
+    cwd, base_ref, temp_branch = resolved
 
+    if temp_branch is None:
+        if pr.mergeable is not False:
+            pr.mergeable = False
+            pr.save(update_fields=["mergeable", "updated_at"])
+        if diff_http is not None:
+            _run_github_diff_fallback(pr, project_config, operator_config, diff_http)
+        return
+
+    executor = make_executor(snowflake_config.remote)
     try:
-        executor = make_executor(snowflake_config.remote)
         findings = run_snowflake_review(cwd, base_ref, snowflake_config, executor=executor)
         if findings:
-            drafts = create_drafts_from_snowflake(pr, findings, pr.project)
+            drafts = create_drafts_from_snowflake(
+                pr, findings, pr.project, diff_source="local_git_merged"
+            )
             logger.info(
                 "  PR #%d: %d Snowflake findings → %d drafts",
                 pr.number,
@@ -1098,6 +1390,8 @@ def _run_snowflake_for_pr(
             )
     except Exception:
         logger.exception("Snowflake review failed for PR #%d; continuing.", pr.number)
+    finally:
+        _cleanup_review_branch(executor, cwd, temp_branch)
 
 
 def _resolve_remote_base_ref(

@@ -197,6 +197,13 @@ class ReviewDraft(models.Model):
     is_auto_suppressed = models.BooleanField(default=False)
     code_context = models.TextField(blank=True, default="")
 
+    DIFF_SOURCE_CHOICES = [
+        ("github_api", "GitHub API"),
+        ("github_scrape", "GitHub Scrape"),
+        ("local_git_merged", "Local Git (Merged)"),
+    ]
+    diff_source = models.CharField(max_length=25, choices=DIFF_SOURCE_CHOICES, blank=True, default="")
+
     # Operator disposition
     STATUS_CHOICES = [
         ("pending", "Pending"),
