@@ -27,6 +27,19 @@ logger = logging.getLogger(__name__)
 DEFAULT_TIMEOUT_SECONDS = 120
 
 
+def _git_verbosity_flag(attempt: int) -> str:
+    """Return the git verbosity flag appropriate for a given retry attempt.
+
+    Escalates from quiet → normal → verbose so early attempts stay terse but
+    later retries surface diagnostic output.
+    """
+    if attempt >= 3:
+        return "--verbose"
+    if attempt >= 1:
+        return ""
+    return "--quiet"
+
+
 @dataclass
 class ExecResult:
     """Subset of ``subprocess.CompletedProcess`` we actually use.
@@ -155,6 +168,23 @@ class RemoteSSHExecutor:
         cmd.append(self._ssh_target())
         return cmd
 
+    def _probe_ssh(self) -> bool:
+        """Run ``ssh … true`` to test bare SSH connectivity, independent of git.
+
+        Returns True when the connection succeeds, False on any failure.
+        A short connect-timeout (10 s) keeps this non-blocking.
+        """
+        try:
+            probe = subprocess.run(
+                [*self._ssh_command(), "-o", "ConnectTimeout=10", "true"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
+        return probe.returncode == 0
+
     def _remote_repo_path(self, owner: str, repo: str) -> str:
         base = self.config.remote_workspace_dir.rstrip("/")
         return f"{base}/{owner}/{repo}"
@@ -190,6 +220,19 @@ class RemoteSSHExecutor:
         host, path = m.group(1), m.group(2)
         return f"https://{host}/{path}.git"
 
+    @staticmethod
+    def _ssh_fallback_url(url: str) -> str:
+        """Derive a git+ssh URL from an HTTPS clone URL, or return empty string.
+
+        Returns empty string when the URL is already git+ssh or doesn't look like
+        an https://host/owner/repo.git URL (no fallback needed).
+        """
+        m = re.match(r"^https://([^/]+)/(.+?)(?:\.git)?$", url)
+        if not m:
+            return ""
+        host, path = m.group(1), m.group(2)
+        return f"git@{host}:{path}.git"
+
     def prepare_repo(
         self,
         owner: str,
@@ -201,6 +244,7 @@ class RemoteSSHExecutor:
             clone_url = self.config.clone_url_template.format(owner=owner, repo=repo)
 
         https_fallback = self._https_fallback_url(clone_url)
+        ssh_fallback = self._ssh_fallback_url(clone_url)
 
         remote_dir = self._remote_repo_path(owner, repo)
         parent_dir = f"{self.config.remote_workspace_dir.rstrip('/')}/{owner}"
@@ -208,38 +252,56 @@ class RemoteSSHExecutor:
         quoted_parent = self._quote_remote_path(parent_dir)
         quoted_remote = self._quote_remote_path(remote_dir)
 
-        # Idempotent: clone-or-fetch in a single round trip. Fetches all
-        # branches so the tool can resolve origin/main, origin/master, etc.
-        # Emits "op=clone" or "op=fetch" to stdout so callers can distinguish
-        # which operation failed when the exit code is non-zero.
-        # When the primary clone URL is git+ssh, we fall back to HTTPS so a
-        # missing SSH deploy key on the remote doesn't permanently block cloning.
-        if https_fallback:
-            clone_cmd = (
-                f"git clone --quiet {shlex.quote(clone_url)} {quoted_remote} "
-                f"|| git clone --quiet {shlex.quote(https_fallback)} {quoted_remote}"
-            )
-        else:
-            clone_cmd = f"git clone --quiet {shlex.quote(clone_url)} {quoted_remote}"
-
-        script = (
-            f"set -e; "
-            f"mkdir -p {quoted_parent}; "
-            f"if [ -d {quoted_remote}/.git ]; then "
-            f"echo 'op=fetch'; "
-            f"cd {quoted_remote} && git fetch --quiet --all --prune; "
-            f"else "
-            f"echo 'op=clone'; "
-            f"{clone_cmd}; "
-            f"fi"
-        )
-
         backoff_delays = (5, 15, 60, 300)
         cumulative_sleep = 0
         op_name = "clone/fetch"
         result = None
-        ssh_argv = [*self._ssh_command(), script]
+        all_ssh_unreachable = True
+        ssh_argv: list[str] = []
         for attempt, _sentinel in enumerate((*backoff_delays, None)):
+            # Build the script per-attempt so git verbosity can escalate:
+            # attempt 0 → --quiet, attempts 1-2 → (no flag), attempt 3+ → --verbose
+            git_flag = _git_verbosity_flag(attempt)
+            git_flag_str = f" {git_flag}" if git_flag else ""
+
+            # Idempotent clone-or-fetch. Emits "op=clone"/"op=fetch" to stdout.
+            # Fetch tries the primary remote first, then falls back to the
+            # alternate protocol URL (SSH→HTTPS or HTTPS→SSH) so a dead origin
+            # doesn't permanently block work.
+            if https_fallback:
+                # Primary URL is git+ssh; fall back to HTTPS on both paths.
+                clone_cmd = (
+                    f"git clone{git_flag_str} {shlex.quote(clone_url)} {quoted_remote} "
+                    f"|| git clone{git_flag_str} {shlex.quote(https_fallback)} {quoted_remote}"
+                )
+                fetch_cmd = (
+                    f"git fetch{git_flag_str} --all --prune "
+                    f"|| git fetch{git_flag_str} {shlex.quote(https_fallback)} --update-head-ok"
+                )
+            elif ssh_fallback:
+                # Primary URL is HTTPS; fall back to SSH on the fetch path.
+                # Clone keeps HTTPS-only (SSH key may not be configured for clone).
+                clone_cmd = f"git clone{git_flag_str} {shlex.quote(clone_url)} {quoted_remote}"
+                fetch_cmd = (
+                    f"git fetch{git_flag_str} --all --prune "
+                    f"|| git fetch{git_flag_str} {shlex.quote(ssh_fallback)} --update-head-ok"
+                )
+            else:
+                clone_cmd = f"git clone{git_flag_str} {shlex.quote(clone_url)} {quoted_remote}"
+                fetch_cmd = f"git fetch{git_flag_str} --all --prune"
+
+            script = (
+                f"set -e; "
+                f"mkdir -p {quoted_parent}; "
+                f"if [ -d {quoted_remote}/.git ]; then "
+                f"echo 'op=fetch'; "
+                f"cd {quoted_remote} && {fetch_cmd}; "
+                f"else "
+                f"echo 'op=clone'; "
+                f"{clone_cmd}; "
+                f"fi"
+            )
+            ssh_argv = [*self._ssh_command(), script]
             try:
                 result = subprocess.run(
                     ssh_argv,
@@ -272,8 +334,23 @@ class RemoteSSHExecutor:
             # when exit code is 255; anything else is a remote command failure.
             if result.returncode == 255:
                 error_kind = "SSH connection error"
+                # After the first retry has also failed with rc=255, run a bare
+                # `ssh … true` probe to confirm transport is down and emit a
+                # clear diagnostic before committing to the long backoff.
+                if attempt == 1 and not self._probe_ssh():
+                    port_hint = f" port {self.config.port}" if self.config.port else ""
+                    logger.warning(
+                        "SSH transport to %s%s is down (bare connectivity probe failed)"
+                        " — git operations for %s/%s will keep retrying but are unlikely"
+                        " to succeed until the host is reachable",
+                        self.config.host,
+                        port_hint,
+                        owner,
+                        repo,
+                    )
             else:
                 error_kind = "remote command error"
+                all_ssh_unreachable = False
 
             cmd_str = " ".join(ssh_argv)
             stdout_snippet = (result.stdout or "")[:300]
@@ -318,18 +395,33 @@ class RemoteSSHExecutor:
                 )
             time.sleep(delay)
 
-        logger.warning(
-            "Remote git %s failed for %s/%s on %s after %d attempts"
-            " — cmd: %s; stdout: %s; stderr: %s",
-            op_name,
-            owner,
-            repo,
-            self.config.host,
-            len(backoff_delays) + 1,
-            " ".join(ssh_argv),
-            (result.stdout or "")[:300] if result is not None else "(no result)",
-            (result.stderr or "")[:300] if result is not None else "(no result)",
-        )
+        if all_ssh_unreachable:
+            port_hint = f" port {self.config.port}" if self.config.port else ""
+            logger.warning(
+                "Remote git %s failed for %s/%s: SSH host %s%s was unreachable after %d"
+                " attempts — check SSH connectivity — cmd: %s; stderr: %s",
+                op_name,
+                owner,
+                repo,
+                self.config.host,
+                port_hint,
+                len(backoff_delays) + 1,
+                " ".join(ssh_argv),
+                (result.stderr or "")[:300] if result is not None else "(no result)",
+            )
+        else:
+            logger.warning(
+                "Remote git %s failed for %s/%s on %s after %d attempts"
+                " — cmd: %s; stdout: %s; stderr: %s",
+                op_name,
+                owner,
+                repo,
+                self.config.host,
+                len(backoff_delays) + 1,
+                " ".join(ssh_argv),
+                (result.stdout or "")[:300] if result is not None else "(no result)",
+                (result.stderr or "")[:300] if result is not None else "(no result)",
+            )
         return None
 
     def run(
