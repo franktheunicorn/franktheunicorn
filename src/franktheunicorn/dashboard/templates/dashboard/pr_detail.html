@@ -13,6 +13,7 @@
     {% if pr.is_draft %}&middot; Draft{% endif %}
     {% if pr.likely_ai_generated %}&middot; AI-Generated{% endif %}
     {% if pr.is_new_contributor %}&middot; New Contributor{% endif %}
+    {% if pr.mergeable == False %}&middot; <span class="badge-conflict" title="PR has merge conflicts">Needs Rebase</span>{% endif %}
     &middot; Queue: {{ pr.queue }}
     &middot; <a href="{{ pr.url }}" target="_blank" rel="noopener noreferrer">View on GitHub &nearr;</a>
 </div>

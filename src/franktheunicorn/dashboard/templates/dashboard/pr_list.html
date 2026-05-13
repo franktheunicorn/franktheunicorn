@@ -59,6 +59,7 @@
             {% if pr.is_draft %}· Draft{% endif %}
             {% if pr.likely_ai_generated %}· AI{% endif %}
             {% if pr.is_new_contributor %}· New Contributor{% endif %}
+            {% if pr.mergeable == False %}· <span class="badge-conflict" title="PR has merge conflicts — needs rebase">Needs Rebase</span>{% endif %}
             {% if pr.findings_count %}· <span class="findings-badge" title="Draft line-level concerns">{{ pr.findings_count }} finding{{ pr.findings_count|pluralize }}</span>{% endif %}
             {% if pr.labels %}· {% for label in pr.labels %}{{ label }} {% endfor %}{% endif %}
         </div>

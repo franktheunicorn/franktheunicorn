@@ -1150,7 +1150,7 @@ def run_agents(request: HttpRequest, pr_id: int) -> HttpResponse:
     pr = get_object_or_404(PullRequest.objects.select_related("project"), pk=pr_id)
     try:
         from franktheunicorn.config.loader import get_operator_config, get_project_config
-        from franktheunicorn.review.drafter import draft_review
+        from franktheunicorn.worker.runner import process_pr
 
         operator_config = get_operator_config()
         project_config = get_project_config(pr.project.full_name)
@@ -1159,7 +1159,7 @@ def run_agents(request: HttpRequest, pr_id: int) -> HttpResponse:
                 '<div class="run-agents-result" style="color: #c00;">'
                 "No project config found for this repo.</div>"
             )
-        drafts = draft_review(pr, project_config, operator_config)
+        drafts = process_pr(pr, project_config, operator_config, force=True)
         return HttpResponse(
             f'<div class="run-agents-result" style="color: #2e7d32;">'
             f"Generated {len(drafts)} finding(s). Reload the page to see updated results.</div>"
@@ -1171,45 +1171,12 @@ def run_agents(request: HttpRequest, pr_id: int) -> HttpResponse:
         )
 
 
-def lookup_pr(request: HttpRequest) -> HttpResponse:
-    """Look up a PR by project + number; ingest on-demand if not yet in the DB."""
-    if request.method != "POST":
-        return redirect("dashboard:index")
-
-    project_str = request.POST.get("project", "").strip()
-    raw_number = request.POST.get("pr_number", "").strip()
-
-    if "/" not in project_str or not raw_number.isdigit():
-        messages.error(request, "Enter a valid project and PR number.")
-        return redirect("dashboard:index")
-
-    owner, repo = project_str.split("/", 1)
-    pr_number = int(raw_number)
-
-    try:
-        pr = PullRequest.objects.select_related("project").get(
-            project__owner=owner, project__repo=repo, number=pr_number
-        )
-        return redirect("dashboard:pr_detail", pr_id=pr.pk)
-    except PullRequest.DoesNotExist:
-        pass
-
-    try:
-        pr = _ingest_single_pr(owner, repo, pr_number)
-        return redirect("dashboard:pr_detail", pr_id=pr.pk)
-    except Exception as exc:
-        logger.warning("On-demand ingest failed for %s/%s#%d: %s", owner, repo, pr_number, exc)
-        messages.error(request, f"Could not fetch PR #{pr_number} from {owner}/{repo}.")
-        return redirect("dashboard:index")
-
-
-def pr_by_coords(
+def _resolve_and_redirect_pr(
     request: HttpRequest, owner: str, repo: str, pr_number: int
 ) -> HttpResponse:
-    """Resolve a PR by owner/repo/number via a bookmarkable GET URL.
+    """Look up a PR in the DB; ingest on-demand from the forge if absent.
 
-    Redirects to pr_detail if already in the DB; ingests on-demand otherwise.
-    Useful for deep-linking directly to a PR from external tools or browser bookmarks.
+    Redirects to pr_detail on success, or to index with an error message on failure.
     """
     try:
         pr = PullRequest.objects.select_related("project").get(
@@ -1226,3 +1193,28 @@ def pr_by_coords(
         logger.warning("On-demand ingest failed for %s/%s#%d: %s", owner, repo, pr_number, exc)
         messages.error(request, f"Could not fetch PR #{pr_number} from {owner}/{repo}.")
         return redirect("dashboard:index")
+
+
+def lookup_pr(request: HttpRequest) -> HttpResponse:
+    """Look up a PR by project + number; ingest on-demand if not yet in the DB."""
+    if request.method != "POST":
+        return redirect("dashboard:index")
+
+    project_str = request.POST.get("project", "").strip()
+    raw_number = request.POST.get("pr_number", "").strip()
+
+    if "/" not in project_str or not raw_number.isdigit():
+        messages.error(request, "Enter a valid project and PR number.")
+        return redirect("dashboard:index")
+
+    owner, repo = project_str.split("/", 1)
+    return _resolve_and_redirect_pr(request, owner, repo, int(raw_number))
+
+
+def pr_by_coords(request: HttpRequest, owner: str, repo: str, pr_number: int) -> HttpResponse:
+    """Resolve a PR by owner/repo/number via a bookmarkable GET URL.
+
+    Redirects to pr_detail if already in the DB; ingests on-demand otherwise.
+    Useful for deep-linking directly to a PR from external tools or browser bookmarks.
+    """
+    return _resolve_and_redirect_pr(request, owner, repo, pr_number)

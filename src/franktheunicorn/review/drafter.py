@@ -422,8 +422,30 @@ def draft_review(
             ", ".join(failed_backends),
         )
 
+    # Always create a rebase-needed draft when GitHub reports merge conflicts.
+    # This runs independently of LLM findings so operators see it even when all
+    # backends fail or produce nothing.
+    extra_drafts: list[ReviewDraft] = []
+    if pr.mergeable is False:
+        rebase_draft, _ = ReviewDraft.objects.get_or_create(
+            pull_request=pr,
+            sources=["auto-conflict"],
+            defaults={
+                "comment_body": (
+                    "This PR has merge conflicts with the target branch. "
+                    "Please rebase onto the latest commit of the base branch before this can be reviewed."
+                ),
+                "confidence": 1.0,
+                "category": "other",
+                "severity": "informational",
+                "status": "pending",
+                "diff_source": "",
+            },
+        )
+        extra_drafts.append(rebase_draft)
+
     if not all_findings:
-        return []
+        return extra_drafts
 
     # Deduplicate across backends.
     raw_findings = [f for _, f in all_findings]
@@ -452,7 +474,7 @@ def draft_review(
 
     # Persist as ReviewDraft rows with anti-pattern gating + rejection scoring.
     source_name = all_findings[0][0] if all_findings else "agent"
-    return create_drafts_from_findings(
+    llm_drafts = create_drafts_from_findings(
         pr,
         deduped,
         source=source_name,
@@ -461,3 +483,4 @@ def draft_review(
         diff=diff,
         governance=governance,
     )
+    return extra_drafts + llm_drafts

@@ -19,8 +19,10 @@ from franktheunicorn.config.models import (
 from franktheunicorn.core.models import PullRequest
 from franktheunicorn.review.tool_executor import ExecResult
 from franktheunicorn.worker.runner import (
+    _REMOTE,
     _checkout_pr_head_with_merge,
     _clone_url_for_project,
+    _resolve_cwd_for_tool,
     _run_coderabbit_for_pr,
 )
 
@@ -182,9 +184,7 @@ class TestCheckoutPrHeadWithMerge:
         executor.run.side_effect = [
             ExecResult(returncode=128, stdout="", stderr="not found"),
         ]
-        ok, branch = _checkout_pr_head_with_merge(
-            executor, "/srv/repo", self._pr(), "origin/main"
-        )
+        ok, branch = _checkout_pr_head_with_merge(executor, "/srv/repo", self._pr(), "origin/main")
         assert ok is False
         assert branch is None
         assert executor.run.call_count == 1
@@ -192,12 +192,10 @@ class TestCheckoutPrHeadWithMerge:
     def test_returns_false_on_checkout_failure(self) -> None:
         executor = MagicMock()
         executor.run.side_effect = [
-            ExecResult(returncode=0, stdout="", stderr=""),   # fetch ok
+            ExecResult(returncode=0, stdout="", stderr=""),  # fetch ok
             ExecResult(returncode=1, stdout="", stderr="err"),  # checkout -b fails
         ]
-        ok, branch = _checkout_pr_head_with_merge(
-            executor, "/srv/repo", self._pr(), "origin/main"
-        )
+        ok, branch = _checkout_pr_head_with_merge(executor, "/srv/repo", self._pr(), "origin/main")
         assert ok is False
         assert branch is None
 
@@ -206,16 +204,14 @@ class TestCheckoutPrHeadWithMerge:
         ok_result = ExecResult(returncode=0, stdout="", stderr="")
         fail_result = ExecResult(returncode=1, stdout="", stderr="conflict")
         executor.run.side_effect = [
-            ok_result,   # fetch
-            ok_result,   # checkout -b
-            fail_result, # merge fails
-            ok_result,   # merge --abort
-            ok_result,   # checkout --detach
-            ok_result,   # branch -D
+            ok_result,  # fetch
+            ok_result,  # checkout -b
+            fail_result,  # merge fails
+            ok_result,  # merge --abort
+            ok_result,  # checkout --detach
+            ok_result,  # branch -D
         ]
-        ok, branch = _checkout_pr_head_with_merge(
-            executor, "/srv/repo", self._pr(), "origin/main"
-        )
+        ok, branch = _checkout_pr_head_with_merge(executor, "/srv/repo", self._pr(), "origin/main")
         assert ok is True
         assert branch is None
         # Confirm cleanup: abort + detach + delete
@@ -225,31 +221,14 @@ class TestCheckoutPrHeadWithMerge:
 
 
 # ---------------------------------------------------------------------------
-# _resolve_cwd_for_tool — remote integration via _run_coderabbit_for_pr
+# _resolve_cwd_for_tool — remote execution returns _REMOTE sentinel
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.django_db
 class TestRemoteCloneUsesProjectForgeUrl:
-    @patch("franktheunicorn.review.tool_executor.subprocess.run")
-    def test_remote_clone_url_comes_from_project_forge(
-        self,
-        mock_run: Any,
-        db_pr: PullRequest,
-        tmp_path: Path,
-    ) -> None:
-        # All ssh calls return success with the CodeRabbit fixture so the
-        # full remote pipeline (clone -> fetch base -> checkout PR head ->
-        # run CLI) completes.
-        fixture = (Path(__file__).parent.parent / "fixtures" / "coderabbit_output.txt").read_text()
-        mock_run.return_value = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=fixture, stderr=""
-        )
-
-        db_pr.head_sha = "deadbeef" * 5
-        db_pr.save()
-
-        config = CodeRabbitConfig(
+    def _remote_config(self) -> CodeRabbitConfig:
+        return CodeRabbitConfig(
             enabled=True,
             cli_path="coderabbit",
             remote=RemoteExecutionConfig(
@@ -259,18 +238,29 @@ class TestRemoteCloneUsesProjectForgeUrl:
                 remote_workspace_dir="/srv/frank",
             ),
         )
-        # Pass a forge-derived clone URL (gitea, in this case) — the worker
-        # is the one that computes this in production.
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_remote_clone_url_comes_from_project_forge(
+        self,
+        mock_run: Any,
+        db_pr: PullRequest,
+        tmp_path: Path,
+    ) -> None:
+        fixture = (Path(__file__).parent.parent / "fixtures" / "coderabbit_output.txt").read_text()
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=fixture, stderr=""
+        )
+
+        db_pr.head_sha = "deadbeef" * 5
+        db_pr.save()
+
         _run_coderabbit_for_pr(
             db_pr,
-            config,
-            repo_path=None,  # remote mode ignores the local path
+            self._remote_config(),
+            repo_path=None,
             clone_url="https://git.example.com/acme/widget.git",
         )
 
-        # Find the prepare_repo SSH invocation. Its argv contains the
-        # remote shell script which must reference the gitea clone URL,
-        # not github.com.
         prepare_calls = [
             call
             for call in mock_run.call_args_list
@@ -280,3 +270,56 @@ class TestRemoteCloneUsesProjectForgeUrl:
         script = prepare_calls[0].args[0][-1]
         assert "git.example.com/acme/widget.git" in script
         assert "github.com" not in script
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_remote_execution_does_not_mark_pr_non_mergeable(
+        self,
+        mock_run: Any,
+        db_pr: PullRequest,
+    ) -> None:
+        """Remote mode must never set pr.mergeable=False — that's only for local conflicts."""
+        fixture = (Path(__file__).parent.parent / "fixtures" / "coderabbit_output.txt").read_text()
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=fixture, stderr=""
+        )
+
+        db_pr.head_sha = "deadbeef" * 5
+        db_pr.mergeable = True
+        db_pr.save()
+
+        _run_coderabbit_for_pr(
+            db_pr,
+            self._remote_config(),
+            repo_path=None,
+            clone_url="https://git.example.com/acme/widget.git",
+        )
+
+        db_pr.refresh_from_db()
+        assert db_pr.mergeable is True, "remote execution must not mark PR as non-mergeable"
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_resolve_cwd_returns_remote_sentinel_for_ssh(
+        self,
+        mock_run: Any,
+        db_pr: PullRequest,
+    ) -> None:
+        """_resolve_cwd_for_tool should return _REMOTE as temp_branch for remote execution."""
+        fixture = (Path(__file__).parent.parent / "fixtures" / "coderabbit_output.txt").read_text()
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=fixture, stderr=""
+        )
+
+        db_pr.head_sha = "deadbeef" * 5
+        db_pr.save()
+
+        config = self._remote_config()
+        resolved = _resolve_cwd_for_tool(
+            db_pr,
+            config.remote,
+            None,
+            "CodeRabbit",
+            clone_url="https://git.example.com/acme/widget.git",
+        )
+        assert resolved is not None
+        _cwd, _base_ref, temp_branch = resolved
+        assert temp_branch == _REMOTE, f"expected _REMOTE sentinel, got {temp_branch!r}"
