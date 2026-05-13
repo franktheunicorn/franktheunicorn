@@ -38,3 +38,37 @@ body {
 code, pre, .font-mono {
     font-family: var(--font-mono);
 }
+
+/* Force-run spinner (htmx-indicator pattern) */
+.run-agents-spinner {
+    display: inline-block;
+    width: 1em;
+    height: 1em;
+    margin-left: 0.5em;
+    vertical-align: middle;
+    border: 2px solid var(--color-border);
+    border-top-color: var(--color-primary);
+    border-radius: 50%;
+    opacity: 0;
+    transition: opacity 0.1s;
+}
+
+.htmx-request .run-agents-spinner,
+.htmx-request.run-agents-spinner {
+    opacity: 1;
+    animation: frank-spin 0.7s linear infinite;
+}
+
+@keyframes frank-spin {
+    to { transform: rotate(360deg); }
+}
+
+/* Agent run log output */
+.agent-log {
+    margin: 0.5rem 0 0;
+    padding-left: 1.25rem;
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    color: var(--color-text-muted);
+    list-style: disc;
+}

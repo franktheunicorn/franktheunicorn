@@ -424,7 +424,31 @@ def ingest_single_pr(owner: str, repo: str, pr_number: int) -> PullRequest:
         pr_obj.interest_score = score
         pr_obj.score_breakdown = breakdown
 
-    _route_pr_to_queue(pr_obj, operator_config.github_username or "")
+    # Hydrate contributors_cache if missing so new-contributor detection isn't
+    # limited to DB-only PR authors (which are sparse on first/force ingest).
+    if not project.contributors_cache:
+        try:
+            forge_contributors = client.list_contributors(owner, repo)
+            if forge_contributors:
+                project.contributors_cache = forge_contributors
+                project.save(update_fields=["contributors_cache"])
+                logger.debug(
+                    "Cached %d contributor(s) for %s/%s during single-PR ingest",
+                    len(forge_contributors),
+                    owner,
+                    repo,
+                )
+        except Exception:
+            logger.debug(
+                "Could not fetch contributors for %s/%s during single-PR ingest",
+                owner,
+                repo,
+                exc_info=True,
+            )
+
+    _route_pr_to_queue(
+        pr_obj, operator_config.github_username or "", list(project.contributors_cache or [])
+    )
 
     pr_obj.save(
         update_fields=[

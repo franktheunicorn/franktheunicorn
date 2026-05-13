@@ -54,9 +54,11 @@
             hx-post="{% url 'dashboard:run_agents' pr.pk %}"
             hx-target="#run-agents-result"
             hx-swap="innerHTML"
+            hx-indicator="#run-agents-spinner"
             hx-confirm="Run all configured agents on this PR now?">
         Force Run Agents Now
     </button>
+    <span id="run-agents-spinner" class="htmx-indicator run-agents-spinner" aria-label="Running..."></span>
     <div id="run-agents-result"></div>
 </div>
 

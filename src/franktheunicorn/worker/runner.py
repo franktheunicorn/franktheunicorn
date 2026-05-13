@@ -480,6 +480,7 @@ def process_pr(
     repo_path: Path | None = None,
     *,
     force: bool = False,
+    log_lines: list[str] | None = None,
 ) -> list[Any]:
     """Run the full review pipeline for a single PR.
 
@@ -519,9 +520,16 @@ def process_pr(
     if operator_config is not None and operator_config.snowflake_review.enabled:
         snowflake_config = operator_config.snowflake_review
 
+    def _log(msg: str) -> None:
+        logger.info(msg)
+        if log_lines is not None:
+            log_lines.append(msg)
+
     try:
         if not force and pr.review_drafts.exists():
             return []
+
+        _log(f"Starting agent run for PR #{pr.number}: {pr.title}")
 
         community_ctx = ""
         jira_ctx = ""
@@ -533,6 +541,7 @@ def process_pr(
                 fetch_sentry_context,
             )
 
+            _log("Fetching external context (JIRA, community, Sentry)...")
             jira_ctx = fetch_jira_context(pr, pc, http_client=diff_http)
             community_ctx = fetch_community_context(pr, pc, operator_config, http_client=diff_http)
             sentry_ctx = fetch_sentry_context(pr, operator_config, http_client=diff_http)
@@ -550,6 +559,7 @@ def process_pr(
             ]
             effective_config = operator_config.model_copy(update={"llm_backends": active})
 
+        _log("Running LLM review pipeline...")
         drafts = draft_review(
             pr,
             pc,
@@ -560,6 +570,7 @@ def process_pr(
             sentry_context=sentry_ctx,
             repo_path=repo_path,
         )
+        _log(f"LLM review complete: {len(drafts)} finding(s) generated")
         logger.info(
             "  PR #%d: score=%.2f, %d drafts generated",
             pr.number,
@@ -570,6 +581,7 @@ def process_pr(
         clone_url = _clone_url_for_project(pc, operator_config)
 
         if cr_config is not None:
+            _log("Running CodeRabbit...")
             _run_coderabbit_for_pr(
                 pr,
                 cr_config,
@@ -580,6 +592,7 @@ def process_pr(
                 diff_http=diff_http,
             )
         if claude_cli_config is not None:
+            _log("Running Claude CLI...")
             _run_claude_cli_for_pr(
                 pr,
                 claude_cli_config,
@@ -590,6 +603,7 @@ def process_pr(
                 diff_http=diff_http,
             )
         if snowflake_config is not None:
+            _log("Running Snowflake review...")
             _run_snowflake_for_pr(
                 pr,
                 snowflake_config,
@@ -605,6 +619,7 @@ def process_pr(
                 from franktheunicorn.data_access.github.diff_fetcher import DiffFetcher
                 from franktheunicorn.review.checks import run_enabled_checks
 
+                _log("Running LLM checks...")
                 diff_fetcher = DiffFetcher(client=diff_http)
                 check_pr_diff = diff_fetcher.fetch(pc.owner, pc.repo, pr.number)
                 check_drafts = run_enabled_checks(
@@ -615,10 +630,12 @@ def process_pr(
                     repo_path=repo_path,
                 )
                 if check_drafts:
+                    _log(f"LLM checks: {len(check_drafts)} finding(s)")
                     logger.info("  PR #%d: %d LLM check findings", pr.number, len(check_drafts))
             except Exception:
                 logger.exception("Error in LLM checks for PR #%d", pr.number)
 
+        _log("Agent run complete.")
         return drafts
     finally:
         if close_http:

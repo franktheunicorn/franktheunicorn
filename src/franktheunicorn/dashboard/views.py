@@ -1159,15 +1159,20 @@ def run_agents(request: HttpRequest, pr_id: int) -> HttpResponse:
                 '<div class="run-agents-result" style="color: #c00;">'
                 "No project config found for this repo.</div>"
             )
-        drafts = process_pr(pr, project_config, operator_config, force=True)
+        log_lines: list[str] = []
+        drafts = process_pr(pr, project_config, operator_config, force=True, log_lines=log_lines)
+        log_html = "".join(f"<li>{line}</li>" for line in log_lines)
         return HttpResponse(
-            f'<div class="run-agents-result" style="color: #2e7d32;">'
-            f"Generated {len(drafts)} finding(s). Reload the page to see updated results.</div>"
+            f'<div class="run-agents-result">'
+            f'<p style="color: #2e7d32; margin: 0 0 0.5rem;">'
+            f"Generated {len(drafts)} finding(s). Reload to see updated results.</p>"
+            f'<ul class="agent-log">{log_html}</ul>'
+            f"</div>"
         )
     except Exception:
         logger.exception("Failed to run agents for PR #%d", pr.pk)
         return HttpResponse(
-            '<div class="run-agents-result" style="color: #c00;">Agent run failed.</div>'
+            '<div class="run-agents-result" style="color: #c00;">Agent run failed. Check server logs.</div>'
         )
 
 

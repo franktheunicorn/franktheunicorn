@@ -174,16 +174,23 @@ class GitHubClient(ForgeClient):
     def list_contributors(self, owner: str, repo: str) -> list[str]:
         """Fetch contributor logins from the GitHub contributors API.
 
-        Returns up to 100 contributors by commit count. On any error
-        (e.g. empty repo, auth failure) returns an empty list so the caller
+        Paginates up to 5 pages (500 contributors) so large repos aren't
+        truncated at 100. On any error returns an empty list so the caller
         can fall back to DB-only known-author detection.
         """
         url = f"/repos/{owner}/{repo}/contributors"
         try:
-            response = self._client.get(url, params={"per_page": 100, "anon": "false"})
-            response.raise_for_status()
-            data: list[dict[str, Any]] = response.json()
-            return [entry["login"] for entry in data if entry.get("login")]
+            all_logins: list[str] = []
+            for page in range(1, 6):
+                response = self._client.get(
+                    url, params={"per_page": 100, "page": page, "anon": "false"}
+                )
+                response.raise_for_status()
+                data: list[dict[str, Any]] = response.json()
+                if not data:
+                    break
+                all_logins.extend(entry["login"] for entry in data if entry.get("login"))
+            return all_logins
         except Exception:
             logger.debug("Could not fetch contributors for %s/%s", owner, repo, exc_info=True)
             return []
