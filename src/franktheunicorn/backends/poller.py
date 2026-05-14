@@ -269,7 +269,16 @@ def poll_project(
 
         results.append(pr_obj)
 
-    logger.info("Polled %s: %d PRs ingested/updated", project.full_name, len(results))
+    queue_summary: dict[str, int] = {}
+    for pr in results:
+        queue_summary[pr.queue] = queue_summary.get(pr.queue, 0) + 1
+    queue_str = ", ".join(f"{q}={n}" for q, n in sorted(queue_summary.items()))
+    logger.info(
+        "Polled %s: %d PRs ingested/updated (%s)",
+        project.full_name,
+        len(results),
+        queue_str or "none",
+    )
     return results
 
 
@@ -327,6 +336,13 @@ def _route_pr_to_queue(
         pr_obj.queue = "needs-triage"
     else:
         pr_obj.queue = "review"
+
+    logger.debug(
+        "PR #%d routed to queue=%r (flags=%s)",
+        pr_obj.number,
+        pr_obj.queue,
+        ", ".join(flags) if flags else "none",
+    )
 
 
 def _parse_github_datetime(dt_str: str | None) -> datetime | None:
