@@ -103,8 +103,9 @@ class RemoteExecutionConfig(BaseModel):
 
     @model_validator(mode="after")
     def host_required_for_ssh(self) -> RemoteExecutionConfig:
-        if self.mode == "ssh" and not self.host.strip():
-            msg = "remote.host is required when mode='ssh'"
+        has_custom_command = self.ssh_command != ["ssh"]
+        if self.mode == "ssh" and not self.host.strip() and not has_custom_command:
+            msg = "remote.host is required when mode='ssh' and no custom ssh_command is set"
             raise ValueError(msg)
         return self
 

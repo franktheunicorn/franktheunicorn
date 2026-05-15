@@ -161,6 +161,12 @@ class TestSnowflakeRemoteConfig:
         cfg = RemoteExecutionConfig(mode="ssh", host="review.example.com")
         assert cfg.host == "review.example.com"
 
+    def test_ssh_mode_no_host_allowed_with_custom_command(self) -> None:
+        # Wrapper commands like "sf workspace ssh" handle routing internally.
+        cfg = RemoteExecutionConfig(mode="ssh", ssh_command=["sf", "workspace", "ssh"])
+        assert cfg.host == ""
+        assert cfg.ssh_command == ["sf", "workspace", "ssh"]
+
 
 class TestSnowflakeCliArgv:
     def test_plain_binary(self) -> None:
