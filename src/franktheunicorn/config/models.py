@@ -1072,6 +1072,7 @@ class ProjectConfig(BaseModel):
             "coverage",
             "issue-link",
             "malicious-prompt",
+            "pr-description",
             "security",
             "security-context",
         }
