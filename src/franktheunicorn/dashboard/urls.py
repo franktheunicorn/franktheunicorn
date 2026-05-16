@@ -9,7 +9,9 @@ app_name = "dashboard"
 urlpatterns = [
     path("", views.index, name="index"),
     path("lookup/", views.lookup_pr, name="lookup_pr"),
-    path("pr/github/<str:owner>/<str:repo>/<int:pr_number>/", views.pr_by_coords, name="pr_by_coords"),
+    path(
+        "pr/github/<str:owner>/<str:repo>/<int:pr_number>/", views.pr_by_coords, name="pr_by_coords"
+    ),
     path("pr/<int:pr_id>/", views.pr_detail, name="pr_detail"),
     path("set-workspace/", views.set_workspace, name="set_workspace"),
     # Finding actions (htmx)
