@@ -1,5 +1,6 @@
 {% extends "dashboard/base.html" %}
 {% load static %}
+{% load markdown_filters %}
 {% block title %}PR #{{ pr.number }} — franktheunicorn{% endblock %}
 {% block content %}
 <div class="pr-nav">
@@ -41,7 +42,7 @@
 
 {% if pr.body %}
 <div style="margin-top: 1rem; padding: 0.75rem; background: #f5f5f5; border-radius: 4px; font-size: 0.9rem;">
-    {{ pr.body|linebreaksbr }}
+    <div class="md-content">{{ pr.body|render_markdown }}</div>
 </div>
 {% endif %}
 
@@ -210,7 +211,8 @@
 <div class="agent-vibes">
     {% for vibe in agent_vibes %}
     <div style="margin-bottom: 0.5rem; padding: 0.75rem; background: #fffaf0; border-left: 3px solid #d97706; border-radius: 4px; font-size: 0.9rem;">
-        <strong>{{ vibe.backend }}:</strong> {{ vibe.vibe_text|linebreaksbr }}
+        <strong>{{ vibe.backend }}:</strong>
+        <div class="md-content">{{ vibe.vibe_text|render_markdown }}</div>
     </div>
     {% endfor %}
 </div>
