@@ -36,9 +36,7 @@
     <a href="?queue={{ tab.key }}{% if active_project_type %}&amp;project_type={{ active_project_type }}{% endif %}{% if active_project %}&amp;project={{ active_project }}{% endif %}"
        {% if active_queue == tab.key %}class="active"{% endif %}>
         {{ tab.label }}
-        {% if queue_counts %}
-        <span class="tab-count">{{ queue_counts|default_if_none:0 }}</span>
-        {% endif %}
+        <span class="tab-count">{{ tab.count }}</span>
     </a>
     {% endfor %}
 </div>

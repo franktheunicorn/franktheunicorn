@@ -2,7 +2,13 @@
 {% load static %}
 {% block title %}PR #{{ pr.number }} — franktheunicorn{% endblock %}
 {% block content %}
-<a href="{% url 'dashboard:index' %}" class="back-link">&larr; Back to list</a>
+<div class="pr-nav">
+    <a href="{% url 'dashboard:index' %}?queue={{ pr.queue }}" class="back-link">&larr; Back to {{ pr.queue }}</a>
+    <span class="pr-nav-arrows">
+        {% if prev_pr %}<a href="{% url 'dashboard:pr_detail' prev_pr.pk %}" class="pr-nav-prev" title="{{ prev_pr.project }} #{{ prev_pr.number }}: {{ prev_pr.title }}" id="pr-nav-prev">&uarr; Higher score</a>{% else %}<span class="pr-nav-prev muted">&uarr; Higher score</span>{% endif %}
+        {% if next_pr %}<a href="{% url 'dashboard:pr_detail' next_pr.pk %}" class="pr-nav-next" title="{{ next_pr.project }} #{{ next_pr.number }}: {{ next_pr.title }}" id="pr-nav-next">&darr; Lower score</a>{% else %}<span class="pr-nav-next muted">&darr; Lower score</span>{% endif %}
+    </span>
+</div>
 
 <h2>{{ pr.project }} #{{ pr.number }}: {{ pr.title }}</h2>
 
