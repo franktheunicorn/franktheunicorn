@@ -1,3 +1,4 @@
+{% load markdown_filters %}
 <div class="draft-item {{ draft.status }}" id="draft-{{ draft.pk }}" data-draft-id="{{ draft.pk }}">
     <strong>{% if draft.file_path %}<a href="{{ draft.github_diff_url }}" target="_blank" rel="noopener noreferrer" style="color: inherit; text-decoration: none; border-bottom: 1px dotted currentColor;">{{ draft.file_path }}{% if draft.line_number %}:{{ draft.line_number }}{% endif %}{% if draft.line_end %}-{{ draft.line_end }}{% endif %}</a>{% endif %}</strong>
     {% if "coderabbit" in draft.sources %}
@@ -19,12 +20,12 @@
     </span>
 
     {% if draft.status == "edited" and draft.edited_body %}
-    <p style="margin-top: 0.25rem;">{{ draft.edited_body }}</p>
+    <div class="md-content" style="margin-top: 0.25rem;">{{ draft.edited_body|render_markdown }}</div>
     <details><summary style="font-size: 0.75rem; cursor: pointer;">Original</summary>
-        <p style="font-size: 0.85rem; color: #666;">{{ draft.comment_body }}</p>
+        <div class="md-content" style="font-size: 0.85rem; color: #666;">{{ draft.comment_body|render_markdown }}</div>
     </details>
     {% else %}
-    <p style="margin-top: 0.25rem;">{{ draft.comment_body }}</p>
+    <div class="md-content" style="margin-top: 0.25rem;">{{ draft.comment_body|render_markdown }}</div>
     {% endif %}
 
     {% if draft.suggestion %}
