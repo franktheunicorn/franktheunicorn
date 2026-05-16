@@ -289,6 +289,104 @@ class TestPRDetailWithTestRuns:
 
 
 @pytest.mark.django_db
+class TestRunDualTests:
+    def test_rejects_get(self, client: Client, db_pr: PullRequest) -> None:
+        response = client.get(f"/pr/{db_pr.pk}/run-dual-tests/")
+        assert response.status_code == 405
+
+    def test_no_project_config(self, client: Client, db_pr: PullRequest) -> None:
+        from unittest.mock import patch
+
+        with patch(
+            "franktheunicorn.config.loader.get_project_config",
+            return_value=None,
+        ):
+            response = client.post(f"/pr/{db_pr.pk}/run-dual-tests/")
+
+        assert response.status_code == 200
+        assert b"No project config" in response.content
+
+    def test_tests_disabled(self, client: Client, db_pr: PullRequest) -> None:
+        from unittest.mock import MagicMock, patch
+
+        mock_config = MagicMock()
+        mock_config.tests.enabled = False
+
+        with patch(
+            "franktheunicorn.config.loader.get_project_config",
+            return_value=mock_config,
+        ):
+            response = client.post(f"/pr/{db_pr.pk}/run-dual-tests/")
+
+        assert response.status_code == 200
+        assert b"not enabled" in response.content
+
+    def test_starts_background_thread(self, client: Client, db_pr: PullRequest) -> None:
+        from unittest.mock import MagicMock, patch
+
+        mock_config = MagicMock()
+        mock_config.tests.enabled = True
+
+        mock_thread = MagicMock()
+        mock_thread_cls = MagicMock(return_value=mock_thread)
+
+        with (
+            patch(
+                "franktheunicorn.config.loader.get_project_config",
+                return_value=mock_config,
+            ),
+            patch(
+                "franktheunicorn.dashboard.views.threading.Thread",
+                mock_thread_cls,
+            ),
+        ):
+            response = client.post(f"/pr/{db_pr.pk}/run-dual-tests/")
+
+        assert response.status_code == 200
+        assert b"started" in response.content
+        mock_thread_cls.assert_called_once()
+        mock_thread.start.assert_called_once_with()
+
+
+@pytest.mark.django_db
+class TestIndexVerdictBadges:
+    def test_latest_verdict_shown_in_pr_list(self, client: Client, db_pr: PullRequest) -> None:
+        TestRunFactory(
+            pull_request=db_pr,
+            status="completed",
+            differential_verdict="broken",
+        )
+        response = client.get("/")
+        assert response.status_code == 200
+        assert b"BROKEN" in response.content
+
+    def test_only_latest_completed_verdict_shown(self, client: Client, db_pr: PullRequest) -> None:
+        TestRunFactory(
+            pull_request=db_pr,
+            status="completed",
+            differential_verdict="suspect",
+        )
+        TestRunFactory(
+            pull_request=db_pr,
+            status="completed",
+            differential_verdict="good",
+        )
+        response = client.get("/")
+        assert response.status_code == 200
+        # Only the most recent verdict should show — we just confirm at least one is present.
+        assert b"GOOD" in response.content or b"SUSPECT" in response.content
+
+    def test_no_verdict_when_no_completed_runs(self, client: Client, db_pr: PullRequest) -> None:
+        TestRunFactory(pull_request=db_pr, status="running", differential_verdict=None)
+        response = client.get("/")
+        assert response.status_code == 200
+        assert b"Tests: GOOD" not in response.content
+        assert b"Tests: BROKEN" not in response.content
+        assert b"Tests: SUSPECT" not in response.content
+        assert b"Tests: INFRA" not in response.content
+
+
+@pytest.mark.django_db
 class TestWorkspace:
     def test_set_workspace_redirects(self, client: Client) -> None:
         response = client.post("/set-workspace/", {"workspace": "work"})

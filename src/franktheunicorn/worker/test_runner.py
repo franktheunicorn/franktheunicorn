@@ -35,6 +35,22 @@ RESOURCE_TIERS: dict[str, dict[str, Any]] = {
 }
 
 
+def _is_trusted_author(pr: PullRequest, project_config: ProjectConfig) -> bool:
+    """Return True if the PR author is a trusted contributor for this project.
+
+    Trusted means: committer, frequent contributor, or the operator's own PR.
+    Untrusted PRs skip automatic differential test runs; the operator can still
+    trigger them manually from the dashboard.
+    """
+    author = (pr.author or "").lower()
+    if not author:
+        return False
+    if pr.is_operator_pr:
+        return True
+    trusted = {u.lower() for u in project_config.committers + project_config.frequent_contributors}
+    return author in trusted
+
+
 class TestRunner:
     """Runs differential tests in Docker containers."""
 
@@ -60,13 +76,27 @@ class TestRunner:
         pr: PullRequest,
         project_config: ProjectConfig,
         repo_path: Path | None = None,
+        force: bool = False,
     ) -> TestRun | None:
         """Run a differential test for a PR.
 
         Returns the TestRun record, or None if tests can't run.
+
+        When ``force=True`` (manual dashboard trigger), the trusted-author gate
+        is bypassed so the operator can always run tests on any PR.
         """
         tests: TestExecutionConfig = project_config.tests
         if not tests.enabled:
+            return None
+
+        # Skip untrusted authors on automatic runs to avoid running arbitrary
+        # code from unknown contributors without operator review.
+        if not force and not _is_trusted_author(pr, project_config):
+            logger.info(
+                "Skipping automatic test run for PR #%d: author %r is not a trusted contributor",
+                pr.number,
+                pr.author,
+            )
             return None
 
         # Identify test scope.

@@ -64,7 +64,7 @@ For project configuration and workspaces, see the **[Install Guide](docs/install
 - **Triages PRs** across multiple repos and forges (GitHub, Gitea, Forgejo / Codeberg, GitLab) with configurable interest scoring (path overlap, git blame, collaborator detection, custom LLM-generated scoring functions)
 - **Drafts review comments** using multi-backend LLM review (Sonnet for substance, Haiku for nits, Opus for architecture)
 - **Learns from your corrections** via an anti-pattern list that improves with every rejection and edit
-- **Runs differential tests** to verify new tests actually fail without the PR's changes — see [docs/test-runner.md](docs/test-runner.md) to enable per project
+- **Runs differential tests** to verify new tests actually fail without the PR's changes — see [Dual Run Tests](#dual-run-tests) below and [docs/test-runner.md](docs/test-runner.md) to enable per project
 - **Routes PRs to queues** — AI-generated, new contributors, low-context drive-bys, consider-closing
 - **Respects project cultures** — ASF governance norms are different from your Django side project
 - **Works on your phone** — responsive dashboard over Tailscale for conference triage
@@ -82,6 +82,97 @@ For project configuration and workspaces, see the **[Install Guide](docs/install
 3. **Operator-in-the-loop.** The agent drafts; you post.
 4. **Project-aware.** Each repo has its own review norms, tone, and expectations.
 5. **Learns from corrections.** Anti-patterns → rejection predictor → fine-tuned model (three tiers, each optional).
+
+## Dual Run Tests
+
+franktheunicorn can run a PR's scoped tests twice — once on the PR branch and
+once on the base branch with the new test files cherry-picked on top — to
+check whether the new tests actually validate the change. This catches
+tautological tests that pass everywhere and regressions in the same sweep.
+
+### What the verdicts mean
+
+| Badge | Meaning |
+|-------|---------|
+| **GOOD** (green) | New tests fail on base, pass on PR. The tests validate the change. |
+| **SUSPECT** (yellow) | Tests pass on both branches — likely tautological, not actually testing the change. |
+| **BROKEN** (red) | Tests fail on the PR branch — possible regression introduced. |
+| **INFRA** (blue) | Base run hit an import/setup error — result is inconclusive. |
+
+Verdicts appear on the home page PR list and on each PR detail page.
+A **Run Dual Tests** button on the PR detail page lets you trigger a run
+manually for any PR, even if the automatic run was skipped.
+
+### Prerequisites
+
+The worker needs a Docker daemon (rootless Docker recommended). The web
+container never gets Docker access — only the worker spawns test containers.
+
+### Enabling for a project
+
+Add a `tests:` block to your project YAML under `config/active/projects/`.
+
+**Apache Spark example** (upstream project with a CI image):
+
+```yaml
+# config/active/projects/apache-spark.yaml
+owner: apache
+repo: spark
+committers:
+  - holdenk         # replace with your GitHub username — operator gets trusted-author runs
+  - mridulm
+  - cloud-fan
+tests:
+  enabled: true
+  container_image: ghcr.io/apache/spark-test:latest
+  resource_tier: heavy          # 8 CPU, 16 GB RAM, 45 min timeout
+  test_command: "python -m pytest {tests} --tb=short -q"
+  workdir: /workspace
+```
+
+**Personal project with a repo Dockerfile:**
+
+```yaml
+# config/active/projects/my-app.yaml
+owner: holdenk
+repo: my-app
+tests:
+  enabled: true
+  dockerfile: .frank/Dockerfile  # path inside the repo
+  resource_tier: standard        # 4 CPU, 8 GB, 15 min (default)
+  test_command: "pytest {tests} --tb=short -q"
+  workdir: /app
+```
+
+**Zero-Dockerfile auto-build:**
+
+```yaml
+# config/active/projects/example.yaml
+owner: example
+repo: hello
+tests:
+  enabled: true
+  resource_tier: light           # 2 CPU, 4 GB, 5 min
+  auto_build:
+    base_image: python:3.12-slim
+    requirements_files:
+      - requirements.txt
+      - requirements-test.txt
+    setup_commands:
+      - pip install -e .
+```
+
+### Trusted-author gate
+
+Automatic differential runs (triggered by the worker) only fire for
+**trusted authors** — committers and frequent contributors listed in your
+project YAML. This prevents running arbitrary code from unknown contributors
+without your review.
+
+The **Run Dual Tests** button on the PR detail page bypasses this gate,
+letting you manually run tests on any PR after you have reviewed the code.
+
+See [docs/test-runner.md](docs/test-runner.md) for the full reference.
 
 ## Documentation
 

@@ -202,7 +202,9 @@ class ReviewDraft(models.Model):
         ("github_scrape", "GitHub Scrape"),
         ("local_git_merged", "Local Git (Merged)"),
     ]
-    diff_source = models.CharField(max_length=25, choices=DIFF_SOURCE_CHOICES, blank=True, default="")
+    diff_source = models.CharField(
+        max_length=25, choices=DIFF_SOURCE_CHOICES, blank=True, default=""
+    )
 
     # Operator disposition
     STATUS_CHOICES = [

@@ -7,6 +7,7 @@ Function-based views. No SPA, no React. htmx for all dynamic updates.
 from __future__ import annotations
 
 import logging
+import threading
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -133,15 +134,31 @@ def index(request: HttpRequest) -> HttpResponse:
     # open PRs (which would block index use for the order_by).
     pr_list: list[PullRequest] = list(prs[:100])
     if pr_list:
+        pr_ids = [pr.pk for pr in pr_list]
         finding_counts = dict(
             ReviewDraft.objects.filter(ReviewDraft.line_finding_q())
-            .filter(pull_request_id__in=[pr.pk for pr in pr_list])
+            .filter(pull_request_id__in=pr_ids)
             .values("pull_request_id")
             .annotate(c=Count("id"))
             .values_list("pull_request_id", "c")
         )
+        # Fetch the latest completed test run verdict per PR.
+        # Order by created_at DESC and pick the first per PR (SQLite-compatible).
+        latest_verdicts: dict[int, str] = {}
+        for run_pr_id, verdict in (
+            TestRun.objects.filter(
+                pull_request_id__in=pr_ids,
+                status="completed",
+                differential_verdict__isnull=False,
+            )
+            .order_by("-created_at")
+            .values_list("pull_request_id", "differential_verdict")
+        ):
+            if run_pr_id not in latest_verdicts and verdict is not None:
+                latest_verdicts[run_pr_id] = verdict
         for pr in pr_list:
             pr.findings_count = finding_counts.get(pr.pk, 0)  # type: ignore[attr-defined]
+            pr.latest_test_verdict = latest_verdicts.get(pr.pk)  # type: ignore[attr-defined]
 
     # Count PRs per queue for tab badges (respects the same project/type filters).
     base_qs = PullRequest.objects.filter(state="open")
@@ -1175,6 +1192,65 @@ def run_agents(request: HttpRequest, pr_id: int) -> HttpResponse:
         return HttpResponse(
             '<div class="run-agents-result" style="color: #c00;">Agent run failed. Check server logs.</div>'
         )
+
+
+@require_POST
+def run_dual_tests(request: HttpRequest, pr_id: int) -> HttpResponse:
+    """Trigger a manual differential test run for a PR (htmx).
+
+    Runs in a background thread so the HTTP response returns immediately.
+    The operator can reload the PR detail page to see the result once complete.
+    The trusted-author gate is bypassed because the operator explicitly requested
+    the run.
+    """
+    from pathlib import Path
+
+    pr = get_object_or_404(PullRequest.objects.select_related("project"), pk=pr_id)
+
+    try:
+        from django.conf import settings
+
+        from franktheunicorn.config.loader import get_project_config
+        from franktheunicorn.worker.test_runner import TestRunner
+
+        project_config = get_project_config(pr.project.full_name)
+        if not project_config:
+            return HttpResponse(
+                '<div class="run-tests-result" style="color: #c00;">'
+                "No project config found for this repo.</div>"
+            )
+        if not project_config.tests.enabled:
+            return HttpResponse(
+                '<div class="run-tests-result" style="color: #c00;">'
+                "Differential tests are not enabled for this project. "
+                "Add <code>tests: enabled: true</code> to the project YAML.</div>"
+            )
+
+        repos_dir = getattr(settings, "FRANK_REPOS_DIR", "")
+        repo_path: Path | None = None
+        if repos_dir:
+            candidate = Path(repos_dir) / pr.project.owner / pr.project.repo
+            if candidate.is_dir():
+                repo_path = candidate
+
+        runner = TestRunner()
+
+        def _run() -> None:
+            runner.run_differential_test(pr, project_config, repo_path=repo_path, force=True)
+
+        thread = threading.Thread(target=_run, daemon=True, name=f"dual-test-pr-{pr.pk}")
+        thread.start()
+
+    except Exception:
+        logger.exception("Failed to start dual test run for PR #%d", pr.pk)
+        return HttpResponse(
+            '<div class="run-tests-result" style="color: #c00;">Failed to start test run. Check server logs.</div>'
+        )
+
+    return HttpResponse(
+        '<div class="run-tests-result" style="color: #2e7d32;">'
+        "Test run started. Reload this page in a few minutes to see the verdict.</div>"
+    )
 
 
 def _resolve_and_redirect_pr(
