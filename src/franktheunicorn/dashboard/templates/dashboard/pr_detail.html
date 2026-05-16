@@ -56,17 +56,31 @@
 </dl>
 {% endif %}
 
-<div style="margin-bottom: 0.75rem; margin-top: 1.5rem;">
-    <button class="action-btn"
-            hx-post="{% url 'dashboard:run_agents' pr.pk %}"
-            hx-target="#run-agents-result"
-            hx-swap="innerHTML"
-            hx-indicator="#run-agents-spinner"
-            hx-confirm="Run all configured agents on this PR now?">
-        Force Run Agents Now
-    </button>
-    <span id="run-agents-spinner" class="htmx-indicator run-agents-spinner" aria-label="Running..."></span>
-    <div id="run-agents-result"></div>
+<div style="margin-bottom: 0.75rem; margin-top: 1.5rem; display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: flex-start;">
+    <div>
+        <button class="action-btn"
+                hx-post="{% url 'dashboard:run_agents' pr.pk %}"
+                hx-target="#run-agents-result"
+                hx-swap="innerHTML"
+                hx-indicator="#run-agents-spinner"
+                hx-confirm="Run all configured agents on this PR now?">
+            Force Run Agents Now
+        </button>
+        <span id="run-agents-spinner" class="htmx-indicator run-agents-spinner" aria-label="Running..."></span>
+        <div id="run-agents-result"></div>
+    </div>
+    <div>
+        <button class="action-btn"
+                hx-post="{% url 'dashboard:run_dual_tests' pr.pk %}"
+                hx-target="#run-tests-result"
+                hx-swap="innerHTML"
+                hx-indicator="#run-tests-spinner"
+                hx-confirm="Run differential tests on this PR? (Runs in background — reload to see verdict.)">
+            Run Dual Tests
+        </button>
+        <span id="run-tests-spinner" class="htmx-indicator run-agents-spinner" aria-label="Starting..."></span>
+        <div id="run-tests-result"></div>
+    </div>
 </div>
 
 {% if agent_run_summary %}

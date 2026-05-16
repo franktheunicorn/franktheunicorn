@@ -83,6 +83,34 @@ class TestRunDifferential:
         )
         assert runner.run_differential_test(pr, _enabled_config(), tmp_path) is None
 
+    def test_skips_untrusted_author_automatically(self, tmp_path: Path) -> None:
+        runner = DockerTestRunner()
+        pr = _ready_pr(changed_files=["tests/test_main.py"])
+        # Default config has no committers/frequent_contributors and the
+        # factory generates a random author — that author is untrusted.
+        result = runner.run_differential_test(pr, _enabled_config(), tmp_path)
+        assert result is None
+
+    def test_force_bypasses_trusted_author_gate(
+        self, tmp_path: Path, fake_workspaces: tuple[Path, Path]
+    ) -> None:
+        runner = DockerTestRunner()
+        pr = _ready_pr(changed_files=["tests/test_main.py"])
+
+        mock_docker = MagicMock()
+        mock_container = MagicMock()
+        mock_container.wait.return_value = {"StatusCode": 0}
+        mock_container.logs.return_value = b"1 passed"
+        mock_docker.containers.run.return_value = mock_container
+
+        with patch(
+            "franktheunicorn.worker.test_runner.TestRunner._get_docker",
+            return_value=mock_docker,
+        ):
+            result = runner.run_differential_test(pr, _enabled_config(), tmp_path, force=True)
+
+        assert result is not None
+
     def test_runs_when_test_files_present(
         self, tmp_path: Path, fake_workspaces: tuple[Path, Path]
     ) -> None:
@@ -99,7 +127,7 @@ class TestRunDifferential:
             "franktheunicorn.worker.test_runner.TestRunner._get_docker",
             return_value=mock_docker,
         ):
-            result = runner.run_differential_test(pr, _enabled_config(), tmp_path)
+            result = runner.run_differential_test(pr, _enabled_config(), tmp_path, force=True)
 
         assert result is not None
         assert result.status == "completed"
@@ -124,7 +152,7 @@ class TestRunDifferential:
             "franktheunicorn.worker.test_runner.TestRunner._get_docker",
             return_value=mock_docker,
         ):
-            runner.run_differential_test(pr, _enabled_config(), tmp_path)
+            runner.run_differential_test(pr, _enabled_config(), tmp_path, force=True)
 
         first_call = mock_docker.containers.run.call_args_list[0]
         kwargs = first_call.kwargs
@@ -158,7 +186,33 @@ class TestRunDifferential:
             "franktheunicorn.worker.test_runner.TestRunner._get_docker",
             return_value=mock_docker,
         ):
-            result = runner.run_differential_test(pr, _enabled_config(), tmp_path)
+            result = runner.run_differential_test(pr, _enabled_config(), tmp_path, force=True)
+
+        assert result is not None
+
+    def test_trusted_committer_runs_automatically(
+        self, tmp_path: Path, fake_workspaces: tuple[Path, Path]
+    ) -> None:
+        runner = DockerTestRunner()
+        config = ProjectConfig(
+            owner="test",
+            repo="test",
+            committers=["trusted-person"],
+            tests=TestExecutionConfig(enabled=True),
+        )
+        pr = _ready_pr(changed_files=["tests/test_main.py"], author="trusted-person")
+
+        mock_docker = MagicMock()
+        mock_container = MagicMock()
+        mock_container.wait.return_value = {"StatusCode": 0}
+        mock_container.logs.return_value = b"ok"
+        mock_docker.containers.run.return_value = mock_container
+
+        with patch(
+            "franktheunicorn.worker.test_runner.TestRunner._get_docker",
+            return_value=mock_docker,
+        ):
+            result = runner.run_differential_test(pr, config, tmp_path)
 
         assert result is not None
 
@@ -169,7 +223,7 @@ class TestRunDifferential:
             "franktheunicorn.worker.test_runner.TestRunner._get_docker",
             return_value=None,
         ):
-            assert runner.run_differential_test(pr, _enabled_config(), tmp_path) is None
+            assert runner.run_differential_test(pr, _enabled_config(), tmp_path, force=True) is None
 
     def test_exception_sets_failed(
         self, tmp_path: Path, fake_workspaces: tuple[Path, Path]
@@ -189,7 +243,7 @@ class TestRunDifferential:
                 side_effect=RuntimeError("Docker exploded"),
             ),
         ):
-            result = runner.run_differential_test(pr, _enabled_config(), tmp_path)
+            result = runner.run_differential_test(pr, _enabled_config(), tmp_path, force=True)
 
         assert result is not None
         assert result.status == "failed"

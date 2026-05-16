@@ -110,3 +110,61 @@ code, pre, .font-mono {
     color: var(--color-text-muted);
     list-style: disc;
 }
+
+/* Differential test verdict badges */
+.verdict-badge {
+    display: inline-block;
+    padding: 0.1rem 0.45rem;
+    border-radius: 3px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    vertical-align: middle;
+}
+
+.verdict-good {
+    background: #dcfce7;
+    color: #15803d;
+}
+
+.verdict-suspect {
+    background: #fef9c3;
+    color: #a16207;
+}
+
+.verdict-broken {
+    background: #fee2e2;
+    color: #b91c1c;
+}
+
+.verdict-infra {
+    background: #e0e7ff;
+    color: #3730a3;
+}
+
+@media (prefers-color-scheme: dark) {
+    .verdict-good   { background: #14532d; color: #86efac; }
+    .verdict-suspect { background: #78350f; color: #fde68a; }
+    .verdict-broken  { background: #7f1d1d; color: #fca5a5; }
+    .verdict-infra   { background: #1e1b4b; color: #a5b4fc; }
+}
+
+/* PR list inline badges */
+.findings-badge {
+    display: inline-block;
+    padding: 0.1rem 0.4rem;
+    border-radius: 3px;
+    font-size: 0.75rem;
+    background: #e0e7ff;
+    color: var(--color-accent);
+}
+
+.badge-conflict {
+    display: inline-block;
+    padding: 0.1rem 0.4rem;
+    border-radius: 3px;
+    font-size: 0.75rem;
+    background: #fee2e2;
+    color: var(--color-danger);
+}

@@ -59,6 +59,17 @@
             {% if pr.is_new_contributor %}· New Contributor{% endif %}
             {% if pr.mergeable == False %}· <span class="badge-conflict" title="PR has merge conflicts — needs rebase">Needs Rebase</span>{% endif %}
             {% if pr.findings_count %}· <span class="findings-badge" title="Draft line-level concerns">{{ pr.findings_count }} finding{{ pr.findings_count|pluralize }}</span>{% endif %}
+            {% if pr.latest_test_verdict %}·
+                {% if pr.latest_test_verdict == "good" %}
+                <span class="verdict-badge verdict-good" title="New tests fail without this PR's changes — the tests validate the change">Tests: GOOD</span>
+                {% elif pr.latest_test_verdict == "suspect" %}
+                <span class="verdict-badge verdict-suspect" title="New tests pass on both PR and base — may not actually validate the change">Tests: SUSPECT</span>
+                {% elif pr.latest_test_verdict == "broken" %}
+                <span class="verdict-badge verdict-broken" title="Tests fail on the PR branch — possible regression">Tests: BROKEN</span>
+                {% elif pr.latest_test_verdict == "infra" %}
+                <span class="verdict-badge verdict-infra" title="Test infrastructure error on base branch — inconclusive">Tests: INFRA</span>
+                {% endif %}
+            {% endif %}
             {% if pr.labels %}· {% for label in pr.labels %}{{ label }} {% endfor %}{% endif %}
         </div>
     </li>
