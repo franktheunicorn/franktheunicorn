@@ -66,7 +66,7 @@ class TestPRDescriptionCheckBuildPrompt:
         from tests.conftest import make_pr_context
 
         check = PRDescriptionCheck()
-        system, user = check.build_prompt("diff", make_pr_context())
+        system, _user = check.build_prompt("diff", make_pr_context())
         assert "findings" in system
         assert "file_path" in system
         assert "HTML comments" in system

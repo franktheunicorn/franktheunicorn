@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import base64
-import json
 
 import httpx
 import pytest
 from pytest_httpx import HTTPXMock
 
-from franktheunicorn.data_access.base import FetchMethod, NotFoundError
+from franktheunicorn.data_access.base import FetchMethod
 from franktheunicorn.data_access.github.template_fetcher import TemplateFetcher, _decode_contents
 from franktheunicorn.data_access.github.types import PRTemplateSummary
 
@@ -107,7 +106,9 @@ class TestTemplateFetcherScrape:
         assert result.text == template.strip()
         assert result.fetched_via == FetchMethod.SCRAPE
 
-    def test_falls_through_candidates(self, httpx_mock: HTTPXMock, fetcher: TemplateFetcher) -> None:
+    def test_falls_through_candidates(
+        self, httpx_mock: HTTPXMock, fetcher: TemplateFetcher
+    ) -> None:
         template = "## Root template\n"
         for path in (
             ".github/pull_request_template.md",
@@ -126,7 +127,9 @@ class TestTemplateFetcherScrape:
         result = fetcher.fetch_via_scrape("apache", "spark")
         assert result.text == template.strip()
 
-    def test_no_template_returns_empty(self, httpx_mock: HTTPXMock, fetcher: TemplateFetcher) -> None:
+    def test_no_template_returns_empty(
+        self, httpx_mock: HTTPXMock, fetcher: TemplateFetcher
+    ) -> None:
         for path in (
             ".github/pull_request_template.md",
             ".github/PULL_REQUEST_TEMPLATE.md",

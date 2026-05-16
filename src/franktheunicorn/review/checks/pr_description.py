@@ -138,7 +138,9 @@ def _fetch_template(owner: str, repo: str) -> str:
         result = fetcher.fetch(owner, repo)
         return result.text
     except Exception:
-        logger.debug("pr-description: error fetching template for %s/%s", owner, repo, exc_info=True)
+        logger.debug(
+            "pr-description: error fetching template for %s/%s", owner, repo, exc_info=True
+        )
         return ""
 
 
