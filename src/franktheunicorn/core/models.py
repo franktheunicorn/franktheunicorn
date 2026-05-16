@@ -66,6 +66,7 @@ class PullRequest(models.Model):
         ("consider-closing", "Consider Closing"),
         ("needs-triage", "Needs Triage"),
         ("your-prs", "Your PRs"),
+        ("wip", "WIP"),
     ]
 
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="pull_requests")
@@ -202,7 +203,9 @@ class ReviewDraft(models.Model):
         ("github_scrape", "GitHub Scrape"),
         ("local_git_merged", "Local Git (Merged)"),
     ]
-    diff_source = models.CharField(max_length=25, choices=DIFF_SOURCE_CHOICES, blank=True, default="")
+    diff_source = models.CharField(
+        max_length=25, choices=DIFF_SOURCE_CHOICES, blank=True, default=""
+    )
 
     # Operator disposition
     STATUS_CHOICES = [

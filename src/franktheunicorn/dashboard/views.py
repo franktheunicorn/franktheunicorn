@@ -43,6 +43,7 @@ QUEUE_TABS: list[dict[str, str]] = [
     {"key": "new-contributor", "label": "New Contributors"},
     {"key": "consider-closing", "label": "Consider Closing"},
     {"key": "needs-triage", "label": "Needs Triage"},
+    {"key": "wip", "label": "WIP"},
 ]
 
 # Valid project type values and their human-readable labels.

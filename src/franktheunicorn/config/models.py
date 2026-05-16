@@ -1032,6 +1032,11 @@ class ProjectConfig(BaseModel):
     cve_files: list[str] = Field(default_factory=list)
     new_contributor_addendum: str = ""
     enabled: bool = True
+    # When True (default), WIP/draft PRs are routed to the "wip" queue and
+    # skipped by the review pipeline until they graduate (draft flag cleared,
+    # title prefix removed). At that point the normal poll cycle re-routes and
+    # processes them. Set to false to review drafts immediately.
+    skip_wip: bool = True
 
     # v1.5 features
     jira: JiraConfig = Field(default_factory=JiraConfig)

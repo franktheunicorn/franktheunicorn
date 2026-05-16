@@ -529,6 +529,10 @@ def process_pr(
         if not force and pr.review_drafts.exists():
             return []
 
+        if not force and pr.queue == "wip":
+            logger.debug("PR #%d is in the wip queue; skipping review pipeline.", pr.number)
+            return []
+
         _log(f"Starting agent run for PR #{pr.number}: {pr.title}")
 
         community_ctx = ""
@@ -901,6 +905,7 @@ def _backfill_unreviewed_prs(
     backfill_qs = (
         PullRequestModel.objects.filter(state="open")
         .exclude(pk__in={pk for pk in already_polled_pks if pk is not None})
+        .exclude(queue="wip")
         .annotate(draft_count=Count("review_drafts"))
         .filter(draft_count=0)
         .select_related("project")

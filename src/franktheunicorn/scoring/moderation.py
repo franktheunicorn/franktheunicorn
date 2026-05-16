@@ -9,6 +9,15 @@ _SOURCE_PREFIXES: tuple[str, ...] = ("src/", "lib/", "app/", "core/")
 _TEST_INDICATORS: tuple[str, ...] = ("test", "spec")
 _DEFAULT_UNOWNED_DAYS: int = 14
 
+# Prefixes in PR titles that mark a PR as an in-progress WIP regardless of
+# the GitHub draft flag — e.g. "[WIP] ...", "WIP: ...", "Draft: ...".
+_WIP_TITLE_PREFIXES: tuple[str, ...] = ("[wip]", "wip:", "draft:", "[draft]")
+
+
+def is_wip_title(title: str) -> bool:
+    """Return True when the PR title signals WIP via a conventional prefix."""
+    return title.lower().lstrip().startswith(_WIP_TITLE_PREFIXES)
+
 
 def _int_field(pr: dict[str, object], key: str, default: int = 0) -> int:
     val = pr.get(key, default)
@@ -27,7 +36,7 @@ def compute_moderation_flags(
     operator_username: str,
     known_authors: list[str] | None = None,
 ) -> list[str]:
-    """Return flag labels for routing: is_operator_pr, draft, bot, large_pr,
+    """Return flag labels for routing: is_operator_pr, draft, wip_title, bot, large_pr,
     low_context, new_contributor, needs_tests, likely_unowned."""
     flags: list[str] = []
     author = str(pr.get("author", ""))
@@ -37,6 +46,9 @@ def compute_moderation_flags(
 
     if pr.get("is_draft"):
         flags.append("draft")
+
+    if is_wip_title(str(pr.get("title", ""))):
+        flags.append("wip_title")
 
     if author and is_likely_bot(author):
         flags.append("bot")
@@ -65,7 +77,11 @@ def compute_moderation_flags(
 
     pr_age_days = _int_field(pr, "pr_age_days", -1)
     reviewers = _str_list(pr, "requested_reviewers")
-    if pr_age_days > _DEFAULT_UNOWNED_DAYS and not reviewers and "draft" not in flags:
+    if (
+        pr_age_days > _DEFAULT_UNOWNED_DAYS
+        and not reviewers
+        and not {"draft", "wip_title"} & set(flags)
+    ):
         flags.append("likely_unowned")
 
     return flags
