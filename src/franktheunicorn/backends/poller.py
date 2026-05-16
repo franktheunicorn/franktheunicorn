@@ -250,7 +250,12 @@ def poll_project(
         pr_obj.score_breakdown = breakdown
 
         # Compute moderation flags and route to queue (§2.2).
-        _route_pr_to_queue(pr_obj, operator_username, list(project.contributors_cache or []))
+        _route_pr_to_queue(
+            pr_obj,
+            operator_username,
+            list(project.contributors_cache or []),
+            project_config,
+        )
 
         pr_obj.save(
             update_fields=[
@@ -286,12 +291,14 @@ def _route_pr_to_queue(
     pr_obj: PullRequest,
     operator_username: str,
     forge_contributors: list[str] | None = None,
+    project_config: ProjectConfig | None = None,
 ) -> None:
     """Set queue and boolean flags based on moderation flags."""
     from franktheunicorn.scoring.moderation import compute_moderation_flags
 
     pr_dict: dict[str, object] = {
         "author": pr_obj.author,
+        "title": pr_obj.title,
         "is_draft": pr_obj.is_draft,
         "additions": pr_obj.additions,
         "deletions": pr_obj.deletions,
@@ -323,8 +330,14 @@ def _route_pr_to_queue(
     pr_obj.is_low_context = "low_context" in flags
     pr_obj.is_likely_unowned = "likely_unowned" in flags
 
+    # When skip_wip is enabled and the PR is a draft or has a WIP title prefix,
+    # park it in the "wip" queue — it will be re-routed when it graduates.
+    skip_wip = project_config is not None and getattr(project_config, "skip_wip", False)
+    is_wip = pr_obj.is_draft or "wip_title" in flags
+    if skip_wip and is_wip:
+        pr_obj.queue = "wip"
     # Route to queue based on priority of flags.
-    if pr_obj.is_operator_pr:
+    elif pr_obj.is_operator_pr:
         pr_obj.queue = "your-prs"
     elif pr_obj.likely_ai_generated or "bot" in flags:
         pr_obj.queue = "ai-generated"
@@ -463,7 +476,10 @@ def ingest_single_pr(owner: str, repo: str, pr_number: int) -> PullRequest:
             )
 
     _route_pr_to_queue(
-        pr_obj, operator_config.github_username or "", list(project.contributors_cache or [])
+        pr_obj,
+        operator_config.github_username or "",
+        list(project.contributors_cache or []),
+        project_config if isinstance(project_config, ProjectConfig) else None,
     )
 
     pr_obj.save(

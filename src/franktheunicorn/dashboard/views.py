@@ -43,6 +43,7 @@ QUEUE_TABS: list[dict[str, str]] = [
     {"key": "new-contributor", "label": "New Contributors"},
     {"key": "consider-closing", "label": "Consider Closing"},
     {"key": "needs-triage", "label": "Needs Triage"},
+    {"key": "wip", "label": "WIP"},
 ]
 
 # Valid project type values and their human-readable labels.
@@ -154,6 +155,9 @@ def index(request: HttpRequest) -> HttpResponse:
     queue_counts: dict[str, int] = {
         tab["key"]: base_qs.filter(queue=tab["key"]).count() for tab in QUEUE_TABS
     }
+    queue_tabs_with_counts = [
+        {**tab, "count": queue_counts.get(tab["key"], 0)} for tab in QUEUE_TABS
+    ]
 
     # Build available filter options from enabled projects only.
     enabled_projects_qs = Project.objects.filter(enabled=True)
@@ -171,44 +175,20 @@ def index(request: HttpRequest) -> HttpResponse:
         projects_qs = projects_qs.filter(project_type=active_project_type)
     available_projects = list(projects_qs.values("owner", "repo"))
 
-    workspace = request.COOKIES.get("workspace", "all")
-    workspaces = _get_workspace_list()
-
     return render(
         request,
         "dashboard/pr_list.html",
         {
             "pull_requests": pr_list,
-            "queue_tabs": QUEUE_TABS,
+            "queue_tabs": queue_tabs_with_counts,
             "active_queue": queue,
             "queue_counts": queue_counts,
-            "workspace": workspace,
-            "workspaces": workspaces,
             "active_project_type": active_project_type,
             "active_project": active_project,
             "available_project_types": available_project_types,
             "available_projects": available_projects,
         },
     )
-
-
-def _get_workspace_list() -> list[dict[str, str]]:
-    """Get available workspaces from config."""
-    workspaces = [{"key": "all", "label": "All Projects"}]
-    try:
-        from django.conf import settings
-
-        from franktheunicorn.config.loader import load_operator_config
-
-        config = load_operator_config(settings.FRANK_OPERATOR_CONFIG)
-        raw = getattr(config, "workspaces", {})
-        if raw and isinstance(raw, dict):
-            for key, val in raw.items():
-                desc = str(val.get("description", key)) if isinstance(val, dict) else str(key)
-                workspaces.append({"key": key, "label": desc})
-    except Exception:
-        pass
-    return workspaces
 
 
 def set_workspace(request: HttpRequest) -> HttpResponse:
@@ -361,6 +341,24 @@ def build_agent_run_summary(
     return summary
 
 
+def _adjacent_prs(pr: PullRequest) -> tuple[PullRequest | None, PullRequest | None]:
+    """Return (prev_pr, next_pr) in the same queue, ordered by -interest_score, -github_updated_at.
+
+    "Next" means the next PR the operator would review (lower score); "prev" is higher score.
+    Both are None when there is no adjacent entry.
+    """
+    same_queue = PullRequest.objects.filter(state="open", queue=pr.queue).order_by(
+        "-interest_score", "-github_updated_at"
+    )
+    ids: list[int] = list(same_queue.values_list("pk", flat=True)[:200])
+    if pr.pk not in ids:
+        return None, None
+    idx = ids.index(pr.pk)
+    prev_pr = PullRequest.objects.filter(pk=ids[idx - 1]).first() if idx > 0 else None
+    next_pr = PullRequest.objects.filter(pk=ids[idx + 1]).first() if idx < len(ids) - 1 else None
+    return prev_pr, next_pr
+
+
 def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
     """Detail view for a single PR showing drafts and score breakdown."""
     pr = get_object_or_404(PullRequest.objects.select_related("project"), pk=pr_id)
@@ -406,6 +404,8 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
     # Agent run summary: which agents ran, their stats, and which didn't.
     agent_run_summary = build_agent_run_summary(pr, operator_config, project_config)
 
+    prev_pr, next_pr = _adjacent_prs(pr)
+
     return render(
         request,
         "dashboard/pr_detail.html",
@@ -424,6 +424,8 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
             "community_context": community_context,
             "sentry_context": sentry_context,
             "agent_run_summary": agent_run_summary,
+            "prev_pr": prev_pr,
+            "next_pr": next_pr,
         },
     )
 

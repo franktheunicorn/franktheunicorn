@@ -77,6 +77,7 @@ TEMPLATES = [
                 "django.contrib.auth.context_processors.auth",
                 "django.contrib.messages.context_processors.messages",
                 "franktheunicorn.dashboard.context_processors.nav_projects",
+                "franktheunicorn.dashboard.context_processors.workspace_context",
             ],
         },
     },

@@ -78,5 +78,25 @@ class TestComputeModerationFlags:
         }
         assert "likely_unowned" not in compute_moderation_flags(pr, "op")
 
+    def test_wip_title_flag(self) -> None:
+        for prefix in ("[WIP]", "WIP:", "Draft:", "[draft]", "[wip] add feature"):
+            assert "wip_title" in compute_moderation_flags(
+                {"author": "a", "title": prefix}, "op"
+            ), f"expected wip_title for title {prefix!r}"
+
+    def test_non_wip_title_no_flag(self) -> None:
+        assert "wip_title" not in compute_moderation_flags(
+            {"author": "a", "title": "Add amazing feature"}, "op"
+        )
+
+    def test_wip_title_not_unowned(self) -> None:
+        pr = {
+            "author": "someone",
+            "title": "WIP: refactor everything",
+            "pr_age_days": 30,
+            "requested_reviewers": [],
+        }
+        assert "likely_unowned" not in compute_moderation_flags(pr, "op")
+
     def test_graceful_missing_keys(self) -> None:
         assert isinstance(compute_moderation_flags({}, "op"), list)

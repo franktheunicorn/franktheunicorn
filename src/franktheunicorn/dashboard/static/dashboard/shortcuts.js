@@ -61,12 +61,16 @@
                 clickButton(getFocusedItem(), ".action-btn.reject");
                 break;
             case "n":
-                // Next PR: find next PR link in the list
-                var nextLink = document.querySelector(".pr-item + .pr-item .pr-title a");
-                if (nextLink) nextLink.click();
+                // Next PR: detail page nav link, or second item on the list page
+                var nextDetailLink = document.getElementById("pr-nav-next");
+                if (nextDetailLink) { nextDetailLink.click(); break; }
+                var nextListLink = document.querySelector(".pr-item + .pr-item .pr-title a");
+                if (nextListLink) nextListLink.click();
                 break;
             case "p":
-                // Previous: go back
+                // Prev PR: detail page nav link, or go back on list page
+                var prevDetailLink = document.getElementById("pr-nav-prev");
+                if (prevDetailLink) { prevDetailLink.click(); break; }
                 window.history.back();
                 break;
             case "s":
