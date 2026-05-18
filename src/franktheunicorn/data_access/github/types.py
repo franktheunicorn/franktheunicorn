@@ -83,3 +83,10 @@ class PRReview(FetchResult):
 
     pr_number: int = 0
     reviews: tuple[SingleReview, ...] = ()
+
+
+@dataclass(frozen=True)
+class PRTemplateSummary(FetchResult):
+    """The PR description template for a repository, if one exists."""
+
+    text: str = ""
