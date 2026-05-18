@@ -10,7 +10,25 @@ watched_paths: ["src/"]
 ignore_paths: ["docs/"]
 frequent_contributors: []
 enabled: true
-llm_checks: ["coverage"]
+
+llm_checks:
+  - coverage          # flag new code paths with no new tests
+  - security          # scan diff for common security anti-patterns
+  - pr-description    # nudge vague or template-only descriptions
+  - api-misuse        # deprecated/misused library APIs (needs network)
+
+# api-misuse look-up config — only active when "api-misuse" is in llm_checks.
+# api_misuse:
+#   enabled: true
+#   registries: ["pypi", "maven"]
+#   cache_ttl_days: 7
+#   max_calls_per_pr: 30
+#   scrape_hosted_docs: true
+
+copypasta_enabled: true
+copypasta_min_lines: 4
+copypasta_scan_extensions: [".py", ".ts", ".js"]
+copypasta_llm_enabled: true
 
 # Detect calls to third-party functions that are misused per their upstream
 # docs (deprecated APIs, complexity-on-large-input, etc.). To enable, add

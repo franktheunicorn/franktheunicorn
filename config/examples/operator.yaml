@@ -166,14 +166,15 @@ digest_enabled: false
 # Wraps `claude -p` in headless prompt mode. Auth is whatever the Claude
 # CLI is configured with on the executing host (local user, or the SSH
 # remote when remote.mode == "ssh").
-# claude_cli:
-#   enabled: true
-#   cli_path: "claude"                 # or "uv run claude", "corp-wrap claude", ...
-#   model: ""                          # empty = CLI default
-#   extra_args: []
-#   timeout_seconds: 300
-#   max_diff_chars: 60000              # diffs above this are truncated
-#   # remote: { mode: "ssh", host: "review-worker.example.com", ... }
+# Install: https://claude.ai/download  (or `npm install -g @anthropic-ai/claude-cli`)
+claude_cli:
+  enabled: true
+  cli_path: "claude"                 # or "uv run claude", "corp-wrap claude", ...
+  model: ""                          # empty = CLI default (Sonnet)
+  extra_args: []
+  timeout_seconds: 300
+  max_diff_chars: 60000              # diffs above this are truncated
+  # remote: { mode: "ssh", host: "review-worker.example.com", ... }
 
 # Snowflake code review CLI integration
 # Mirrors CodeRabbit's invocation contract; expects the same

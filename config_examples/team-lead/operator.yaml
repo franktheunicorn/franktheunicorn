@@ -10,6 +10,15 @@ llm_backends:
     model: "claude-sonnet-4-20250514"
     api_key_env: "ANTHROPIC_API_KEY"
 
+# Claude CLI runs a second independent review pass in headless mode,
+# adding findings that the LLM backend pipeline may miss.
+claude_cli:
+  enabled: true
+  cli_path: "claude"
+  model: ""
+  timeout_seconds: 300
+  max_diff_chars: 60000
+
 # Forge registry — uncomment to ingest from non-GitHub forges. Each
 # project YAML picks one by ``name``. Leaving this empty falls back to
 # the legacy single-GitHub setup driven by ``github_token``.

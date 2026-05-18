@@ -12,6 +12,15 @@ ignore_paths: []
 frequent_contributors: []
 enabled: true
 
+llm_checks:
+  - coverage          # flag new code paths with no new tests
+  - pr-description    # nudge vague or template-only descriptions
+  - security          # scan diff for common security anti-patterns
+
+copypasta_enabled: true
+copypasta_min_lines: 4
+copypasta_scan_extensions: [".py"]
+
 # Differential test runner (see docs/test-runner.md). Disabled by default.
 # Pick exactly one of: container_image, dockerfile, auto_build.
 # tests:

@@ -20,6 +20,32 @@ ignore_paths:
 tone: "constructive and thorough"
 test_expectations: "tests required for all new features and bug fixes"
 
+# LLM sub-checks — each runs a focused prompt and feeds findings through
+# the standard anti-pattern pipeline.  Add or remove as needed.
+llm_checks:
+  - coverage          # flags new code paths not covered by new tests
+  - security          # scans diff for security anti-patterns
+  - security-context  # broadens security scan with CVE-file context
+  - pr-description    # nudges incomplete or vague PR descriptions
+  - issue-link        # flags PRs missing a SPARK-xxxxx reference
+  - api-misuse        # deprecated/complex API calls (needs network; see below)
+
+# api-misuse look-up config.  Only active when "api-misuse" is in llm_checks.
+# Issues requests to Maven Central (and optionally hosted Javadoc).
+api_misuse:
+  enabled: true
+  registries: ["maven"]
+  cache_ttl_days: 7
+  max_calls_per_pr: 30
+  scrape_hosted_docs: true
+
+# Copy-pasta detection — flag blocks of code copied verbatim from other files
+# in the repo (or identical to existing code outside the diff).
+copypasta_enabled: true
+copypasta_min_lines: 5
+copypasta_scan_extensions: [".py", ".scala", ".java", ".sql"]
+copypasta_llm_enabled: true
+
 # People whose PRs you typically review or collaborate with
 frequent_contributors:
   - "cloud-fan"
@@ -28,6 +54,17 @@ frequent_contributors:
   - "viirya"
 
 enabled: true
+
+# Full-file + first-party-import context injected into review prompts.
+# Bumped budgets for a large monorepo — reduces "can't see the surrounding
+# code" false positives on catalyst/optimizer changes.
+context:
+  include_full_file: true
+  include_first_party_imports: true
+  total_token_budget: 8000
+  per_file_token_cap: 3000
+  import_depth: 1
+  package_roots: ["sql", "core", "python"]
 
 # Differential test runner (see docs/test-runner.md). Spark publishes a
 # CI-grade test image upstream, so we use it as-is rather than rebuilding.
