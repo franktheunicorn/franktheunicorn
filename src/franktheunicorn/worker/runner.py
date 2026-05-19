@@ -192,6 +192,7 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
     )
 
     disabled_backends = _check_backends(operator_config)
+    _check_ssh_configs(operator_config)
 
     try:
         while True:
@@ -403,6 +404,50 @@ def _check_backends(operator_config: OperatorConfig) -> frozenset[int]:
         )
 
     return frozenset(disabled)
+
+
+def _check_ssh_configs(operator_config: OperatorConfig) -> frozenset[str]:
+    """Probe SSH connectivity for each enabled tool that uses remote SSH execution.
+
+    Logs results at INFO (reachable) or WARNING (unreachable) so operators see
+    SSH problems at startup rather than buried in per-PR retry logs.
+    Returns the names of tools whose SSH probe failed.
+    """
+    from franktheunicorn.review.tool_executor import RemoteSSHExecutor
+
+    failed: set[str] = set()
+
+    tool_remotes: list[tuple[str, Any]] = [
+        ("coderabbit", operator_config.coderabbit),
+        ("claude_cli", operator_config.claude_cli),
+        ("snowflake_review", operator_config.snowflake_review),
+    ]
+    for tool_name, tool_config in tool_remotes:
+        if not tool_config.enabled:
+            continue
+        remote = tool_config.remote
+        if remote.mode != "ssh":
+            continue
+
+        executor = RemoteSSHExecutor(config=remote)
+        ssh_display = " ".join(remote.ssh_command)
+        target = executor._ssh_target()
+        target_hint = f" (target={target!r})" if target else " (no host — wrapper handles routing)"
+
+        if executor._probe_ssh():
+            logger.info("SSH[%s] %s%s: OK", tool_name, ssh_display, target_hint)
+        else:
+            logger.warning(
+                "SSH[%s] %s%s: preflight probe failed"
+                " — SSH may be misconfigured; remote git operations will retry but are"
+                " unlikely to succeed until connectivity is restored",
+                tool_name,
+                ssh_display,
+                target_hint,
+            )
+            failed.add(tool_name)
+
+    return frozenset(failed)
 
 
 _HEALTH_STALE_DAYS = 7

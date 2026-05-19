@@ -11,7 +11,7 @@
     </span>
 </div>
 
-<h2>{{ pr.project }} #{{ pr.number }}: {{ pr.title }}</h2>
+<h2>{{ pr.project }} #{{ pr.number }}: {{ pr.title|render_markdown_inline }}</h2>
 
 <div class="pr-meta" style="margin-top: 0.5rem;">
     by <strong>{{ pr.author }}</strong>
@@ -22,6 +22,7 @@
     {% if pr.is_new_contributor %}&middot; New Contributor{% endif %}
     {% if pr.mergeable == False %}&middot; <span class="badge-conflict" title="PR has merge conflicts">Needs Rebase</span>{% endif %}
     &middot; Queue: {{ pr.queue }}
+    &middot; Last checked: <span title="{{ pr.updated_at|date:'Y-m-d H:i:s' }} UTC">{{ pr.updated_at|timesince }} ago</span>
     &middot; <a href="{{ pr.url }}" target="_blank" rel="noopener noreferrer">View on GitHub &nearr;</a>
 </div>
 
@@ -43,6 +44,30 @@
 {% if pr.body %}
 <div style="margin-top: 1rem; padding: 0.75rem; background: #f5f5f5; border-radius: 4px; font-size: 0.9rem;">
     <div class="md-content">{{ pr.body|render_markdown }}</div>
+</div>
+{% endif %}
+
+{% if jira_context %}
+<div style="margin-top: 1rem; padding: 0.75rem; background: #f0f4ff; border-left: 3px solid #0052cc; border-radius: 4px; font-size: 0.9rem;">
+    <strong>JIRA:
+    {% if jira_server and jira_context.ticket_id %}
+        <a href="{{ jira_server }}/browse/{{ jira_context.ticket_id }}" target="_blank" rel="noopener noreferrer">{{ jira_context.ticket_id }} &nearr;</a>
+    {% else %}
+        {{ jira_context.ticket_id }}
+    {% endif %}
+    </strong>
+    {% if jira_context.summary %}&mdash; {{ jira_context.summary }}{% endif %}
+    <span style="font-size: 0.8rem; color: #555; margin-left: 0.5rem;">
+        {% if jira_context.status %}{{ jira_context.status }}{% endif %}
+        {% if jira_context.priority %}&middot; {{ jira_context.priority }}{% endif %}
+        {% if jira_context.assignee %}&middot; {{ jira_context.assignee }}{% endif %}
+    </span>
+    {% if jira_context.description %}
+    <details style="margin-top: 0.5rem;">
+        <summary style="cursor: pointer; font-size: 0.8rem; color: #0052cc;">Description</summary>
+        <div style="margin-top: 0.4rem; font-size: 0.85rem; color: #333; white-space: pre-wrap;">{{ jira_context.description|truncatewords:200 }}</div>
+    </details>
+    {% endif %}
 </div>
 {% endif %}
 

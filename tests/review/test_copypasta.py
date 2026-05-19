@@ -356,6 +356,44 @@ class TestCheckSymilar:
         matches = _check_symilar(chunks, repo_files, min_lines=4)
         assert len(matches) >= 1
 
+    def test_unparseable_chunk_does_not_crash(self) -> None:
+        """Non-Python content (YAML, malformed string literals) must not propagate
+        AstroidSyntaxError — the chunk is skipped and an empty result is returned."""
+        from franktheunicorn.review.copypasta import CodeChunk
+
+        # A docstring-like line with an unmatched backtick — triggers the exact
+        # error seen in production: "unterminated string literal"
+        bad_lines = (
+            "* top StructType of a file-source metadata attribute (e.g. `_metadata`'s",
+            "  corresponding field type) rather than the root type of the schema",
+            "  definition. This is intentional and not a bug in the schema parser.",
+            "  See the schema validation docs for more details about this behaviour.",
+        )
+        chunks = [CodeChunk(file_path="CHANGES.md", start_line=1, lines=bad_lines)]
+        repo_files = {"existing.py": "def foo():\n    pass\n"}
+        # Must return without raising
+        matches = _check_symilar(chunks, repo_files, min_lines=4)
+        assert isinstance(matches, list)
+
+    def test_unparseable_repo_file_does_not_crash(self) -> None:
+        """A repo file that fails AST parsing is silently skipped."""
+        from franktheunicorn.review.copypasta import CodeChunk
+
+        valid_code = (
+            "def hello():",
+            "    x = 1",
+            "    y = 2",
+            "    return x + y",
+        )
+        chunks = [CodeChunk(file_path="new.py", start_line=1, lines=valid_code)]
+        repo_files = {
+            "valid.py": "\n".join(valid_code) + "\n",
+            "bad.md": "# `unterminated\nsome text\nmore text\neven more text\n",
+        }
+        # Must return without raising; valid.py match may still be found
+        matches = _check_symilar(chunks, repo_files, min_lines=4)
+        assert isinstance(matches, list)
+
 
 # -- Test tier 1b: winnowing -------------------------------------------------
 

@@ -165,7 +165,9 @@ class RemoteSSHExecutor:
         if self.config.ssh_key_path:
             cmd += ["-i", self.config.ssh_key_path]
         cmd += list(self.config.ssh_extra_args)
-        cmd.append(self._ssh_target())
+        target = self._ssh_target()
+        if target:
+            cmd.append(target)
         return cmd
 
     def _probe_ssh(self) -> bool:
@@ -362,8 +364,8 @@ class RemoteSSHExecutor:
             cumulative_sleep += delay
             if delay >= 60:
                 logger.warning(
-                    "Backing off %ds after remote git %s %s for %s/%s on %s (attempt %d/%d)"
-                    " — cmd: %s; stdout: %s; stderr: %s",
+                    "Backing off %ds after remote git %s %s for %s/%s on %s (attempt %d/%d,"
+                    " rc=%d) — cmd: %s; stdout: %s; stderr: %s",
                     delay,
                     op_name,
                     error_kind,
@@ -372,6 +374,7 @@ class RemoteSSHExecutor:
                     self.config.host,
                     attempt + 1,
                     len(backoff_delays),
+                    result.returncode,
                     cmd_str,
                     stdout_snippet or "(empty)",
                     stderr_snippet or "(empty)",

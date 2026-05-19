@@ -1,4 +1,4 @@
-"""Tests for _openai_chat_preflight and _seed_token_param_fallback in the worker runner."""
+"""Tests for _openai_chat_preflight, _seed_token_param_fallback, and _check_ssh_configs."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from franktheunicorn.worker.runner import _openai_chat_preflight
+from franktheunicorn.worker.runner import _check_ssh_configs, _openai_chat_preflight
 
 
 def _make_bad_request(message: str) -> object:
@@ -115,3 +115,64 @@ class TestOpenAIChatPreflight:
     def test_disables_on_non_bad_request_exception(self) -> None:
         disabled = self._run([ConnectionError("timeout")])
         assert 1 in disabled
+
+
+class TestCheckSshConfigs:
+    """_check_ssh_configs probes SSH for each enabled SSH-mode tool at startup."""
+
+    def _make_operator_config(
+        self,
+        *,
+        coderabbit_ssh: bool = False,
+        claude_cli_ssh: bool = False,
+        snowflake_ssh: bool = False,
+    ) -> object:
+        from franktheunicorn.config.models import (
+            ClaudeCLIConfig,
+            CodeRabbitConfig,
+            OperatorConfig,
+            RemoteExecutionConfig,
+            SnowflakeReviewConfig,
+        )
+
+        remote_ssh = RemoteExecutionConfig(mode="ssh", ssh_command=["sf", "workspace", "ssh"])
+        return OperatorConfig(
+            coderabbit=CodeRabbitConfig(enabled=coderabbit_ssh, remote=remote_ssh),
+            claude_cli=ClaudeCLIConfig(enabled=claude_cli_ssh, remote=remote_ssh),
+            snowflake_review=SnowflakeReviewConfig(enabled=snowflake_ssh, remote=remote_ssh),
+        )
+
+    @patch("franktheunicorn.review.tool_executor.RemoteSSHExecutor._probe_ssh", return_value=True)
+    def test_ssh_ok_returns_empty_set(self, mock_probe: MagicMock) -> None:
+        cfg = self._make_operator_config(claude_cli_ssh=True)
+        failed = _check_ssh_configs(cfg)  # type: ignore[arg-type]
+        assert failed == frozenset()
+        assert mock_probe.call_count == 1
+
+    @patch("franktheunicorn.review.tool_executor.RemoteSSHExecutor._probe_ssh", return_value=False)
+    def test_ssh_fail_returns_tool_name(
+        self, mock_probe: MagicMock, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        cfg = self._make_operator_config(coderabbit_ssh=True)
+        with caplog.at_level("WARNING"):
+            failed = _check_ssh_configs(cfg)  # type: ignore[arg-type]
+        assert "coderabbit" in failed
+        assert "preflight probe failed" in caplog.text
+
+    @patch("franktheunicorn.review.tool_executor.RemoteSSHExecutor._probe_ssh", return_value=True)
+    def test_disabled_tool_skipped(self, mock_probe: MagicMock) -> None:
+        # All tools disabled — no probes should fire.
+        cfg = self._make_operator_config()
+        failed = _check_ssh_configs(cfg)  # type: ignore[arg-type]
+        assert failed == frozenset()
+        mock_probe.assert_not_called()
+
+    @patch("franktheunicorn.review.tool_executor.RemoteSSHExecutor._probe_ssh", return_value=True)
+    def test_local_mode_tool_skipped(self, mock_probe: MagicMock) -> None:
+        from franktheunicorn.config.models import ClaudeCLIConfig, OperatorConfig
+
+        # enabled=True but mode=local (default) — should not probe
+        cfg = OperatorConfig(claude_cli=ClaudeCLIConfig(enabled=True))
+        failed = _check_ssh_configs(cfg)  # type: ignore[arg-type]
+        assert failed == frozenset()
+        mock_probe.assert_not_called()

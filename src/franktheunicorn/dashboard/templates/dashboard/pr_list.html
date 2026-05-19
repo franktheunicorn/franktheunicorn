@@ -1,5 +1,6 @@
 {% extends "dashboard/base.html" %}
 {% load static %}
+{% load markdown_filters %}
 {% block title %}PRs — franktheunicorn{% endblock %}
 {% block content %}
 {# Filter bar: project type + specific project selects.
@@ -49,7 +50,7 @@
             <span class="score-badge {% if pr.interest_score < 0.2 %}low{% elif pr.interest_score < 0.5 %}mid{% endif %}">
                 {{ pr.interest_score|floatformat:2 }}
             </span>
-            <a href="{% url 'dashboard:pr_detail' pr.pk %}">{{ pr.project }} #{{ pr.number }}: {{ pr.title }}</a>
+            <a href="{% url 'dashboard:pr_detail' pr.pk %}">{{ pr.project }} #{{ pr.number }}: {{ pr.title|render_markdown_inline }}</a>
         </div>
         <div class="pr-meta">
             by <strong>{{ pr.author }}</strong>

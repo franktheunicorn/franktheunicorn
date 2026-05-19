@@ -1,11 +1,14 @@
-"""Tests for the render_markdown template filter."""
+"""Tests for the render_markdown and render_markdown_inline template filters."""
 
 from __future__ import annotations
 
 import pytest
 from django.utils.safestring import SafeString
 
-from franktheunicorn.dashboard.templatetags.markdown_filters import render_markdown
+from franktheunicorn.dashboard.templatetags.markdown_filters import (
+    render_markdown,
+    render_markdown_inline,
+)
 
 
 @pytest.mark.parametrize(
@@ -34,3 +37,29 @@ def test_render_markdown_returns_safe_string() -> None:
 def test_render_markdown_gfm_table_has_thead() -> None:
     result = render_markdown("| a | b |\n|---|---|\n| 1 | 2 |")
     assert "<thead>" in result
+
+
+@pytest.mark.parametrize(
+    "input_md, expected_fragment",
+    [
+        ("**bold**", "<strong>bold</strong>"),
+        ("`code`", "<code>code</code>"),
+        (None, ""),
+        ("", ""),
+        ("<script>alert(1)</script>", "&lt;script&gt;"),
+    ],
+)
+def test_render_markdown_inline(input_md: str | None, expected_fragment: str) -> None:
+    result = render_markdown_inline(input_md)
+    assert expected_fragment in result
+
+
+def test_render_markdown_inline_no_wrapping_paragraph() -> None:
+    result = render_markdown_inline("**bold**")
+    assert "<p>" not in result
+    assert "</p>" not in result
+
+
+def test_render_markdown_inline_returns_safe_string() -> None:
+    result = render_markdown_inline("hello")
+    assert isinstance(result, SafeString)

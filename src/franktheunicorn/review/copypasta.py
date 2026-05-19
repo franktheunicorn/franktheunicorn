@@ -194,14 +194,29 @@ def _check_symilar(
 
     # Add PR chunks as virtual files
     chunk_names: set[str] = set()
+    failed_chunks: set[str] = set()
     for chunk in chunks:
         name = f"{_PR_CHUNK_PREFIX}{chunk.file_path}:{chunk.start_line}"
         chunk_names.add(name)
-        sym.append_stream(name, StringIO("\n".join(chunk.lines) + "\n"))
+        try:
+            sym.append_stream(name, StringIO("\n".join(chunk.lines) + "\n"))
+        except Exception:
+            # Symilar parses content as Python AST; non-Python or syntax-broken
+            # chunks (e.g. YAML, docstrings with unmatched quotes) raise
+            # AstroidSyntaxError.  Skip them here — the caller will route them
+            # to the winnowing tier instead.
+            failed_chunks.add(name)
+            logger.debug(
+                "symilar: skipping unparseable chunk %s (will fall back to winnowing)",
+                name,
+            )
 
-    # Add existing repo files
+    # Add existing repo files; skip any that also fail AST parsing.
     for path, content in repo_files.items():
-        sym.append_stream(path, StringIO(content))
+        try:
+            sym.append_stream(path, StringIO(content))
+        except Exception:
+            logger.debug("symilar: skipping unparseable repo file %s", path)
 
     sym.run()
 

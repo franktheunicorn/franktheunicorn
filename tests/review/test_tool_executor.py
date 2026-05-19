@@ -258,6 +258,17 @@ class TestRemoteSSHExecutorCustomCommand:
             assert executor.run(["true"], cwd="/srv/frank") is None
         assert "corp-ssh-helper" in caplog.text
 
+    def test_wrapper_command_no_host_omits_empty_target(self) -> None:
+        # When host is empty (e.g. sf workspace ssh handles routing internally),
+        # _ssh_command must not append an empty string — that becomes a spurious
+        # positional arg that confuses CLIs expecting exactly one arg.
+        cfg = RemoteExecutionConfig(mode="ssh", ssh_command=["sf", "workspace", "ssh"])
+        executor = RemoteSSHExecutor(config=cfg)
+        argv = executor._ssh_command()
+        assert "" not in argv
+        # Command should be: sf workspace ssh -o BatchMode=yes (5 elements, no empty)
+        assert argv == ["sf", "workspace", "ssh", "-o", "BatchMode=yes"]
+
 
 class TestRemoteSSHExecutorPort:
     """``port`` populates ``-p <port>`` in the ssh argv. Zero means

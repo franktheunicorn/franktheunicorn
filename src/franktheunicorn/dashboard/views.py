@@ -415,6 +415,9 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
 
     # v1.5: External context (JIRA, community, Sentry).
     jira_context = pr.jira_cache if pr.jira_cache else None
+    jira_server = (
+        project_config.jira.server if project_config and project_config.jira.server else ""
+    )
     community_context = pr.community_context_cache if pr.community_context_cache else None
     sentry_context = pr.sentry_context_cache if pr.sentry_context_cache else None
 
@@ -438,6 +441,7 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
             "feedback_enabled": feedback_enabled,
             "personality_name": personality_name,
             "jira_context": jira_context,
+            "jira_server": jira_server,
             "community_context": community_context,
             "sentry_context": sentry_context,
             "agent_run_summary": agent_run_summary,
