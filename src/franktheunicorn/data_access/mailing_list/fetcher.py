@@ -9,6 +9,7 @@ Both paths return a ``MailingListSearchResult`` with the same fields.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any
 from urllib.parse import quote_plus, urljoin
@@ -30,6 +31,25 @@ logger = logging.getLogger(__name__)
 DEFAULT_DELAY_SECONDS = 2.0
 DEFAULT_TIMEOUT_SECONDS = 30
 CACHE_TTL_SECONDS = 7 * 24 * 3600  # 7 days
+
+# Patterns for detecting JIRA ticket IDs and PR number references in thread text.
+_JIRA_RE = re.compile(r"\b([A-Z]+-\d+)\b")
+_PR_NUM_RE = re.compile(r"(?:PR\s*#?|#)(\d+)\b", re.IGNORECASE)
+
+
+def _extract_pr_references(text: str) -> list[str]:
+    """Extract JIRA ticket IDs and PR number markers from thread subject/snippet."""
+    refs: list[str] = []
+    refs.extend(_JIRA_RE.findall(text))
+    for m in _PR_NUM_RE.finditer(text):
+        refs.append(f"#{m.group(1)}")
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for r in refs:
+        if r not in seen:
+            seen.add(r)
+            deduped.append(r)
+    return deduped
 
 
 class MailingListFetcher(DataFetcher[MailingListSearchResult]):
@@ -128,6 +148,9 @@ class MailingListFetcher(DataFetcher[MailingListSearchResult]):
                     snippet=email.get("body", "")[:500],
                     url=email.get("permalink", ""),
                     list_name=list_name,
+                    pr_references=_extract_pr_references(
+                        subject + " " + email.get("body", "")[:200]
+                    ),
                 )
             )
 
@@ -140,15 +163,17 @@ class MailingListFetcher(DataFetcher[MailingListSearchResult]):
             participants = [
                 a.get("name", a.get("email", "")) for a in thread_data.get("authors", [])
             ]
+            snippet = thread_data.get("snippet", "")[:500]
             threads.append(
                 MailingListThread(
                     fetched_via=FetchMethod.API,
                     subject=subject,
                     date=thread_data.get("date", ""),
                     participants=participants,
-                    snippet=thread_data.get("snippet", "")[:500],
+                    snippet=snippet,
                     url=thread_data.get("permalink", ""),
                     list_name=list_name,
+                    pr_references=_extract_pr_references(subject + " " + snippet),
                 )
             )
 
@@ -205,6 +230,7 @@ class MailingListFetcher(DataFetcher[MailingListSearchResult]):
                     snippet="",
                     url=thread_url,
                     list_name=list_name,
+                    pr_references=_extract_pr_references(link_text),
                 )
             )
 
@@ -230,6 +256,8 @@ class MailingListFetcher(DataFetcher[MailingListSearchResult]):
                 snippet=t.get("snippet", ""),
                 url=t.get("url", ""),
                 list_name=t.get("list_name", ""),
+                pr_references=t.get("pr_references", []),
+                blame_hit=bool(t.get("blame_hit", False)),
             )
             for t in data.get("threads", [])
         ]

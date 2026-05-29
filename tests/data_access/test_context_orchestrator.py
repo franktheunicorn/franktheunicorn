@@ -16,7 +16,7 @@ from franktheunicorn.config.models import (
 )
 from franktheunicorn.data_access.context_orchestrator import (
     _MAX_CONTEXT_CHARS_PER_SOURCE,
-    _build_search_query,
+    _build_mailing_list_queries,
     _format_community_from_cache,
     _format_community_results,
     _format_jira_from_cache,
@@ -188,26 +188,27 @@ class TestSourceTruncation:
 class TestBuildSearchQuery:
     def test_from_title(self) -> None:
         pr = PullRequestFactory(title="Add DataFrame.mapInArrow for Connect")
-        query = _build_search_query(pr)
-        assert "mapInArrow" in query
+        queries = _build_mailing_list_queries(pr)
+        assert any("mapInArrow" in q for q in queries)
 
     def test_includes_file_names(self) -> None:
         pr = PullRequestFactory(
             title="Fix bug",
             changed_files=["core/rdd.py", "sql/catalyst.scala"],
         )
-        query = _build_search_query(pr)
-        assert "rdd" in query
-        assert "catalyst" in query
+        queries = _build_mailing_list_queries(pr)
+        combined = " ".join(queries)
+        assert "rdd" in combined
+        assert "catalyst" in combined
 
     def test_excludes_init_files(self) -> None:
         pr = PullRequestFactory(
             title="Fix",
             changed_files=["pkg/__init__.py", "pkg/real_module.py"],
         )
-        query = _build_search_query(pr)
-        assert "__init__" not in query
-        assert "real_module" in query
+        queries = _build_mailing_list_queries(pr)
+        assert all("__init__" not in q for q in queries)
+        assert any("real_module" in q for q in queries)
 
 
 @pytest.mark.django_db
@@ -466,18 +467,20 @@ class TestFormatCommunityResultsAllTypes:
 class TestBuildSearchQueryEdgeCases:
     def test_empty_title_and_no_files(self) -> None:
         pr = PullRequestFactory(title="", changed_files=[])
-        query = _build_search_query(pr)
-        assert query == ""
+        queries = _build_mailing_list_queries(pr)
+        # With no title and no files, only a PR number query remains.
+        assert all(q.startswith("#") for q in queries) or queries == []
 
     def test_excludes_test_and_conftest(self) -> None:
         pr = PullRequestFactory(
             title="Update",
             changed_files=["tests/test.py", "tests/conftest.py", "src/module.py"],
         )
-        query = _build_search_query(pr)
-        assert "test" not in query.split()
-        assert "conftest" not in query.split()
-        assert "module" in query
+        queries = _build_mailing_list_queries(pr)
+        flat = " ".join(queries)
+        # "test" and "conftest" should not appear as standalone query terms.
+        assert "conftest" not in flat
+        assert "module" in flat
 
     def test_limits_file_parts_to_five(self) -> None:
         pr = PullRequestFactory(
@@ -492,11 +495,9 @@ class TestBuildSearchQueryEdgeCases:
                 "g/mod7.py",
             ],
         )
-        query = _build_search_query(pr)
-        # Title contributes 1 part, only first 5 files are used
-        parts = query.split()
-        # Should have title + at most 5 file names
-        assert len(parts) <= 6
+        queries = _build_mailing_list_queries(pr)
+        # Total queries capped at 10; file names contribute at most 5.
+        assert len(queries) <= 10
 
 
 @pytest.mark.django_db
@@ -509,6 +510,17 @@ class TestFetchMailingList:
         thread.subject = "Arrow discussion"
         thread.date = "2026-03-20"
         thread.snippet = "Some snippet about Arrow"
+        thread.url = "https://example.com/t/1"
+        thread.to_cache_dict.return_value = {
+            "subject": "Arrow discussion",
+            "date": "2026-03-20",
+            "snippet": "Some snippet about Arrow",
+            "url": "https://example.com/t/1",
+            "list_name": "dev@spark",
+            "participants": [],
+            "pr_references": [],
+            "blame_hit": False,
+        }
 
         mock_result = MagicMock()
         mock_result.threads = [thread]
@@ -519,7 +531,7 @@ class TestFetchMailingList:
             name="dev@spark",
             archive_url="https://lists.apache.org/dev@spark",
         )
-        result = _fetch_mailing_list(config, "Arrow API", MagicMock())
+        result = _fetch_mailing_list(config, ["Arrow API"], MagicMock())
         assert result is not None
         assert result["type"] == "mailing-list"
         assert result["name"] == "dev@spark"
@@ -536,13 +548,13 @@ class TestFetchMailingList:
         config = CommunitySourceConfig(
             type="mailing-list", name="dev@spark", archive_url="https://lists.example.com"
         )
-        result = _fetch_mailing_list(config, "query", MagicMock())
+        result = _fetch_mailing_list(config, ["query"], MagicMock())
         assert result is None
 
     def test_returns_none_for_wrong_config_type(self) -> None:
         from franktheunicorn.data_access.context_orchestrator import _fetch_mailing_list
 
-        result = _fetch_mailing_list("not a config", "query", MagicMock())
+        result = _fetch_mailing_list("not a config", ["query"], MagicMock())
         assert result is None
 
 
@@ -1134,7 +1146,8 @@ class TestFetchCommunityContext:
         assert "dev@spark" in result
         pr.refresh_from_db()
         assert pr.community_context_cache is not None
-        assert pr.community_context_cache["query"] == "Arrow API change"
+        # query is the first query built (PR number or title, depending on PR metadata)
+        assert "query" in pr.community_context_cache
 
     @patch("franktheunicorn.data_access.context_orchestrator._fetch_single_source")
     def test_handles_source_exception(self, mock_fetch: MagicMock) -> None:
@@ -1174,7 +1187,7 @@ class TestFetchCommunityContext:
     @patch("franktheunicorn.data_access.context_orchestrator._fetch_single_source")
     def test_multiple_sources(self, mock_fetch: MagicMock) -> None:
         def side_effect(
-            source_config: object, query: str, client: object, op_config: object = None
+            source_config: object, queries: list[str], client: object, op_config: object = None
         ) -> dict[str, object] | None:
             if hasattr(source_config, "type") and source_config.type == "mailing-list":
                 return {

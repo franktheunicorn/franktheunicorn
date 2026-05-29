@@ -597,6 +597,43 @@ def process_pr(
         except Exception:
             logger.debug("External context fetch failed for PR #%d", pr.number, exc_info=True)
 
+        # Secondary rescore: apply mailing list signals now that community context is populated.
+        if community_ctx:
+            try:
+                from franktheunicorn.data_access.jira.fetcher import extract_ticket_ids
+                from franktheunicorn.scoring.signals import (
+                    score_mailing_list_blame_author,
+                    score_mailing_list_mention,
+                )
+
+                pr_ids: set[str] = set()
+                if pr.jira_ticket_id:
+                    pr_ids.add(pr.jira_ticket_id)
+                if pr.number:
+                    pr_ids.add(f"#{pr.number}")
+                import contextlib
+
+                with contextlib.suppress(Exception):
+                    pr_ids.update(extract_ticket_ids(f"{pr.title} {pr.body}", project_prefix=""))
+
+                ml_boost = score_mailing_list_mention(pr.community_context_cache, pr_ids) or 0
+                blame_boost = score_mailing_list_blame_author(pr.community_context_cache) or 0
+                if ml_boost or blame_boost:
+                    pr.interest_score = min(100.0, pr.interest_score + ml_boost + blame_boost)
+                    breakdown: dict[str, object] = dict(pr.score_breakdown or {})
+                    if ml_boost:
+                        breakdown["mailing_list_mention"] = ml_boost
+                    if blame_boost:
+                        breakdown["mailing_list_blame_author"] = blame_boost
+                    pr.score_breakdown = breakdown
+                    pr.save(update_fields=["interest_score", "score_breakdown", "updated_at"])
+                    _log(
+                        f"Mailing list rescore: +{ml_boost + blame_boost} "
+                        f"(mention={ml_boost}, blame={blame_boost})"
+                    )
+            except Exception:
+                logger.debug("Mailing list rescore failed for PR #%d", pr.number, exc_info=True)
+
         health_ctx = _build_repo_health_context(pr)
 
         effective_config = operator_config
