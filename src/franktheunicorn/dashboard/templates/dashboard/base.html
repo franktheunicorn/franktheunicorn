@@ -4,8 +4,13 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}franktheunicorn{% endblock %}</title>
-    <script src="https://unpkg.com/htmx.org@1.9.12"></script>
     {% load static %}
+    {# htmx is vendored under static/dashboard/vendor/ so the dashboard works
+       on a phone over Tailscale — unpkg.com is not always reachable. Pinned
+       to 1.9.12; bump by re-running:
+       curl -o src/franktheunicorn/dashboard/static/dashboard/vendor/htmx.min.js \
+            https://unpkg.com/htmx.org@<version>/dist/htmx.min.js #}
+    <script src="{% static 'dashboard/vendor/htmx.min.js' %}"></script>
     <link rel="icon" type="image/svg+xml" href="{% static 'dashboard/img/duck-icon.svg' %}">
     <link rel="stylesheet" href="{% static 'dashboard/styles.css' %}">
     <style>

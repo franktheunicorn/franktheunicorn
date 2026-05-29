@@ -209,11 +209,26 @@ def index(request: HttpRequest) -> HttpResponse:
     )
 
 
+@require_POST
 def set_workspace(request: HttpRequest) -> HttpResponse:
-    """Set the active workspace via cookie."""
+    """Set the active workspace via cookie.
+
+    POST-only because this is a mutation. The cookie is HttpOnly + SameSite=Lax
+    — it stores a workspace identifier, not a session token, but JS access is
+    unnecessary and SameSite limits CSRF surface.
+    """
+    from django.conf import settings
+
     workspace = request.POST.get("workspace", "all")
     response = redirect("dashboard:index")
-    response.set_cookie("workspace", workspace, max_age=86400 * 365)
+    response.set_cookie(
+        "workspace",
+        workspace,
+        max_age=86400 * 365,
+        httponly=True,
+        samesite="Lax",
+        secure=not settings.DEBUG,
+    )
     return response
 
 

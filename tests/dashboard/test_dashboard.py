@@ -467,6 +467,17 @@ class TestWorkspace:
         assert response.status_code == 302
         assert response.cookies.get("workspace")
 
+    def test_set_workspace_rejects_get(self, client: Client) -> None:
+        # set_workspace is a mutation; GET must return 405 Method Not Allowed.
+        response = client.get("/set-workspace/")
+        assert response.status_code == 405
+
+    def test_set_workspace_cookie_is_httponly_and_samesite(self, client: Client) -> None:
+        response = client.post("/set-workspace/", {"workspace": "work"})
+        cookie = response.cookies["workspace"]
+        assert cookie["httponly"]
+        assert cookie["samesite"].lower() == "lax"
+
     def test_index_with_workspace_cookie(self, client: Client, db_pr: PullRequest) -> None:
         client.cookies["workspace"] = "all"
         response = client.get("/")
