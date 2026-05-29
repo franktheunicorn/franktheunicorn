@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from franktheunicorn.config.models import OperatorConfig, ProjectConfig
 
 from django.contrib import messages
-from django.db.models import Count, Q, Sum
+from django.db.models import Count, Max, Q, Sum
 from django.http import HttpRequest, HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_POST
@@ -113,6 +113,7 @@ def index(request: HttpRequest) -> HttpResponse:
     prs = (
         PullRequest.objects.select_related("project")
         .filter(state="open", queue=queue)
+        .annotate(last_local_action_at=Max("actions__created_at"))
         .order_by("-interest_score", "-github_updated_at")
     )
 
@@ -378,7 +379,12 @@ def _adjacent_prs(pr: PullRequest) -> tuple[PullRequest | None, PullRequest | No
 
 def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
     """Detail view for a single PR showing drafts and score breakdown."""
-    pr = get_object_or_404(PullRequest.objects.select_related("project"), pk=pr_id)
+    pr = get_object_or_404(
+        PullRequest.objects.select_related("project").annotate(
+            last_local_action_at=Max("actions__created_at"),
+        ),
+        pk=pr_id,
+    )
     drafts = (
         ReviewDraft.objects.filter(
             pull_request=pr,

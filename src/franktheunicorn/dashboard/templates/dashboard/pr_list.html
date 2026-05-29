@@ -72,6 +72,8 @@
                 {% endif %}
             {% endif %}
             {% if pr.labels %}· {% for label in pr.labels %}{{ label }} {% endfor %}{% endif %}
+            {% if pr.github_updated_at %}· <span title="Upstream {{ pr.github_updated_at|date:'Y-m-d H:i' }} UTC">upstream {{ pr.github_updated_at|timesince }} ago</span>{% endif %}
+            {% if pr.last_local_action_at %}· <span title="Local action {{ pr.last_local_action_at|date:'Y-m-d H:i' }} UTC">reviewed {{ pr.last_local_action_at|timesince }} ago</span>{% else %}· <span class="muted" title="No accept/reject/edit actions yet">never reviewed locally</span>{% endif %}
         </div>
     </li>
     {% endfor %}

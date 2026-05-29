@@ -128,6 +128,80 @@ class TestDashboardViews:
 
 
 @pytest.mark.django_db
+class TestPRFreshness:
+    """Surfacing 'updated upstream' and 'reviewed locally' timestamps."""
+
+    def test_index_shows_upstream_timestamp(self, client: Client, db_pr: PullRequest) -> None:
+        from datetime import UTC, datetime
+
+        db_pr.github_updated_at = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+        db_pr.save(update_fields=["github_updated_at"])
+        response = client.get("/")
+        assert response.status_code == 200
+        # Both the relative-time label and the UTC tooltip should appear.
+        assert b"upstream" in response.content
+        assert b"2026-05-01 12:00 UTC" in response.content
+
+    def test_index_shows_never_reviewed_when_no_actions(
+        self, client: Client, db_pr: PullRequest
+    ) -> None:
+        # Sanity check: the fixture has no OperatorActions on db_pr.
+        assert not OperatorAction.objects.filter(pull_request=db_pr).exists()
+        response = client.get("/")
+        assert response.status_code == 200
+        assert b"never reviewed locally" in response.content
+
+    def test_index_shows_reviewed_locally_after_action(
+        self, client: Client, db_pr: PullRequest, review_draft: ReviewDraft
+    ) -> None:
+        from datetime import UTC, datetime
+
+        action = OperatorAction.objects.create(
+            action_type="accept_draft",
+            review_draft=review_draft,
+            pull_request=db_pr,
+        )
+        action.created_at = datetime(2026, 5, 20, 9, 0, tzinfo=UTC)
+        action.save(update_fields=["created_at"])
+        response = client.get("/")
+        assert response.status_code == 200
+        assert b"reviewed" in response.content
+        assert b"2026-05-20 09:00 UTC" in response.content
+        assert b"never reviewed locally" not in response.content
+
+    def test_pr_detail_shows_upstream_and_local_freshness(
+        self, client: Client, db_pr: PullRequest, review_draft: ReviewDraft
+    ) -> None:
+        from datetime import UTC, datetime
+
+        db_pr.github_updated_at = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+        db_pr.save(update_fields=["github_updated_at"])
+        action = OperatorAction.objects.create(
+            action_type="accept_draft",
+            review_draft=review_draft,
+            pull_request=db_pr,
+        )
+        action.created_at = datetime(2026, 5, 20, 9, 0, tzinfo=UTC)
+        action.save(update_fields=["created_at"])
+
+        response = client.get(f"/pr/{db_pr.pk}/")
+        assert response.status_code == 200
+        assert b"Updated upstream:" in response.content
+        assert b"Reviewed locally:" in response.content
+        # Old misleading "Last checked:" label must be gone.
+        assert b"Last checked:" not in response.content
+
+    def test_pr_detail_shows_never_when_no_actions(
+        self, client: Client, db_pr: PullRequest
+    ) -> None:
+        response = client.get(f"/pr/{db_pr.pk}/")
+        assert response.status_code == 200
+        assert b"Reviewed locally: <span >never</span>" in response.content or (
+            b"Reviewed locally:" in response.content and b">never<" in response.content
+        )
+
+
+@pytest.mark.django_db
 class TestQueueTabs:
     def test_index_queue_filter(self, client: Client, db_pr: PullRequest) -> None:
         db_pr.queue = "ai-generated"
