@@ -220,8 +220,26 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
                 operator_config,
                 disabled_backends,
             )
-            logger.info("Sleeping %ds until next poll...", poll_interval)
-            time.sleep(poll_interval)
+            # Sleep until the next poll, but wake every COMMAND_POLL_INTERVAL
+            # to drain any WorkerCommand rows the dashboard queued (manual
+            # test runs, force-run agents, security sandbox). This keeps
+            # web-triggered actions responsive even when poll_interval is
+            # several minutes.
+            from franktheunicorn.worker.commands import process_pending_commands
+
+            command_poll_interval = 5
+            elapsed = 0
+            while elapsed < poll_interval:
+                try:
+                    processed = process_pending_commands(operator_config)
+                    if processed:
+                        logger.info("Drained %d worker command(s)", processed)
+                except Exception:
+                    logger.exception("Error draining worker commands")
+                wait = min(command_poll_interval, poll_interval - elapsed)
+                time.sleep(wait)
+                elapsed += wait
+            logger.info("Next poll cycle...")
     except KeyboardInterrupt:
         logger.info("Worker shutting down.")
     finally:

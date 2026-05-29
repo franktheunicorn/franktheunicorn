@@ -11,6 +11,7 @@ from franktheunicorn.core.models import (
     OperatorAction,
     PullRequest,
     ReviewDraft,
+    WorkerCommand,
 )
 from tests.factories import (
     AntiPatternFactory,
@@ -199,6 +200,73 @@ class TestPRFreshness:
         assert b"Reviewed locally: <span >never</span>" in response.content or (
             b"Reviewed locally:" in response.content and b">never<" in response.content
         )
+
+
+@pytest.mark.django_db
+class TestWorkerCommandQueueing:
+    """The web container must enqueue WorkerCommand rows rather than spawn
+    Docker / threads / long LLM runs from inside the request path."""
+
+    def test_run_dual_tests_enqueues_command(self, client: Client, db_pr: PullRequest) -> None:
+        from unittest.mock import MagicMock, patch
+
+        mock_pc = MagicMock()
+        mock_pc.tests.enabled = True
+        with patch("franktheunicorn.config.loader.get_project_config", return_value=mock_pc):
+            response = client.post(f"/pr/{db_pr.pk}/run-dual-tests/")
+        assert response.status_code == 200
+        assert b"queued" in response.content.lower()
+        cmd = WorkerCommand.objects.get(command="run_dual_tests", pull_request=db_pr)
+        assert cmd.status == "pending"
+
+    def test_run_dual_tests_does_not_spawn_thread(self, client: Client, db_pr: PullRequest) -> None:
+        from unittest.mock import MagicMock, patch
+
+        mock_pc = MagicMock()
+        mock_pc.tests.enabled = True
+        with (
+            patch("franktheunicorn.config.loader.get_project_config", return_value=mock_pc),
+            patch("franktheunicorn.worker.test_runner.TestRunner") as runner_cls,
+        ):
+            client.post(f"/pr/{db_pr.pk}/run-dual-tests/")
+        # The web view must not instantiate a TestRunner — that would mean
+        # docker.from_env() in the web container.
+        runner_cls.assert_not_called()
+
+    def test_run_agents_enqueues_command(self, client: Client, db_pr: PullRequest) -> None:
+        from unittest.mock import MagicMock, patch
+
+        mock_pc = MagicMock()
+        with patch("franktheunicorn.config.loader.get_project_config", return_value=mock_pc):
+            response = client.post(f"/pr/{db_pr.pk}/run-agents/")
+        assert response.status_code == 200
+        assert b"queued" in response.content.lower()
+        cmd = WorkerCommand.objects.get(command="run_agents", pull_request=db_pr)
+        assert cmd.status == "pending"
+
+    def test_run_agents_returns_error_when_no_project_config(
+        self, client: Client, db_pr: PullRequest
+    ) -> None:
+        from unittest.mock import patch
+
+        with patch("franktheunicorn.config.loader.get_project_config", return_value=None):
+            response = client.post(f"/pr/{db_pr.pk}/run-agents/")
+        assert response.status_code == 200
+        assert b"No project config" in response.content
+        assert not WorkerCommand.objects.filter(pull_request=db_pr).exists()
+
+    def test_run_dual_tests_rejects_when_tests_disabled(
+        self, client: Client, db_pr: PullRequest
+    ) -> None:
+        from unittest.mock import MagicMock, patch
+
+        mock_pc = MagicMock()
+        mock_pc.tests.enabled = False
+        with patch("franktheunicorn.config.loader.get_project_config", return_value=mock_pc):
+            response = client.post(f"/pr/{db_pr.pk}/run-dual-tests/")
+        assert response.status_code == 200
+        assert b"not enabled" in response.content
+        assert not WorkerCommand.objects.filter(pull_request=db_pr).exists()
 
 
 @pytest.mark.django_db
@@ -395,31 +463,25 @@ class TestRunDualTests:
         assert response.status_code == 200
         assert b"not enabled" in response.content
 
-    def test_starts_background_thread(self, client: Client, db_pr: PullRequest) -> None:
+    def test_enqueues_worker_command(self, client: Client, db_pr: PullRequest) -> None:
+        # See TestWorkerCommandQueueing for the deeper assertions; this case
+        # mirrors the legacy "background thread" test for the new queue path.
         from unittest.mock import MagicMock, patch
 
         mock_config = MagicMock()
         mock_config.tests.enabled = True
 
-        mock_thread = MagicMock()
-        mock_thread_cls = MagicMock(return_value=mock_thread)
-
-        with (
-            patch(
-                "franktheunicorn.config.loader.get_project_config",
-                return_value=mock_config,
-            ),
-            patch(
-                "franktheunicorn.dashboard.views.threading.Thread",
-                mock_thread_cls,
-            ),
+        with patch(
+            "franktheunicorn.config.loader.get_project_config",
+            return_value=mock_config,
         ):
             response = client.post(f"/pr/{db_pr.pk}/run-dual-tests/")
 
         assert response.status_code == 200
-        assert b"started" in response.content
-        mock_thread_cls.assert_called_once()
-        mock_thread.start.assert_called_once_with()
+        assert b"queued" in response.content.lower()
+        assert WorkerCommand.objects.filter(
+            command="run_dual_tests", pull_request=db_pr, status="pending"
+        ).exists()
 
 
 @pytest.mark.django_db
