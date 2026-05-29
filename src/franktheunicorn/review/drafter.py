@@ -478,12 +478,14 @@ def draft_review(
 
     # Always create a rebase-needed draft when GitHub reports merge conflicts.
     # This runs independently of LLM findings so operators see it even when all
-    # backends fail or produce nothing.
+    # backends fail or produce nothing. Look up by ``backend_used`` (a stable
+    # CharField) rather than the JSONField ``sources`` so re-runs don't create
+    # duplicate conflict markers if the encoded list ever differs by a byte.
     extra_drafts: list[ReviewDraft] = []
     if pr.mergeable is False:
         rebase_draft, _ = ReviewDraft.objects.get_or_create(
             pull_request=pr,
-            sources=["auto-conflict"],
+            backend_used="auto-conflict",
             defaults={
                 "comment_body": (
                     "This PR has merge conflicts with the target branch. "
@@ -493,6 +495,7 @@ def draft_review(
                 "category": "other",
                 "severity": "informational",
                 "status": "pending",
+                "sources": ["auto-conflict"],
                 "diff_source": "",
             },
         )
