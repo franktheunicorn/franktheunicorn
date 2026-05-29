@@ -25,20 +25,38 @@ This is **not a hosted service**. It's a tool you clone, configure, and run loca
 ```
 src/franktheunicorn/
   core/              # Django models, config loading, shared types
+    management/
+      commands/      # Django management commands + CLI entry points
   scoring/           # Interest scoring, moderation flags, blame analysis,
                      #   collaborator detection, custom scoring functions
   review/            # Multi-backend LLM review pipeline, finding generation,
                      #   tone guard, anti-pattern matching, deduplication
+                     #   (auto_poster.py is present but not wired — see
+                     #    "Auto-posting" under Important Design Decisions)
+  backends/          # Forge clients (GitHub, Gitea, GitLab) + posters
+  personalities/     # Reviewer voice loader (markdown personalities)
+  security/          # Security-report triage pipeline (CVE lookup,
+                     #   malicious-prompt detection, sandboxed POC runs)
+  curator/           # Textual TUI for curating voice datasets from
+                     #   historical comments (used to seed fine-tuning;
+                     #   not part of the live review path)
+  fine_tuning/       # Axolotl pipeline + evaluator. Optional v2 install
+                     #   extra; not imported on the live review path.
   data_access/       # Dual-path data fetchers (API + scrape)
     github/          #   PRs, diffs, reviews, blame, users
     jira/            #   Ticket fetch + cache (v1.5)
     mailing_list/    #   Archive search (v1.5)
+    discourse/       #   Forum search (community context, v1.5)
+    discord/         #   Discord search (API-only, v1.5)
+    perplexity/      #   Web search via Perplexity (v1.5)
+    sentry/          #   Production-error context (v1.5)
+    dependencies/    #   PR dependency-change detection
+    package_registry/ #  Changelog/release-notes lookup for deps
+    email_inbox/     #   Security report ingestion via IMAP
   worker/            # Background worker, job scheduling, priority queue
   dashboard/         # Django views, templates, htmx endpoints
   digest/            # Email digest generation and sending
   config/            # YAML schema validation, project/operator config loaders
-  management/
-    commands/        # Django management commands + CLI entry points
 tests/
   core/
   scoring/
@@ -68,7 +86,7 @@ The anti-pattern list is the primary feedback mechanism — not a side feature. 
 ## Coding Conventions
 
 ### Python
-- Python 3.11+. Use modern syntax: `match`, `|` for union types, f-strings.
+- Python 3.12+. Use modern syntax: `match`, `|` for union types, f-strings.
 - Type hints on all public functions. `mypy` strict mode.
 - `ruff` for linting and formatting. Line length 100.
 - Avoid `Any` types. Prefer `dataclass` or Pydantic models for structured data.
@@ -85,7 +103,7 @@ The anti-pattern list is the primary feedback mechanism — not a side feature. 
 ### Testing
 - `pytest` + `pytest-django`. Target **90%+ coverage** — enforced in CI.
 - `factory_boy` for model fixtures. DRY test data — never duplicate factory definitions.
-- `responses` or `httpx-mock` for HTTP mocking. `VCR.py` for LLM API call recording.
+- `responses` or `httpx-mock` for HTTP mocking.
 - Every `DataFetcher` has three test files: `test_*_api.py`, `test_*_scrape.py`, `test_*_integration.py`.
 - Contract tests: parametrize the same test across API and scrape implementations.
 - Use `review-agent record-fixtures` to generate test fixtures from live data, then redact tokens.
@@ -98,10 +116,10 @@ The anti-pattern list is the primary feedback mechanism — not a side feature. 
 
 ## Important Design Decisions
 
-- **Draft-only posting (v1).** The agent never posts to GitHub without the operator clicking approve. Do not add auto-posting paths in v1 code.
-- **Graceful feature gates.** Every optional feature (CodeRabbit, email, tests, JIRA) must degrade gracefully when not configured. Check config before using; skip silently, don't error.
+- **Draft-only by default.** Posting to GitHub requires the operator clicking approve. The default `posting.mode` is `draft-only`. `review/auto_poster.py` exists for the v1.5 confidence-gated path but is *not wired* into the worker — it only fires when a project explicitly sets `posting.mode = "confidence-gated"` and the triple gate (mode + confidence threshold + tone guard) passes. New review-pipeline features should keep the default draft-only path intact.
+- **Graceful feature gates.** Every optional feature (CodeRabbit, email, tests, JIRA, community search, Sentry) must degrade gracefully when not configured. Check config before using; skip silently, don't error.
 - **SQLite is first-class.** Don't use Postgres-specific features. Test against SQLite. The `DATABASE_URL` env var switches to Postgres but SQLite must always work.
-- **No Docker socket in web container.** Only the worker container accesses Docker for test execution. The web container never spawns containers.
+- **No Docker socket in web container.** Only the worker container accesses Docker for test execution and the security sandbox. The web container never spawns containers. (Two endpoints — `run_dual_tests` and `security_report_sandbox` — currently break this rule via threading; a worker-queue refactor is in flight.)
 - **Blame: run fresh, don't cache.** Run `git blame` on the base branch for changed files each time. No blame cache.
 
 ## Running the Project
@@ -155,7 +173,11 @@ When working on features, know which version they belong to:
 - **v1.75:** Rejection predictor (sklearn), auto-suppress low-value findings
 - **v2:** Fine-tuned personal model (Axolotl), merge queue, shepherding, k8s
 
-Do not implement v1.5+ features in v1 branches. Config sections for future features should be commented out in example configs with a version note.
+v1.5+ infrastructure (caches, models, optional commands, contextual data
+sources, the auto-poster module, the curator/fine-tuning pipelines) is
+present in the tree but feature-gated: enable a v1.5+ path only via
+explicit project YAML or operator config — never as the default. Do not
+add code that activates these paths automatically in v1 deployments.
 
 ## Common Tasks
 
