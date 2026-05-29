@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from franktheunicorn.config.loader import _expand_env_vars
 from franktheunicorn.config.resolver import (
+    ensure_github_username,
     resolve_config,
     resolve_operator_config_path,
 )
@@ -214,7 +215,13 @@ class TestResolveConfig:
 
 
 class TestResolveConfigUsernameInference:
-    def test_infers_username_when_token_present(self, tmp_path: Path) -> None:
+    """resolve_config must NOT make any network calls (no GitHub inference).
+
+    Inference is performed explicitly by ensure_github_username, called by the
+    worker after settings load — see TestEnsureGithubUsername below.
+    """
+
+    def test_resolve_config_does_not_call_infer(self, tmp_path: Path) -> None:
         config_dir = tmp_path / "config" / "active"
         config_dir.mkdir(parents=True)
         (config_dir / "operator.yaml").write_text(
@@ -222,9 +229,34 @@ class TestResolveConfigUsernameInference:
         )
         with patch(
             "franktheunicorn.backends.github.infer_github_username",
+        ) as mock_infer:
+            oc, _resolved = resolve_config(tmp_path)
+        mock_infer.assert_not_called()
+        assert oc.github_username == ""
+
+    def test_resolve_config_preserves_explicit_username(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / "config" / "active"
+        config_dir.mkdir(parents=True)
+        (config_dir / "operator.yaml").write_text(
+            'github_token: "ghp_test_token"\ngithub_username: "explicit-user"\n'
+        )
+        oc, _resolved = resolve_config(tmp_path)
+        assert oc.github_username == "explicit-user"
+
+
+class TestEnsureGithubUsername:
+    def test_infers_when_token_present_and_username_empty(self, tmp_path: Path) -> None:
+        config_dir = tmp_path / "config" / "active"
+        config_dir.mkdir(parents=True)
+        (config_dir / "operator.yaml").write_text(
+            'github_token: "ghp_test_token"\ngithub_username: ""\n'
+        )
+        oc, _resolved = resolve_config(tmp_path)
+        with patch(
+            "franktheunicorn.backends.github.infer_github_username",
             return_value="inferred-user",
         ):
-            oc, _resolved = resolve_config(tmp_path)
+            ensure_github_username(oc)
         assert oc.github_username == "inferred-user"
 
     def test_skips_inference_when_username_set(self, tmp_path: Path) -> None:
@@ -233,12 +265,13 @@ class TestResolveConfigUsernameInference:
         (config_dir / "operator.yaml").write_text(
             'github_token: "ghp_test_token"\ngithub_username: "explicit-user"\n'
         )
+        oc, _resolved = resolve_config(tmp_path)
         with patch(
             "franktheunicorn.backends.github.infer_github_username",
         ) as mock_infer:
-            _oc, _resolved = resolve_config(tmp_path)
+            ensure_github_username(oc)
         mock_infer.assert_not_called()
-        assert _oc.github_username == "explicit-user"
+        assert oc.github_username == "explicit-user"
 
     def test_skips_inference_in_mock_mode(self, tmp_path: Path) -> None:
         config_dir = tmp_path / "config" / "active"
@@ -246,29 +279,32 @@ class TestResolveConfigUsernameInference:
         (config_dir / "operator.yaml").write_text(
             'github_token: "ghp_test_token"\nmock_mode: true\n'
         )
+        oc, _resolved = resolve_config(tmp_path)
         with patch(
             "franktheunicorn.backends.github.infer_github_username",
         ) as mock_infer:
-            _oc, _resolved = resolve_config(tmp_path)
+            ensure_github_username(oc)
         mock_infer.assert_not_called()
 
     def test_skips_inference_when_no_token(self, tmp_path: Path) -> None:
         config_dir = tmp_path / "config" / "active"
         config_dir.mkdir(parents=True)
         (config_dir / "operator.yaml").write_text('github_username: ""\n')
+        oc, _resolved = resolve_config(tmp_path)
         with patch(
             "franktheunicorn.backends.github.infer_github_username",
         ) as mock_infer:
-            _oc, _resolved = resolve_config(tmp_path)
+            ensure_github_username(oc)
         mock_infer.assert_not_called()
 
     def test_continues_with_empty_username_on_inference_failure(self, tmp_path: Path) -> None:
         config_dir = tmp_path / "config" / "active"
         config_dir.mkdir(parents=True)
         (config_dir / "operator.yaml").write_text('github_token: "ghp_test_token"\n')
+        oc, _resolved = resolve_config(tmp_path)
         with patch(
             "franktheunicorn.backends.github.infer_github_username",
             return_value="",
         ):
-            oc, _resolved = resolve_config(tmp_path)
+            ensure_github_username(oc)
         assert oc.github_username == ""

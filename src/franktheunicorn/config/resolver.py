@@ -80,17 +80,15 @@ def resolve_config(base_dir: Path) -> tuple[OperatorConfig, dict[str, str | int 
     The resolved dict uses YAML values with sensible defaults for
     empty strings.  ``${…}`` expansion has already happened at YAML
     load time.
+
+    Note: This does NOT make any network calls. Username inference from a
+    token requires a separate explicit call to ``ensure_github_username``,
+    which the worker performs after settings load. Keeping settings load
+    purely local-first means ``manage.py check`` / ``migrate`` / test
+    runs do not depend on GitHub being reachable.
     """
     config_path = resolve_operator_config_path(base_dir)
     oc = load_operator_config(config_path)
-
-    # Infer GitHub username from token if not explicitly set.
-    if not oc.github_username and oc.github_token and not oc.mock_mode:
-        from franktheunicorn.backends.github import infer_github_username
-
-        inferred = infer_github_username(oc.github_token)
-        if inferred:
-            oc.github_username = inferred
 
     resolved: dict[str, str | int | bool] = {
         "config_path": config_path,
@@ -113,3 +111,20 @@ def resolve_config(base_dir: Path) -> tuple[OperatorConfig, dict[str, str | int 
     }
 
     return oc, resolved
+
+
+def ensure_github_username(oc: OperatorConfig) -> None:
+    """Populate ``oc.github_username`` from the token via a GitHub API call,
+    if a token is set and a username is not. No-op in mock mode.
+
+    Mutates ``oc`` in place. This is called by the worker after settings
+    load so Django settings.py never depends on a live GitHub connection.
+    """
+    if oc.github_username or not oc.github_token or oc.mock_mode:
+        return
+
+    from franktheunicorn.backends.github import infer_github_username
+
+    inferred = infer_github_username(oc.github_token)
+    if inferred:
+        oc.github_username = inferred

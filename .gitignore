@@ -194,6 +194,8 @@ cython_debug/
 # franktheunicorn local state
 data/*.sqlite3
 data/*.sqlite3-journal
+data/*.lock
+data/*.pid
 data/cache/
 data/repos/
 
