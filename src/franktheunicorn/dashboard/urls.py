@@ -8,6 +8,7 @@ app_name = "dashboard"
 
 urlpatterns = [
     path("", views.index, name="index"),
+    path("health/", views.health, name="health"),
     path("lookup/", views.lookup_pr, name="lookup_pr"),
     path(
         "pr/github/<str:owner>/<str:repo>/<int:pr_number>/", views.pr_by_coords, name="pr_by_coords"

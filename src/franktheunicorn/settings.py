@@ -109,7 +109,9 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # Static files (CSS, JavaScript, Images)
 STATIC_URL = "static/"
-STATIC_ROOT = str(DATA_DIR / "staticfiles")
+# Static files are code artifacts baked into the image — keep them under
+# BASE_DIR so Docker volume mounts on DATA_DIR don't hide them at runtime.
+STATIC_ROOT = str(BASE_DIR / "staticfiles")
 # Use the compressed/manifest storage only in production builds. In DEBUG
 # (dev + tests) Django serves files straight from app static dirs and the
 # manifest hasn't been built yet, so the standard storage is required.

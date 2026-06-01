@@ -1264,3 +1264,12 @@ def pr_by_coords(request: HttpRequest, owner: str, repo: str, pr_number: int) ->
     Useful for deep-linking directly to a PR from external tools or browser bookmarks.
     """
     return _resolve_and_redirect_pr(request, owner, repo, pr_number)
+
+
+def health(request: HttpRequest) -> HttpResponse:
+    """Lightweight liveness check for container health probes.
+
+    Returns 200 immediately with no DB queries or template rendering so
+    the probe passes even before the first full page render is possible.
+    """
+    return HttpResponse("ok")
