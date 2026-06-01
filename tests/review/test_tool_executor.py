@@ -260,14 +260,57 @@ class TestRemoteSSHExecutorCustomCommand:
 
     def test_wrapper_command_no_host_omits_empty_target(self) -> None:
         # When host is empty (e.g. sf workspace ssh handles routing internally),
-        # _ssh_command must not append an empty string — that becomes a spurious
-        # positional arg that confuses CLIs expecting exactly one arg.
+        # _ssh_command must not append an empty string AND must not add SSH-specific
+        # option flags that the wrapper doesn't understand (-o BatchMode=yes etc.).
         cfg = RemoteExecutionConfig(mode="ssh", ssh_command=["sf", "workspace", "ssh"])
         executor = RemoteSSHExecutor(config=cfg)
         argv = executor._ssh_command()
         assert "" not in argv
-        # Command should be: sf workspace ssh -o BatchMode=yes (5 elements, no empty)
-        assert argv == ["sf", "workspace", "ssh", "-o", "BatchMode=yes"]
+        # Wrapper mode: only the base command, no -o flags, no host
+        assert argv == ["sf", "workspace", "ssh"]
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_wrapper_command_probe_uses_dash_c_true(self, mock_run: Any) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        cfg = RemoteExecutionConfig(mode="ssh", ssh_command=["sf", "workspace", "ssh"])
+        executor = RemoteSSHExecutor(config=cfg)
+        executor._probe_ssh()
+        argv = mock_run.call_args.args[0]
+        assert argv == ["sf", "workspace", "ssh", "-c", "true"]
+        # Must NOT include SSH-specific flags
+        assert "-o" not in argv
+        assert "BatchMode=yes" not in argv
+        assert "ConnectTimeout=10" not in argv
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_wrapper_command_run_uses_dash_c(self, mock_run: Any) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        cfg = RemoteExecutionConfig(mode="ssh", ssh_command=["sf", "workspace", "ssh"])
+        executor = RemoteSSHExecutor(config=cfg)
+        executor.run(["true"], cwd="/home/frank/repo")
+        argv = mock_run.call_args.args[0]
+        # Wrapper: sf workspace ssh -c "cd /path && true"
+        assert argv[0:3] == ["sf", "workspace", "ssh"]
+        assert argv[3] == "-c"
+        assert "true" in argv[4]
+        assert "-o" not in argv
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_wrapper_command_prepare_repo_uses_dash_c(self, mock_run: Any) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="op=clone", stderr=""
+        )
+        cfg = RemoteExecutionConfig(mode="ssh", ssh_command=["sf", "workspace", "ssh"])
+        executor = RemoteSSHExecutor(config=cfg)
+        executor.prepare_repo("owner", "repo")
+        argv = mock_run.call_args.args[0]
+        assert argv[0:3] == ["sf", "workspace", "ssh"]
+        assert argv[3] == "-c"
+        assert "git clone" in argv[4] or "git fetch" in argv[4]
 
 
 class TestRemoteSSHExecutorPort:

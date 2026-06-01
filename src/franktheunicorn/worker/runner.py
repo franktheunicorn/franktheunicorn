@@ -207,7 +207,7 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
     )
 
     disabled_backends = _check_backends(operator_config)
-    _check_ssh_configs(operator_config)
+    disabled_ssh_tools = _check_ssh_configs(operator_config)
 
     signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
 
@@ -219,6 +219,7 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
                 operator_config.github_username,
                 operator_config,
                 disabled_backends,
+                disabled_ssh_tools,
             )
             # Sleep until the next poll, but wake every COMMAND_POLL_INTERVAL
             # to drain any WorkerCommand rows the dashboard queued (manual
@@ -558,6 +559,7 @@ def process_pr(
     disabled_backends: frozenset[int] = frozenset(),
     diff_http: httpx.Client | None = None,
     repo_path: Path | None = None,
+    disabled_ssh_tools: frozenset[str] = frozenset(),
     *,
     force: bool = False,
     log_lines: list[str] | None = None,
@@ -589,15 +591,27 @@ def process_pr(
         close_http = True
 
     cr_config: CodeRabbitConfig | None = None
-    if operator_config is not None and operator_config.coderabbit.enabled:
+    if (
+        operator_config is not None
+        and operator_config.coderabbit.enabled
+        and "coderabbit" not in disabled_ssh_tools
+    ):
         cr_config = operator_config.coderabbit
 
     claude_cli_config: ClaudeCLIConfig | None = None
-    if operator_config is not None and operator_config.claude_cli.enabled:
+    if (
+        operator_config is not None
+        and operator_config.claude_cli.enabled
+        and "claude_cli" not in disabled_ssh_tools
+    ):
         claude_cli_config = operator_config.claude_cli
 
     snowflake_config: SnowflakeReviewConfig | None = None
-    if operator_config is not None and operator_config.snowflake_review.enabled:
+    if (
+        operator_config is not None
+        and operator_config.snowflake_review.enabled
+        and "snowflake_review" not in disabled_ssh_tools
+    ):
         snowflake_config = operator_config.snowflake_review
 
     def _log(msg: str) -> None:
@@ -769,6 +783,7 @@ def _run_cycle(
     operator_username: str,
     operator_config: OperatorConfig | None = None,
     disabled_backends: frozenset[int] = frozenset(),
+    disabled_ssh_tools: frozenset[str] = frozenset(),
 ) -> None:
     """Run one polling cycle across all configured projects.
 
@@ -870,6 +885,7 @@ def _run_cycle(
                     disabled_backends=disabled_backends,
                     diff_http=diff_http,
                     repo_path=repo_path,
+                    disabled_ssh_tools=disabled_ssh_tools,
                 )
 
                 # Differential test verification (§9).
@@ -931,6 +947,7 @@ def _run_cycle(
         project_configs=project_configs,
         operator_config=operator_config,
         disabled_backends=disabled_backends,
+        disabled_ssh_tools=disabled_ssh_tools,
         diff_http=diff_http,
     )
 
@@ -1007,6 +1024,7 @@ def _backfill_unreviewed_prs(
     operator_config: OperatorConfig | None,
     disabled_backends: frozenset[int],
     diff_http: httpx.Client,
+    disabled_ssh_tools: frozenset[str] = frozenset(),
 ) -> None:
     """Draft reviews for open PRs in the DB that have no review drafts yet.
 
@@ -1052,6 +1070,7 @@ def _backfill_unreviewed_prs(
                 operator_config,
                 disabled_backends=disabled_backends,
                 diff_http=diff_http,
+                disabled_ssh_tools=disabled_ssh_tools,
             )
             logger.info("  Backfill PR #%d: %d drafts generated", pr.number, len(drafts))
         except Exception:

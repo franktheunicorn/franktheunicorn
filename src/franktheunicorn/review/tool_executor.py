@@ -153,32 +153,57 @@ class RemoteSSHExecutor:
 
     config: RemoteExecutionConfig
 
+    def _is_wrapper(self) -> bool:
+        """Return True when a routing wrapper (e.g. sf workspace ssh) is in use.
+
+        Wrappers handle host resolution internally so they don't accept standard
+        SSH option flags (-o, -p, -i) and expect the command via -c, not positionally.
+        """
+        return not self.config.host.strip()
+
     def _ssh_target(self) -> str:
         if self.config.user:
             return f"{self.config.user}@{self.config.host}"
         return self.config.host
 
     def _ssh_command(self) -> list[str]:
-        cmd = [*self.config.ssh_command, "-o", "BatchMode=yes"]
-        if self.config.port:
-            cmd += ["-p", str(self.config.port)]
-        if self.config.ssh_key_path:
-            cmd += ["-i", self.config.ssh_key_path]
+        cmd = list(self.config.ssh_command)
+        if not self._is_wrapper():
+            cmd += ["-o", "BatchMode=yes"]
+            if self.config.port:
+                cmd += ["-p", str(self.config.port)]
+            if self.config.ssh_key_path:
+                cmd += ["-i", self.config.ssh_key_path]
         cmd += list(self.config.ssh_extra_args)
         target = self._ssh_target()
         if target:
             cmd.append(target)
         return cmd
 
+    def _remote_argv(self, script: str) -> list[str]:
+        """Build the full SSH invocation for running a remote shell script.
+
+        Wrapper mode (e.g. sf workspace ssh) passes the script via -c; standard
+        SSH passes it as a positional argument after the host.
+        """
+        if self._is_wrapper():
+            return [*self.config.ssh_command, *self.config.ssh_extra_args, "-c", script]
+        return [*self._ssh_command(), script]
+
     def _probe_ssh(self) -> bool:
-        """Run ``ssh … true`` to test bare SSH connectivity, independent of git.
+        """Run a minimal remote command to test connectivity, independent of git.
 
         Returns True when the connection succeeds, False on any failure.
-        A short connect-timeout (10 s) keeps this non-blocking.
+        For wrapper mode (e.g. sf workspace ssh) uses -c syntax; for standard SSH
+        adds a ConnectTimeout so the probe doesn't hang.
         """
+        if self._is_wrapper():
+            probe_argv = [*self.config.ssh_command, *self.config.ssh_extra_args, "-c", "true"]
+        else:
+            probe_argv = [*self._ssh_command(), "-o", "ConnectTimeout=10", "true"]
         try:
             probe = subprocess.run(
-                [*self._ssh_command(), "-o", "ConnectTimeout=10", "true"],
+                probe_argv,
                 capture_output=True,
                 text=True,
                 timeout=15,
@@ -303,7 +328,7 @@ class RemoteSSHExecutor:
                 f"{clone_cmd}; "
                 f"fi"
             )
-            ssh_argv = [*self._ssh_command(), script]
+            ssh_argv = self._remote_argv(script)
             try:
                 result = subprocess.run(
                     ssh_argv,
@@ -445,7 +470,7 @@ class RemoteSSHExecutor:
 
         try:
             result = subprocess.run(
-                [*self._ssh_command(), remote_invocation],
+                self._remote_argv(remote_invocation),
                 capture_output=True,
                 text=True,
                 timeout=timeout,
