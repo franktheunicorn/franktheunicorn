@@ -110,6 +110,33 @@ class TestDeduplicateFindings:
         result = deduplicate_findings(findings)
         assert len(result) == 1
 
+    def test_grouping_is_greedy_not_transitive(self) -> None:
+        """Pin down the documented non-transitive merge behavior.
+
+        ``deduplicate_findings`` only tests the group anchor (the first
+        finding) against every later finding. So for findings on lines
+        10 / 14 / 18 (anchor distance 0/4/8 with proximity threshold 5):
+        - 10 and 14 merge (within 5 lines, overlapping body)
+        - 10 and 18 do NOT merge (distance 8 exceeds proximity)
+        - 14 and 18 are never compared because 14 was already absorbed
+          into the anchor's group
+        Result: two groups, not one. This is intentional (avoids
+        runaway transitive merges) but is worth a regression test so
+        a future tweak doesn't silently change the contract.
+        """
+        a = ReviewFinding(file_path="a.py", line_number=10, body="The null check is wrong")
+        b = ReviewFinding(file_path="a.py", line_number=14, body="The null check is wrong indeed")
+        c = ReviewFinding(file_path="a.py", line_number=18, body="The null check is wrong here")
+
+        result = deduplicate_findings([a, b, c])
+        # Two groups: {a, b} merged into one, c on its own. The merged
+        # group's primary is b (longest body), so the kept line numbers
+        # are b's (14) and c's (18). What matters for the contract is
+        # that there are two findings, not one transitive group of three.
+        assert len(result) == 2
+        line_numbers = sorted(f.line_number for f in result if f.line_number is not None)
+        assert line_numbers == [14, 18]
+
 
 class TestJaccardSimilarity:
     def test_identical(self) -> None:

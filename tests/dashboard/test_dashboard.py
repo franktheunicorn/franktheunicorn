@@ -11,6 +11,7 @@ from franktheunicorn.core.models import (
     OperatorAction,
     PullRequest,
     ReviewDraft,
+    WorkerCommand,
 )
 from tests.factories import (
     AntiPatternFactory,
@@ -125,6 +126,147 @@ class TestDashboardViews:
         response = client.get("/")
         assert response.status_code == 200
         assert b'class="findings-badge"' not in response.content
+
+
+@pytest.mark.django_db
+class TestPRFreshness:
+    """Surfacing 'updated upstream' and 'reviewed locally' timestamps."""
+
+    def test_index_shows_upstream_timestamp(self, client: Client, db_pr: PullRequest) -> None:
+        from datetime import UTC, datetime
+
+        db_pr.github_updated_at = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+        db_pr.save(update_fields=["github_updated_at"])
+        response = client.get("/")
+        assert response.status_code == 200
+        # Both the relative-time label and the UTC tooltip should appear.
+        assert b"upstream" in response.content
+        assert b"2026-05-01 12:00 UTC" in response.content
+
+    def test_index_shows_never_reviewed_when_no_actions(
+        self, client: Client, db_pr: PullRequest
+    ) -> None:
+        # Sanity check: the fixture has no OperatorActions on db_pr.
+        assert not OperatorAction.objects.filter(pull_request=db_pr).exists()
+        response = client.get("/")
+        assert response.status_code == 200
+        assert b"never reviewed locally" in response.content
+
+    def test_index_shows_reviewed_locally_after_action(
+        self, client: Client, db_pr: PullRequest, review_draft: ReviewDraft
+    ) -> None:
+        from datetime import UTC, datetime
+
+        action = OperatorAction.objects.create(
+            action_type="accept_draft",
+            review_draft=review_draft,
+            pull_request=db_pr,
+        )
+        action.created_at = datetime(2026, 5, 20, 9, 0, tzinfo=UTC)
+        action.save(update_fields=["created_at"])
+        response = client.get("/")
+        assert response.status_code == 200
+        assert b"reviewed" in response.content
+        assert b"2026-05-20 09:00 UTC" in response.content
+        assert b"never reviewed locally" not in response.content
+
+    def test_pr_detail_shows_upstream_and_local_freshness(
+        self, client: Client, db_pr: PullRequest, review_draft: ReviewDraft
+    ) -> None:
+        from datetime import UTC, datetime
+
+        db_pr.github_updated_at = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+        db_pr.save(update_fields=["github_updated_at"])
+        action = OperatorAction.objects.create(
+            action_type="accept_draft",
+            review_draft=review_draft,
+            pull_request=db_pr,
+        )
+        action.created_at = datetime(2026, 5, 20, 9, 0, tzinfo=UTC)
+        action.save(update_fields=["created_at"])
+
+        response = client.get(f"/pr/{db_pr.pk}/")
+        assert response.status_code == 200
+        assert b"Updated upstream:" in response.content
+        assert b"Reviewed locally:" in response.content
+        # Old misleading "Last checked:" label must be gone.
+        assert b"Last checked:" not in response.content
+
+    def test_pr_detail_shows_never_when_no_actions(
+        self, client: Client, db_pr: PullRequest
+    ) -> None:
+        response = client.get(f"/pr/{db_pr.pk}/")
+        assert response.status_code == 200
+        assert b"Reviewed locally: <span >never</span>" in response.content or (
+            b"Reviewed locally:" in response.content and b">never<" in response.content
+        )
+
+
+@pytest.mark.django_db
+class TestWorkerCommandQueueing:
+    """The web container must enqueue WorkerCommand rows rather than spawn
+    Docker / threads / long LLM runs from inside the request path."""
+
+    def test_run_dual_tests_enqueues_command(self, client: Client, db_pr: PullRequest) -> None:
+        from unittest.mock import MagicMock, patch
+
+        mock_pc = MagicMock()
+        mock_pc.tests.enabled = True
+        with patch("franktheunicorn.config.loader.get_project_config", return_value=mock_pc):
+            response = client.post(f"/pr/{db_pr.pk}/run-dual-tests/")
+        assert response.status_code == 200
+        assert b"queued" in response.content.lower()
+        cmd = WorkerCommand.objects.get(command="run_dual_tests", pull_request=db_pr)
+        assert cmd.status == "pending"
+
+    def test_run_dual_tests_does_not_spawn_thread(self, client: Client, db_pr: PullRequest) -> None:
+        from unittest.mock import MagicMock, patch
+
+        mock_pc = MagicMock()
+        mock_pc.tests.enabled = True
+        with (
+            patch("franktheunicorn.config.loader.get_project_config", return_value=mock_pc),
+            patch("franktheunicorn.worker.test_runner.TestRunner") as runner_cls,
+        ):
+            client.post(f"/pr/{db_pr.pk}/run-dual-tests/")
+        # The web view must not instantiate a TestRunner — that would mean
+        # docker.from_env() in the web container.
+        runner_cls.assert_not_called()
+
+    def test_run_agents_enqueues_command(self, client: Client, db_pr: PullRequest) -> None:
+        from unittest.mock import MagicMock, patch
+
+        mock_pc = MagicMock()
+        with patch("franktheunicorn.config.loader.get_project_config", return_value=mock_pc):
+            response = client.post(f"/pr/{db_pr.pk}/run-agents/")
+        assert response.status_code == 200
+        assert b"queued" in response.content.lower()
+        cmd = WorkerCommand.objects.get(command="run_agents", pull_request=db_pr)
+        assert cmd.status == "pending"
+
+    def test_run_agents_returns_error_when_no_project_config(
+        self, client: Client, db_pr: PullRequest
+    ) -> None:
+        from unittest.mock import patch
+
+        with patch("franktheunicorn.config.loader.get_project_config", return_value=None):
+            response = client.post(f"/pr/{db_pr.pk}/run-agents/")
+        assert response.status_code == 200
+        assert b"No project config" in response.content
+        assert not WorkerCommand.objects.filter(pull_request=db_pr).exists()
+
+    def test_run_dual_tests_rejects_when_tests_disabled(
+        self, client: Client, db_pr: PullRequest
+    ) -> None:
+        from unittest.mock import MagicMock, patch
+
+        mock_pc = MagicMock()
+        mock_pc.tests.enabled = False
+        with patch("franktheunicorn.config.loader.get_project_config", return_value=mock_pc):
+            response = client.post(f"/pr/{db_pr.pk}/run-dual-tests/")
+        assert response.status_code == 200
+        assert b"not enabled" in response.content
+        assert not WorkerCommand.objects.filter(pull_request=db_pr).exists()
 
 
 @pytest.mark.django_db
@@ -321,31 +463,25 @@ class TestRunDualTests:
         assert response.status_code == 200
         assert b"not enabled" in response.content
 
-    def test_starts_background_thread(self, client: Client, db_pr: PullRequest) -> None:
+    def test_enqueues_worker_command(self, client: Client, db_pr: PullRequest) -> None:
+        # See TestWorkerCommandQueueing for the deeper assertions; this case
+        # mirrors the legacy "background thread" test for the new queue path.
         from unittest.mock import MagicMock, patch
 
         mock_config = MagicMock()
         mock_config.tests.enabled = True
 
-        mock_thread = MagicMock()
-        mock_thread_cls = MagicMock(return_value=mock_thread)
-
-        with (
-            patch(
-                "franktheunicorn.config.loader.get_project_config",
-                return_value=mock_config,
-            ),
-            patch(
-                "franktheunicorn.dashboard.views.threading.Thread",
-                mock_thread_cls,
-            ),
+        with patch(
+            "franktheunicorn.config.loader.get_project_config",
+            return_value=mock_config,
         ):
             response = client.post(f"/pr/{db_pr.pk}/run-dual-tests/")
 
         assert response.status_code == 200
-        assert b"started" in response.content
-        mock_thread_cls.assert_called_once()
-        mock_thread.start.assert_called_once_with()
+        assert b"queued" in response.content.lower()
+        assert WorkerCommand.objects.filter(
+            command="run_dual_tests", pull_request=db_pr, status="pending"
+        ).exists()
 
 
 @pytest.mark.django_db
@@ -392,6 +528,17 @@ class TestWorkspace:
         response = client.post("/set-workspace/", {"workspace": "work"})
         assert response.status_code == 302
         assert response.cookies.get("workspace")
+
+    def test_set_workspace_rejects_get(self, client: Client) -> None:
+        # set_workspace is a mutation; GET must return 405 Method Not Allowed.
+        response = client.get("/set-workspace/")
+        assert response.status_code == 405
+
+    def test_set_workspace_cookie_is_httponly_and_samesite(self, client: Client) -> None:
+        response = client.post("/set-workspace/", {"workspace": "work"})
+        cookie = response.cookies["workspace"]
+        assert cookie["httponly"]
+        assert cookie["samesite"].lower() == "lax"
 
     def test_index_with_workspace_cookie(self, client: Client, db_pr: PullRequest) -> None:
         client.cookies["workspace"] = "all"

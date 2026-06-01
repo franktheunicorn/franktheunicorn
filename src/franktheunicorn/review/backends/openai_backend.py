@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from franktheunicorn.review.backends.base import BaseLLMBackend
+
+if TYPE_CHECKING:
+    from franktheunicorn.config.models import LLMBackendConfig
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +37,7 @@ class OpenAIBackend(BaseLLMBackend):
     # fall back to a plain prompt-only JSON request and cache the result.
     _supports_json_object: bool = True
 
-    def __init__(self, config: Any) -> None:
+    def __init__(self, config: LLMBackendConfig) -> None:
         super().__init__(config)
         self._load_fallback_state()
 

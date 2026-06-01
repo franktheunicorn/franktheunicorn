@@ -279,23 +279,30 @@ class TestSecurityReportSandbox:
         assert response.status_code == 200
         assert b"not enabled" in response.content
 
-    @patch("franktheunicorn.security.sandbox.run_poc_in_sandbox")
     @patch("franktheunicorn.config.loader.get_operator_config")
-    def test_sandbox_runs(
-        self, mock_config: MagicMock, mock_sandbox: MagicMock, client: Client, db: Any
+    def test_sandbox_enqueues_worker_command(
+        self, mock_config: MagicMock, client: Client, db: Any
     ) -> None:
+        # The web container does not have Docker access. The view should
+        # enqueue a WorkerCommand for the worker to execute the sandbox,
+        # not run run_poc_in_sandbox inline.
         from franktheunicorn.config.models import OperatorConfig, SecurityTriageConfig
-        from franktheunicorn.security.sandbox import SandboxResult
+        from franktheunicorn.core.models import WorkerCommand
 
         mock_config.return_value = OperatorConfig(
             github_username="testuser",
             security_triage=SecurityTriageConfig(enabled=True, sandbox_enabled=True),
         )
-        mock_sandbox.return_value = SandboxResult(verdict="not-reproduced", output="Failed.")
         report = SecurityReportFactory(parsed_poc="echo test")
 
-        response = client.post(f"/security/{report.pk}/sandbox/")
+        with patch("franktheunicorn.security.sandbox.run_poc_in_sandbox") as mock_sandbox:
+            response = client.post(f"/security/{report.pk}/sandbox/")
+
         assert response.status_code == 200
-        report.refresh_from_db()
-        assert report.sandbox_requested is True
-        assert report.sandbox_verdict == "not-reproduced"
+        assert b"queued" in response.content.lower()
+        # Sandbox must NOT have run inline.
+        mock_sandbox.assert_not_called()
+        # And the worker command must exist.
+        assert WorkerCommand.objects.filter(
+            command="run_security_sandbox", security_report=report, status="pending"
+        ).exists()

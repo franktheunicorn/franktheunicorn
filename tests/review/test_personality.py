@@ -5,12 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
-from franktheunicorn.personalities import Personality, load_personality
+from franktheunicorn.personalities import Personality, clear_personality_cache, load_personality
 
 
 class TestLoadPersonality:
     def setup_method(self) -> None:
-        load_personality.cache_clear()
+        clear_personality_cache()
 
     def test_load_default_frank_personality(self) -> None:
         p = load_personality("frank")
@@ -60,7 +60,7 @@ class TestLoadPersonality:
             encoding="utf-8",
         )
 
-        load_personality.cache_clear()
+        clear_personality_cache()
         with patch("franktheunicorn.personalities._USER_PERSONALITIES_DIR", custom_dir):
             p = load_personality("frank")
 
@@ -74,3 +74,44 @@ class TestLoadPersonality:
         p = load_personality("frank")
         assert p is not None
         assert isinstance(p, Personality)
+
+    def test_user_file_edit_invalidates_cache(self, tmp_path: Path) -> None:
+        """Editing a user personality file picks up the new content on the
+        next load — operators should not need to restart the worker after
+        tweaking a personality."""
+        import os
+        import time
+
+        custom_dir = tmp_path / "personalities"
+        custom_dir.mkdir()
+        custom_file = custom_dir / "frank.md"
+        custom_file.write_text(
+            "## Identity\nFirst version.\n\n"
+            "## Internal voice\nA.\n\n"
+            "## External voice\nB.\n\n"
+            "## Review philosophy\nC.\n",
+            encoding="utf-8",
+        )
+
+        clear_personality_cache()
+        with patch("franktheunicorn.personalities._USER_PERSONALITIES_DIR", custom_dir):
+            first = load_personality("frank")
+            assert first is not None
+            assert first.identity == "First version."
+
+            # Rewrite with a bumped mtime so the cache key changes. We can't
+            # rely on filesystem clock granularity in CI, so set mtime
+            # explicitly a few seconds into the future.
+            custom_file.write_text(
+                "## Identity\nSecond version.\n\n"
+                "## Internal voice\nA.\n\n"
+                "## External voice\nB.\n\n"
+                "## Review philosophy\nC.\n",
+                encoding="utf-8",
+            )
+            future = time.time() + 10
+            os.utime(custom_file, (future, future))
+
+            second = load_personality("frank")
+            assert second is not None
+            assert second.identity == "Second version."

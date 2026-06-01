@@ -7,7 +7,6 @@ Function-based views. No SPA, no React. htmx for all dynamic updates.
 from __future__ import annotations
 
 import logging
-import threading
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -15,7 +14,7 @@ if TYPE_CHECKING:
     from franktheunicorn.config.models import OperatorConfig, ProjectConfig
 
 from django.contrib import messages
-from django.db.models import Count, Q, Sum
+from django.db.models import Count, Max, Q, Sum
 from django.http import HttpRequest, HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_POST
@@ -32,6 +31,7 @@ from franktheunicorn.core.models import (
     ReviewDraft,
     SecurityReport,
     TestRun,
+    WorkerCommand,
 )
 
 logger = logging.getLogger(__name__)
@@ -113,6 +113,7 @@ def index(request: HttpRequest) -> HttpResponse:
     prs = (
         PullRequest.objects.select_related("project")
         .filter(state="open", queue=queue)
+        .annotate(last_local_action_at=Max("actions__created_at"))
         .order_by("-interest_score", "-github_updated_at")
     )
 
@@ -208,11 +209,26 @@ def index(request: HttpRequest) -> HttpResponse:
     )
 
 
+@require_POST
 def set_workspace(request: HttpRequest) -> HttpResponse:
-    """Set the active workspace via cookie."""
+    """Set the active workspace via cookie.
+
+    POST-only because this is a mutation. The cookie is HttpOnly + SameSite=Lax
+    — it stores a workspace identifier, not a session token, but JS access is
+    unnecessary and SameSite limits CSRF surface.
+    """
+    from django.conf import settings
+
     workspace = request.POST.get("workspace", "all")
     response = redirect("dashboard:index")
-    response.set_cookie("workspace", workspace, max_age=86400 * 365)
+    response.set_cookie(
+        "workspace",
+        workspace,
+        max_age=86400 * 365,
+        httponly=True,
+        samesite="Lax",
+        secure=not settings.DEBUG,
+    )
     return response
 
 
@@ -378,7 +394,12 @@ def _adjacent_prs(pr: PullRequest) -> tuple[PullRequest | None, PullRequest | No
 
 def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
     """Detail view for a single PR showing drafts and score breakdown."""
-    pr = get_object_or_404(PullRequest.objects.select_related("project"), pk=pr_id)
+    pr = get_object_or_404(
+        PullRequest.objects.select_related("project").annotate(
+            last_local_action_at=Max("actions__created_at"),
+        ),
+        pk=pr_id,
+    )
     drafts = (
         ReviewDraft.objects.filter(
             pull_request=pr,
@@ -1043,7 +1064,7 @@ def security_report_verdict(request: HttpRequest, report_id: int) -> HttpRespons
 
 @require_POST
 def security_report_sandbox(request: HttpRequest, report_id: int) -> HttpResponse:
-    """Trigger sandbox POC execution (htmx)."""
+    """Queue a sandbox POC execution for the worker (htmx)."""
     report = get_object_or_404(SecurityReport.objects.select_related("project"), pk=report_id)
 
     if not _is_sandbox_enabled():
@@ -1052,40 +1073,16 @@ def security_report_sandbox(request: HttpRequest, report_id: int) -> HttpRespons
             "Sandbox execution is not enabled.</div>"
         )
 
-    try:
-        from franktheunicorn.security.sandbox import run_poc_in_sandbox
-
-        repo_path = None
-        if report.project:
-            from django.conf import settings
-
-            repos_dir = getattr(settings, "FRANK_REPOS_DIR", "")
-            if repos_dir:
-                from pathlib import Path
-
-                candidate = Path(repos_dir) / report.project.owner / report.project.repo
-                if candidate.is_dir():
-                    repo_path = candidate
-
-        result = run_poc_in_sandbox(report, repo_path=repo_path)
-        report.sandbox_requested = True
-        report.sandbox_verdict = result.verdict
-        report.sandbox_result = result.output
-        report.save(
-            update_fields=[
-                "sandbox_requested",
-                "sandbox_verdict",
-                "sandbox_result",
-                "updated_at",
-            ]
-        )
-    except Exception:
-        logger.exception("Sandbox execution failed for report %d", report.pk)
-        return HttpResponse(
-            '<div class="sandbox-result" style="color: #c00;">Sandbox execution failed.</div>'
-        )
-
-    return render(request, "dashboard/_security_sandbox_result.html", {"report": report})
+    # The web container does not have Docker access; enqueue a
+    # WorkerCommand for the worker container to pick up and execute.
+    WorkerCommand.objects.create(
+        command="run_security_sandbox",
+        security_report=report,
+    )
+    return HttpResponse(
+        '<div class="sandbox-result" style="color: #1565c0;">'
+        "Sandbox run queued. Reload this page in a few minutes to see the verdict.</div>"
+    )
 
 
 @require_POST
@@ -1169,92 +1166,54 @@ def _ingest_single_pr(owner: str, repo: str, pr_number: int) -> PullRequest:
 
 @require_POST
 def run_agents(request: HttpRequest, pr_id: int) -> HttpResponse:
-    """Trigger on-demand LLM agent review for a PR (htmx)."""
+    """Queue an on-demand LLM agent review for the worker (htmx)."""
     pr = get_object_or_404(PullRequest.objects.select_related("project"), pk=pr_id)
-    try:
-        from franktheunicorn.config.loader import get_operator_config, get_project_config
-        from franktheunicorn.worker.runner import process_pr
+    from franktheunicorn.config.loader import get_project_config
 
-        operator_config = get_operator_config()
-        project_config = get_project_config(pr.project.full_name)
-        if not project_config:
-            return HttpResponse(
-                '<div class="run-agents-result" style="color: #c00;">'
-                "No project config found for this repo.</div>"
-            )
-        log_lines: list[str] = []
-        drafts = process_pr(pr, project_config, operator_config, force=True, log_lines=log_lines)
-        log_html = "".join(f"<li>{line}</li>" for line in log_lines)
+    project_config = get_project_config(pr.project.full_name)
+    if not project_config:
         return HttpResponse(
-            f'<div class="run-agents-result">'
-            f'<p style="color: #2e7d32; margin: 0 0 0.5rem;">'
-            f"Generated {len(drafts)} finding(s). Reload to see updated results.</p>"
-            f'<ul class="agent-log">{log_html}</ul>'
-            f"</div>"
+            '<div class="run-agents-result" style="color: #c00;">'
+            "No project config found for this repo.</div>"
         )
-    except Exception:
-        logger.exception("Failed to run agents for PR #%d", pr.pk)
-        return HttpResponse(
-            '<div class="run-agents-result" style="color: #c00;">Agent run failed. Check server logs.</div>'
-        )
+    # Enqueue rather than run inline: process_pr makes external HTTP +
+    # LLM calls and can take 30-120s, which would tie up the web request.
+    WorkerCommand.objects.create(command="run_agents", pull_request=pr)
+    return HttpResponse(
+        '<div class="run-agents-result" style="color: #1565c0; margin: 0;">'
+        "Agent run queued. Reload this page in a few minutes to see updated findings.</div>"
+    )
 
 
 @require_POST
 def run_dual_tests(request: HttpRequest, pr_id: int) -> HttpResponse:
-    """Trigger a manual differential test run for a PR (htmx).
+    """Queue a manual differential test run for the worker (htmx).
 
-    Runs in a background thread so the HTTP response returns immediately.
-    The operator can reload the PR detail page to see the result once complete.
-    The trusted-author gate is bypassed because the operator explicitly requested
-    the run.
+    The worker container runs the tests inside Docker; the web container
+    must not (no Docker socket). Operator reloads the PR detail page to
+    see the verdict once the worker drains the command.
     """
-    from pathlib import Path
-
     pr = get_object_or_404(PullRequest.objects.select_related("project"), pk=pr_id)
 
-    try:
-        from django.conf import settings
+    from franktheunicorn.config.loader import get_project_config
 
-        from franktheunicorn.config.loader import get_project_config
-        from franktheunicorn.worker.test_runner import TestRunner
-
-        project_config = get_project_config(pr.project.full_name)
-        if not project_config:
-            return HttpResponse(
-                '<div class="run-tests-result" style="color: #c00;">'
-                "No project config found for this repo.</div>"
-            )
-        if not project_config.tests.enabled:
-            return HttpResponse(
-                '<div class="run-tests-result" style="color: #c00;">'
-                "Differential tests are not enabled for this project. "
-                "Add <code>tests: enabled: true</code> to the project YAML.</div>"
-            )
-
-        repos_dir = getattr(settings, "FRANK_REPOS_DIR", "")
-        repo_path: Path | None = None
-        if repos_dir:
-            candidate = Path(repos_dir) / pr.project.owner / pr.project.repo
-            if candidate.is_dir():
-                repo_path = candidate
-
-        runner = TestRunner()
-
-        def _run() -> None:
-            runner.run_differential_test(pr, project_config, repo_path=repo_path, force=True)
-
-        thread = threading.Thread(target=_run, daemon=True, name=f"dual-test-pr-{pr.pk}")
-        thread.start()
-
-    except Exception:
-        logger.exception("Failed to start dual test run for PR #%d", pr.pk)
+    project_config = get_project_config(pr.project.full_name)
+    if not project_config:
         return HttpResponse(
-            '<div class="run-tests-result" style="color: #c00;">Failed to start test run. Check server logs.</div>'
+            '<div class="run-tests-result" style="color: #c00;">'
+            "No project config found for this repo.</div>"
+        )
+    if not project_config.tests.enabled:
+        return HttpResponse(
+            '<div class="run-tests-result" style="color: #c00;">'
+            "Differential tests are not enabled for this project. "
+            "Add <code>tests: enabled: true</code> to the project YAML.</div>"
         )
 
+    WorkerCommand.objects.create(command="run_dual_tests", pull_request=pr)
     return HttpResponse(
-        '<div class="run-tests-result" style="color: #2e7d32;">'
-        "Test run started. Reload this page in a few minutes to see the verdict.</div>"
+        '<div class="run-tests-result" style="color: #1565c0;">'
+        "Test run queued. Reload this page in a few minutes to see the verdict.</div>"
     )
 
 

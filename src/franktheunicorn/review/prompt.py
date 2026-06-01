@@ -30,7 +30,11 @@ def _finding_schema() -> str:
         "    overall — strengths, concerns, and your gut feel as a reviewer.\n"
         '  - "findings": an array of finding objects matching this schema:\n'
         + finding_schema_json()
-        + '\n\nIf you have no line-specific findings, return "findings": [].'
+        + "\n\nFor the 'severity' field, prefer one of: 'critical', 'important', "
+        "'nit', 'informational'. ('high'/'medium'/'low' will be mapped to "
+        "'important'/'nit'/'nit' respectively, but using the canonical values "
+        "is preferred.)\n"
+        'If you have no line-specific findings, return "findings": [].'
         ' Always include "overall_vibe" with at least one sentence.'
     )
 

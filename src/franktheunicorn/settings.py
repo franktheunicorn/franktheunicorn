@@ -63,6 +63,14 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
+# In production (DEBUG=False) gunicorn serves the app and WhiteNoise serves
+# the collected static files. In DEBUG, runserver/staticfiles handle it and
+# WhiteNoise would warn about a missing manifest, so we only insert the
+# middleware in production. Order matters — must come right after the
+# SecurityMiddleware to short-circuit static requests early.
+if not DEBUG:
+    MIDDLEWARE.insert(1, "whitenoise.middleware.WhiteNoiseMiddleware")
+
 ROOT_URLCONF = "franktheunicorn.urls"
 
 TEMPLATES = [
@@ -101,6 +109,19 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # Static files (CSS, JavaScript, Images)
 STATIC_URL = "static/"
+STATIC_ROOT = str(DATA_DIR / "staticfiles")
+# Use the compressed/manifest storage only in production builds. In DEBUG
+# (dev + tests) Django serves files straight from app static dirs and the
+# manifest hasn't been built yet, so the standard storage is required.
+_STATIC_STORAGE = (
+    "django.contrib.staticfiles.storage.StaticFilesStorage"
+    if DEBUG
+    else "whitenoise.storage.CompressedManifestStaticFilesStorage"
+)
+STORAGES = {
+    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "staticfiles": {"BACKEND": _STATIC_STORAGE},
+}
 
 # --- franktheunicorn-specific settings (from operator.yaml) ---
 

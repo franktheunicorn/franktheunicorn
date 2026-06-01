@@ -16,10 +16,12 @@ import argparse
 import fcntl
 import logging
 import os
+import signal
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from types import FrameType
 from typing import TYPE_CHECKING, Any
 
 import django
@@ -36,6 +38,15 @@ if TYPE_CHECKING:
     )
     from franktheunicorn.core.models import PullRequest
     from franktheunicorn.data_access.github.diff_fetcher import DiffFetcher
+
+
+def _raise_keyboard_interrupt(signum: int, frame: FrameType | None) -> None:
+    """Convert SIGTERM into KeyboardInterrupt so the main loop's ``finally``
+    cleanup runs (close clients, release worker.lock). Container orchestrators
+    send SIGTERM before SIGKILL on shutdown.
+    """
+    raise KeyboardInterrupt
+
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +109,7 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
     from franktheunicorn.backends.base import ForgeClient
     from franktheunicorn.backends.mock import MockForgeClient
     from franktheunicorn.config.loader import load_operator_config, load_project_configs
-    from franktheunicorn.config.resolver import get_forge_entry
+    from franktheunicorn.config.resolver import ensure_github_username, get_forge_entry
 
     # Precedence: --log-level CLI flag > FRANK_LOG_LEVEL env > operator.yaml > INFO.
     # The env var path is already applied inside the resolver, so reading
@@ -123,6 +134,10 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
         sys.exit(1)
 
     operator_config = load_operator_config(settings.FRANK_OPERATOR_CONFIG)
+    # Infer github_username from the token if not explicitly set. We do this
+    # here rather than during Django settings load so settings has no live
+    # network dependency (manage.py check / migrate / tests stay offline).
+    ensure_github_username(operator_config)
     project_configs = load_project_configs(settings.FRANK_PROJECTS_DIR)
 
     if not project_configs:
@@ -194,6 +209,8 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
     disabled_backends = _check_backends(operator_config)
     _check_ssh_configs(operator_config)
 
+    signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
+
     try:
         while True:
             _run_cycle(
@@ -203,8 +220,26 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
                 operator_config,
                 disabled_backends,
             )
-            logger.info("Sleeping %ds until next poll...", poll_interval)
-            time.sleep(poll_interval)
+            # Sleep until the next poll, but wake every COMMAND_POLL_INTERVAL
+            # to drain any WorkerCommand rows the dashboard queued (manual
+            # test runs, force-run agents, security sandbox). This keeps
+            # web-triggered actions responsive even when poll_interval is
+            # several minutes.
+            from franktheunicorn.worker.commands import process_pending_commands
+
+            command_poll_interval = 5
+            elapsed = 0
+            while elapsed < poll_interval:
+                try:
+                    processed = process_pending_commands(operator_config)
+                    if processed:
+                        logger.info("Drained %d worker command(s)", processed)
+                except Exception:
+                    logger.exception("Error draining worker commands")
+                wait = min(command_poll_interval, poll_interval - elapsed)
+                time.sleep(wait)
+                elapsed += wait
+            logger.info("Next poll cycle...")
     except KeyboardInterrupt:
         logger.info("Worker shutting down.")
     finally:

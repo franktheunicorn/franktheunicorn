@@ -21,8 +21,10 @@ x-common: &common
     OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
     REVIEW_AGENT_SMTP_PASS: ${REVIEW_AGENT_SMTP_PASS:-}
-    # Django infrastructure
-    DJANGO_DEBUG: "true"
+    # Django infrastructure. DEBUG is off by default so WhiteNoise serves
+    # static files under gunicorn; flip to "true" in .env for verbose
+    # error pages while developing.
+    DJANGO_DEBUG: ${DJANGO_DEBUG:-false}
 
 services:
   web:
@@ -33,10 +35,14 @@ services:
       target: web
     ports:
       - "7742:8000"
-    # Web runs migrations; worker waits for web to be healthy before starting.
+    # Web runs migrations + collectstatic on every start so DB schema and
+    # the WhiteNoise manifest match the deployed code, then serves under
+    # gunicorn (Django's runserver is dev-only).
     command: >
       sh -c "python manage.py migrate --run-syncdb &&
-             python manage.py runserver 0.0.0.0:8000"
+             python manage.py collectstatic --noinput &&
+             gunicorn franktheunicorn.wsgi:application
+                 --bind 0.0.0.0:8000 --workers 2 --access-logfile -"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/')"]
       interval: 5s

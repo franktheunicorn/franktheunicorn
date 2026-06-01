@@ -20,7 +20,7 @@ from franktheunicorn.review.antipattern import (
 from franktheunicorn.review.backends import get_backend
 from franktheunicorn.review.backends.base import PRContext, ReviewFinding, ReviewResult
 from franktheunicorn.review.context_builder import build_context_strings
-from franktheunicorn.review.dedup import deduplicate_findings
+from franktheunicorn.review.dedup import deduplicate_findings, merge_source_tags
 from franktheunicorn.review.tone_guard import apply_tone_guard_batch
 from franktheunicorn.scoring.rejection_predictor import (
     SUPPRESS_THRESHOLD,
@@ -36,6 +36,41 @@ if TYPE_CHECKING:
     from franktheunicorn.scoring.rejection_predictor import RejectionPredictor
 
 logger = logging.getLogger(__name__)
+
+
+# LLM vocabulary → ReviewDraft.SEVERITY_CHOICES vocabulary.
+# The default ReviewFinding.severity is "medium" (which is not a model choice)
+# and prompts historically allowed "high"/"medium"/"low". Map those to the
+# closest model choice rather than silently downgrading everything to "nit".
+_SEVERITY_MAP: dict[str, str] = {
+    "critical": "critical",
+    "important": "important",
+    "high": "important",
+    "medium": "nit",
+    "nit": "nit",
+    "low": "nit",
+    "informational": "informational",
+    "info": "informational",
+    "trivial": "informational",
+}
+
+
+def _coerce_severity(raw_severity: str, finding_title: str = "") -> str:
+    """Map an LLM-returned severity string to a valid ReviewDraft choice.
+
+    Unrecognized values fall back to ``"nit"`` and are logged at WARNING
+    so prompt regressions surface in the logs instead of being silently
+    downgraded.
+    """
+    key = (raw_severity or "").strip().lower()
+    if key in _SEVERITY_MAP:
+        return _SEVERITY_MAP[key]
+    logger.warning(
+        "Unknown LLM severity %r on finding %r — coercing to 'nit'.",
+        raw_severity,
+        finding_title[:60],
+    )
+    return "nit"
 
 
 def fetch_linked_issues_context(pr: PullRequest) -> str:
@@ -178,6 +213,7 @@ def create_drafts_from_findings(
     diff: str = "",
     governance: str = "standard",
     diff_source: str = "",
+    sources_per_finding: list[str] | None = None,
 ) -> list[ReviewDraft]:
     """Convert ReviewFinding objects into ReviewDraft rows.
 
@@ -186,6 +222,14 @@ def create_drafts_from_findings(
 
     All drafts are created inside a single transaction to avoid partial state
     on worker crash.
+
+    ``source`` is the fallback backend identifier used when
+    ``sources_per_finding`` is not supplied (single-backend path or callers
+    who don't care about per-finding attribution). When ``sources_per_finding``
+    is supplied it must be parallel to ``findings``: each entry is a
+    comma-separated list of source tags as produced by
+    ``dedup.merge_source_tags`` so deduped multi-backend findings keep
+    accurate attribution on ``ReviewDraft.sources``.
     """
     from django.db import transaction
 
@@ -197,14 +241,27 @@ def create_drafts_from_findings(
         predictor = load_predictor_for_project(project.owner, project.repo)
 
     with transaction.atomic():
-        for finding in findings:
+        for idx, finding in enumerate(findings):
+            # Resolve attribution for this specific finding. When dedup merged
+            # findings from multiple backends, sources_per_finding[idx] holds
+            # all contributors as a comma-joined string.
+            if sources_per_finding is not None and idx < len(sources_per_finding):
+                finding_sources = [
+                    s.strip() for s in sources_per_finding[idx].split(",") if s.strip()
+                ]
+                if not finding_sources:
+                    finding_sources = [source]
+            else:
+                finding_sources = [source]
+            primary_source = finding_sources[0]
+
             # Anti-pattern gate.
             matches = check_against_anti_patterns(finding.body, project)
             if matches:
                 record_anti_pattern_matches(matches)
                 logger.info(
                     "Suppressed %s finding '%s' — matched anti-pattern(s): %s",
-                    source,
+                    primary_source,
                     finding.title[:40],
                     ", ".join(ap.pattern_text[:40] for ap in matches),
                 )
@@ -234,12 +291,11 @@ def create_drafts_from_findings(
             # Rejection predictor scoring (v1.75).
             rejection_probability: float | None = None
             is_auto_suppressed = False
+            coerced_severity = _coerce_severity(finding.severity, finding.title)
             if predictor is not None:
                 features = predictor.extract_features(
                     category=category,
-                    severity=finding.severity
-                    if finding.severity in ("critical", "important", "nit", "informational")
-                    else "nit",
+                    severity=coerced_severity,
                     file_path=finding.file_path,
                     comment_body=finding.body,
                     code_context=code_context,
@@ -266,15 +322,13 @@ def create_drafts_from_findings(
                 comment_body=finding.body,
                 suggestion=finding.suggestion,
                 confidence=finding.confidence,
-                severity=finding.severity
-                if finding.severity in ("critical", "important", "nit", "informational")
-                else "nit",
+                severity=coerced_severity,
                 category=category,
                 reasoning_trace=finding.title,  # original body before tone guard
                 tone_guard_applied=tone_guard_applied,
-                backend_used=source,
+                backend_used=primary_source,
                 status="pending",
-                sources=[source],
+                sources=finding_sources,
                 code_context=code_context,
                 rejection_probability=rejection_probability,
                 is_auto_suppressed=is_auto_suppressed,
@@ -424,12 +478,14 @@ def draft_review(
 
     # Always create a rebase-needed draft when GitHub reports merge conflicts.
     # This runs independently of LLM findings so operators see it even when all
-    # backends fail or produce nothing.
+    # backends fail or produce nothing. Look up by ``backend_used`` (a stable
+    # CharField) rather than the JSONField ``sources`` so re-runs don't create
+    # duplicate conflict markers if the encoded list ever differs by a byte.
     extra_drafts: list[ReviewDraft] = []
     if pr.mergeable is False:
         rebase_draft, _ = ReviewDraft.objects.get_or_create(
             pull_request=pr,
-            sources=["auto-conflict"],
+            backend_used="auto-conflict",
             defaults={
                 "comment_body": (
                     "This PR has merge conflicts with the target branch. "
@@ -439,6 +495,7 @@ def draft_review(
                 "category": "other",
                 "severity": "informational",
                 "status": "pending",
+                "sources": ["auto-conflict"],
                 "diff_source": "",
             },
         )
@@ -449,9 +506,15 @@ def draft_review(
 
     # Deduplicate across backends.
     raw_findings = [f for _, f in all_findings]
+    raw_sources = [s for s, _ in all_findings]
     deduped = deduplicate_findings(raw_findings)
+    # Re-build per-deduped source attribution so multi-backend drafts persist
+    # all contributors (e.g. "agent,coderabbit") instead of pinning every
+    # draft to the first backend that ran.
+    deduped_sources = merge_source_tags(raw_findings, raw_sources, deduped)
 
-    # Apply tone guard rewrite pass.
+    # Apply tone guard rewrite pass. apply_tone_guard_batch is 1:1 over the
+    # input list, so deduped_sources stays aligned with deduped after this.
     tone_backend = backend_configs[0] if backend_configs else None
     is_new_contributor = getattr(pr, "is_new_contributor", False)
     new_contributor_addendum = ""
@@ -473,14 +536,18 @@ def draft_review(
     governance = getattr(project_config, "governance", "standard")
 
     # Persist as ReviewDraft rows with anti-pattern gating + rejection scoring.
-    source_name = all_findings[0][0] if all_findings else "agent"
+    # ``source`` is the fallback identifier; per-finding attribution comes
+    # from ``sources_per_finding`` so each draft carries the actual list of
+    # backends that produced it.
+    fallback_source = raw_sources[0] if raw_sources else "agent"
     llm_drafts = create_drafts_from_findings(
         pr,
         deduped,
-        source=source_name,
+        source=fallback_source,
         project=pr.project,
         tone_guard_applied=tone_applied,
         diff=diff,
         governance=governance,
+        sources_per_finding=deduped_sources,
     )
     return extra_drafts + llm_drafts

@@ -611,3 +611,76 @@ class SecurityReport(models.Model):
 
     def __str__(self) -> str:
         return f"SecurityReport: {self.title or self.raw_text[:60]}"
+
+
+class WorkerCommand(models.Model):
+    """A queued action requested from the dashboard for the worker to run.
+
+    Lets the web container hand off Docker / long-running operations
+    (differential test runs, security sandbox, force-run agents) to the
+    worker container instead of spawning subprocesses or threads from
+    inside the request path. The web view inserts a row with
+    ``status="pending"``; the worker picks it up on its next cycle.
+    """
+
+    COMMAND_CHOICES = [
+        ("run_dual_tests", "Run differential tests"),
+        ("run_security_sandbox", "Run security report sandbox"),
+        ("run_agents", "Force-run review agents"),
+    ]
+
+    STATUS_CHOICES = [
+        ("pending", "Pending"),
+        ("running", "Running"),
+        ("completed", "Completed"),
+        ("failed", "Failed"),
+    ]
+
+    command = models.CharField(max_length=50, choices=COMMAND_CHOICES)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
+
+    # Either a PR or a SecurityReport target. At least one must be set.
+    pull_request = models.ForeignKey(
+        PullRequest,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="worker_commands",
+    )
+    security_report = models.ForeignKey(
+        SecurityReport,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="worker_commands",
+    )
+
+    # Optional command-specific arguments (e.g. force flags).
+    kwargs = models.JSONField(default=dict)
+    log = models.TextField(blank=True, default="")
+    error = models.TextField(blank=True, default="")
+
+    created_at = models.DateTimeField(default=timezone.now)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    # Explicit manager declaration so django-stubs can resolve
+    # ``WorkerCommand.objects`` in type-checking. Without this declaration
+    # the plugin sometimes fails to attach the default manager to newly
+    # introduced models.
+    objects: models.Manager[WorkerCommand] = models.Manager()
+
+    class Meta:
+        ordering = ["created_at"]
+        indexes = [
+            models.Index(fields=["status", "created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        if self.pull_request is not None:
+            target = f"PR#{self.pull_request.pk}"
+        elif self.security_report is not None:
+            target = f"Report#{self.security_report.pk}"
+        else:
+            target = "<no target>"
+        return f"{self.command} on {target} [{self.status}]"

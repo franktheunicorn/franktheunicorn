@@ -30,7 +30,13 @@ RUN mkdir -p /app/data
 
 FROM base AS web
 EXPOSE 8000
-CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
+# Collect static files at image-build time so WhiteNoise can serve them.
+# The runserver dev path doesn't need this; the gunicorn production path
+# does. Run with DJANGO_DEBUG=false at runtime in the compose file to
+# pick up the WhiteNoise middleware (only inserted when DEBUG is off).
+RUN python manage.py collectstatic --noinput || true
+CMD ["gunicorn", "franktheunicorn.wsgi:application", \
+     "--bind", "0.0.0.0:8000", "--workers", "2", "--access-logfile", "-"]
 
 FROM base AS worker
 
