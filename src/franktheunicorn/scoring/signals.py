@@ -30,6 +30,8 @@ WEIGHTS: dict[str, int] = {
     "sentry_errors": 15,
     "cve_file_history": 25,
     "draft_findings": 5,
+    "mailing_list_mention": 15,
+    "mailing_list_blame_author": 10,
 }
 
 MAX_SCORE: int = 100
@@ -325,3 +327,54 @@ def score_draft_findings(draft_findings_count: int | None) -> int | None:
     if not draft_findings_count or draft_findings_count <= 0:
         return None
     return WEIGHTS["draft_findings"]
+
+
+def score_mailing_list_mention(
+    community_context_cache: dict[str, object] | None,
+    pr_identifiers: set[str] | None = None,
+) -> int | None:
+    """Boost when a mailing list thread references this PR or its JIRA ticket.
+
+    ``pr_identifiers`` must contain the PR's own JIRA ticket IDs and ``#<number>``.
+    Returns ``None`` when ``pr_identifiers`` is not provided — cannot verify a match
+    without knowing which IDs belong to this PR.
+    """
+    if not community_context_cache or not pr_identifiers:
+        return None
+    sources = community_context_cache.get("sources", [])
+    if not isinstance(sources, list):
+        return None
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        if source.get("type") != "mailing-list":
+            continue
+        for thread in source.get("threads", []):
+            if not isinstance(thread, dict):
+                continue
+            refs = thread.get("pr_references")
+            if isinstance(refs, list) and any(r in pr_identifiers for r in refs):
+                return WEIGHTS["mailing_list_mention"]
+    return None
+
+
+def score_mailing_list_blame_author(
+    community_context_cache: dict[str, object] | None,
+) -> int | None:
+    """Boost when a blame author for the changed files appears in a mailing list thread."""
+    if not community_context_cache:
+        return None
+    sources = community_context_cache.get("sources", [])
+    if not isinstance(sources, list):
+        return None
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        if source.get("type") != "mailing-list":
+            continue
+        for thread in source.get("threads", []):
+            if not isinstance(thread, dict):
+                continue
+            if thread.get("blame_hit"):
+                return WEIGHTS["mailing_list_blame_author"]
+    return None

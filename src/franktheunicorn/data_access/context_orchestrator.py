@@ -117,8 +117,8 @@ def fetch_community_context(
     if pr.community_context_cache:
         return _format_community_from_cache(pr.community_context_cache)
 
-    query = _build_search_query(pr)
-    if not query:
+    queries = _build_mailing_list_queries(pr)
+    if not queries:
         return ""
 
     client = http_client or httpx.Client()
@@ -128,7 +128,9 @@ def fetch_community_context(
     try:
         for source_config in project_config.community_sources:
             try:
-                source_result = _fetch_single_source(source_config, query, client, operator_config)
+                source_result = _fetch_single_source(
+                    source_config, queries, client, operator_config
+                )
                 if source_result:
                     results.append(source_result)
             except Exception:
@@ -142,31 +144,70 @@ def fetch_community_context(
             client.close()
 
     if results:
-        pr.community_context_cache = {"sources": results, "query": query}
+        pr.community_context_cache = {"sources": results, "query": queries[0] if queries else ""}
         pr.save(update_fields=["community_context_cache", "updated_at"])
 
     return _format_community_results(results)
 
 
-def _build_search_query(pr: PullRequest) -> str:
-    """Build a search query from PR metadata."""
-    parts: list[str] = []
+def _build_mailing_list_queries(pr: PullRequest) -> list[str]:
+    """Build an ordered list of search queries from PR metadata.
+
+    Returns queries in priority order: JIRA IDs first (most specific),
+    then PR number, then title terms. Blame authors are read from
+    score_breakdown if available.
+    """
+    queries: list[str] = []
+    seen: set[str] = set()
+
+    def _add(q: str) -> None:
+        q = q.strip()
+        if q and q not in seen:
+            seen.add(q)
+            queries.append(q)
+
+    # JIRA ticket IDs extracted from PR title + body (e.g. "SPARK-12345").
+    try:
+        from franktheunicorn.data_access.jira.fetcher import extract_ticket_ids
+
+        text = f"{pr.title} {pr.body}"
+        for ticket_id in extract_ticket_ids(text, project_prefix=""):
+            _add(ticket_id)
+    except Exception:
+        logger.debug("JIRA ticket extraction failed during query build", exc_info=True)
+
+    # PR number.
+    if pr.number:
+        _add(f"#{pr.number}")
+
+    # PR title terms (existing behaviour).
     if pr.title:
-        parts.append(pr.title)
-    # Add key terms from changed files.
+        _add(pr.title)
+
+    # Changed filenames for component context.
     changed_files: list[str] = pr.changed_files or []
-    if changed_files:
-        # Extract module/class names from file paths.
-        for f in changed_files[:5]:
-            name = f.rsplit("/", 1)[-1].rsplit(".", 1)[0]
-            if name and name not in ("__init__", "test", "conftest"):
-                parts.append(name)
-    return " ".join(parts[:10])
+    for f in changed_files[:5]:
+        name = f.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+        if name and name not in ("__init__", "test", "conftest"):
+            _add(name)
+
+    # Blame authors (stored in score_breakdown by the scorer).
+    # TODO: the scorer does not yet populate "blame_authors" in score_breakdown;
+    # add that in a follow-up so this author-query path actually fires.
+    blame_authors: list[str] = []
+    if isinstance(pr.score_breakdown, dict):
+        raw = pr.score_breakdown.get("blame_authors", [])
+        if isinstance(raw, list):
+            blame_authors = [str(a) for a in raw[:3]]
+    for author in blame_authors:
+        _add(author)
+
+    return queries[:10]
 
 
 def _fetch_single_source(
     source_config: object,
-    query: str,
+    queries: list[str],
     http_client: httpx.Client,
     operator_config: OperatorConfig | None = None,
 ) -> dict[str, object] | None:
@@ -176,17 +217,20 @@ def _fetch_single_source(
     if not isinstance(source_config, CommunitySourceConfig):
         return None
 
+    # For non-mailing-list sources, use the first (most general) query.
+    primary_query = queries[0] if queries else ""
+
     match source_config.type:
         case "mailing-list":
-            return _fetch_mailing_list(source_config, query, http_client)
+            return _fetch_mailing_list(source_config, queries, http_client)
         case "discourse":
-            return _fetch_discourse(source_config, query, http_client)
+            return _fetch_discourse(source_config, primary_query, http_client)
         case "discord":
-            return _fetch_discord(source_config, query, http_client)
+            return _fetch_discord(source_config, primary_query, http_client)
         case "github-issues":
-            return _fetch_github_issues(source_config, query, http_client)
+            return _fetch_github_issues(source_config, primary_query, http_client)
         case "perplexity":
-            return _fetch_perplexity(source_config, query, http_client, operator_config)
+            return _fetch_perplexity(source_config, primary_query, http_client, operator_config)
         case "sentry":
             return None  # Sentry is handled separately via fetch_sentry_context
         case _:
@@ -196,25 +240,74 @@ def _fetch_single_source(
 
 def _fetch_mailing_list(
     config: object,
-    query: str,
+    queries: list[str],
     http_client: httpx.Client,
 ) -> dict[str, object] | None:
     from franktheunicorn.config.models import CommunitySourceConfig
-    from franktheunicorn.data_access.mailing_list.fetcher import MailingListFetcher
 
     if not isinstance(config, CommunitySourceConfig):
         return None
-    fetcher = MailingListFetcher(client=http_client)
-    result = fetcher.fetch(config.archive_url, query, timeout_seconds=config.timeout_seconds)
-    if not result.threads:
+
+    all_threads: list[dict[str, object]] = []
+    seen_urls: set[str] = set()
+
+    # Determine which fetcher to use.
+    use_imap = bool(config.imap_host)
+
+    # Blame authors are the last queries (appended after title/JIRA/number).
+    # We tag them so threads found only via author search get blame_hit=True.
+    # Heuristic: queries with no JIRA-like pattern and no "#" are author queries.
+    import re as _re
+
+    _jira_re = _re.compile(r"^[A-Z]+-\d+$")
+    _pr_num_re = _re.compile(r"^#\d+$")
+
+    for i, query in enumerate(queries):
+        is_blame_query = not (
+            _jira_re.match(query)
+            or _pr_num_re.match(query)
+            or i == 0  # first query is always title-based
+        )
+
+        try:
+            if use_imap:
+                from franktheunicorn.data_access.mailing_list.imap_fetcher import (
+                    fetch_mailing_list_imap,
+                )
+
+                result = fetch_mailing_list_imap(config, query, blame_hit=is_blame_query)
+            else:
+                from franktheunicorn.data_access.mailing_list.fetcher import MailingListFetcher
+
+                fetcher = MailingListFetcher(client=http_client)
+                result = fetcher.fetch(
+                    config.archive_url, query, timeout_seconds=config.timeout_seconds
+                )
+
+            for t in result.threads:
+                key = t.url or f"{t.subject}|{t.date}"
+                if key in seen_urls:
+                    continue
+                seen_urls.add(key)
+                thread_dict = t.to_cache_dict()
+                if is_blame_query:
+                    thread_dict["blame_hit"] = True
+                all_threads.append(thread_dict)
+        except Exception:
+            logger.debug(
+                "Mailing list fetch failed for query '%s' on '%s'",
+                query,
+                config.name,
+                exc_info=True,
+            )
+
+    if not all_threads:
         return None
+
     return {
         "type": "mailing-list",
         "name": config.name,
-        "threads": [
-            {"subject": t.subject, "date": t.date, "snippet": t.snippet[:300]}
-            for t in result.threads[:5]
-        ],
+        "threads": all_threads[:10],
     }
 
 
@@ -425,7 +518,13 @@ def _format_community_results(results: list[dict[str, object]]) -> str:
                 if threads:
                     parts.append(f"\n{annotation}")
                     for t in threads:
-                        parts.append(f"  - {t.get('subject', '')} ({t.get('date', '')})")
+                        raw_refs = t.get("pr_references", [])
+                        refs = [str(r) for r in raw_refs] if isinstance(raw_refs, list) else []
+                        ref_str = f" [{', '.join(refs)}]" if refs else ""
+                        blame_str = " [blame match]" if t.get("blame_hit") else ""
+                        parts.append(
+                            f"  - {t.get('subject', '')} ({t.get('date', '')}){ref_str}{blame_str}"
+                        )
                         snippet = str(t.get("snippet", ""))
                         if snippet:
                             parts.append(f"    {snippet[:200]}")

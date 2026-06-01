@@ -255,6 +255,16 @@ class CommunitySourceConfig(BaseModel):
     cache_ttl_days: int = 7
     niceness_delay_seconds: float = 2.0  # delay between requests
 
+    # IMAP fields for private/authenticated mailing lists (e.g. Apache private@).
+    # When imap_host is set and type is "mailing-list", the IMAP fetcher is used
+    # instead of the public lists.apache.org API.
+    imap_host: str = ""
+    imap_port: int = 993
+    imap_user: str = ""
+    imap_pass: str = ""  # use ${ENV_VAR} syntax; expanded at YAML load time by config/loader.py
+    imap_folder: str = "INBOX"
+    use_ssl: bool = True
+
     @field_validator("type")
     @classmethod
     def type_must_be_known(cls, v: str) -> str:

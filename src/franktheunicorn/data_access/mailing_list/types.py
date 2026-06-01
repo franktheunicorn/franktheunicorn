@@ -17,6 +17,11 @@ class MailingListThread(FetchResult):
     snippet: str = ""
     url: str = ""
     list_name: str = ""
+    # JIRA ticket IDs (e.g. "SPARK-12345") and PR number markers ("PR #999")
+    # parsed from subject + snippet.
+    pr_references: list[str] = field(default_factory=list)
+    # True when this thread was found via a blame-author name query.
+    blame_hit: bool = False
 
     def to_prompt_context(self) -> str:
         """Format thread data for LLM prompt injection."""
@@ -24,6 +29,8 @@ class MailingListThread(FetchResult):
             f"[{self.list_name}] {self.subject}",
             f"Date: {self.date} | Participants: {', '.join(self.participants[:5])}",
         ]
+        if self.pr_references:
+            parts.append(f"References: {', '.join(self.pr_references)}")
         if self.snippet:
             snip = self.snippet[:500]
             if len(self.snippet) > 500:
@@ -42,6 +49,8 @@ class MailingListThread(FetchResult):
             "snippet": self.snippet[:1000],
             "url": self.url,
             "list_name": self.list_name,
+            "pr_references": self.pr_references,
+            "blame_hit": self.blame_hit,
         }
 
 
