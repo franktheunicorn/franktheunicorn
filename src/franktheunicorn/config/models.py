@@ -1017,6 +1017,87 @@ class TestExecutionConfig(BaseModel):
         return self
 
 
+_KNOWN_AGENT_TOOLS = {
+    "grep",
+    "find_files",
+    "read_file",
+    "list_symbols",
+    "compile_build",
+    "run_tests",
+}
+
+
+class AgentToolsConfig(BaseModel):
+    """Agentic tool-use for the Claude review backend (v1.5, default OFF).
+
+    When ``enabled``, the Claude backend may call sandboxed tools (grep,
+    find_files, read_file, list_symbols, compile_build, run_tests) to explore
+    the PR's code before drafting findings. Every tool runs inside a hardened,
+    network-isolated container (see ``worker/tool_sandbox.py``) — never on the
+    host. When disabled (the default), the review pipeline takes the unchanged
+    one-shot path. This is an optional, cost/latency-affecting capability, so it
+    is gated like other v1.5 features.
+    """
+
+    enabled: bool = False
+    # Which tools to expose. ``compile_build`` / ``run_tests`` additionally
+    # require their own enable flags below.
+    tools: list[str] = Field(
+        default_factory=lambda: ["grep", "find_files", "read_file", "list_symbols"]
+    )
+    max_iterations: int = 8
+    time_budget_seconds: int = 120
+    per_call_timeout_seconds: int = 20
+    max_output_bytes: int = 64_000
+    resource_tier: str = "light"
+    # compile_build runs an operator-configured command (never model-supplied).
+    enable_compile: bool = False
+    build_command: str | None = None
+    # run_tests reuses the project's test_command; also requires tests.enabled.
+    enable_run_tests: bool = False
+    # Optional override; falls back to the project test image, then the default.
+    toolchain_image: str | None = None
+
+    @field_validator("resource_tier")
+    @classmethod
+    def resource_tier_valid(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in _KNOWN_TEST_RESOURCE_TIERS:
+            msg = f"resource_tier must be one of {sorted(_KNOWN_TEST_RESOURCE_TIERS)}, got {v!r}"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("tools")
+    @classmethod
+    def tools_warn_unknown(cls, v: list[str]) -> list[str]:
+        kept: list[str] = []
+        for name in v:
+            if name not in _KNOWN_AGENT_TOOLS:
+                logger.warning(
+                    "Unknown agent tool '%s'; known tools: %s",
+                    name,
+                    ", ".join(sorted(_KNOWN_AGENT_TOOLS)),
+                )
+                continue
+            kept.append(name)
+        return kept
+
+    @field_validator("max_iterations", "time_budget_seconds", "per_call_timeout_seconds")
+    @classmethod
+    def positive_int(cls, v: int) -> int:
+        if v <= 0:
+            msg = "must be positive"
+            raise ValueError(msg)
+        return v
+
+    @model_validator(mode="after")
+    def compile_requires_command(self) -> AgentToolsConfig:
+        if self.enable_compile and not self.build_command:
+            msg = "agent_tools.build_command is required when enable_compile is true"
+            raise ValueError(msg)
+        return self
+
+
 class ProjectConfig(BaseModel):
     """Per-project config loaded from a YAML file in the projects directory."""
 
@@ -1073,6 +1154,9 @@ class ProjectConfig(BaseModel):
 
     # Differential test runner (§9). Disabled by default; see docs/test-runner.md.
     tests: TestExecutionConfig = Field(default_factory=TestExecutionConfig)
+
+    # Agentic tool-use for the Claude backend (v1.5). Disabled by default.
+    agent_tools: AgentToolsConfig = Field(default_factory=AgentToolsConfig)
 
     @field_validator("llm_checks")
     @classmethod

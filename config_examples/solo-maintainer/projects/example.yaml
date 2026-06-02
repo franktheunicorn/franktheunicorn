@@ -54,6 +54,24 @@ copypasta_scan_extensions: [".py"]
 #   project_prefix: ""
 # community_sources: []
 
+# Agentic tool-use for the Claude backend (v1.5). Lets the reviewer search,
+# read files, list symbols, and (optionally) compile/run tests while drafting.
+# Every tool runs in a hardened, network-isolated container over the PR's
+# checkout. Disabled by default. Reuses the `tests:` image (above) so
+# compile/run_tests get the project's dependencies; rg/ctags/fd are detected
+# at runtime and skipped gracefully when absent.
+# agent_tools:
+#   enabled: false
+#   tools: ["grep", "find_files", "read_file", "list_symbols"]
+#   max_iterations: 8
+#   time_budget_seconds: 120
+#   per_call_timeout_seconds: 20
+#   resource_tier: light
+#   # enable_compile: true
+#   # build_command: "python -m mypy src/"   # required when enable_compile is true
+#   # enable_run_tests: false
+#   # toolchain_image: null                  # override; defaults to the tests image
+
 # v2+ merge queue and migration restack automation:
 # merge_queue:
 #   enabled: false
