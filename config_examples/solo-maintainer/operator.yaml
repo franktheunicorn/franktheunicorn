@@ -8,6 +8,25 @@ digest_enabled: false
 llm_backends:
   - provider: stub
 
+# Recursive Language Model backend (v1.5, opt-in). Decomposes a large PR into
+# per-file/per-hunk leaf reviews and aggregates them — useful when PRs are too
+# big for a single prompt. It owns no model of its own: every leaf review is
+# delegated to the cheap ``rlm.leaf`` backend below. Uncomment to enable.
+#
+# llm_backends:
+#   - provider: rlm
+#     rlm:
+#       leaf:
+#         provider: claude
+#         model: claude-haiku-4-5-20251001   # cheap leaf for the fan-out
+#         api_key_env: ANTHROPIC_API_KEY
+#       max_depth: 2            # 1 = per-file only; 2 = split big files by hunk
+#       max_sub_calls: 30       # hard cap on leaf calls per PR (cost guard)
+#       leaf_token_budget: 8000 # below this, a unit is reviewed whole
+#       total_token_budget: 200000
+#       concurrency: 4
+#       synthesis_call: false   # true = one extra leaf call to summarize
+
 # Forge registry. Each entry is a named forge instance the operator wants
 # to talk to. Project YAMLs reference an entry by ``name`` via ``forge:``.
 # If you only use github.com, you can leave this empty and rely on the

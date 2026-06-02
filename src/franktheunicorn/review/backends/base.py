@@ -48,6 +48,10 @@ class PRContext:
     # v1: full-file + first-party-import context (built from local checkout)
     full_file_context: str = ""
     imported_modules_context: str = ""
+    # Identifiers for cost attribution (used by the RLM engine to record a
+    # CostRecord per recursive leaf call). Optional; default None.
+    project_id: int | None = None
+    pr_id: int | None = None
 
 
 class ReviewFinding(BaseModel):

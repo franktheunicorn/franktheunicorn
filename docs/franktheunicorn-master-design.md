@@ -1440,6 +1440,35 @@ PR arrives → Worker picks up (priority: is_operator_pr first, then score)
 - Community context search (blocking, with timeouts) → injected into LLM context
 - JIRA lazy-fetch → injected into LLM context
 - Confidence gating for auto-post (triple gate)
+- Recursive Language Model (RLM) backend (see §7.5)
+
+### 7.5 Recursive Language Model (RLM) backend (v1.5, opt-in)
+
+Large PRs overflow a single context window and suffer "context rot." The RLM
+backend (`provider: rlm`) instead **decomposes** a PR — per changed file, then
+per hunk when a file is still too big — dispatches each unit as a focused
+*leaf* review to an ordinary backend (`rlm.leaf`, e.g. Haiku), and aggregates
+the results back into one `ReviewResult`. It owns no model of its own.
+
+- **Bounded, not model-driven.** Decomposition is decided by the engine and
+  capped by `max_depth`, `max_sub_calls`, `leaf_token_budget`, and
+  `total_token_budget`. On budget exhaustion it returns partial findings and
+  logs a warning — it never errors. Small PRs (that fit `leaf_token_budget`)
+  skip decomposition entirely and behave like a normal single backend call.
+- **Reuses the pipeline.** RLM output is a plain `ReviewResult`, so dedup,
+  tone-guard, anti-pattern gating, and rejection scoring all apply downstream
+  unchanged. Each recursive leaf records a `CostRecord` (`action_type=rlm-leaf`).
+- **Drop-in.** It implements the `LLMBackend` protocol and registers as
+  provider `rlm`; the drafter dispatches to it through the normal registry.
+
+**Scoring/rejection (additive, gated, default off):** `rlm_scoring` enables two
+optional judges that *never* replace existing logic. `interest_enabled`
+produces the otherwise-dormant `llm_interest` scoring signal by recursively
+reviewing the PR and mapping the findings to a high/medium label.
+`rejection_judge_enabled` adds an RLM "second opinion" P(rejection) that is
+combined with the sklearn `RejectionPredictor` value per `rejection_combine`
+(`max` | `average` | `rlm-only`). Both stay draft-only-safe: they only affect
+`interest_score`/`rejection_probability`, never posting.
 
 ### 7.3 Context Window Construction
 
