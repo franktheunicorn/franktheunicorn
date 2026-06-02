@@ -16,6 +16,17 @@ llm_backends:
 # llm_backends:
 #   - provider: rlm
 #     rlm:
+#       # execution: map-reduce (default) = deterministic in-process decomposition.
+#       # execution: notebook = the model writes Python in a Jupyter notebook run
+#       #   inside a --network=none container, with the PR bound to a CONTEXT
+#       #   variable and helpers to call ANY model (llm(), models()), recurse on
+#       #   sub-parts, and search the code (grep/search/find_files/read_file/
+#       #   ripgrep). Worker-only (needs Docker + a jupyter image); falls back to
+#       #   map-reduce when Docker is unavailable.
+#       execution: map-reduce
+#       image: python:3.12-slim     # notebook mode: use an image with nbclient+ipykernel
+#       container_timeout: 300      # notebook mode: per-run wall-clock cap (s)
+#       max_model_calls: 40         # notebook mode: brokered model-call budget
 #       leaf:
 #         provider: claude
 #         model: claude-haiku-4-5-20251001   # cheap leaf for the fan-out

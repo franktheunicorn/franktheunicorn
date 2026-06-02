@@ -1455,6 +1455,23 @@ the results back into one `ReviewResult`. It owns no model of its own.
   `total_token_budget`. On budget exhaustion it returns partial findings and
   logs a warning — it never errors. Small PRs (that fit `leaf_token_budget`)
   skip decomposition entirely and behave like a normal single backend call.
+
+**Execution modes (`rlm.execution`).** Two engines satisfy the same interface:
+
+- `map-reduce` (default) — the deterministic in-process decomposition above.
+- `notebook` — the authentic RLM: the model **writes Python in a Jupyter
+  notebook** that runs inside a sandboxed container (`docker run --network=none`,
+  read-only rootfs, dropped caps, memory/CPU/pids caps — the same posture as the
+  security/test sandboxes, so it is **worker-only**). The PR is bound to a
+  `CONTEXT` variable; the notebook namespace provides `models()` (list every
+  configured model), `llm(prompt, model=...)` to **call any of them and recurse
+  on sub-parts** (the model calling itself by writing more code), search tools
+  (`grep`, `search`, `find_files`, `read_file`, `ripgrep`, `list_context`), and
+  `emit_finding(...)`. Because the container has no network, every `llm()` and
+  `emit_finding()` call is brokered back to the host worker over a bind-mounted
+  Unix socket (`ModelBroker`/`BrokerServer`), which holds the API keys, enforces
+  a `max_model_calls` budget, and records a `CostRecord` per call. If Docker is
+  absent (e.g. the web tier) notebook mode degrades to `map-reduce`.
 - **Reuses the pipeline.** RLM output is a plain `ReviewResult`, so dedup,
   tone-guard, anti-pattern gating, and rejection scoring all apply downstream
   unchanged. Each recursive leaf records a `CostRecord` (`action_type=rlm-leaf`).

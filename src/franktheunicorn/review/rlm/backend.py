@@ -47,9 +47,47 @@ class RLMBackend:
 
         return get_backend(self._leaf_config)
 
+    def _leaf_name(self) -> str:
+        return self._leaf_config.model or self._leaf_config.provider
+
+    def _build_model_configs(self) -> dict[str, LLMBackendConfig]:
+        """Map model-name → backend config for every model the RLM may call.
+
+        In notebook mode the recursive driver can call *any* of these via
+        ``llm(prompt, model=...)``. We gather all of the operator's configured
+        backends plus the RLM's own leaf, skipping the ``rlm`` provider itself
+        (an RLM can't be a leaf model — that would recurse forever).
+        """
+        configs: dict[str, LLMBackendConfig] = {}
+        try:
+            from franktheunicorn.config.loader import get_operator_config
+
+            operator_config = get_operator_config()
+            for backend in operator_config.llm_backends:
+                if backend.provider == "rlm":
+                    continue
+                configs[backend.model or backend.provider] = backend
+        except Exception:
+            logger.debug("RLM: could not load operator config for model map.", exc_info=True)
+
+        configs.setdefault(self._leaf_name(), self._leaf_config)
+        return configs
+
+    def _make_engine(self) -> RLMEngine:
+        return RLMEngine(
+            self._rlm_config,
+            self._make_leaf,
+            model_configs=self._build_model_configs(),
+            default_model=self._leaf_name(),
+        )
+
     def generate_review(self, diff: str, pr_context: PRContext) -> ReviewResult:
-        engine = RLMEngine(self._rlm_config, self._make_leaf)
-        return engine.review(diff, pr_context)
+        return self._make_engine().review(diff, pr_context)
 
     def generate_findings(self, diff: str, pr_context: PRContext) -> list[ReviewFinding]:
         return self.generate_review(diff, pr_context).findings
+
+    def complete(self, prompt: str, *, system: str = "") -> str:
+        # An RLM is an orchestrator, not a raw-completion model; delegate to
+        # its leaf so it still satisfies the LLMBackend protocol.
+        return self._make_leaf().complete(prompt, system=system)

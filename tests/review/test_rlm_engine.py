@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from unittest.mock import patch
 
 from franktheunicorn.config.models import RLMConfig
 from franktheunicorn.review.backends.base import PRContext, ReviewFinding, ReviewResult
@@ -133,6 +134,59 @@ class CostRecordingLeaf(RecordingLeaf):
         self, project_id: int | None, pr_id: int | None, action_type: str = "review"
     ) -> None:
         self._cost_calls.append((project_id, pr_id, action_type))
+
+
+def test_notebook_mode_returns_notebook_findings() -> None:
+    from franktheunicorn.config.models import LLMBackendConfig
+    from franktheunicorn.review.backends.base import ReviewFinding
+    from franktheunicorn.review.rlm import sandbox_runner
+
+    calls: list[str] = []
+    config = RLMConfig(execution="notebook", leaf_token_budget=5)
+    engine = RLMEngine(
+        config,
+        _factory(calls),
+        model_configs={"stub": LLMBackendConfig(provider="stub")},
+    )
+    result_obj = sandbox_runner.RLMNotebookResult(
+        findings=[ReviewFinding(file_path="x.py", body="nb finding")],
+        overall_vibe="notebook vibe",
+    )
+    with patch.object(sandbox_runner, "run_rlm_notebook", return_value=result_obj):
+        result = engine.review(_TWO_FILE_DIFF, _ctx())
+    assert result.overall_vibe == "notebook vibe"
+    assert result.findings[0].file_path == "x.py"
+    assert calls == []  # map-reduce leaf path was NOT used
+
+
+def test_notebook_mode_falls_back_to_map_reduce() -> None:
+    from franktheunicorn.config.models import LLMBackendConfig
+    from franktheunicorn.review.rlm import sandbox_runner
+
+    calls: list[str] = []
+    config = RLMConfig(execution="notebook", leaf_token_budget=5, max_depth=1)
+    engine = RLMEngine(
+        config,
+        _factory(calls),
+        model_configs={"stub": LLMBackendConfig(provider="stub")},
+    )
+    with patch.object(
+        sandbox_runner,
+        "run_rlm_notebook",
+        side_effect=sandbox_runner.RLMSandboxUnavailableError("no docker"),
+    ):
+        result = engine.review(_TWO_FILE_DIFF, _ctx())
+    assert len(calls) == 2  # fell back to map-reduce
+    assert {f.file_path for f in result.findings} == {"a.py", "b.py"}
+
+
+def test_notebook_mode_without_models_uses_map_reduce() -> None:
+    calls: list[str] = []
+    config = RLMConfig(execution="notebook", leaf_token_budget=5, max_depth=1)
+    engine = RLMEngine(config, _factory(calls))  # no model_configs
+    result = engine.review(_TWO_FILE_DIFF, _ctx())
+    assert len(calls) == 2
+    assert result.findings
 
 
 def test_cost_recorded_per_leaf() -> None:

@@ -412,6 +412,10 @@ KNOWN_LLM_PROVIDERS: frozenset[str] = frozenset(
 # Combine strategies for the optional RLM rejection judge (v1.5).
 KNOWN_RLM_COMBINE_MODES: frozenset[str] = frozenset({"max", "average", "rlm-only"})
 
+# RLM execution backends: deterministic in-process map-reduce, or the
+# authentic "model writes code" notebook running in a sandboxed container.
+KNOWN_RLM_EXECUTION_MODES: frozenset[str] = frozenset({"map-reduce", "notebook"})
+
 
 class LLMBackendConfig(BaseModel):
     """Config for which LLM backend to use for review generation."""
@@ -492,6 +496,20 @@ class RLMConfig(BaseModel):
     # otherwise the vibe is assembled deterministically from leaf vibes.
     synthesis_call: bool = False
 
+    # Execution backend. "map-reduce" (default) runs the deterministic
+    # in-process decomposition. "notebook" runs the authentic RLM: the model
+    # writes Python in a Jupyter notebook executed inside a sandboxed
+    # container, with the PR bound to a `CONTEXT` variable and helpers to
+    # recurse into any model and search the code. Notebook mode is worker-only
+    # (needs Docker); it degrades to map-reduce when Docker/Jupyter are absent.
+    execution: str = "map-reduce"
+    # Container image for notebook mode. Must have nbclient + ipykernel
+    # available (e.g. a prebuilt jupyter image). Run with --network=none.
+    image: str = "python:3.12-slim"
+    container_timeout: int = 300
+    # Budget on brokered model calls per notebook session (cost guard).
+    max_model_calls: int = 40
+
     @field_validator("max_depth")
     @classmethod
     def depth_in_range(cls, v: int) -> int:
@@ -500,10 +518,26 @@ class RLMConfig(BaseModel):
             raise ValueError(msg)
         return v
 
-    @field_validator("max_sub_calls", "leaf_token_budget", "total_token_budget", "concurrency")
+    @field_validator(
+        "max_sub_calls",
+        "leaf_token_budget",
+        "total_token_budget",
+        "concurrency",
+        "container_timeout",
+        "max_model_calls",
+    )
     @classmethod
     def caps_positive(cls, v: int) -> int:
         return _positive(v, "RLM budget value")
+
+    @field_validator("execution")
+    @classmethod
+    def execution_must_be_known(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in KNOWN_RLM_EXECUTION_MODES:
+            msg = f"execution must be one of: {', '.join(sorted(KNOWN_RLM_EXECUTION_MODES))}"
+            raise ValueError(msg)
+        return v
 
 
 class RLMScoringConfig(BaseModel):

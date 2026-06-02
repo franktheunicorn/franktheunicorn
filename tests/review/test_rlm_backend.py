@@ -60,3 +60,35 @@ def test_rlm_leaf_provider_falls_back_to_stub() -> None:
     # Still produces a result without infinite recursion.
     result = backend.generate_review(_DIFF, _ctx())
     assert isinstance(result.findings, list)
+
+
+def test_complete_delegates_to_leaf() -> None:
+    backend = RLMBackend(_rlm_config())
+    out = backend.complete("hello")
+    assert "stub completion" in out  # stub leaf's deterministic completion
+
+
+def test_model_map_includes_all_operator_models_and_leaf() -> None:
+    from unittest.mock import patch
+
+    from franktheunicorn.config.models import OperatorConfig
+
+    backend = RLMBackend(
+        LLMBackendConfig(
+            provider="rlm",
+            rlm=RLMConfig(leaf=LLMBackendConfig(provider="claude", model="leaf-m")),
+        )
+    )
+    operator = OperatorConfig(
+        llm_backends=[
+            LLMBackendConfig(provider="claude", model="sonnet"),
+            LLMBackendConfig(provider="openai", model="gpt"),
+            LLMBackendConfig(provider="rlm"),  # must be skipped (no self-recursion)
+        ]
+    )
+    with patch("franktheunicorn.config.loader.get_operator_config", return_value=operator):
+        configs = backend._build_model_configs()
+    assert "sonnet" in configs
+    assert "gpt" in configs
+    assert "leaf-m" in configs  # the RLM's own leaf is always present
+    assert "rlm" not in configs  # the orchestrator itself is never a callable model

@@ -92,6 +92,11 @@ class LLMBackend(Protocol):
         pr_context: PRContext,
     ) -> ReviewResult: ...
 
+    def complete(self, prompt: str, *, system: str = "") -> str:
+        """Raw, review-agnostic completion. Used by the RLM broker so the
+        recursive notebook can call any model with an arbitrary prompt."""
+        ...
+
 
 def _log_backend_error(backend_name: str, exc: BaseException) -> None:
     """Emit an appropriate log message for an LLM API error.
@@ -221,6 +226,36 @@ class BaseLLMBackend:
             self._last_duration = time.monotonic() - start
 
         return parse_llm_review(raw_text)
+
+    def complete(self, prompt: str, *, system: str = "") -> str:
+        """Make a raw completion call, returning the model's text response.
+
+        Unlike ``generate_review`` this does not impose the review JSON schema —
+        it is the generic primitive the RLM broker exposes to the recursive
+        notebook so the model can call itself (and any other backend) freely.
+        Returns "" on any error so callers degrade gracefully.
+        """
+        if not self._sdk_available:
+            return ""
+
+        api_key = self._resolve_api_key()
+        if self._default_key_env and not api_key:
+            key_env = self._config.api_key_env or self._default_key_env
+            logger.error("API key not found in env var '%s'.", key_env)
+            return ""
+
+        import time
+
+        start = time.monotonic()
+        self._last_tokens_in = 0
+        self._last_tokens_out = 0
+        try:
+            return self._call_api(system, prompt, api_key)
+        except Exception as exc:
+            _log_backend_error(type(self).__name__, exc)
+            return ""
+        finally:
+            self._last_duration = time.monotonic() - start
 
     def record_cost(
         self,

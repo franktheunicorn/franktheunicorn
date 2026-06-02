@@ -38,6 +38,15 @@ fine-tuning = [
     "axolotl>=0.4",
     "rouge-score>=0.1.2",
 ]
+# Recursive Language Model notebook execution (v1.5). The host writes the
+# .ipynb as plain JSON (no dep needed); these are for building the *container
+# image* that runs `jupyter execute` inside the sandbox. Map-reduce mode (the
+# default) needs none of this.
+rlm = [
+    "nbformat>=5.10,<6.0",
+    "nbclient>=0.10,<1.0",
+    "ipykernel>=6.29,<7.0",
+]
 dev = [
     "pytest>=8.0,<9.0",
     "pytest-django>=4.8,<5.0",
