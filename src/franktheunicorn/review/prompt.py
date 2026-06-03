@@ -39,6 +39,24 @@ def _finding_schema() -> str:
     )
 
 
+def tools_system_addendum() -> str:
+    """Extra system-prompt guidance for the agentic tool-use path.
+
+    Only appended when AgentToolsConfig is enabled; the default one-shot prompt
+    is unchanged. Tells the model it may investigate with tools before emitting
+    the same JSON object the non-tools path expects.
+    """
+    return (
+        "You have read-only tools to investigate the codebase (search, find "
+        "files, read files, list symbols, and optionally compile/run tests). "
+        "All tools run in a sandboxed, network-isolated container over the PR's "
+        "checkout. Use them to ground your review — confirm how changed code is "
+        "called, check surrounding context, and verify claims before raising a "
+        "finding. When you are done investigating, respond with the JSON object "
+        "described above (no tool call) as your final message."
+    )
+
+
 def build_system_prompt(ctx: PRContext) -> str:
     """Build the system prompt from project and operator context."""
     if ctx.personality_identity:
@@ -126,4 +144,9 @@ def build_user_message(diff: str, ctx: PRContext) -> str:
     return "\n".join(header_parts)
 
 
-__all__ = ["build_system_prompt", "build_user_message", "finding_schema_json"]
+__all__ = [
+    "build_system_prompt",
+    "build_user_message",
+    "finding_schema_json",
+    "tools_system_addendum",
+]

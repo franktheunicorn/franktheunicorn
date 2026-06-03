@@ -14,7 +14,8 @@ from pydantic import BaseModel, Field, ValidationError
 from franktheunicorn.review.prompt import build_system_prompt, build_user_message
 
 if TYPE_CHECKING:
-    from franktheunicorn.config.models import LLMBackendConfig
+    from franktheunicorn.config.models import AgentToolsConfig, LLMBackendConfig
+    from franktheunicorn.review.agent_tools import Tool, ToolRunner
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +164,13 @@ class BaseLLMBackend:
         self._config = config
         self._model = config.model or self._default_model
         self._sdk_available = True
+        # Optional agentic tool-use, attached by the caller (drafter) before
+        # generate_review when AgentToolsConfig is enabled. While _tool_runner
+        # is None (the default) the backend takes the unchanged one-shot path.
+        self._tool_runner: ToolRunner | None = None
+        self._tool_specs: list[dict[str, object]] = []
+        self._tool_registry: dict[str, Tool] = {}
+        self._tool_config: AgentToolsConfig | None = None
         if self._sdk_module:
             try:
                 __import__(self._sdk_module)
@@ -208,8 +216,12 @@ class BaseLLMBackend:
         self._last_tokens_in = 0
         self._last_tokens_out = 0
 
+        use_tools = self._tool_runner is not None and bool(self._tool_specs)
         try:
-            raw_text = self._call_api(system_prompt, user_message, api_key)
+            if use_tools:
+                raw_text = self._call_api_agentic(system_prompt, user_message, api_key)
+            else:
+                raw_text = self._call_api(system_prompt, user_message, api_key)
         except Exception as exc:
             _log_backend_error(type(self).__name__, exc)
             return ReviewResult()
@@ -217,6 +229,19 @@ class BaseLLMBackend:
             self._last_duration = time.monotonic() - start
 
         return parse_llm_review(raw_text)
+
+    def attach_tools(
+        self,
+        runner: ToolRunner,
+        registry: dict[str, Tool],
+        specs: list[dict[str, object]],
+        config: AgentToolsConfig,
+    ) -> None:
+        """Enable the agentic tool-use path for the next generate_review call."""
+        self._tool_runner = runner
+        self._tool_registry = registry
+        self._tool_specs = specs
+        self._tool_config = config
 
     def record_cost(
         self,
@@ -257,6 +282,14 @@ class BaseLLMBackend:
 
     def _call_api(self, system_prompt: str, user_message: str, api_key: str) -> str:
         """Make the actual SDK call. Must be overridden by subclasses."""
+        raise NotImplementedError
+
+    def _call_api_agentic(self, system_prompt: str, user_message: str, api_key: str) -> str:
+        """Run an agentic tool-use loop. Overridden by tool-capable backends.
+
+        Only reached when a caller has attached tools via ``attach_tools``;
+        backends that don't support tools never enter this path.
+        """
         raise NotImplementedError
 
 

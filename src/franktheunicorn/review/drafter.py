@@ -10,7 +10,8 @@ Multiple backends can run in parallel; their findings are combined.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from contextlib import ExitStack, contextmanager
+from typing import TYPE_CHECKING, Any
 
 from franktheunicorn.core.models import AgentVibe, ReviewDraft
 from franktheunicorn.review.antipattern import (
@@ -18,7 +19,12 @@ from franktheunicorn.review.antipattern import (
     record_anti_pattern_matches,
 )
 from franktheunicorn.review.backends import get_backend
-from franktheunicorn.review.backends.base import PRContext, ReviewFinding, ReviewResult
+from franktheunicorn.review.backends.base import (
+    BaseLLMBackend,
+    PRContext,
+    ReviewFinding,
+    ReviewResult,
+)
 from franktheunicorn.review.context_builder import build_context_strings
 from franktheunicorn.review.dedup import deduplicate_findings, merge_source_tags
 from franktheunicorn.review.tone_guard import apply_tone_guard_batch
@@ -29,10 +35,17 @@ from franktheunicorn.scoring.rejection_predictor import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
-    from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig, ProjectConfig
+    from franktheunicorn.config.models import (
+        AgentToolsConfig,
+        LLMBackendConfig,
+        OperatorConfig,
+        ProjectConfig,
+    )
     from franktheunicorn.core.models import Project, PullRequest
+    from franktheunicorn.review.agent_tools import Tool, ToolRunner
     from franktheunicorn.scoring.rejection_predictor import RejectionPredictor
 
 logger = logging.getLogger(__name__)
@@ -372,16 +385,126 @@ def _maybe_inject_fine_tuned_model(
     return [ft_backend, *backend_configs]
 
 
+def _get_docker_client() -> Any:
+    """Lazy-load + ping a Docker client. Returns None if Docker is unavailable.
+
+    Imported lazily (worker-only dependency) so the web container never pulls
+    in Docker via the review package.
+    """
+    try:
+        import docker
+
+        client = docker.from_env()  # type: ignore[attr-defined]
+        client.ping()
+        return client
+    except Exception:
+        logger.debug("Docker not available for agent tools", exc_info=True)
+        return None
+
+
+@contextmanager
+def _tool_session(
+    pr: PullRequest,
+    project_config: ProjectConfig,
+    repo_path: Path | None,
+) -> Iterator[tuple[ToolRunner | None, dict[str, Tool], list[dict[str, object]]]]:
+    """Yield ``(runner, registry, specs)`` for the agentic tool path.
+
+    Yields ``(None, {}, [])`` when agent tools are disabled or any part of the
+    sandbox setup fails (Docker missing, no checkout, image unresolvable, etc.).
+    The review then takes the unchanged one-shot path. Never raises during
+    setup; the sandbox container is always cleaned up on exit.
+    """
+    cfg = project_config.agent_tools
+    if not cfg.enabled or repo_path is None or not getattr(pr, "head_sha", ""):
+        yield None, {}, []
+        return
+
+    stack = ExitStack()
+    runner: ToolRunner | None = None
+    registry: dict[str, Tool] = {}
+    specs: list[dict[str, object]] = []
+    try:
+        from franktheunicorn.review.agent_tools import (
+            anthropic_tool_specs,
+            build_tool_registry,
+        )
+        from franktheunicorn.worker.test_image import resolve_image
+        from franktheunicorn.worker.test_runner import RESOURCE_TIERS
+        from franktheunicorn.worker.test_workspace import pr_branch_workspace
+        from franktheunicorn.worker.tool_sandbox import tool_sandbox_session
+
+        docker_client = _get_docker_client()
+        if docker_client is None:
+            raise RuntimeError("Docker unavailable")
+
+        resources = RESOURCE_TIERS.get(cfg.resource_tier, RESOURCE_TIERS["light"])
+        workspace = stack.enter_context(pr_branch_workspace(repo_path, pr.head_sha))
+        image = cfg.toolchain_image or resolve_image(
+            docker_client,
+            project_config.owner,
+            project_config.repo,
+            project_config.tests,
+            workspace,
+        )
+        runner = stack.enter_context(
+            tool_sandbox_session(
+                docker_client,
+                image,
+                workspace,
+                resources=resources,
+                total_budget_seconds=cfg.time_budget_seconds,
+                per_call_timeout=cfg.per_call_timeout_seconds,
+                max_output_bytes=cfg.max_output_bytes,
+            )
+        )
+        registry = build_tool_registry(cfg, runner, test_command=project_config.tests.test_command)
+        specs = anthropic_tool_specs(registry)
+        if not registry:
+            logger.info("Agent tools enabled but no tools available; using one-shot review.")
+    except Exception:
+        logger.info(
+            "Agent tool sandbox unavailable for PR #%d; falling back to one-shot review.",
+            getattr(pr, "number", 0),
+            exc_info=True,
+        )
+        stack.close()
+        runner, registry, specs = None, {}, []
+
+    try:
+        yield runner, registry, specs
+    finally:
+        stack.close()
+
+
 def _run_single_backend(
     backend_config: LLMBackendConfig,
     diff: str,
     pr_context: PRContext,
+    *,
+    tool_runner: ToolRunner | None = None,
+    tool_registry: dict[str, Tool] | None = None,
+    tool_specs: list[dict[str, object]] | None = None,
+    tools_cfg: AgentToolsConfig | None = None,
 ) -> tuple[str, ReviewResult, bool]:
-    """Run one backend and return ``(source_name, result, failed)``."""
+    """Run one backend and return ``(source_name, result, failed)``.
+
+    When a tool runner is supplied and this is the Claude backend, the agentic
+    tool-use path is enabled for the call; otherwise behavior is unchanged.
+    """
     backend = get_backend(backend_config)
     source = backend_config.provider
     if source == "stub":
         source = "agent"
+
+    if (
+        backend_config.provider == "claude"
+        and tool_runner is not None
+        and tool_specs
+        and tools_cfg is not None
+        and isinstance(backend, BaseLLMBackend)
+    ):
+        backend.attach_tools(tool_runner, tool_registry or {}, tool_specs, tools_cfg)
 
     try:
         if hasattr(backend, "generate_review"):
@@ -451,23 +574,38 @@ def draft_review(
     # don't collide on the unique (pull_request, backend) constraint.
     all_findings: list[tuple[str, ReviewFinding]] = []
     failed_backends: list[str] = []
-    for backend_config in backend_configs:
-        source, result, failed = _run_single_backend(backend_config, diff, pr_context)
-        if failed:
-            model_name = backend_config.model or "<default>"
-            failed_backends.append(f"{backend_config.provider}/{model_name}")
-        if result.overall_vibe:
-            vibe_backend = f"{source}/{backend_config.model}" if backend_config.model else source
-            try:
-                AgentVibe.objects.update_or_create(
-                    pull_request=pr,
-                    backend=vibe_backend,
-                    defaults={"vibe_text": result.overall_vibe},
+    with _tool_session(pr, project_config, repo_path) as (
+        tool_runner,
+        tool_registry,
+        tool_specs,
+    ):
+        for backend_config in backend_configs:
+            source, result, failed = _run_single_backend(
+                backend_config,
+                diff,
+                pr_context,
+                tool_runner=tool_runner,
+                tool_registry=tool_registry,
+                tool_specs=tool_specs,
+                tools_cfg=project_config.agent_tools,
+            )
+            if failed:
+                model_name = backend_config.model or "<default>"
+                failed_backends.append(f"{backend_config.provider}/{model_name}")
+            if result.overall_vibe:
+                vibe_backend = (
+                    f"{source}/{backend_config.model}" if backend_config.model else source
                 )
-            except Exception:
-                logger.debug("Failed to persist agent vibe for %s", vibe_backend, exc_info=True)
-        for f in result.findings:
-            all_findings.append((source, f))
+                try:
+                    AgentVibe.objects.update_or_create(
+                        pull_request=pr,
+                        backend=vibe_backend,
+                        defaults={"vibe_text": result.overall_vibe},
+                    )
+                except Exception:
+                    logger.debug("Failed to persist agent vibe for %s", vibe_backend, exc_info=True)
+            for f in result.findings:
+                all_findings.append((source, f))
 
     if failed_backends:
         logger.warning(

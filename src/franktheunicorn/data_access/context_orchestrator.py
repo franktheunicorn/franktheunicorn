@@ -271,7 +271,10 @@ def _fetch_mailing_list(
 
         try:
             if use_imap:
-                from franktheunicorn.data_access.mailing_list.imap_fetcher import (
+                # imap_fetcher is a pending #113 deliverable not yet present in
+                # the tree; the broad except below degrades gracefully (the
+                # query is skipped) until it lands.
+                from franktheunicorn.data_access.mailing_list.imap_fetcher import (  # type: ignore[import-untyped]
                     fetch_mailing_list_imap,
                 )
 
