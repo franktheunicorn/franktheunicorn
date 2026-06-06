@@ -59,7 +59,11 @@ where = ["src"]
 [tool.setuptools.package-data]
 "franktheunicorn" = [
     "dashboard/templates/**/*.html",
-    "dashboard/static/**/*.js",
+    # All static assets (css, svg, js, fonts, ...) must ship in the wheel so the
+    # non-editable Docker install can collectstatic them into the WhiteNoise
+    # manifest. A narrower glob (e.g. *.js only) silently drops the favicon and
+    # stylesheet and 500s every page under DEBUG=False.
+    "dashboard/static/**/*",
 ]
 
 [tool.pytest.ini_options]
