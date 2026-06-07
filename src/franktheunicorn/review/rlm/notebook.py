@@ -103,8 +103,12 @@ def list_context():
 
 
 def find_files(pattern="*"):
-    """Glob the changed-file paths in CONTEXT."""
-    return sorted(p for p in CONTEXT.get("files", {}) if fnmatch.fnmatch(p, pattern))
+    """Glob the changed-file paths. Falls back to the diff's '+++ b/<path>'
+    headers when CONTEXT['files'] is empty (the common notebook-mode case)."""
+    paths = list(CONTEXT.get("files", {}))
+    if not paths:
+        paths = [p.strip() for p in re.findall(r"^\\+\\+\\+ b/(.+)$", CONTEXT.get("diff", ""), re.M)]
+    return sorted(p for p in paths if fnmatch.fnmatch(p, pattern))
 
 
 def read_file(path, max_chars=20000):

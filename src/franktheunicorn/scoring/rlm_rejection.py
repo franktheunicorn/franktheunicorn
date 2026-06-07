@@ -35,8 +35,9 @@ def combine_rejection(sklearn_p: float | None, rlm_p: float, mode: str) -> float
         return rlm_p
     if mode == "average":
         return (sklearn_p + rlm_p) / 2
-    # Default / "max": be conservative (suppress only when both lean reject low,
-    # surface when either is confident the operator would keep it).
+    # Default / "max": take the higher P(rejection), so a finding is suppressed
+    # when EITHER the sklearn predictor or the RLM judge is confident it'd be
+    # rejected. (Use "average" if you'd rather the two have to agree.)
     return max(sklearn_p, rlm_p)
 
 

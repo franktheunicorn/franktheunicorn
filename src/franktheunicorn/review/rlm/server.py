@@ -57,6 +57,10 @@ class BrokerServer:
             try:
                 conn, _ = self._sock.accept()
             except TimeoutError:
+                # The accept timeout fires every ~0.5s while idle so the loop
+                # can notice stop(). On Python 3.10+ socket.timeout is an alias
+                # of TimeoutError, so this branch (not the OSError one below)
+                # catches it and the server keeps serving.
                 continue
             except OSError:
                 break
