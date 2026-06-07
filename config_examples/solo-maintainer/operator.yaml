@@ -24,7 +24,9 @@ llm_backends:
 #       #   ripgrep). Worker-only (needs Docker + a jupyter image); falls back to
 #       #   map-reduce when Docker is unavailable.
 #       execution: map-reduce
-#       image: python:3.12-slim     # notebook mode: use an image with nbclient+ipykernel
+#       # notebook mode needs an image with nbclient+ipykernel+ripgrep; build it:
+#       #   docker build -f docker/rlm-notebook.Dockerfile -t frank-rlm-notebook:latest .
+#       image: frank-rlm-notebook:latest
 #       container_timeout: 300      # notebook mode: per-run wall-clock cap (s)
 #       max_model_calls: 40         # notebook mode: brokered model-call budget
 #       leaf:

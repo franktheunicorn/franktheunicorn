@@ -1471,7 +1471,9 @@ the results back into one `ReviewResult`. It owns no model of its own.
   `emit_finding()` call is brokered back to the host worker over a bind-mounted
   Unix socket (`ModelBroker`/`BrokerServer`), which holds the API keys, enforces
   a `max_model_calls` budget, and records a `CostRecord` per call. If Docker is
-  absent (e.g. the web tier) notebook mode degrades to `map-reduce`.
+  absent (e.g. the web tier) notebook mode degrades to `map-reduce`. The sandbox
+  image (Jupyter + ripgrep, no franktheunicorn, no keys) is built from
+  `docker/rlm-notebook.Dockerfile` and referenced via `rlm.image`.
 - **Reuses the pipeline.** RLM output is a plain `ReviewResult`, so dedup,
   tone-guard, anti-pattern gating, and rejection scoring all apply downstream
   unchanged. Each recursive leaf records a `CostRecord` (`action_type=rlm-leaf`).
