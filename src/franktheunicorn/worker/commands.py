@@ -140,8 +140,9 @@ def _run_security_sandbox(cmd: WorkerCommand, operator_config: OperatorConfig) -
 
     report = cmd.security_report
     repo_path: Path | None = None
-    if report.project_id is not None:
-        repo_path = _resolve_repo_path(report.project.owner, report.project.repo)
+    project = report.project
+    if project is not None:
+        repo_path = _resolve_repo_path(project.owner, project.repo)
 
     result = run_poc_in_sandbox(report, repo_path=repo_path)
     report.sandbox_requested = True

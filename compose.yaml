@@ -38,11 +38,15 @@ services:
     # Web runs migrations + collectstatic on every start so DB schema and
     # the WhiteNoise manifest match the deployed code, then serves under
     # gunicorn (Django's runserver is dev-only).
+    # NOTE: keep gunicorn and ALL its flags on one line. With a folded (>)
+    # scalar, the more-indented continuation lines keep their newlines, so a
+    # break between "application" and "--bind" splits the command and gunicorn
+    # silently falls back to its 127.0.0.1:8000 default — unreachable via the
+    # published port. The "&&" line breaks are fine; a bare break is not.
     command: >
       sh -c "python manage.py migrate --run-syncdb &&
              python manage.py collectstatic --noinput &&
-             gunicorn franktheunicorn.wsgi:application
-                 --bind 0.0.0.0:8000 --workers 2 --access-logfile -"
+             gunicorn franktheunicorn.wsgi:application --bind 0.0.0.0:8000 --workers 2 --access-logfile -"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/')"]
       interval: 5s
