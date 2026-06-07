@@ -88,6 +88,17 @@ class TestFetchMailingListImap:
         conn.logout.assert_called_once()
 
     @patch(_CONNECT)
+    def test_multiword_query_is_imap_quoted(self, mock_connect: MagicMock) -> None:
+        # A multi-word query must be sent as one quoted IMAP string, not split
+        # into separate SEARCH tokens.
+        conn = MagicMock()
+        mock_connect.return_value = conn
+        conn.search.return_value = ("OK", [b""])
+
+        fetch_mailing_list_imap(_config(), "fix the rebase")
+        conn.search.assert_called_once_with(None, "SUBJECT", '"fix the rebase"')
+
+    @patch(_CONNECT)
     def test_filters_non_matching_subject(self, mock_connect: MagicMock) -> None:
         raw = _message("Unrelated weekly status email")
         conn = MagicMock()

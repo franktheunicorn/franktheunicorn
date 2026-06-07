@@ -312,6 +312,15 @@ def score_pull_request_from_model(
                 ReviewDraft.line_finding_q(), pull_request=pr
             ).count()
 
+    # Optional RLM interest judge (v1.5) — produces the otherwise-dormant
+    # ``llm_interest`` signal. Gated; degrades silently to no signal.
+    if getattr(project_config, "rlm_scoring", None) and project_config.rlm_scoring.interest_enabled:
+        from franktheunicorn.scoring.rlm_interest import judge_interest
+
+        label = judge_interest(pr, project_config)
+        if label is not None:
+            pr_dict["llm_interest"] = label
+
     return score_pull_request(
         pr_dict,
         config_dict,

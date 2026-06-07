@@ -406,8 +406,15 @@ class APIMisuseConfig(BaseModel):
 
 
 KNOWN_LLM_PROVIDERS: frozenset[str] = frozenset(
-    {"stub", "claude", "openai", "gemini", "ollama", "llama-cpp", "vllm"}
+    {"stub", "claude", "openai", "gemini", "ollama", "llama-cpp", "vllm", "rlm"}
 )
+
+# Combine strategies for the optional RLM rejection judge (v1.5).
+KNOWN_RLM_COMBINE_MODES: frozenset[str] = frozenset({"max", "average", "rlm-only"})
+
+# RLM execution backends: deterministic in-process map-reduce, or the
+# authentic "model writes code" notebook running in a sandboxed container.
+KNOWN_RLM_EXECUTION_MODES: frozenset[str] = frozenset({"map-reduce", "notebook"})
 
 
 class LLMBackendConfig(BaseModel):
@@ -419,6 +426,9 @@ class LLMBackendConfig(BaseModel):
     base_url: str = ""
     temperature: float = 0.3
     max_tokens: int = 4096
+    # Recursive Language Model settings (v1.5). Only consulted when
+    # ``provider == "rlm"``; ignored (with a warning) for other providers.
+    rlm: RLMConfig | None = None
 
     @field_validator("provider")
     @classmethod
@@ -447,6 +457,124 @@ class LLMBackendConfig(BaseModel):
             msg = "max_tokens must be positive"
             raise ValueError(msg)
         return v
+
+    @model_validator(mode="after")
+    def warn_rlm_misplaced(self) -> LLMBackendConfig:
+        if self.rlm is not None and self.provider != "rlm":
+            logger.warning(
+                "'rlm' settings provided on a '%s' backend; they are only used when "
+                "provider == 'rlm' and will be ignored here.",
+                self.provider,
+            )
+        return self
+
+
+def _positive(v: int, name: str) -> int:
+    if v <= 0:
+        msg = f"{name} must be positive"
+        raise ValueError(msg)
+    return v
+
+
+class RLMConfig(BaseModel):
+    """Recursive Language Model orchestration settings (v1.5, opt-in).
+
+    The RLM decomposes a large PR (per file, then per hunk) and dispatches
+    focused "leaf" reviews to an ordinary backend (``leaf``), then aggregates
+    the findings. Recursion is bounded entirely by these knobs — cost never
+    runs away. When the whole PR fits under ``leaf_token_budget`` the engine
+    skips decomposition and behaves like a single normal backend call.
+    """
+
+    leaf: LLMBackendConfig = Field(default_factory=LLMBackendConfig)
+    max_depth: int = 2
+    max_sub_calls: int = 30
+    leaf_token_budget: int = 8000
+    total_token_budget: int = 200_000
+    concurrency: int = 4
+    # When True, spend one extra leaf call synthesizing an overall vibe;
+    # otherwise the vibe is assembled deterministically from leaf vibes.
+    synthesis_call: bool = False
+
+    # Execution backend. "map-reduce" (default) runs the deterministic
+    # in-process decomposition. "notebook" runs the authentic RLM: the model
+    # writes Python in a Jupyter notebook executed inside a sandboxed
+    # container, with the PR bound to a `CONTEXT` variable and helpers to
+    # recurse into any model and search the code. Notebook mode is worker-only
+    # (needs Docker); it degrades to map-reduce when Docker/Jupyter are absent.
+    execution: str = "map-reduce"
+    # Container image for notebook mode. Must have nbclient + ipykernel
+    # available (e.g. a prebuilt jupyter image). Run with --network=none.
+    image: str = "python:3.12-slim"
+    container_timeout: int = 300
+    # Budget on brokered model calls per notebook session (cost guard).
+    max_model_calls: int = 40
+
+    @field_validator("max_depth")
+    @classmethod
+    def depth_in_range(cls, v: int) -> int:
+        if v < 1:
+            msg = "max_depth must be >= 1"
+            raise ValueError(msg)
+        return v
+
+    @field_validator(
+        "max_sub_calls",
+        "leaf_token_budget",
+        "total_token_budget",
+        "concurrency",
+        "container_timeout",
+        "max_model_calls",
+    )
+    @classmethod
+    def caps_positive(cls, v: int) -> int:
+        return _positive(v, "RLM budget value")
+
+    @field_validator("execution")
+    @classmethod
+    def execution_must_be_known(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in KNOWN_RLM_EXECUTION_MODES:
+            msg = f"execution must be one of: {', '.join(sorted(KNOWN_RLM_EXECUTION_MODES))}"
+            raise ValueError(msg)
+        return v
+
+
+class RLMScoringConfig(BaseModel):
+    """Optional RLM-based scoring/rejection judges (v1.5, opt-in, default off).
+
+    These are *additive* — they never replace the sklearn rejection predictor.
+    ``interest_enabled`` lets the RLM produce the ``llm_interest`` scoring
+    signal; ``rejection_judge_enabled`` lets it contribute a P(rejection)
+    estimate that is combined with the sklearn value per ``rejection_combine``.
+    """
+
+    interest_enabled: bool = False
+    rejection_judge_enabled: bool = False
+    rejection_combine: str = "max"
+    leaf: LLMBackendConfig = Field(default_factory=LLMBackendConfig)
+    max_sub_calls: int = 20
+    leaf_token_budget: int = 8000
+    total_token_budget: int = 120_000
+
+    @field_validator("rejection_combine")
+    @classmethod
+    def combine_must_be_known(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in KNOWN_RLM_COMBINE_MODES:
+            msg = f"rejection_combine must be one of: {', '.join(sorted(KNOWN_RLM_COMBINE_MODES))}"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("max_sub_calls", "leaf_token_budget", "total_token_budget")
+    @classmethod
+    def caps_positive(cls, v: int) -> int:
+        return _positive(v, "RLM scoring budget value")
+
+
+# LLMBackendConfig references RLMConfig (forward ref) which references
+# LLMBackendConfig — resolve the cycle now that both are defined.
+LLMBackendConfig.model_rebuild()
 
 
 KNOWN_SCHEDULE_FREQUENCIES: frozenset[str] = frozenset({"daily", "weekly", "monthly"})
@@ -1070,6 +1198,9 @@ class ProjectConfig(BaseModel):
 
     # Full-file + first-party-import context for review prompts (v1).
     context: ContextConfig = Field(default_factory=ContextConfig)
+
+    # Recursive Language Model scoring/rejection judges (v1.5, opt-in).
+    rlm_scoring: RLMScoringConfig = Field(default_factory=RLMScoringConfig)
 
     # Differential test runner (§9). Disabled by default; see docs/test-runner.md.
     tests: TestExecutionConfig = Field(default_factory=TestExecutionConfig)

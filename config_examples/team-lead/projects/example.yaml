@@ -48,6 +48,20 @@ copypasta_llm_enabled: true
 #   project_prefix: ""
 # community_sources: []
 
+# Recursive Language Model scoring/rejection judges (v1.5, opt-in, default off).
+# These are *additive* — they never replace the sklearn rejection predictor.
+# rlm_scoring:
+#   interest_enabled: false        # produce the `llm_interest` scoring signal
+#   rejection_judge_enabled: false # add an RLM second-opinion P(rejection)
+#   rejection_combine: max         # max | average | rlm-only
+#   leaf:
+#     provider: claude
+#     model: claude-haiku-4-5-20251001
+#     api_key_env: ANTHROPIC_API_KEY
+#   max_sub_calls: 20
+#   leaf_token_budget: 8000
+#   total_token_budget: 120000
+
 # v2+ merge queue and migration restack automation:
 # merge_queue:
 #   enabled: true

@@ -1440,6 +1440,54 @@ PR arrives → Worker picks up (priority: is_operator_pr first, then score)
 - Community context search (blocking, with timeouts) → injected into LLM context
 - JIRA lazy-fetch → injected into LLM context
 - Confidence gating for auto-post (triple gate)
+- Recursive Language Model (RLM) backend (see §7.5)
+
+### 7.5 Recursive Language Model (RLM) backend (v1.5, opt-in)
+
+Large PRs overflow a single context window and suffer "context rot." The RLM
+backend (`provider: rlm`) instead **decomposes** a PR — per changed file, then
+per hunk when a file is still too big — dispatches each unit as a focused
+*leaf* review to an ordinary backend (`rlm.leaf`, e.g. Haiku), and aggregates
+the results back into one `ReviewResult`. It owns no model of its own.
+
+- **Bounded, not model-driven.** Decomposition is decided by the engine and
+  capped by `max_depth`, `max_sub_calls`, `leaf_token_budget`, and
+  `total_token_budget`. On budget exhaustion it returns partial findings and
+  logs a warning — it never errors. Small PRs (that fit `leaf_token_budget`)
+  skip decomposition entirely and behave like a normal single backend call.
+
+**Execution modes (`rlm.execution`).** Two engines satisfy the same interface:
+
+- `map-reduce` (default) — the deterministic in-process decomposition above.
+- `notebook` — the authentic RLM: the model **writes Python in a Jupyter
+  notebook** that runs inside a sandboxed container (`docker run --network=none`,
+  read-only rootfs, dropped caps, memory/CPU/pids caps — the same posture as the
+  security/test sandboxes, so it is **worker-only**). The PR is bound to a
+  `CONTEXT` variable; the notebook namespace provides `models()` (list every
+  configured model), `llm(prompt, model=...)` to **call any of them and recurse
+  on sub-parts** (the model calling itself by writing more code), search tools
+  (`grep`, `search`, `find_files`, `read_file`, `ripgrep`, `list_context`), and
+  `emit_finding(...)`. Because the container has no network, every `llm()` and
+  `emit_finding()` call is brokered back to the host worker over a bind-mounted
+  Unix socket (`ModelBroker`/`BrokerServer`), which holds the API keys, enforces
+  a `max_model_calls` budget, and records a `CostRecord` per call. If Docker is
+  absent (e.g. the web tier) notebook mode degrades to `map-reduce`. The sandbox
+  image (Jupyter + ripgrep, no franktheunicorn, no keys) is built from
+  `docker/rlm-notebook.Dockerfile` and referenced via `rlm.image`.
+- **Reuses the pipeline.** RLM output is a plain `ReviewResult`, so dedup,
+  tone-guard, anti-pattern gating, and rejection scoring all apply downstream
+  unchanged. Each recursive leaf records a `CostRecord` (`action_type=rlm-leaf`).
+- **Drop-in.** It implements the `LLMBackend` protocol and registers as
+  provider `rlm`; the drafter dispatches to it through the normal registry.
+
+**Scoring/rejection (additive, gated, default off):** `rlm_scoring` enables two
+optional judges that *never* replace existing logic. `interest_enabled`
+produces the otherwise-dormant `llm_interest` scoring signal by recursively
+reviewing the PR and mapping the findings to a high/medium label.
+`rejection_judge_enabled` adds an RLM "second opinion" P(rejection) that is
+combined with the sklearn `RejectionPredictor` value per `rejection_combine`
+(`max` | `average` | `rlm-only`). Both stay draft-only-safe: they only affect
+`interest_score`/`rejection_probability`, never posting.
 
 ### 7.3 Context Window Construction
 
