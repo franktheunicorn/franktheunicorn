@@ -34,43 +34,33 @@ def test_available_models_lists_all() -> None:
 
 def test_call_routes_to_named_model() -> None:
     broker = ModelBroker(_configs(), max_calls=10, project_id=1, pr_id=2)
-    with patch(
-        "franktheunicorn.review.backends.get_backend", side_effect=lambda c: _FakeBackend(c)
-    ):
+    with patch("franktheunicorn.review.backends.get_backend", side_effect=_FakeBackend):
         assert broker.call_model("gpt-x", "hello") == "openai:hello"
         assert broker.call_model("claude-x", "hi") == "claude:hi"
 
 
 def test_call_uses_default_when_model_none() -> None:
     broker = ModelBroker(_configs(), max_calls=10, default_model="gpt-x")
-    with patch(
-        "franktheunicorn.review.backends.get_backend", side_effect=lambda c: _FakeBackend(c)
-    ):
+    with patch("franktheunicorn.review.backends.get_backend", side_effect=_FakeBackend):
         assert broker.call_model(None, "x").startswith("openai:")
 
 
 def test_unknown_model_is_reported() -> None:
     broker = ModelBroker(_configs(), max_calls=10)
-    with patch(
-        "franktheunicorn.review.backends.get_backend", side_effect=lambda c: _FakeBackend(c)
-    ):
+    with patch("franktheunicorn.review.backends.get_backend", side_effect=_FakeBackend):
         assert "unknown model" in broker.call_model("nope", "x")
 
 
 def test_call_budget_enforced() -> None:
     broker = ModelBroker(_configs(), max_calls=1, default_model="gpt-x")
-    with patch(
-        "franktheunicorn.review.backends.get_backend", side_effect=lambda c: _FakeBackend(c)
-    ):
+    with patch("franktheunicorn.review.backends.get_backend", side_effect=_FakeBackend):
         assert broker.call_model(None, "a").startswith("openai:")
         assert "budget exhausted" in broker.call_model(None, "b")
 
 
 def test_handle_dispatches_ops() -> None:
     broker = ModelBroker(_configs(), max_calls=10, default_model="gpt-x")
-    with patch(
-        "franktheunicorn.review.backends.get_backend", side_effect=lambda c: _FakeBackend(c)
-    ):
+    with patch("franktheunicorn.review.backends.get_backend", side_effect=_FakeBackend):
         assert broker.handle({"op": "models"})["models"]
         assert broker.handle({"op": "llm", "prompt": "p"})["text"].startswith("openai:")
     assert broker.handle({"op": "emit", "finding": {"file_path": "a.py", "body": "x"}})["ok"]

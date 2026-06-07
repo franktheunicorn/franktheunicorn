@@ -95,7 +95,6 @@ class LLMBackend(Protocol):
     def complete(self, prompt: str, *, system: str = "") -> str:
         """Raw, review-agnostic completion. Used by the RLM broker so the
         recursive notebook can call any model with an arbitrary prompt."""
-        ...
 
 
 def _log_backend_error(backend_name: str, exc: BaseException) -> None:
