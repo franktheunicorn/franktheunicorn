@@ -159,6 +159,29 @@ def test_notebook_mode_returns_notebook_findings() -> None:
     assert calls == []  # map-reduce leaf path was NOT used
 
 
+def test_notebook_mode_forwards_default_model() -> None:
+    from franktheunicorn.config.models import LLMBackendConfig
+    from franktheunicorn.review.rlm import sandbox_runner
+
+    calls: list[str] = []
+    config = RLMConfig(execution="notebook", leaf_token_budget=5)
+    engine = RLMEngine(
+        config,
+        _factory(calls),
+        model_configs={"haiku": LLMBackendConfig(provider="claude", model="haiku")},
+        default_model="haiku",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_run(payload: object, model_configs: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        captured.update(kwargs)
+        return sandbox_runner.RLMNotebookResult(findings=[], overall_vibe="v")
+
+    with patch.object(sandbox_runner, "run_rlm_notebook", side_effect=fake_run):
+        engine.review(_TWO_FILE_DIFF, _ctx())
+    assert captured["default_model"] == "haiku"
+
+
 def test_notebook_mode_falls_back_to_map_reduce() -> None:
     from franktheunicorn.config.models import LLMBackendConfig
     from franktheunicorn.review.rlm import sandbox_runner

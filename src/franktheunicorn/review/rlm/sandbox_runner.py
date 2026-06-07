@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
@@ -100,6 +99,7 @@ def run_rlm_notebook(
     repo_path: Path | None = None,
     project_id: int | None = None,
     pr_id: int | None = None,
+    default_model: str | None = None,
 ) -> RLMNotebookResult:
     """Execute the recursive-notebook RLM and return its findings.
 
@@ -113,6 +113,7 @@ def run_rlm_notebook(
     broker = ModelBroker(
         model_configs,
         max_calls=config.max_model_calls,
+        default_model=default_model,
         project_id=project_id,
         pr_id=pr_id,
     )
@@ -126,14 +127,14 @@ def run_rlm_notebook(
             input_path=DEFAULT_INPUT_PATH,
             repo_path=DEFAULT_REPO_PATH,
         )
-        # World-accessible so the (unprivileged) container user can read the
-        # notebook/input and connect to the socket through the bind mount.
-        os.chmod(workdir, 0o777)
+        # The work dir keeps its default 0o700 perms: the container runs as
+        # root and reaches the bind-mounted notebook/input/socket regardless,
+        # so there's no need to widen perms (which would expose the socket and
+        # inputs to other users on a shared host).
 
         server = BrokerServer(broker, str(workdir / "broker.sock"))
         server.start()
         try:
-            os.chmod(server.socket_path, 0o777)
             cmd = _container_command(config.image, workdir, repo_path)
             try:
                 proc = subprocess.run(

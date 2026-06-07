@@ -10,6 +10,7 @@ tracking race-free when leaves run concurrently.
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
@@ -28,6 +29,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 LeafFactory = Callable[[], "LLMBackend"]
+
+# Serializes CostRecord writes across the leaf thread pool (SQLite-safe).
+_COST_LOCK = threading.Lock()
 
 
 def _resolve_repo_path(project_name: str) -> Path | None:
@@ -141,6 +145,7 @@ class RLMEngine:
                 repo_path=_resolve_repo_path(pr_context.project_name),
                 project_id=pr_context.project_id,
                 pr_id=pr_context.pr_id,
+                default_model=self._default_model,
             )
         except RLMSandboxUnavailableError:
             logger.info("RLM: notebook sandbox unavailable.", exc_info=True)
@@ -148,6 +153,8 @@ class RLMEngine:
         except Exception:
             logger.warning("RLM: notebook execution failed; falling back.", exc_info=True)
             return None
+        if result.log:
+            logger.debug("RLM notebook log:\n%s", result.log)
         return ReviewResult(overall_vibe=result.overall_vibe, findings=result.findings)
 
     def _dispatch(self, nodes: list[RLMNode], budget: RLMBudget) -> list[ReviewResult]:
@@ -185,7 +192,18 @@ class RLMEngine:
         record = getattr(backend, "record_cost", None)
         if not callable(record):
             return
-        try:
-            record(pr_context.project_id, pr_context.pr_id, action_type)
-        except Exception:
-            logger.debug("RLM: failed to record leaf cost.", exc_info=True)
+        # Leaves run in a thread pool; serialize the ORM write so concurrent
+        # leaves don't contend on SQLite ("database is locked"), and close the
+        # per-thread DB connection afterward so worker threads don't leak it.
+        with _COST_LOCK:
+            try:
+                record(pr_context.project_id, pr_context.pr_id, action_type)
+            except Exception:
+                logger.debug("RLM: failed to record leaf cost.", exc_info=True)
+            finally:
+                try:
+                    from django.db import close_old_connections
+
+                    close_old_connections()
+                except Exception:
+                    logger.debug("RLM: failed to close DB connection.", exc_info=True)

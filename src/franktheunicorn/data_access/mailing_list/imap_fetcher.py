@@ -73,7 +73,10 @@ def fetch_mailing_list_imap(
     threads: list[MailingListThread] = []
     try:
         conn.select(config.imap_folder)
-        status, data = conn.search(None, "SUBJECT", query)
+        # Quote the query as a single IMAP string. Without quoting, a multi-word
+        # query (e.g. a PR title) is sent as several SEARCH tokens, which the
+        # server rejects or misinterprets.
+        status, data = conn.search(None, "SUBJECT", _imap_quote(query))
         if status != "OK" or not data or not data[0]:
             return empty
         for msg_id in data[0].split()[:MAX_MESSAGES]:
@@ -96,6 +99,12 @@ def fetch_mailing_list_imap(
         query=query,
         list_name=list_name,
     )
+
+
+def _imap_quote(value: str) -> str:
+    """Quote a value as a single IMAP string literal (escaping \\ and ")."""
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
 
 
 def _connect(config: CommunitySourceConfig) -> ImapConn:

@@ -81,6 +81,10 @@ def judge_rejection(
 
     Best-effort: returns a neutral 0.5 on any failure so the caller's combine
     step degrades gracefully.
+
+    This runs per finding by design — it's an independent second opinion on one
+    finding's own hunk. The engine/backend setup is cheap relative to the single
+    leaf LLM call it makes, so there's no per-finding batching to gain here.
     """
     from franktheunicorn.review.backends import get_backend
     from franktheunicorn.review.rlm.engine import RLMEngine

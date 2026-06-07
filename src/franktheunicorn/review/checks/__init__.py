@@ -127,6 +127,9 @@ def run_enabled_checks(
             findings,
             source=source,
             project=pr.project,
+            diff=diff,
+            governance=project_config.governance,
+            rlm_scoring=getattr(project_config, "rlm_scoring", None),
         )
         all_drafts.extend(drafts)
 
