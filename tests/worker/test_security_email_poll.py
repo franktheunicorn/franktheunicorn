@@ -18,6 +18,7 @@ from franktheunicorn.config.models import (
 )
 from franktheunicorn.core.models import EmailScanRecord, SecurityReport
 from franktheunicorn.data_access.email_inbox.types import EmailFetchResult, InboxMessage
+from franktheunicorn.worker import runner
 
 
 def _operator_config(auto_triage: bool = False) -> OperatorConfig:
@@ -42,16 +43,12 @@ def _reset_poll_clock() -> None:
     # passes regardless of the absolute value of time.monotonic() — on a
     # freshly-booted CI runner monotonic() can be < the poll interval, which
     # made `now - 0.0 < interval` true and skipped the poll.
-    import franktheunicorn.worker.runner as runner
-
     runner._last_security_email_poll = float("-inf")
 
 
 @pytest.mark.django_db
 class TestPollSecurityEmails:
     def test_records_every_examined_message_and_ingests_security(self) -> None:
-        from franktheunicorn.worker.runner import _poll_security_emails
-
         _reset_poll_clock()
         fetch = EmailFetchResult(
             examined=[
@@ -79,7 +76,7 @@ class TestPollSecurityEmails:
             "franktheunicorn.data_access.email_inbox.fetcher.fetch_security_emails",
             return_value=fetch,
         ):
-            _poll_security_emails(_operator_config(auto_triage=False))
+            runner._poll_security_emails(_operator_config(auto_triage=False))
 
         # One audit row per examined message.
         assert EmailScanRecord.objects.count() == 2
@@ -100,8 +97,6 @@ class TestPollSecurityEmails:
         assert report.source == "email"
 
     def test_duplicate_report_is_recorded_but_not_reingested(self) -> None:
-        from franktheunicorn.worker.runner import _poll_security_emails
-
         # A report with this message-id already exists.
         SecurityReport.objects.create(
             raw_text="old", title="old", source="email", email_message_id="<sec-dup>"
@@ -121,15 +116,13 @@ class TestPollSecurityEmails:
             "franktheunicorn.data_access.email_inbox.fetcher.fetch_security_emails",
             return_value=fetch,
         ):
-            _poll_security_emails(_operator_config())
+            runner._poll_security_emails(_operator_config())
 
         assert SecurityReport.objects.count() == 1  # not re-ingested
         rec = EmailScanRecord.objects.get(message_id="<sec-dup>")
         assert rec.action == "skipped_duplicate"
 
     def test_auto_triage_drafts_only_never_sends(self) -> None:
-        from franktheunicorn.worker.runner import _poll_security_emails
-
         _reset_poll_clock()
         fetch = EmailFetchResult(
             examined=[
@@ -148,19 +141,17 @@ class TestPollSecurityEmails:
             ),
             patch("franktheunicorn.security.triage.triage_report") as mock_triage,
         ):
-            _poll_security_emails(_operator_config(auto_triage=True))
+            runner._poll_security_emails(_operator_config(auto_triage=True))
 
         # Triage runs on the drafted report; there is no send path invoked.
         assert mock_triage.call_count == 1
 
     def test_disabled_does_nothing(self) -> None:
-        from franktheunicorn.worker.runner import _poll_security_emails
-
         _reset_poll_clock()
         cfg = OperatorConfig(security_triage=SecurityTriageConfig(enabled=False))
         with patch(
             "franktheunicorn.data_access.email_inbox.fetcher.fetch_security_emails"
         ) as mock_fetch:
-            _poll_security_emails(cfg)
+            runner._poll_security_emails(cfg)
         mock_fetch.assert_not_called()
         assert EmailScanRecord.objects.count() == 0

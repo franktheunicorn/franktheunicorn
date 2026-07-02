@@ -123,11 +123,22 @@ class TestRunner:
             return None
 
         # The poll loop calls this for every open PR every cycle — skip heads
-        # we've already tested so unchanged PRs don't burn a container run
-        # (and a TestRun row) per poll. force=True (dashboard) bypasses.
-        if not force and TestRun.objects.filter(pull_request=pr, head_sha=pr.head_sha).exists():
+        # we've already produced a *result* for so unchanged PRs don't burn a
+        # container run (and a TestRun row) per poll. Only terminal runs that
+        # completed count: an orphaned "running"/"pending" row left by a
+        # killed worker must NOT block re-verification (the worker is meant to
+        # be restart-safe), and a "failed" (infra-errored) run is retryable.
+        # force=True (dashboard) bypasses.
+        if (
+            not force
+            and TestRun.objects.filter(
+                pull_request=pr,
+                head_sha=pr.head_sha,
+                status__in=("completed", "timeout"),
+            ).exists()
+        ):
             logger.debug(
-                "PR #%d head %s already has a test run; skipping",
+                "PR #%d head %s already has a completed test run; skipping",
                 pr.number,
                 pr.head_sha[:12],
             )

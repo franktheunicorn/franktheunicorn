@@ -191,6 +191,39 @@ class TestDetectCollaboratorsCommand:
         assert "collaborators" in output.lower()
 
 
+class TestLoginFromEmail:
+    """Collaborator keys must be forge-login-ish so they can match
+    PullRequest.author during scoring — not space-containing display names."""
+
+    def test_github_noreply_plain(self) -> None:
+        from franktheunicorn.core.management.commands.detect_collaborators import (
+            _login_from_email,
+        )
+
+        assert _login_from_email("janedoe@users.noreply.github.com") == "janedoe"
+
+    def test_github_noreply_id_prefixed(self) -> None:
+        from franktheunicorn.core.management.commands.detect_collaborators import (
+            _login_from_email,
+        )
+
+        assert _login_from_email("12345+janedoe@users.noreply.github.com") == "janedoe"
+
+    def test_plain_email_local_part(self) -> None:
+        from franktheunicorn.core.management.commands.detect_collaborators import (
+            _login_from_email,
+        )
+
+        assert _login_from_email("Jane.Doe@example.com") == "jane.doe"
+
+    def test_non_email_returns_empty(self) -> None:
+        from franktheunicorn.core.management.commands.detect_collaborators import (
+            _login_from_email,
+        )
+
+        assert _login_from_email("Jane Doe") == ""
+
+
 @pytest.mark.django_db
 class TestTrainRejectionModelCommand:
     def _create_actions(self, project: Project, count: int) -> None:

@@ -158,30 +158,60 @@ class Command(BaseCommand):
         return yaml_path
 
 
+def _login_from_email(email: str) -> str:
+    """Best-effort forge login from a git author email.
+
+    The scorer matches ``collaborator_scores`` keys against the forge login
+    (``PullRequest.author``), so keying on the git *display name* (``%aN``,
+    e.g. "Jane Doe") never matches a login like "janedoe". The email
+    local-part is a much better key — and for GitHub-authored commits it *is*
+    the login: ``login@users.noreply.github.com`` or the numeric-id form
+    ``12345+login@users.noreply.github.com``.
+    """
+    email = email.strip().lower()
+    if "@" not in email:
+        return ""
+    local = email.split("@", 1)[0]
+    # GitHub's "id+login" noreply form.
+    if "+" in local:
+        local = local.split("+", 1)[1]
+    return local
+
+
 def _analyze_git_log(repo_path: Path, operator: str, months: int) -> Counter[str]:
-    """Analyze git log for co-file committers."""
+    """Analyze git log for co-file committers, keyed by forge-login-ish id.
+
+    Uses the author *email* (``%ae``) rather than the display name so the
+    resulting keys can match forge logins during scoring.
+    """
     co_committers: Counter[str] = Counter()
+    op = operator.lower()
     try:
         result = subprocess.run(
-            ["git", "log", f"--since={months} months ago", "--format=%aN", "--no-merges"],
+            ["git", "log", f"--since={months} months ago", "--format=%ae", "--no-merges"],
             capture_output=True,
             text=True,
             cwd=str(repo_path),
             timeout=60,
         )
         if result.returncode == 0:
-            for author in result.stdout.strip().split("\n"):
-                author = author.strip().lower()
-                if author and author != operator.lower():
-                    co_committers[author] += 1
+            for raw_email in result.stdout.strip().split("\n"):
+                login = _login_from_email(raw_email)
+                if login and login != op:
+                    co_committers[login] += 1
     except Exception:
         logger.debug("git log analysis failed", exc_info=True)
     return co_committers
 
 
 def _analyze_co_authors(repo_path: Path, operator: str, months: int) -> Counter[str]:
-    """Analyze git log for Co-authored-by trailers."""
+    """Analyze git log for Co-authored-by trailers, keyed by forge-login-ish id.
+
+    The trailer carries ``Name <email>``; we key on the email local-part
+    (see :func:`_login_from_email`) so entries can match forge logins.
+    """
     co_authors: Counter[str] = Counter()
+    op = operator.lower()
     try:
         result = subprocess.run(
             ["git", "log", f"--since={months} months ago", "--format=%b"],
@@ -194,11 +224,11 @@ def _analyze_co_authors(repo_path: Path, operator: str, months: int) -> Counter[
             import re
 
             for line in result.stdout.split("\n"):
-                match = re.match(r"Co-authored-by:\s+(.+?)\s+<", line, re.IGNORECASE)
+                match = re.match(r"Co-authored-by:\s+.+?\s+<([^>]+)>", line, re.IGNORECASE)
                 if match:
-                    name = match.group(1).strip().lower()
-                    if name != operator.lower():
-                        co_authors[name] += 1
+                    login = _login_from_email(match.group(1))
+                    if login and login != op:
+                        co_authors[login] += 1
     except Exception:
         logger.debug("Co-author analysis failed", exc_info=True)
     return co_authors
