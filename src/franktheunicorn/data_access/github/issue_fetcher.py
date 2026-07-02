@@ -30,8 +30,13 @@ from franktheunicorn.data_access.github.issue_types import (
 logger = logging.getLogger(__name__)
 
 # Pattern to extract issue references from text.
-# Matches: #123, org/repo#456
-ISSUE_REF_PATTERN = re.compile(r"(?:([\w.-]+)/([\w.-]+))?#(\d+)")
+# Matches: #123, org/repo#456. The lookbehind rejects matches embedded in
+# URLs/paths ("github.com/foo/bar#12") and mid-word hits so we don't burn
+# API budget fetching issues that were never actually referenced.
+ISSUE_REF_PATTERN = re.compile(r"(?<![\w/.#-])(?:([\w.-]+)/([\w.-]+))?#(\d+)\b")
+
+# Cap on distinct issue references fetched per PR — each is an API call.
+MAX_LINKED_ISSUES = 5
 
 
 class IssueFetcher(DataFetcher[GitHubIssueResult]):
@@ -61,6 +66,9 @@ class IssueFetcher(DataFetcher[GitHubIssueResult]):
         seen: set[tuple[str, str, int]] = set()
 
         for ref_owner, ref_repo, number_str in matches:
+            if len(seen) >= MAX_LINKED_ISSUES:
+                logger.debug("Capping linked-issue fetches at %d", MAX_LINKED_ISSUES)
+                break
             issue_owner = ref_owner or owner
             issue_repo = ref_repo or repo
             issue_number = int(number_str)
@@ -91,7 +99,10 @@ class IssueFetcher(DataFetcher[GitHubIssueResult]):
         keywords: str,
     ) -> list[GitHubIssueResult]:
         """Search for related issues using the GitHub search API."""
-        query = f"{keywords}+repo:{owner}/{repo}+is:issue"
+        # Space separators, not literal "+": httpx percent-encodes the query
+        # value, so "+" reaches GitHub as %2B and the repo:/is: qualifiers
+        # glue into one useless token.
+        query = f"{keywords} repo:{owner}/{repo} is:issue"
         url = f"{GITHUB_API_BASE}/search/issues"
         response = self._api_get_json(url, q=query)
         data: dict[str, Any] = response.json()
@@ -225,10 +236,11 @@ class IssueFetcher(DataFetcher[GitHubIssueResult]):
         if body_el:
             body = body_el.get_text(strip=True)
 
-        # Comments
+        # Comments — cap at 5 to match the API path (per_page=5), both
+        # oldest-first.
         comments: list[IssueComment] = []
         comment_els = soup.find_all("div", class_="timeline-comment")
-        for comment_el in comment_els[1:]:  # skip first (issue body)
+        for comment_el in comment_els[1:6]:  # skip first (issue body)
             c_author_el = comment_el.find("a", class_="author")
             c_body_el = comment_el.find("td", class_="comment-body")
             if c_author_el and c_body_el:

@@ -19,6 +19,7 @@ from bs4 import BeautifulSoup
 from franktheunicorn.data_access.base import (
     DataFetcher,
     FetchMethod,
+    NotFoundError,
 )
 from franktheunicorn.data_access.cache import FileCache
 from franktheunicorn.data_access.mailing_list.types import (
@@ -86,16 +87,18 @@ class MailingListFetcher(DataFetcher[MailingListSearchResult]):
         # Expected format: https://lists.apache.org/list.html?dev@spark.apache.org
         list_name, domain = _parse_archive_url(archive_url)
 
+        # Ponymail date syntax is "d=lte=1y" — "lte1y" is silently treated as
+        # a much narrower window by the live API.
         url = (
             f"https://lists.apache.org/api/stats.lua"
             f"?list={quote_plus(list_name)}"
             f"&domain={quote_plus(domain)}"
-            f"&d=lte1y"
+            f"&d=lte=1y"
             f"&q={quote_plus(query)}"
         )
 
         time.sleep(self._delay_seconds)
-        response = self._api_get(url)
+        response = self._api_get(url, timeout=timeout_seconds)
         data: dict[str, Any] = response.json()
         result = self._parse_api_response(data, query, list_name=f"{list_name}@{domain}")
 
@@ -115,7 +118,7 @@ class MailingListFetcher(DataFetcher[MailingListSearchResult]):
             return self._result_from_cache(cached.data, FetchMethod.SCRAPE)
 
         time.sleep(self._delay_seconds)
-        response = self._scrape_get(archive_url)
+        response = self._scrape_get(archive_url, timeout=timeout_seconds)
         result = self._parse_html(response.text, query, archive_url=archive_url)
 
         self._cache.put(archive_url, query, "scrape", data=result.to_cache_dict())
@@ -143,10 +146,10 @@ class MailingListFetcher(DataFetcher[MailingListSearchResult]):
                 MailingListThread(
                     fetched_via=FetchMethod.API,
                     subject=subject,
-                    date=email.get("date", ""),
+                    date=_email_date(email),
                     participants=participants,
                     snippet=email.get("body", "")[:500],
-                    url=email.get("permalink", ""),
+                    url=_email_url(email),
                     list_name=list_name,
                     pr_references=_extract_pr_references(
                         subject + " " + email.get("body", "")[:200]
@@ -168,10 +171,10 @@ class MailingListFetcher(DataFetcher[MailingListSearchResult]):
                 MailingListThread(
                     fetched_via=FetchMethod.API,
                     subject=subject,
-                    date=thread_data.get("date", ""),
+                    date=_email_date(thread_data),
                     participants=participants,
                     snippet=snippet,
-                    url=thread_data.get("permalink", ""),
+                    url=_email_url(thread_data),
                     list_name=list_name,
                     pr_references=_extract_pr_references(subject + " " + snippet),
                 )
@@ -269,16 +272,58 @@ class MailingListFetcher(DataFetcher[MailingListSearchResult]):
         )
 
 
+def _email_date(email: dict[str, Any]) -> str:
+    """Extract a date string from a ponymail email object.
+
+    Live responses carry ``epoch`` (unix seconds), not a ``date`` field —
+    accept both so hand-written fixtures and the real API agree.
+    """
+    date = email.get("date", "")
+    if date:
+        return str(date)
+    epoch = email.get("epoch")
+    if epoch:
+        try:
+            from datetime import UTC, datetime
+
+            return datetime.fromtimestamp(int(epoch), tz=UTC).strftime("%Y-%m-%d")
+        except (ValueError, OverflowError, OSError):
+            return ""
+    return ""
+
+
+def _email_url(email: dict[str, Any]) -> str:
+    """Build an archive URL for a ponymail email object.
+
+    Live responses have no ``permalink``; threads are addressable as
+    ``https://lists.apache.org/thread/{mid}``.
+    """
+    permalink = email.get("permalink", "")
+    if permalink:
+        return str(permalink)
+    mid = email.get("mid", "") or email.get("id", "")
+    if mid:
+        return f"https://lists.apache.org/thread/{mid}"
+    return ""
+
+
 def _parse_archive_url(archive_url: str) -> tuple[str, str]:
     """Extract list name and domain from an Apache archive URL.
 
     Expected format: https://lists.apache.org/list.html?dev@spark.apache.org
     Returns: ("dev", "spark.apache.org")
+
+    Raises ``NotFoundError`` for URLs that aren't lists.apache.org list URLs
+    so ``fetch()`` falls through to the scrape path — silently defaulting to
+    Spark's dev list queried the wrong project's archive *and* suppressed the
+    scrape fallback the operator's URL was meant for.
     """
     if "?" in archive_url:
         query_part = archive_url.split("?", 1)[1]
         if "@" in query_part:
             list_name, domain = query_part.split("@", 1)
             return list_name, domain
-    # Fallback: use reasonable defaults.
-    return "dev", "spark.apache.org"
+    raise NotFoundError(
+        f"Not a lists.apache.org list URL (expected ...list.html?name@domain): {archive_url}",
+        method=FetchMethod.API,
+    )

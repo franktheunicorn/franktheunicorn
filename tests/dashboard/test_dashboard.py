@@ -975,44 +975,33 @@ class TestDashboardV15:
         assert response.context["jira_context"] is not None
         assert response.context["jira_context"]["ticket_id"] == "SPARK-123"
 
-    def test_pr_detail_with_community_context(self, client: Client) -> None:
+    def test_pr_detail_renders_with_context_caches(self, client: Client) -> None:
+        """Cached v1.5 context on the PR must not break the detail page.
+
+        (The per-source context variables were removed from the view —
+        they were computed on every request but never rendered by any
+        template.)
+        """
         pr = PullRequestFactory(
             community_context_cache={
                 "sources": [{"type": "mailing-list", "name": "dev@"}],
                 "query": "test",
             },
-        )
-        response = client.get(f"/pr/{pr.pk}/")
-        assert response.status_code == 200
-        assert response.context["community_context"] is not None
-
-    def test_pr_detail_with_sentry_context(self, client: Client) -> None:
-        pr = PullRequestFactory(
             sentry_context_cache={
                 "issues": [{"title": "NPE in RDD.scala", "count": 42}],
             },
         )
-        response = client.get(f"/pr/{pr.pk}/")
-        assert response.status_code == 200
-        assert response.context["sentry_context"] is not None
-
-    def test_pr_detail_coderabbit_drafts_separated(self, client: Client) -> None:
-        pr = PullRequestFactory()
         ReviewDraftFactory(pull_request=pr, sources=["agent"])
         ReviewDraftFactory(pull_request=pr, sources=["coderabbit"])
-        ReviewDraftFactory(pull_request=pr, sources=["agent", "coderabbit"])
         response = client.get(f"/pr/{pr.pk}/")
         assert response.status_code == 200
-        assert len(response.context["agent_drafts"]) == 1
-        assert len(response.context["coderabbit_drafts"]) == 2
+        assert len(response.context["drafts"]) == 2
 
     def test_pr_detail_no_context_is_none(self, client: Client) -> None:
         pr = PullRequestFactory()
         response = client.get(f"/pr/{pr.pk}/")
         assert response.status_code == 200
         assert response.context["jira_context"] is None
-        assert response.context["community_context"] is None
-        assert response.context["sentry_context"] is None
 
 
 @pytest.mark.django_db

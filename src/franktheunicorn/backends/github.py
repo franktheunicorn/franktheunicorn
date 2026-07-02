@@ -54,18 +54,26 @@ class GitHubClient(ForgeClient):
         actionable suggestions to help the operator fix their token.
         """
         url = f"/repos/{owner}/{repo}/pulls"
-        response = self._client.get(url, params={"state": state, "per_page": 50})
-        if response.status_code in (401, 403):
-            _log_auth_suggestions(owner, repo, response)
-            logger.info(
-                "Falling back to HTML scrape for %s/%s PR listing (API returned %d)",
-                owner,
-                repo,
-                response.status_code,
-            )
-            return _list_pull_requests_via_scrape(owner, repo, state=state)
-        response.raise_for_status()
-        result: list[dict[str, Any]] = response.json()
+        # Paginate: spark-scale repos have hundreds of open PRs; a single
+        # 50-item page silently hid everything but the newest PRs from
+        # ingestion. Capped at 10 pages (1000 PRs) per cycle.
+        result: list[dict[str, Any]] = []
+        for page in range(1, 11):
+            response = self._client.get(url, params={"state": state, "per_page": 100, "page": page})
+            if response.status_code in (401, 403):
+                _log_auth_suggestions(owner, repo, response)
+                logger.info(
+                    "Falling back to HTML scrape for %s/%s PR listing (API returned %d)",
+                    owner,
+                    repo,
+                    response.status_code,
+                )
+                return _list_pull_requests_via_scrape(owner, repo, state=state)
+            response.raise_for_status()
+            data: list[dict[str, Any]] = response.json()
+            result.extend(data)
+            if len(data) < 100:
+                break
         return result
 
     def get_pull_request(self, owner: str, repo: str, pr_number: int) -> dict[str, Any]:
@@ -77,11 +85,21 @@ class GitHubClient(ForgeClient):
         return result
 
     def get_pull_request_files(self, owner: str, repo: str, pr_number: int) -> list[dict[str, Any]]:
-        """Fetch the list of files changed in a PR."""
+        """Fetch the list of files changed in a PR.
+
+        Paginates (up to 10 pages / 1000 files) — a single page truncated
+        large PRs at 100 files, corrupting path-overlap/test-detection
+        signals computed from ``changed_files``.
+        """
         url = f"/repos/{owner}/{repo}/pulls/{pr_number}/files"
-        response = self._client.get(url, params={"per_page": 100})
-        response.raise_for_status()
-        result: list[dict[str, Any]] = response.json()
+        result: list[dict[str, Any]] = []
+        for page in range(1, 11):
+            response = self._client.get(url, params={"per_page": 100, "page": page})
+            response.raise_for_status()
+            data: list[dict[str, Any]] = response.json()
+            result.extend(data)
+            if len(data) < 100:
+                break
         return result
 
     def get_pull_request_diff(self, owner: str, repo: str, pr_number: int) -> str:
@@ -101,10 +119,23 @@ class GitHubClient(ForgeClient):
         the review's comments after creation. GitHub returns review
         comments in posting order, so the IDs align with ``review.comments``.
         """
+        # GitHub rejects review comments that carry neither line nor position
+        # (422, failing the whole batch). Fold file-level comments (no line
+        # number, e.g. CodeRabbit summaries) into the review body instead.
+        inline_comments = [c for c in review.comments if c.line is not None]
+        file_level = [c for c in review.comments if c.line is None]
+
+        body_text = review.body or ""
+        if file_level:
+            extras = "\n\n".join(
+                f"**{c.path}**: {c.body}" if c.path else c.body for c in file_level
+            )
+            body_text = f"{body_text}\n\n{extras}".strip() if body_text else extras
+
         payload: dict[str, Any] = {"event": review.event}
-        if review.body:
-            payload["body"] = review.body
-        payload["comments"] = [_to_github_comment(c) for c in review.comments]
+        if body_text:
+            payload["body"] = body_text
+        payload["comments"] = [_to_github_comment(c) for c in inline_comments]
 
         url = f"/repos/{owner}/{repo}/pulls/{pr_number}/reviews"
         response = self._client.post(url, json=payload)
@@ -113,13 +144,13 @@ class GitHubClient(ForgeClient):
 
         comment_ids_by_key: dict[str, int] = {}
         review_id = result.get("id")
-        if review_id and review.comments:
+        if review_id and inline_comments:
             try:
                 posted_comments = self.get_review_comments(owner, repo, pr_number, review_id)
                 fetched_ids = [c["id"] for c in posted_comments if "id" in c]
                 for i, fid in enumerate(fetched_ids):
-                    if i < len(review.comments):
-                        key = review.comments[i].correlation_key
+                    if i < len(inline_comments):
+                        key = inline_comments[i].correlation_key
                         if key:
                             comment_ids_by_key[key] = fid
             except Exception:

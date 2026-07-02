@@ -88,6 +88,12 @@ class TestParseGradle:
 
 
 class TestResolveDepsFromCheckout:
+    @pytest.fixture(autouse=True)
+    def _trusted_ref(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # These tests exercise the build-tool invocation itself; the
+        # trusted-branch guard has its own tests below.
+        monkeypatch.setattr(maven_tree, "_is_on_trusted_ref", lambda _repo: True)
+
     def test_returns_empty_when_no_repo_path(self) -> None:
         assert resolve_deps_from_checkout(None) == []
 
@@ -161,6 +167,63 @@ class TestResolveDepsFromCheckout:
             cmd = args[0] if args else kwargs.get("args", [])
             stdout = _GRADLE_OUTPUT if cmd and "gradle" in cmd[0] else ""
             return subprocess.CompletedProcess(args=args, returncode=0, stdout=stdout, stderr="")
+
+        monkeypatch.setattr(maven_tree.subprocess, "run", fake_run)
+        deps = resolve_deps_from_checkout(tmp_path)
+        assert BuildFileDep("com.google.guava", "guava", "33.0.0-jre") in deps
+
+
+class TestTrustedRefGuard:
+    """Build tools execute checkout-controlled scripts on the host — they
+    must never run while the clone is at a PR head."""
+
+    def _write_pom(self, tmp_path: Path) -> None:
+        (tmp_path / "pom.xml").write_text("<project/>")
+
+    def test_skips_when_detached_head(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._write_pom(tmp_path)
+        monkeypatch.setattr(maven_tree.shutil, "which", lambda _name: "/usr/bin/mvn")
+
+        def fake_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            cmd = args[0] if args else kwargs.get("args", [])
+            if cmd[:2] == ["git", "symbolic-ref"]:
+                # Detached HEAD → symbolic-ref fails.
+                return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr="")
+            raise AssertionError(f"build tool must not run on detached HEAD: {cmd}")
+
+        monkeypatch.setattr(maven_tree.subprocess, "run", fake_run)
+        assert resolve_deps_from_checkout(tmp_path) == []
+
+    def test_skips_on_review_branch(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._write_pom(tmp_path)
+        monkeypatch.setattr(maven_tree.shutil, "which", lambda _name: "/usr/bin/mvn")
+
+        def fake_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            cmd = args[0] if args else kwargs.get("args", [])
+            if cmd[:2] == ["git", "symbolic-ref"]:
+                return subprocess.CompletedProcess(
+                    args=args, returncode=0, stdout="franktheunicorn-review-42\n", stderr=""
+                )
+            raise AssertionError(f"build tool must not run on a review branch: {cmd}")
+
+        monkeypatch.setattr(maven_tree.subprocess, "run", fake_run)
+        assert resolve_deps_from_checkout(tmp_path) == []
+
+    def test_runs_on_default_branch(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._write_pom(tmp_path)
+        monkeypatch.setattr(maven_tree.shutil, "which", lambda _name: "/usr/bin/mvn")
+
+        def fake_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            cmd = args[0] if args else kwargs.get("args", [])
+            if cmd[:2] == ["git", "symbolic-ref"]:
+                return subprocess.CompletedProcess(
+                    args=args, returncode=0, stdout="main\n", stderr=""
+                )
+            return subprocess.CompletedProcess(
+                args=args, returncode=0, stdout=_MAVEN_OUTPUT, stderr=""
+            )
 
         monkeypatch.setattr(maven_tree.subprocess, "run", fake_run)
         deps = resolve_deps_from_checkout(tmp_path)

@@ -60,23 +60,28 @@ def apply_tone_guard(
     backend_config: LLMBackendConfig | None = None,
     is_new_contributor: bool = False,
     new_contributor_addendum: str = "",
-) -> ReviewFinding:
+) -> tuple[ReviewFinding, bool]:
     """Rewrite a finding's body for constructive tone.
 
     Uses the configured LLM backend to rewrite. Falls back to returning the
     original finding unchanged if no backend is available or the call fails.
 
+    Returns ``(finding, rewritten)`` where ``rewritten`` is True only when
+    the rewrite actually succeeded. Callers must not mark drafts
+    ``tone_guard_applied`` on the fallback path — the auto-poster's Gate 3
+    relies on that flag meaning the rewrite really ran.
+
     The original body is preserved in the returned finding's ``title`` field
     (used as reasoning trace when persisted).
     """
     if backend_config is None:
-        return finding
+        return finding, False
 
     from franktheunicorn.review.backends import get_backend
 
     backend = get_backend(backend_config)
     if not hasattr(backend, "_call_api") or not hasattr(backend, "_resolve_api_key"):
-        return finding
+        return finding, False
 
     system_prompt = _build_tone_prompt(
         pr_context,
@@ -92,11 +97,11 @@ def apply_tone_guard(
         )
     except Exception:
         logger.warning("Tone guard LLM call failed; returning original finding.", exc_info=True)
-        return finding
+        return finding, False
 
     rewritten = rewritten.strip()
     if not rewritten:
-        return finding
+        return finding, False
 
     return ReviewFinding(
         file_path=finding.file_path,
@@ -106,7 +111,7 @@ def apply_tone_guard(
         suggestion=finding.suggestion,
         confidence=finding.confidence,
         severity=finding.severity,
-    )
+    ), True
 
 
 def apply_tone_guard_batch(
@@ -115,18 +120,25 @@ def apply_tone_guard_batch(
     backend_config: LLMBackendConfig | None = None,
     is_new_contributor: bool = False,
     new_contributor_addendum: str = "",
-) -> list[ReviewFinding]:
-    """Apply tone guard to a batch of findings."""
-    if backend_config is None:
-        return findings
+) -> tuple[list[ReviewFinding], list[bool]]:
+    """Apply tone guard to a batch of findings.
 
-    return [
-        apply_tone_guard(
+    Returns the (possibly rewritten) findings plus a parallel list of flags
+    marking which findings were actually rewritten.
+    """
+    if backend_config is None:
+        return findings, [False] * len(findings)
+
+    results: list[ReviewFinding] = []
+    flags: list[bool] = []
+    for f in findings:
+        rewritten, ok = apply_tone_guard(
             f,
             pr_context,
             backend_config,
             is_new_contributor=is_new_contributor,
             new_contributor_addendum=new_contributor_addendum,
         )
-        for f in findings
-    ]
+        results.append(rewritten)
+        flags.append(ok)
+    return results, flags

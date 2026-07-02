@@ -83,25 +83,30 @@ def _should_merge(a: ReviewFinding, b: ReviewFinding) -> bool:
     return _is_substring_match(a.body, b.body)
 
 
-def deduplicate_findings(
-    findings: list[ReviewFinding],
-    sources: list[str] | None = None,
-) -> list[ReviewFinding]:
+def deduplicate_findings(findings: list[ReviewFinding]) -> list[ReviewFinding]:
     """Deduplicate findings that target the same file/line region.
 
     Uses fuzzy matching: file + line proximity (within 5 lines) + keyword
     overlap (Jaccard > 0.3) or substring matching.
 
-    When ``sources`` is provided, merged findings get combined source tags.
-    The sources list must be the same length as findings.
-
     Returns a list of deduplicated findings.
     """
-    if len(findings) <= 1:
-        return findings
+    deduped, _ = deduplicate_findings_with_groups(findings)
+    return deduped
 
-    if sources and len(sources) != len(findings):
-        sources = None
+
+def deduplicate_findings_with_groups(
+    findings: list[ReviewFinding],
+) -> tuple[list[ReviewFinding], list[list[int]]]:
+    """Deduplicate findings and report which inputs formed each output.
+
+    Returns ``(deduped, groups)`` where ``groups[i]`` lists the indices into
+    ``findings`` that were merged into ``deduped[i]``. Callers use the groups
+    to combine per-finding metadata (e.g. source attribution) exactly, rather
+    than reconstructing membership by key matching after the fact.
+    """
+    if len(findings) <= 1:
+        return findings, [[i] for i in range(len(findings))]
 
     # Group by file, then merge nearby+similar findings within each file.
     by_file: dict[str, list[tuple[int, ReviewFinding]]] = {}
@@ -129,8 +134,10 @@ def deduplicate_findings(
             groups.append(group)
 
     result: list[ReviewFinding] = []
+    result_groups: list[list[int]] = []
     for group in groups:
         findings_in_group = [f for _, f in group]
+        result_groups.append([idx for idx, _ in group])
 
         if len(findings_in_group) == 1:
             result.append(findings_in_group[0])
@@ -171,47 +178,28 @@ def deduplicate_findings(
             )
         )
 
-    return result
+    return result, result_groups
 
 
-def merge_source_tags(
-    findings: list[ReviewFinding],
+def merge_source_tags_from_groups(
     finding_sources: list[str],
-    deduped: list[ReviewFinding],
+    groups: list[list[int]],
 ) -> list[str]:
-    """Map deduplicated findings back to combined source tags.
+    """Combine per-finding source tags using dedup group membership.
 
-    Returns a list of comma-separated source strings matching ``deduped``.
-    For merged findings, sources are combined (e.g. "agent,coderabbit").
+    Returns a list of comma-separated source strings parallel to the deduped
+    findings (e.g. ``"agent,coderabbit"`` when both backends contributed to a
+    merged finding). ``groups`` comes from ``deduplicate_findings_with_groups``.
     """
-    if not finding_sources or len(finding_sources) != len(findings):
-        return ["agent"] * len(deduped)
-
-    # Build a mapping from (file, line, body_prefix) to source.
-    source_map: dict[tuple[str, int, str], list[str]] = {}
-    for finding, source in zip(findings, finding_sources, strict=True):
-        key = (finding.file_path, finding.line_number or 0, finding.body[:50])
-        source_map.setdefault(key, []).append(source)
-
     result: list[str] = []
-    for finding in deduped:
-        key = (finding.file_path, finding.line_number or 0, finding.body[:50])
-        matched_sources = source_map.get(key, [])
-        if not matched_sources:
-            # Fuzzy match: find any source for this file+nearby line.
-            for (fp, ln, _bp), srcs in source_map.items():
-                if (
-                    fp == finding.file_path
-                    and abs(ln - (finding.line_number or 0)) <= _LINE_PROXIMITY
-                ):
-                    matched_sources.extend(srcs)
+    for group in groups:
         # Deduplicate sources while preserving order.
         seen: set[str] = set()
         unique: list[str] = []
-        for s in matched_sources:
-            if s not in seen:
-                seen.add(s)
-                unique.append(s)
+        for idx in group:
+            source = finding_sources[idx] if idx < len(finding_sources) else "agent"
+            if source and source not in seen:
+                seen.add(source)
+                unique.append(source)
         result.append(",".join(unique) if unique else "agent")
-
     return result

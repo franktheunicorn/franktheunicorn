@@ -62,13 +62,21 @@ def fetch_security_emails(config: SecurityEmailConfig) -> list[InboxMessage]:
                 # raw_bytes may be bytes or str depending on IMAP server.
                 byte_data = raw_bytes if isinstance(raw_bytes, bytes) else str(raw_bytes).encode()
 
-                parsed = parse_email_message(byte_data)
-                # Mark as read so non-security emails aren't re-fetched every cycle.
-                conn.store(msg_id, "+FLAGS", "\\Seen")
-                if parsed.is_security_report:
+                try:
+                    parsed = parse_email_message(byte_data)
+                except Exception:
+                    logger.exception("Failed to parse email %s", msg_id)
+                    parsed = None
+                finally:
+                    # Always mark fetched messages read — a poison message
+                    # (bad Date header, unknown charset) that stayed UNSEEN
+                    # would be re-fetched and re-fail every poll forever. The
+                    # message itself remains in the mailbox for manual review.
+                    conn.store(msg_id, "+FLAGS", "\\Seen")
+                if parsed is not None and parsed.is_security_report:
                     messages.append(parsed)
             except Exception:
-                logger.exception("Failed to parse email %s", msg_id)
+                logger.exception("Failed to fetch email %s", msg_id)
     except Exception:
         logger.exception("Error fetching from IMAP server")
     finally:

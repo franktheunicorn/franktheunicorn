@@ -261,13 +261,17 @@ class BaseLLMBackend:
 
 
 # Severity → default confidence mapping (used only when the LLM didn't
-# provide an explicit confidence value).
+# provide an explicit confidence value). Covers both the canonical prompt
+# vocabulary (critical/important/nit/informational) and the legacy
+# high/medium/low terms models still emit.
 SEVERITY_CONFIDENCE: dict[str, float] = {
     "critical": 0.9,
+    "important": 0.8,
     "high": 0.8,
     "medium": 0.6,
     "low": 0.4,
     "nit": 0.3,
+    "informational": 0.3,
 }
 
 # Matches markdown code fences anywhere in the text (```json ... ```)
@@ -308,7 +312,10 @@ def parse_llm_review(raw_text: str) -> ReviewResult:
     if not raw_text:
         return ReviewResult()
 
-    # Strip markdown code fences if present.
+    # Prefer fenced content, but keep the original text: the first fence may
+    # be a code snippet in prose while the real JSON payload sits elsewhere
+    # (in another fence or bare), so fall back to scanning the full response.
+    original_text = raw_text
     fence_match = _CODE_FENCE_RE.search(raw_text)
     if fence_match:
         raw_text = fence_match.group(1)
@@ -319,6 +326,8 @@ def parse_llm_review(raw_text: str) -> ReviewResult:
         # Models without response_format enforcement may add prose around
         # the JSON. Try to extract the first valid JSON value.
         data = _extract_json_blob(raw_text)
+        if data is None and raw_text is not original_text:
+            data = _extract_json_blob(original_text)
         if data is None:
             logger.warning("LLM response is not valid JSON; returning empty findings.")
             return ReviewResult()

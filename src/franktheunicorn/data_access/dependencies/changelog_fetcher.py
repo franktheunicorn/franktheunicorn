@@ -17,6 +17,7 @@ from franktheunicorn.data_access.base import (
     GITHUB_WEB_BASE,
     DataFetcher,
     FetchMethod,
+    RateLimitError,
 )
 from franktheunicorn.data_access.dependencies.types import (
     ChangelogEntry,
@@ -187,6 +188,11 @@ class PythonChangelogFetcher(ChangelogFetcher):
             try:
                 response = self._api_get(url)
                 return response.json()  # type: ignore[no-any-return]
+            except RateLimitError:
+                # No point probing more tag candidates against an exhausted
+                # budget — and swallowing this persisted a permanent
+                # "No GitHub release found" row that was never retried.
+                raise
             except Exception:
                 continue
         return None

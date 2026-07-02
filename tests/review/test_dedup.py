@@ -7,7 +7,8 @@ from franktheunicorn.review.dedup import (
     _jaccard_similarity,
     _should_merge,
     deduplicate_findings,
-    merge_source_tags,
+    deduplicate_findings_with_groups,
+    merge_source_tags_from_groups,
 )
 
 
@@ -213,17 +214,48 @@ class TestCrossSourceDedup:
         assert result[0].severity == "critical"  # highest severity
         assert result[0].confidence == 0.8  # highest confidence
 
-    def test_merge_source_tags(self) -> None:
+    def test_merge_source_tags_same_line(self) -> None:
         findings = [
             ReviewFinding(body="null check wrong here", file_path="a.py", line_number=10),
             ReviewFinding(body="null check wrong use isNullAt", file_path="a.py", line_number=10),
         ]
         sources = ["agent", "coderabbit"]
-        deduped = deduplicate_findings(findings)
-        tags = merge_source_tags(findings, sources, deduped)
+        deduped, groups = deduplicate_findings_with_groups(findings)
+        assert len(deduped) == 1
+        tags = merge_source_tags_from_groups(sources, groups)
         assert len(tags) == 1
-        # Both sources should be present (merged via fuzzy match on nearby lines).
-        assert "agent" in tags[0] or "coderabbit" in tags[0]
+        # Both contributors must be attributed on the merged finding.
+        assert tags[0] == "agent,coderabbit"
+
+    def test_merge_source_tags_fuzzy_nearby_lines(self) -> None:
+        # Different wording and nearby-but-different lines: the merged finding
+        # keeps the longer body, but attribution must still include both
+        # backends (regression: key-based reconstruction only found the
+        # primary's source).
+        findings = [
+            ReviewFinding(
+                body="missing null check on user input", file_path="a.py", line_number=10
+            ),
+            ReviewFinding(
+                body="null check missing for the user input value here",
+                file_path="a.py",
+                line_number=12,
+            ),
+        ]
+        sources = ["agent", "coderabbit"]
+        deduped, groups = deduplicate_findings_with_groups(findings)
+        assert len(deduped) == 1
+        tags = merge_source_tags_from_groups(sources, groups)
+        assert tags == ["agent,coderabbit"]
+
+    def test_merge_source_tags_repeated_source_deduped(self) -> None:
+        findings = [
+            ReviewFinding(body="null check wrong here", file_path="a.py", line_number=10),
+            ReviewFinding(body="null check wrong here too", file_path="a.py", line_number=10),
+        ]
+        _deduped, groups = deduplicate_findings_with_groups(findings)
+        tags = merge_source_tags_from_groups(["agent", "agent"], groups)
+        assert tags == ["agent"]
 
     def test_no_merge_different_issues(self) -> None:
         findings = [

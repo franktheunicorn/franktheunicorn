@@ -69,10 +69,13 @@ class TestSafeJsonParse:
 
 @pytest.mark.django_db
 class TestTriageReport:
-    def test_triage_sets_status_to_triaging(
+    def test_triage_without_backend_leaves_status_untouched(
         self,
         db: Any,
     ) -> None:
+        """No LLM backend → skip gracefully. The report must stay in "new";
+        flipping it to "triaging" before the backend check stranded reports
+        out of the queue forever (worker email auto-triage has no guard)."""
         from tests.factories import SecurityReportFactory
 
         report = SecurityReportFactory(
@@ -82,10 +85,9 @@ class TestTriageReport:
 
         config = OperatorConfig(github_username="testuser")
 
-        # No LLM backends → triage returns early but status is set.
         triage_report(report, None, config)
         report.refresh_from_db()
-        assert report.status == "triaging"
+        assert report.status == "new"
 
     @patch("franktheunicorn.security.triage.search_cves", return_value=[])
     def test_triage_with_stub_backend(

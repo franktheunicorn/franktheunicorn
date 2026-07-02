@@ -133,6 +133,8 @@ def create_drafts_from_snowflake(
 
         confidence = _SEVERITY_CONFIDENCE.get(finding.severity, 0.5)
 
+        from franktheunicorn.review.drafter import _coerce_severity
+
         draft = ReviewDraft.objects.create(
             pull_request=pr,
             file_path=finding.file_path,
@@ -140,8 +142,10 @@ def create_drafts_from_snowflake(
             comment_body=finding.body,
             suggestion=finding.suggestion,
             confidence=confidence,
+            severity=_coerce_severity(finding.severity, finding.title),
             status="pending",
             sources=["snowflake-review"],
+            backend_used="snowflake-review",
             diff_source=diff_source,
         )
         drafts.append(draft)

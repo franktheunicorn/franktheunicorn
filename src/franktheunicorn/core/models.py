@@ -70,7 +70,9 @@ class PullRequest(models.Model):
     ]
 
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="pull_requests")
-    github_id = models.IntegerField()
+    # BigInteger: GitHub's global PR ids passed 2^31 in 2024. SQLite masks the
+    # overflow (dynamic 64-bit INTEGER) but Postgres rejects it on insert.
+    github_id = models.BigIntegerField()
     number = models.IntegerField()
     title = models.CharField(max_length=1000)
     author = models.CharField(max_length=255)
@@ -440,6 +442,9 @@ class TestRun(models.Model):
     )
     run_type = models.CharField(max_length=20, choices=RUN_TYPE_CHOICES)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
+    # PR head commit this run tested — the worker skips PRs whose head
+    # already has a run, so unchanged PRs aren't re-tested every poll cycle.
+    head_sha = models.CharField(max_length=64, blank=True, default="")
     test_scope = models.JSONField(default=list)
     results = models.JSONField(null=True, blank=True)
     differential_verdict = models.CharField(

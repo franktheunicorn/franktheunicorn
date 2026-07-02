@@ -144,27 +144,34 @@ def fetch_community_context(
             client.close()
 
     if results:
-        pr.community_context_cache = {"sources": results, "query": queries[0] if queries else ""}
+        pr.community_context_cache = {
+            "sources": results,
+            "query": queries[0][0] if queries else "",
+        }
         pr.save(update_fields=["community_context_cache", "updated_at"])
 
     return _format_community_results(results)
 
 
-def _build_mailing_list_queries(pr: PullRequest) -> list[str]:
-    """Build an ordered list of search queries from PR metadata.
+def _build_mailing_list_queries(pr: PullRequest) -> list[tuple[str, bool]]:
+    """Build an ordered list of ``(query, is_blame_author)`` search queries.
 
-    Returns queries in priority order: JIRA IDs first (most specific),
-    then PR number, then title terms. Blame authors are read from
-    score_breakdown if available.
+    Queries come in priority order: JIRA IDs first (most specific), then PR
+    number, then title terms, then changed filenames. Blame authors (read
+    from score_breakdown, when populated) come last and are tagged True so
+    the mailing-list fetch can mark threads found via author search as blame
+    hits — tagging at build time, rather than reverse-engineering intent
+    from query shape later, keeps title/filename queries from being
+    mislabeled as blame matches.
     """
-    queries: list[str] = []
+    queries: list[tuple[str, bool]] = []
     seen: set[str] = set()
 
-    def _add(q: str) -> None:
+    def _add(q: str, *, is_blame: bool = False) -> None:
         q = q.strip()
         if q and q not in seen:
             seen.add(q)
-            queries.append(q)
+            queries.append((q, is_blame))
 
     # JIRA ticket IDs extracted from PR title + body (e.g. "SPARK-12345").
     try:
@@ -200,14 +207,14 @@ def _build_mailing_list_queries(pr: PullRequest) -> list[str]:
         if isinstance(raw, list):
             blame_authors = [str(a) for a in raw[:3]]
     for author in blame_authors:
-        _add(author)
+        _add(author, is_blame=True)
 
     return queries[:10]
 
 
 def _fetch_single_source(
     source_config: object,
-    queries: list[str],
+    queries: list[tuple[str, bool]],
     http_client: httpx.Client,
     operator_config: OperatorConfig | None = None,
 ) -> dict[str, object] | None:
@@ -218,7 +225,7 @@ def _fetch_single_source(
         return None
 
     # For non-mailing-list sources, use the first (most general) query.
-    primary_query = queries[0] if queries else ""
+    primary_query = queries[0][0] if queries else ""
 
     match source_config.type:
         case "mailing-list":
@@ -240,7 +247,7 @@ def _fetch_single_source(
 
 def _fetch_mailing_list(
     config: object,
-    queries: list[str],
+    queries: list[tuple[str, bool]],
     http_client: httpx.Client,
 ) -> dict[str, object] | None:
     from franktheunicorn.config.models import CommunitySourceConfig
@@ -254,21 +261,9 @@ def _fetch_mailing_list(
     # Determine which fetcher to use.
     use_imap = bool(config.imap_host)
 
-    # Blame authors are the last queries (appended after title/JIRA/number).
-    # We tag them so threads found only via author search get blame_hit=True.
-    # Heuristic: queries with no JIRA-like pattern and no "#" are author queries.
-    import re as _re
-
-    _jira_re = _re.compile(r"^[A-Z]+-\d+$")
-    _pr_num_re = _re.compile(r"^#\d+$")
-
-    for i, query in enumerate(queries):
-        is_blame_query = not (
-            _jira_re.match(query)
-            or _pr_num_re.match(query)
-            or i == 0  # first query is always title-based
-        )
-
+    # Blame-author queries carry their tag from _build_mailing_list_queries;
+    # threads found via those queries get blame_hit=True.
+    for query, is_blame_query in queries:
         try:
             if use_imap:
                 from franktheunicorn.data_access.mailing_list.imap_fetcher import (
@@ -277,9 +272,14 @@ def _fetch_mailing_list(
 
                 result = fetch_mailing_list_imap(config, query, blame_hit=is_blame_query)
             else:
+                from franktheunicorn.data_access.cache import FileCache
                 from franktheunicorn.data_access.mailing_list.fetcher import MailingListFetcher
 
-                fetcher = MailingListFetcher(client=http_client)
+                fetcher = MailingListFetcher(
+                    client=http_client,
+                    delay_seconds=config.niceness_delay_seconds,
+                    cache=FileCache("mailing_list", ttl_seconds=config.cache_ttl_days * 86400),
+                )
                 result = fetcher.fetch(
                     config.archive_url, query, timeout_seconds=config.timeout_seconds
                 )
@@ -321,7 +321,12 @@ def _fetch_discourse(
 
     if not isinstance(config, CommunitySourceConfig):
         return None
-    fetcher = DiscourseFetcher(client=http_client)
+    from franktheunicorn.data_access.cache import FileCache
+
+    fetcher = DiscourseFetcher(
+        client=http_client,
+        cache=FileCache("discourse", ttl_seconds=config.cache_ttl_days * 86400),
+    )
     result = fetcher.fetch(config.base_url, query, timeout_seconds=config.timeout_seconds)
     if not result.posts:
         return None
@@ -506,8 +511,9 @@ def _format_community_results(results: list[dict[str, object]]) -> str:
         raw = src.get(key, [])
         return list(raw) if isinstance(raw, list) else []
 
-    parts: list[str] = []
+    blocks: list[str] = []
     for source in results:
+        parts: list[str] = []
         source_type = str(source.get("type", "unknown"))
         source_name = str(source.get("name", source_type))
         annotation = f"[{source_name}, unverified]"
@@ -557,7 +563,12 @@ def _format_community_results(results: list[dict[str, object]]) -> str:
                     parts.append("\n[Perplexity search, unverified]")
                     parts.append(f"  {content}")
 
-    return _truncate_source_block("\n".join(parts))
+        # The character cap is per source — capping the concatenation of all
+        # sources would let the first source starve the rest out of the prompt.
+        if parts:
+            blocks.append(_truncate_source_block("\n".join(parts)))
+
+    return "\n".join(blocks)
 
 
 def format_context_for_prompt(

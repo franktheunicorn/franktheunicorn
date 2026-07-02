@@ -43,13 +43,16 @@ def triage_report(
     4. Search CVE database for duplicates
     5. Save results to the report
     """
-    report.status = "triaging"
-    report.save(update_fields=["status", "updated_at"])
-
+    # Resolve the backend *before* mutating status — otherwise a deployment
+    # with no LLM backends (e.g. email auto-triage on but llm_backends empty)
+    # strands every report in "triaging" and it drops out of the "new" queue.
     backend = _get_triage_backend(operator_config)
     if backend is None:
         logger.warning("No LLM backend configured; skipping triage.")
         return report
+
+    report.status = "triaging"
+    report.save(update_fields=["status", "updated_at"])
 
     _parse_report(report, backend)
     project_context = _load_project_context(report, project_config)

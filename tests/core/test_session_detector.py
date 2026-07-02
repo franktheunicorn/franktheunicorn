@@ -22,6 +22,37 @@ class TestDetectAgentSession:
         assert result.agent_source == "claude-code"
         assert result.session_url == "https://claude.ai/code/session/xyz"
 
+    def test_claude_code_underscore_session_trailer(self) -> None:
+        """The current Claude Code footer: Claude-Session + session_<id> form."""
+        body = (
+            "Fixes the flaky test.\n\n"
+            "Co-Authored-By: Claude <noreply@anthropic.com>\n"
+            "Claude-Session: https://claude.ai/code/session_014NSLpmXbAYQD34gBVgJich\n"
+        )
+        result = detect_agent_session(body)
+        assert result is not None
+        assert result.agent_source == "claude-code"
+        assert result.session_url == "https://claude.ai/code/session_014NSLpmXbAYQD34gBVgJich"
+
+    def test_claude_code_generated_with_footer(self) -> None:
+        """A bare session URL in the standard 'Generated with' footer."""
+        body = (
+            "## Summary\nDoes the thing.\n\n"
+            "🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n"
+            "https://claude.ai/code/session_01AbCdEf\n"
+        )
+        result = detect_agent_session(body)
+        assert result is not None
+        assert result.agent_source == "claude-code"
+        assert result.session_url == "https://claude.ai/code/session_01AbCdEf"
+
+    def test_generated_with_generic_block(self) -> None:
+        body = "Generated with SomeAgent\nhttps://someagent.example.com/run/99\n"
+        result = detect_agent_session(body)
+        assert result is not None
+        assert result.agent_source == "generic"
+        assert result.session_url == "https://someagent.example.com/run/99"
+
     def test_claude_code_case_insensitive(self) -> None:
         body = "session: https://claude.ai/code/session/ABC123"
         result = detect_agent_session(body)

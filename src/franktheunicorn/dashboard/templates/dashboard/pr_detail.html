@@ -259,9 +259,10 @@
 {% endif %}
 
 <h3 style="margin-top: 1.5rem;">{% if personality_name %}{{ personality_name }}'s Findings{% else %}Review Findings{% endif %}
-    <button class="action-btn post" style="float: right;"
+    <button class="action-btn post" id="post-review-btn" style="float: right;"
             hx-post="{% url 'dashboard:post_review' pr.pk %}"
             hx-target="#post-result"
+            hx-confirm="Post all approved/edited findings to the forge?"
             hx-swap="innerHTML">Post Approved to GitHub</button>
 </h3>
 <div id="post-result"></div>
@@ -285,7 +286,7 @@
         Suppressed Findings ({{ suppressed_drafts|length }})
         <span style="font-size: 0.75rem; color: #999;">&mdash; auto-suppressed by rejection predictor</span>
     </summary>
-    <div class="draft-list suppressed" style="margin-top: 0.5rem; opacity: 0.8;">
+    <div class="draft-list suppressed" data-suppressed-section style="margin-top: 0.5rem; opacity: 0.8;">
         {% for draft in suppressed_drafts %}
         {% include "dashboard/_draft_item.html" %}
         {% endfor %}

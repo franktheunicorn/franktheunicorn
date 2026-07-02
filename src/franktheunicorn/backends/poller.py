@@ -23,6 +23,9 @@ from franktheunicorn.scoring.scorer import score_pull_request_from_model
 
 logger = logging.getLogger(__name__)
 
+# YAML governance value → Project.project_type choice.
+_GOVERNANCE_TO_PROJECT_TYPE = {"asf": "asf", "personal": "personal", "corporate": "org"}
+
 
 def poll_project(
     client: ForgeClient,
@@ -42,7 +45,12 @@ def poll_project(
     project, _created = Project.objects.update_or_create(
         owner=project_config.owner,
         repo=project_config.repo,
-        defaults={"review_context": project_config.review_context},
+        defaults={
+            "review_context": project_config.review_context,
+            # Sync the dashboard's type filter from YAML governance — nothing
+            # else ever wrote this field, so the filter was dead on arrival.
+            "project_type": _GOVERNANCE_TO_PROJECT_TYPE.get(project_config.governance, "personal"),
+        },
     )
 
     logger.debug("Listing pull requests for %s/%s ...", project_config.owner, project_config.repo)
@@ -394,14 +402,15 @@ def _upsert_pull_request(
     }
 
     # Detect AI agent session from PR description (v1.25).
-    # Always set these fields so stale values are cleared on update.
+    # Always set these fields so stale values are cleared on update —
+    # including the boolean, otherwise a PR whose author edited the session
+    # link away stays latched in the ai-generated queue forever.
     body = defaults["body"]
     session = detect_agent_session(body) if body else None
     defaults["ai_agent_source"] = session.agent_source if session else ""
     defaults["agent_session_url"] = session.session_url if session else ""
     defaults["agent_task_id"] = session.task_id if session else ""
-    if session:
-        defaults["likely_ai_generated"] = True
+    defaults["likely_ai_generated"] = session is not None
 
     pr_obj, _created = PullRequest.objects.update_or_create(
         project=project,

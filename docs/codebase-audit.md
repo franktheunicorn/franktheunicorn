@@ -1,5 +1,12 @@
 # Codebase Audit: franktheunicorn vs. Spec
 
+> **Status (2026-07-02): historical.** This audit describes the tree as of
+> 2026-04-01. All P0 items and most P1/P2 items have since been fixed
+> (e.g. #34/#35/#36 scoring weights and glob matching, #18 DATABASE_URL,
+> #29 `sources` JSONField, #30 `project_type`, #40 `test_drafter.py`,
+> #48 test layout, #49/#50 duplicate modules). Kept for the record — do
+> not use it as a work list without re-verifying against the current code.
+
 Audit date: 2026-04-01
 Auditor: Claude Code
 Compared: all source files, tests, config, and infrastructure against `docs/franktheunicorn-master-design.md` and `CLAUDE.md`.

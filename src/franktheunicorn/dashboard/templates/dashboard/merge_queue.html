@@ -55,6 +55,12 @@
 <script>
 function copyMergeCommand(btn) {
   var cmd = btn.getAttribute("data-command");
+  // navigator.clipboard is undefined on insecure origins (plain-HTTP over
+  // Tailscale is the documented phone use case) — fall back to a prompt.
+  if (!navigator.clipboard) {
+    window.prompt("Copy the merge command:", cmd);
+    return;
+  }
   navigator.clipboard.writeText(cmd).then(function() {
     var orig = btn.textContent;
     btn.textContent = "Copied!";

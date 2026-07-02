@@ -27,6 +27,10 @@ class Command(BaseCommand):
         dry_run: bool = options.get("dry_run", False)  # type: ignore[assignment]
         months: int = options.get("months", 6)  # type: ignore[assignment]
 
+        if "/" not in project_name:
+            self.stderr.write(self.style.ERROR("--project must be in owner/repo format"))
+            return
+
         self.stdout.write(f"Detecting collaborators for {project_name} (last {months} months)...")
 
         # Get operator username from config.
@@ -100,10 +104,58 @@ class Command(BaseCommand):
 
         if dry_run:
             self.stdout.write(self.style.WARNING("\n--dry-run: no changes saved"))
+            return
+
+        # Persist scores into the project YAML's collaborator_scores map —
+        # that's what the scorer reads (§2.4). Merge, don't overwrite:
+        # entries with score null are manual and are never touched.
+        saved_to = self._save_scores(project_name, results)
+        if saved_to:
+            self.stdout.write(
+                self.style.SUCCESS(f"\nSaved {len(results)} collaborator scores to {saved_to}.")
+            )
         else:
             self.stdout.write(
-                self.style.SUCCESS(f"\nDetected {len(results)} collaborators for {project_name}.")
+                self.style.WARNING(
+                    f"\nDetected {len(results)} collaborators but no project YAML found "
+                    f"for {project_name} — run add_project first, or use --dry-run."
+                )
             )
+
+    def _save_scores(
+        self,
+        project_name: str,
+        results: list[tuple[str, int, dict[str, int]]],
+    ) -> Path | None:
+        """Merge detected scores into the project YAML. Returns the path written."""
+        import os
+
+        import yaml
+        from django.conf import settings
+
+        owner, repo = project_name.split("/", 1)
+        base = Path(settings.BASE_DIR)
+        config_dir = Path(os.environ.get("FRANK_CONFIG_DIR", str(base / "config" / "active")))
+        yaml_path = config_dir / "projects" / f"{owner}-{repo}.yaml"
+        if not yaml_path.is_file():
+            return None
+
+        data = yaml.safe_load(yaml_path.read_text()) or {}
+        if not isinstance(data, dict):
+            return None
+        scores = data.get("collaborator_scores") or {}
+        if not isinstance(scores, dict):
+            scores = {}
+
+        for user, score, _signals in results:
+            # score None marks a manual entry (full weight, never overwritten).
+            if user in scores and scores[user] is None:
+                continue
+            scores[user] = score
+
+        data["collaborator_scores"] = scores
+        yaml_path.write_text(yaml.safe_dump(data, sort_keys=False))
+        return yaml_path
 
 
 def _analyze_git_log(repo_path: Path, operator: str, months: int) -> Counter[str]:

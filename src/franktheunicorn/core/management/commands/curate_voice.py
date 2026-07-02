@@ -42,9 +42,12 @@ class Command(BaseCommand):
             raise CommandError("--project must be in owner/repo format")
 
         owner, repo = project.split("/", 1)
-        token = os.environ.get("GITHUB_TOKEN", "")
+        # FRANK_GITHUB_TOKEN is the project's canonical token variable
+        # (.env.example, settings, other commands); accept plain GITHUB_TOKEN
+        # as a fallback for compatibility.
+        token = os.environ.get("FRANK_GITHUB_TOKEN", "") or os.environ.get("GITHUB_TOKEN", "")
         if not token:
-            raise CommandError("GITHUB_TOKEN environment variable is required")
+            raise CommandError("FRANK_GITHUB_TOKEN environment variable is required")
 
         output_dir = Path(output_dir_str) if output_dir_str else None
 

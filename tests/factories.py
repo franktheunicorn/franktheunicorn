@@ -161,6 +161,10 @@ class DependencyChangeFactory(factory.django.DjangoModelFactory):  # type: ignor
 class TestRunFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
     """Factory for TestRun model instances."""
 
+    # Keep pytest from collecting this as a test class (name starts with
+    # "Test"; factory_boy's __new__ triggers a PytestCollectionWarning).
+    __test__ = False
+
     class Meta:
         model = TestRun
 

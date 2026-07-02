@@ -114,10 +114,12 @@ class TestGiteaClient:
         assert sent["event"] == "COMMENT"
         assert sent["body"] == "overall"
         assert len(sent["comments"]) == 1
+        # Gitea's new_position takes the file line number, not a
+        # GitHub-style diff offset.
         assert sent["comments"][0] == {
             "path": "foo.py",
             "body": "nit",
-            "new_position": 2,
+            "new_position": 11,
         }
 
     def test_create_review_drops_unlocatable_comment(
@@ -246,8 +248,8 @@ class TestGiteaClient:
 
         post = next(r for r in httpx_mock.get_requests() if r.method == "POST")
         sent = json.loads(post.content)
-        # @@ +1, +added1=2, +added2=3, +added3=4 → end-of-range line 13 → position 4.
-        assert sent["comments"][0]["new_position"] == 4
+        # Multi-line ranges anchor on the end-of-range *file line* (13).
+        assert sent["comments"][0]["new_position"] == 13
 
     def test_delete_review_comment(self, httpx_mock: HTTPXMock, client: GiteaClient) -> None:
         httpx_mock.add_response(

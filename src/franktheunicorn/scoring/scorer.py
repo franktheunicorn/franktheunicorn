@@ -194,9 +194,11 @@ def score_pull_request(
             "downstream_impact", score_downstream_impact(changed_files, diff_text, downstream_apis)
         )
 
-    # Sentry error context scoring signal (v1.5)
+    # Sentry error context scoring signal (v1.5). Pass the *default* weight —
+    # _add applies any scoring_weights override itself; passing the overridden
+    # value here would scale it twice.
     if sentry_error_count is not None and sentry_error_count > 0:
-        _add("sentry_errors", weights.get("sentry_errors", 15))
+        _add("sentry_errors", WEIGHTS.get("sentry_errors", 15))
 
     _add("draft_findings", score_draft_findings(draft_findings_count))
 

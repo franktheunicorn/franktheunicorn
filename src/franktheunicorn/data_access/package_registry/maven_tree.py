@@ -53,18 +53,52 @@ _GRADLE_LINE_RE = re.compile(
 _TIMEOUT_SECONDS = 60
 
 
+def _is_on_trusted_ref(repo: Path) -> bool:
+    """True when the checkout is on a regular branch, not a PR-review state.
+
+    Maven/Gradle invocations execute the checkout's own build scripts (and
+    ``gradlew``) directly on the worker host — that must never happen while
+    the clone is detached at a PR head or sitting on a temporary
+    ``franktheunicorn-review-*`` branch, where contributor-controlled build
+    files would run outside any sandbox.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "symbolic-ref", "-q", "--short", "HEAD"],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return False
+    if result.returncode != 0:
+        # Detached HEAD (e.g. left at a PR/merge commit by the review flow).
+        return False
+    branch = result.stdout.strip()
+    return bool(branch) and not branch.startswith("franktheunicorn-review-")
+
+
 def resolve_deps_from_checkout(repo_path: Path | str | None) -> list[BuildFileDep]:
     """Run ``mvn`` / ``gradle`` in ``repo_path`` and return resolved deps.
 
     Returns an empty list when ``repo_path`` is missing, no recognised
-    build file is present, the build tool isn't on ``$PATH``, or the
-    invocation fails. Callers should treat ``[]`` as "no signal" and
-    fall back to other dep sources.
+    build file is present, the checkout isn't on a trusted branch, the
+    build tool isn't on ``$PATH``, or the invocation fails. Callers should
+    treat ``[]`` as "no signal" and fall back to other dep sources.
     """
     if repo_path is None:
         return []
     root = Path(repo_path)
     if not root.is_dir():
+        return []
+
+    if not _is_on_trusted_ref(root):
+        logger.info(
+            "Skipping build-tool dependency resolution for %s: checkout is not "
+            "on a trusted branch (PR-head build files must not execute on the host).",
+            root,
+        )
         return []
 
     pom = root / "pom.xml"

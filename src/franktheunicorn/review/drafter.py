@@ -20,7 +20,10 @@ from franktheunicorn.review.antipattern import (
 from franktheunicorn.review.backends import get_backend
 from franktheunicorn.review.backends.base import PRContext, ReviewFinding, ReviewResult
 from franktheunicorn.review.context_builder import build_context_strings
-from franktheunicorn.review.dedup import deduplicate_findings, merge_source_tags
+from franktheunicorn.review.dedup import (
+    deduplicate_findings_with_groups,
+    merge_source_tags_from_groups,
+)
 from franktheunicorn.review.tone_guard import apply_tone_guard_batch
 from franktheunicorn.scoring.rejection_predictor import (
     SUPPRESS_THRESHOLD,
@@ -73,6 +76,32 @@ def _coerce_severity(raw_severity: str, finding_title: str = "") -> str:
     return "nit"
 
 
+def ensure_conflict_draft(pr: PullRequest) -> ReviewDraft:
+    """Get or create the single rebase-needed draft for a conflicted PR.
+
+    Looks up by ``backend_used`` (a stable CharField) rather than the
+    JSONField ``sources`` so re-runs don't create duplicate conflict markers
+    if the encoded list ever differs by a byte.
+    """
+    rebase_draft, _ = ReviewDraft.objects.get_or_create(
+        pull_request=pr,
+        backend_used="auto-conflict",
+        defaults={
+            "comment_body": (
+                "This PR has merge conflicts with the target branch. "
+                "Please rebase onto the latest commit of the base branch before this can be reviewed."
+            ),
+            "confidence": 1.0,
+            "category": "other",
+            "severity": "informational",
+            "status": "pending",
+            "sources": ["auto-conflict"],
+            "diff_source": "",
+        },
+    )
+    return rebase_draft
+
+
 def fetch_linked_issues_context(pr: PullRequest) -> str:
     """Extract issue references from PR title/body and fetch their content.
 
@@ -83,13 +112,16 @@ def fetch_linked_issues_context(pr: PullRequest) -> str:
         return ""
 
     try:
+        import httpx
+
         from franktheunicorn.data_access.github.issue_fetcher import IssueFetcher
 
-        fetcher = IssueFetcher()
-        issues = fetcher.fetch_linked_issues(pr.project.owner, pr.project.repo, text)
-        if not issues:
-            return ""
-        return "\n\n".join(issue.to_prompt_context() for issue in issues)
+        with httpx.Client(follow_redirects=True, timeout=30.0) as client:
+            fetcher = IssueFetcher(client=client)
+            issues = fetcher.fetch_linked_issues(pr.project.owner, pr.project.repo, text)
+            if not issues:
+                return ""
+            return "\n\n".join(issue.to_prompt_context() for issue in issues)
     except Exception:
         logger.debug("Could not fetch linked issues for PR #%d", pr.number, exc_info=True)
         return ""
@@ -166,6 +198,31 @@ def _get_pr_diff(pr: PullRequest, diff: str = "") -> str:
     return "\n".join(f"+++ b/{f}" for f in files) + "\n" if files else "+++ b/unknown_file.py\n"
 
 
+def _derive_category(title: str) -> str:
+    """Derive a ReviewDraft category from a finding title.
+
+    Must run against the *original* LLM title — the tone guard replaces
+    ``title`` with the pre-rewrite body as a reasoning trace, which destroys
+    the ``"security:"``-style prefixes this scan relies on.
+    """
+    lowered = (title or "").lower()
+    for cat in (
+        "correctness",
+        "style",
+        "security-context",
+        "security",
+        "test-coverage",
+        "architectural",
+        "naming",
+        "suggested-change",
+        "moderation",
+        "issue-link",
+    ):
+        if cat in lowered:
+            return cat
+    return "other"
+
+
 def _extract_code_context(diff: str, file_path: str, line_number: int | None) -> str:
     """Extract the relevant diff hunk for a finding's file and line.
 
@@ -190,13 +247,13 @@ def _extract_code_context(diff: str, file_path: str, line_number: int | None) ->
                     if patched_file:
                         return str(patched_file[0])
                     return ""
-                # Find the hunk containing the target line.
+                # Find the hunk containing the target line. The last line of a
+                # hunk is target_start + target_length - 1 (inclusive).
                 for hunk in patched_file:
-                    if hunk.target_start <= line_number <= hunk.target_start + hunk.target_length:
+                    if hunk.target_start <= line_number < hunk.target_start + hunk.target_length:
                         return str(hunk)
-                # If no hunk matches the exact line, return the closest.
-                if patched_file:
-                    return str(patched_file[0])
+                # No hunk contains the line — return nothing rather than an
+                # unrelated hunk that would mislead the dashboard/predictor.
                 return ""
     except Exception:
         logger.debug("Could not parse diff for code context extraction.")
@@ -214,11 +271,15 @@ def create_drafts_from_findings(
     governance: str = "standard",
     diff_source: str = "",
     sources_per_finding: list[str] | None = None,
+    categories_per_finding: list[str] | None = None,
+    tone_applied_per_finding: list[bool] | None = None,
+    rejection_predictor_enabled: bool = False,
 ) -> list[ReviewDraft]:
     """Convert ReviewFinding objects into ReviewDraft rows.
 
-    Gates through anti-pattern checks, scores with rejection predictor,
-    and auto-suppresses high-P(rejection) findings.
+    Gates through anti-pattern checks and — when the project has explicitly
+    enabled the v1.75 rejection predictor — scores findings and
+    auto-suppresses high-P(rejection) ones.
 
     All drafts are created inside a single transaction to avoid partial state
     on worker crash.
@@ -228,16 +289,25 @@ def create_drafts_from_findings(
     who don't care about per-finding attribution). When ``sources_per_finding``
     is supplied it must be parallel to ``findings``: each entry is a
     comma-separated list of source tags as produced by
-    ``dedup.merge_source_tags`` so deduped multi-backend findings keep
-    accurate attribution on ``ReviewDraft.sources``.
+    ``dedup.merge_source_tags_from_groups`` so deduped multi-backend findings
+    keep accurate attribution on ``ReviewDraft.sources``.
+
+    ``categories_per_finding`` carries categories derived from the original
+    finding titles *before* the tone guard replaced them with reasoning
+    traces; without it the category is derived from ``finding.title``.
+    ``tone_applied_per_finding`` marks which findings the tone guard actually
+    rewrote (the scalar ``tone_guard_applied`` is the fallback for callers
+    without per-finding data).
     """
     from django.db import transaction
 
     drafts: list[ReviewDraft] = []
 
-    # Try to load the rejection predictor for this project.
+    # v1.75 feature — only load the predictor when explicitly enabled for the
+    # project. It must never activate in a plain v1 deployment (CLAUDE.md:
+    # v1.5+ paths are opt-in via config, never the default).
     predictor: RejectionPredictor | None = None
-    if project is not None:
+    if project is not None and rejection_predictor_enabled:
         predictor = load_predictor_for_project(project.owner, project.repo)
 
     with transaction.atomic():
@@ -267,23 +337,12 @@ def create_drafts_from_findings(
                 )
                 continue
 
-            # Map severity string to a valid category if present in the finding title.
-            category = "other"
-            for cat in (
-                "correctness",
-                "style",
-                "security-context",
-                "security",
-                "test-coverage",
-                "architectural",
-                "naming",
-                "suggested-change",
-                "moderation",
-                "issue-link",
-            ):
-                if cat in (finding.title or "").lower():
-                    category = cat
-                    break
+            # Category comes from the original title when the caller derived
+            # it before the tone guard replaced titles with reasoning traces.
+            if categories_per_finding is not None and idx < len(categories_per_finding):
+                category = categories_per_finding[idx]
+            else:
+                category = _derive_category(finding.title)
 
             # Extract code context from the diff.
             code_context = _extract_code_context(diff, finding.file_path, finding.line_number)
@@ -315,6 +374,11 @@ def create_drafts_from_findings(
                         rejection_probability,
                     )
 
+            if tone_applied_per_finding is not None and idx < len(tone_applied_per_finding):
+                draft_tone_applied = tone_applied_per_finding[idx]
+            else:
+                draft_tone_applied = tone_guard_applied
+
             draft = ReviewDraft.objects.create(
                 pull_request=pr,
                 file_path=finding.file_path,
@@ -325,7 +389,7 @@ def create_drafts_from_findings(
                 severity=coerced_severity,
                 category=category,
                 reasoning_trace=finding.title,  # original body before tone guard
-                tone_guard_applied=tone_guard_applied,
+                tone_guard_applied=draft_tone_applied,
                 backend_used=primary_source,
                 status="pending",
                 sources=finding_sources,
@@ -336,8 +400,8 @@ def create_drafts_from_findings(
             )
             drafts.append(draft)
 
-    # Auto-retrain check (v1.75).
-    if project is not None:
+    # Auto-retrain check (v1.75) — only when the project opted in.
+    if project is not None and rejection_predictor_enabled:
         try:
             maybe_retrain(project.pk, project.owner, project.repo)
         except Exception:
@@ -376,6 +440,7 @@ def _run_single_backend(
     backend_config: LLMBackendConfig,
     diff: str,
     pr_context: PRContext,
+    pr: PullRequest | None = None,
 ) -> tuple[str, ReviewResult, bool]:
     """Run one backend and return ``(source_name, result, failed)``."""
     backend = get_backend(backend_config)
@@ -391,6 +456,14 @@ def _run_single_backend(
     except Exception:
         result = ReviewResult()
         return source, result, True
+    finally:
+        # Review calls are the dominant LLM spend — without this the cost
+        # widget/digest only ever counted security-triage calls.
+        if pr is not None and hasattr(backend, "record_cost"):
+            try:
+                backend.record_cost(pr.project_id, pr.pk, action_type="review")
+            except Exception:
+                logger.debug("Failed to record review cost", exc_info=True)
 
     return source, result, False
 
@@ -400,6 +473,7 @@ def draft_review(
     project_config: ProjectConfig,
     operator_config: OperatorConfig | None = None,
     *,
+    diff: str = "",
     repo_health_context: str = "",
     community_context: str = "",
     jira_context: str = "",
@@ -411,6 +485,11 @@ def draft_review(
     Each backend in ``operator_config.llm_backends`` runs independently.
     Findings from all backends are combined, gated through anti-patterns,
     and stored as ReviewDraft rows with the backend's provider as the source.
+
+    ``diff`` is the PR's real unified diff. Callers should always supply it
+    (the worker fetches it via ``DiffFetcher``); when empty, a placeholder
+    built from ``pr.changed_files`` is used, which tells the backends *which*
+    files changed but not *what* changed.
 
     When ``operator_config`` is None or has no backends configured, falls
     back to the stub backend for backwards compatibility.
@@ -432,7 +511,7 @@ def draft_review(
         sentry_context=sentry_context,
         repo_path=repo_path,
     )
-    diff = _get_pr_diff(pr)
+    diff = _get_pr_diff(pr, diff)
 
     # Resolve which backends to run.
     backend_configs = list(operator_config.llm_backends)
@@ -452,7 +531,7 @@ def draft_review(
     all_findings: list[tuple[str, ReviewFinding]] = []
     failed_backends: list[str] = []
     for backend_config in backend_configs:
-        source, result, failed = _run_single_backend(backend_config, diff, pr_context)
+        source, result, failed = _run_single_backend(backend_config, diff, pr_context, pr=pr)
         if failed:
             model_name = backend_config.model or "<default>"
             failed_backends.append(f"{backend_config.provider}/{model_name}")
@@ -478,59 +557,43 @@ def draft_review(
 
     # Always create a rebase-needed draft when GitHub reports merge conflicts.
     # This runs independently of LLM findings so operators see it even when all
-    # backends fail or produce nothing. Look up by ``backend_used`` (a stable
-    # CharField) rather than the JSONField ``sources`` so re-runs don't create
-    # duplicate conflict markers if the encoded list ever differs by a byte.
+    # backends fail or produce nothing.
     extra_drafts: list[ReviewDraft] = []
     if pr.mergeable is False:
-        rebase_draft, _ = ReviewDraft.objects.get_or_create(
-            pull_request=pr,
-            backend_used="auto-conflict",
-            defaults={
-                "comment_body": (
-                    "This PR has merge conflicts with the target branch. "
-                    "Please rebase onto the latest commit of the base branch before this can be reviewed."
-                ),
-                "confidence": 1.0,
-                "category": "other",
-                "severity": "informational",
-                "status": "pending",
-                "sources": ["auto-conflict"],
-                "diff_source": "",
-            },
-        )
-        extra_drafts.append(rebase_draft)
+        extra_drafts.append(ensure_conflict_draft(pr))
 
     if not all_findings:
         return extra_drafts
 
-    # Deduplicate across backends.
+    # Deduplicate across backends, keeping group membership so source
+    # attribution can be combined exactly (e.g. "agent,coderabbit").
     raw_findings = [f for _, f in all_findings]
     raw_sources = [s for s, _ in all_findings]
-    deduped = deduplicate_findings(raw_findings)
-    # Re-build per-deduped source attribution so multi-backend drafts persist
-    # all contributors (e.g. "agent,coderabbit") instead of pinning every
-    # draft to the first backend that ran.
-    deduped_sources = merge_source_tags(raw_findings, raw_sources, deduped)
+    deduped, dedup_groups = deduplicate_findings_with_groups(raw_findings)
+    deduped_sources = merge_source_tags_from_groups(raw_sources, dedup_groups)
+
+    # Derive categories from the original titles now — the tone guard replaces
+    # titles with pre-rewrite bodies (reasoning traces), which would destroy
+    # the "security:"-style prefixes the category scan relies on.
+    categories = [_derive_category(f.title) for f in deduped]
 
     # Apply tone guard rewrite pass. apply_tone_guard_batch is 1:1 over the
-    # input list, so deduped_sources stays aligned with deduped after this.
+    # input list, so the parallel lists stay aligned with deduped after this.
     tone_backend = backend_configs[0] if backend_configs else None
     is_new_contributor = getattr(pr, "is_new_contributor", False)
     new_contributor_addendum = ""
     if project_config and hasattr(project_config, "new_contributor_addendum"):
         new_contributor_addendum = project_config.new_contributor_addendum
 
-    tone_applied = False
+    tone_flags = [False] * len(deduped)
     if tone_backend and tone_backend.provider != "stub":
-        deduped = apply_tone_guard_batch(
+        deduped, tone_flags = apply_tone_guard_batch(
             deduped,
             pr_context,
             backend_config=tone_backend,
             is_new_contributor=is_new_contributor,
             new_contributor_addendum=new_contributor_addendum,
         )
-        tone_applied = True
 
     # Resolve governance for rejection predictor features.
     governance = getattr(project_config, "governance", "standard")
@@ -545,9 +608,11 @@ def draft_review(
         deduped,
         source=fallback_source,
         project=pr.project,
-        tone_guard_applied=tone_applied,
         diff=diff,
         governance=governance,
         sources_per_finding=deduped_sources,
+        categories_per_finding=categories,
+        tone_applied_per_finding=tone_flags,
+        rejection_predictor_enabled=getattr(project_config, "rejection_predictor_enabled", False),
     )
     return extra_drafts + llm_drafts

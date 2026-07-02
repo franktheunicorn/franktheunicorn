@@ -34,7 +34,9 @@ def extract_ticket_ids(text: str, project_prefix: str = "") -> list[str]:
     """
     matches = TICKET_ID_PATTERN.findall(text)
     if project_prefix:
-        prefix = project_prefix.upper()
+        # Match the full project key — a bare startswith("SPARK") would also
+        # accept SPARKR-12 and any other project sharing the prefix.
+        prefix = project_prefix.upper() + "-"
         matches = [m for m in matches if m.startswith(prefix)]
     # Deduplicate while preserving order.
     seen: set[str] = set()
@@ -126,6 +128,12 @@ class JiraFetcher(DataFetcher[JiraTicketResult]):
             # Remove "[TICKET-ID] " prefix from title.
             if summary.startswith(f"[{ticket_id}]"):
                 summary = summary[len(f"[{ticket_id}]") :].strip()
+            # <title>-derived summaries carry the site suffix — strip it so
+            # the scrape path matches the API path's clean summary.
+            for suffix in (" - ASF JIRA", " - JIRA"):
+                if summary.endswith(suffix):
+                    summary = summary[: -len(suffix)].strip()
+                    break
 
         description = ""
         desc_el = soup.find("div", id="description-val") or soup.find(

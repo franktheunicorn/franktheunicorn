@@ -79,10 +79,13 @@ class GitHubPoster:
         docs); IDs are matched deterministically by correlation key.
         """
         if drafts is None:
+            # Edited drafts are postable too — the operator's rewrite is the
+            # strongest approval signal (``_format_comment_body`` prefers
+            # ``edited_body``); without this they'd be stranded unpostable.
             drafts = list(
                 ReviewDraft.objects.filter(
                     pull_request=pr,
-                    status="accepted",
+                    status__in=["accepted", "edited"],
                 ).order_by("file_path", "line_number")
             )
 

@@ -117,7 +117,12 @@ def _extract_body(msg: Message) -> str:
     payload = msg.get_payload(decode=True)
     if isinstance(payload, bytes):
         charset = msg.get_content_charset() or "utf-8"
-        return payload.decode(charset, errors="replace")
+        try:
+            return payload.decode(charset, errors="replace")
+        except LookupError:
+            # errors="replace" doesn't guard against an unknown charset
+            # *name* — decode raises LookupError before error handling.
+            return payload.decode("latin-1", errors="replace")
     return str(payload) if payload else ""
 
 
@@ -129,10 +134,17 @@ def _strip_html(html: str) -> str:
 
 
 def _parse_date(date_str: str) -> datetime | None:
-    """Parse an email date header into a datetime."""
+    """Parse an email date header into a datetime.
+
+    Returns None for malformed headers — a report with a bad Date: must
+    still be ingested, not error out of the pipeline.
+    """
     if not date_str:
         return None
-    parsed = email.utils.parsedate_to_datetime(date_str)
+    try:
+        parsed = email.utils.parsedate_to_datetime(date_str)
+    except ValueError:
+        return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
     return parsed

@@ -59,9 +59,11 @@ class PerplexityFetcher:
         if cached is not None:
             return self._from_cache_dict(cached.data, query, mode)
 
+        had_errors = False
         if mode == "both":
             general = self._query_api(api_key, query, "general", timeout_seconds)
             technical = self._query_api(api_key, query, "technical", timeout_seconds)
+            had_errors = general is None or technical is None
             content = ""
             citations: list[str] = []
             if general:
@@ -82,6 +84,7 @@ class PerplexityFetcher:
             citations = deduped
         else:
             raw = self._query_api(api_key, query, mode, timeout_seconds)
+            had_errors = raw is None
             content = raw.get("content", "") if raw else ""
             citations = raw.get("citations", []) if raw else []
 
@@ -91,7 +94,10 @@ class PerplexityFetcher:
             query=query,
             mode=mode,
         )
-        self._cache.put(query, mode, data=result.to_cache_dict())
+        # Don't cache emptiness caused by API failures — a transient outage
+        # would otherwise blank this query's context for the whole TTL.
+        if content or not had_errors:
+            self._cache.put(query, mode, data=result.to_cache_dict())
         return result
 
     def _query_api(

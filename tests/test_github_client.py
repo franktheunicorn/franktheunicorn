@@ -132,7 +132,7 @@ class TestListPullRequestsAuthFallback:
     ) -> None:
         html = (_FIXTURES / "pulls_listing_scrape.html").read_text()
         httpx_mock.add_response(
-            url="https://api.github.test/repos/apache/spark/pulls?state=open&per_page=50",
+            url="https://api.github.test/repos/apache/spark/pulls?state=open&per_page=100&page=1",
             status_code=401,
         )
         httpx_mock.add_response(
@@ -152,7 +152,7 @@ class TestListPullRequestsAuthFallback:
     def test_401_returns_scraped_prs(self, httpx_mock: HTTPXMock, client: GitHubClient) -> None:
         html = (_FIXTURES / "pulls_listing_scrape.html").read_text()
         httpx_mock.add_response(
-            url="https://api.github.test/repos/apache/spark/pulls?state=open&per_page=50",
+            url="https://api.github.test/repos/apache/spark/pulls?state=open&per_page=100&page=1",
             status_code=401,
         )
         httpx_mock.add_response(
@@ -172,7 +172,7 @@ class TestListPullRequestsAuthFallback:
         self, httpx_mock: HTTPXMock, client: GitHubClient
     ) -> None:
         httpx_mock.add_response(
-            url="https://api.github.test/repos/apache/spark/pulls?state=open&per_page=50",
+            url="https://api.github.test/repos/apache/spark/pulls?state=open&per_page=100&page=1",
             status_code=401,
         )
         httpx_mock.add_response(
@@ -187,7 +187,7 @@ class TestListPullRequestsAuthFallback:
     ) -> None:
         html = (_FIXTURES / "pulls_listing_scrape.html").read_text()
         httpx_mock.add_response(
-            url="https://api.github.test/repos/apache/spark/pulls?state=open&per_page=50",
+            url="https://api.github.test/repos/apache/spark/pulls?state=open&per_page=100&page=1",
             status_code=403,
             headers={"X-OAuth-Scopes": "read:user"},
         )
@@ -212,7 +212,7 @@ class TestListPullRequestsAuthFallback:
     ) -> None:
         html = (_FIXTURES / "pulls_listing_scrape.html").read_text()
         httpx_mock.add_response(
-            url="https://api.github.test/repos/apache/spark/pulls?state=open&per_page=50",
+            url="https://api.github.test/repos/apache/spark/pulls?state=open&per_page=100&page=1",
             status_code=403,
         )
         httpx_mock.add_response(

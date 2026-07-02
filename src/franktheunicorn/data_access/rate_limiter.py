@@ -49,9 +49,11 @@ class GitHubRateLimiter:
         self._limiter = Limiter(bucket)
 
     def acquire(self) -> None:
-        """Block until a request slot is available.
+        """Wait briefly for a request slot; never raises.
 
-        Raises ``BucketFullException`` if the wait would exceed max_delay.
+        A full local bucket degrades to a short sleep rather than erroring
+        the fetch — the adaptive header-based check (``is_rate_limited``)
+        is the authoritative brake; this bucket just paces bursts.
         """
         if self.is_rate_limited():
             wait = self._seconds_until_reset()
@@ -59,7 +61,11 @@ class GitHubRateLimiter:
                 logger.info("Rate-limited by GitHub headers, waiting %.1fs", wait)
                 time.sleep(min(wait, 30.0))
 
-        self._limiter.try_acquire("github")
+        try:
+            self._limiter.try_acquire("github")
+        except Exception:
+            logger.debug("Local rate bucket full; pacing with a short sleep")
+            time.sleep(1.0)
 
     def update_from_headers(self, headers: httpx.Headers) -> None:
         """Read GitHub rate-limit headers from a response and adapt."""

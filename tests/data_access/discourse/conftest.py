@@ -8,7 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from franktheunicorn.data_access.discourse import fetcher as discourse_fetcher_mod
+from franktheunicorn.data_access.cache import FileCache
 from franktheunicorn.data_access.discourse.fetcher import DiscourseFetcher
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -31,12 +31,9 @@ def http_client() -> httpx.Client:
     client.close()
 
 
-@pytest.fixture(autouse=True)
-def _clear_discourse_cache() -> None:
-    """Clear the module-level cache before each test."""
-    discourse_fetcher_mod._cache.clear()
-
-
 @pytest.fixture
-def discourse_fetcher(http_client: httpx.Client) -> DiscourseFetcher:
-    return DiscourseFetcher(client=http_client)
+def discourse_fetcher(http_client: httpx.Client, tmp_path: Path) -> DiscourseFetcher:
+    # Inject a tmp-scoped cache — the old module-singleton cache made tests
+    # read and delete files under the operator's real data/cache directory.
+    cache = FileCache("discourse", cache_dir=tmp_path)
+    return DiscourseFetcher(client=http_client, cache=cache)

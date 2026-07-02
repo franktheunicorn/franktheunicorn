@@ -56,9 +56,15 @@ T = TypeVar("T", bound=FetchResult)
 
 
 def get_login(obj: dict[str, Any]) -> str:
-    """Extract ``user.login`` from a GitHub API JSON object."""
+    """Extract ``user.login`` from a GitHub API JSON object.
+
+    GitHub sends ``"user": null`` for deleted/ghost accounts — return ""
+    rather than the string "None" so author fields stay empty.
+    """
     user = obj.get("user", {})
-    return user.get("login", "") if isinstance(user, dict) else str(user)
+    if isinstance(user, dict):
+        return str(user.get("login", "") or "")
+    return str(user) if user else ""
 
 
 class DataFetcher(ABC, Generic[T]):  # noqa: UP046
@@ -74,13 +80,24 @@ class DataFetcher(ABC, Generic[T]):  # noqa: UP046
         self._rate_limiter = rate_limiter
 
     def fetch(self, *args: object, **kwargs: object) -> T:
-        """Try API path first; fall back to scrape on rate-limit/server errors."""
+        """Try API path first; fall back to scrape on rate-limit/server errors.
+
+        ``NotFoundError`` from the API path also falls through — "the API
+        can't serve this" (e.g. an archive URL the API doesn't understand)
+        is exactly what the scrape path exists for; a genuine 404 will then
+        surface from the scrape attempt instead.
+        """
         try:
             return self.fetch_via_api(*args, **kwargs)
         except RateLimitError:
             logger.info("%s: API rate-limited, falling back to scrape", type(self).__name__)
+        except NotFoundError:
+            logger.info("%s: API path not found, falling back to scrape", type(self).__name__)
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code in (403, 429, 500, 502, 503):
+            # Redirects (301/302/307/308) surface here when the shared client
+            # doesn't follow them (e.g. a renamed repo) — the scrape path sets
+            # follow_redirects=True, so fall through rather than fail the PR.
+            if exc.response.status_code in (301, 302, 307, 308, 403, 429, 500, 502, 503):
                 logger.info(
                     "%s: API returned %s, falling back to scrape",
                     type(self).__name__,
@@ -100,9 +117,9 @@ class DataFetcher(ABC, Generic[T]):  # noqa: UP046
 
     # -- Shared helpers for subclasses --
 
-    def _scrape_get(self, url: str) -> httpx.Response:
+    def _scrape_get(self, url: str, **kwargs: object) -> httpx.Response:
         """GET for scrape path with 404 handling."""
-        response = self._client.get(url, follow_redirects=True)
+        response = self._client.get(url, follow_redirects=True, **kwargs)  # type: ignore[arg-type]
         if response.status_code == 404:
             raise NotFoundError(f"Not found: {url}", method=FetchMethod.SCRAPE, status_code=404)
         response.raise_for_status()

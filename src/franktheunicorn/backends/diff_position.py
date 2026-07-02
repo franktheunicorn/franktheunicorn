@@ -1,14 +1,17 @@
 """
 Translate file/line/side coordinates into a positional offset within a
-unified diff, as required by the Gitea/Forgejo review API and (for the
-historical-position form) GitHub.
+unified diff (the historical GitHub Reviews API "position" form).
 
 The "position" is 1-based, counted from the line immediately after the
 first ``@@`` hunk header for the target file. It increments for every
 subsequent line within that file's hunks (including subsequent ``@@``
 headers, blank context lines, and ``+``/``-`` lines) until the start of
-the next file. This matches the original GitHub Reviews API "position"
-semantics, which Gitea adopted.
+the next file.
+
+Note: Gitea/Forgejo do NOT use this offset — their review API's
+``new_position``/``old_position`` fields take plain file line numbers
+(``CreateCodeComment``'s signed line). The Gitea client uses this
+translation only to verify a target line exists in the diff.
 """
 
 from __future__ import annotations

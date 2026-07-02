@@ -40,6 +40,10 @@
     }
 
     document.addEventListener("keydown", function(e) {
+        // Don't hijack browser/OS chords (Cmd+S, Ctrl+R, Ctrl+A, ...) —
+        // these must never trigger dashboard mutations.
+        if (e.ctrlKey || e.metaKey || e.altKey) return;
+
         // Don't intercept when typing in inputs/textareas
         var tag = e.target.tagName.toLowerCase();
         if (tag === "input" || tag === "textarea" || tag === "select") return;
@@ -74,24 +78,33 @@
                 window.history.back();
                 break;
             case "s":
-                var postBtn = document.querySelector(".action-btn.post");
+                // Only the PR detail page's post button — a class selector
+                // would match the first .action-btn.post anywhere (e.g. the
+                // security page's "Run LLM Triage").
+                var postBtn = document.getElementById("post-review-btn");
                 if (postBtn) postBtn.click();
                 break;
             case "A":
-                // Approve all nits
+                // Approve all nit-severity findings. Match on the severity
+                // data attribute — substring-matching textContent approved
+                // any finding whose body contained "nit" ("unit", "initialize",
+                // "monitoring", ...). Skip auto-suppressed items.
                 var items = getDraftItems();
                 items.forEach(function(item) {
-                    var severity = item.textContent;
-                    if (severity && severity.indexOf("nit") !== -1) {
-                        var btn = item.querySelector(".action-btn.approve");
-                        if (btn) btn.click();
-                    }
+                    if (item.dataset.severity !== "nit") return;
+                    if (item.closest("[data-suppressed-section]")) return;
+                    var btn = item.querySelector(".action-btn.approve");
+                    if (btn) btn.click();
                 });
                 break;
             case "?":
                 var help = document.getElementById("shortcut-help");
                 if (help) {
-                    help.style.display = help.style.display === "none" ? "block" : "none";
+                    // Computed style, not el.style: the initial display:none
+                    // comes from the stylesheet, so el.style.display is ""
+                    // and the first toggle would do nothing.
+                    var visible = window.getComputedStyle(help).display !== "none";
+                    help.style.display = visible ? "none" : "block";
                 }
                 break;
         }

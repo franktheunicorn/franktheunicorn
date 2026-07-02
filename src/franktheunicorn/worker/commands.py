@@ -53,11 +53,33 @@ def process_pending_commands(operator_config: OperatorConfig) -> int:
             logger.exception("WorkerCommand #%d (%s) failed", cmd.pk, cmd.command)
             cmd.status = "failed"
             cmd.error = f"{type(exc).__name__}: {exc}"[:5000]
+        except BaseException:
+            # SIGTERM arrives as KeyboardInterrupt (see runner). Without this
+            # the finally below would persist status="running" forever.
+            cmd.status = "failed"
+            cmd.error = "Interrupted by worker shutdown"
+            raise
         finally:
             cmd.finished_at = timezone.now()
             cmd.save(update_fields=["status", "error", "log", "finished_at"])
             processed += 1
     return processed
+
+
+def requeue_interrupted_commands() -> int:
+    """Reset commands stranded in ``running`` by a dead worker back to pending.
+
+    Called once at worker startup, *after* the single-instance flock is held —
+    at that point no other worker can legitimately own a running command, so
+    anything still marked ``running`` was orphaned by a crash/kill and would
+    otherwise stay in-flight forever (the worker is required to be safe to
+    kill and restart).
+    """
+    stale = WorkerCommand.objects.filter(status="running")
+    count = stale.update(status="pending", started_at=None)
+    if count:
+        logger.info("Requeued %d WorkerCommand row(s) orphaned by a previous worker.", count)
+    return count
 
 
 def _claim_command(cmd_id: int) -> WorkerCommand | None:
@@ -173,8 +195,20 @@ def _run_agents(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
         msg = f"No project config for {pr.project.full_name}"
         raise ValueError(msg)
 
+    # Pass the local clone like the scheduled path does — without it,
+    # blame/repo context and local-mode CLI tools are silently skipped and
+    # "Force Run Agents" produces a weaker review than the poll cycle.
+    repo_path = _resolve_repo_path(pr.project.owner, pr.project.repo)
+
     log_lines: list[str] = []
-    drafts = process_pr(pr, project_config, operator_config, force=True, log_lines=log_lines)
+    drafts = process_pr(
+        pr,
+        project_config,
+        operator_config,
+        repo_path=repo_path,
+        force=True,
+        log_lines=log_lines,
+    )
     summary = f"Generated {len(drafts)} finding(s)"
     if log_lines:
         joined = "\n".join(log_lines[-50:])  # cap log size

@@ -50,7 +50,6 @@ class Command(BaseCommand):
         from franktheunicorn.config.loader import load_operator_config
         from franktheunicorn.fine_tuning.axolotl_config import generate_axolotl_config
         from franktheunicorn.fine_tuning.data_export import export_training_data
-        from franktheunicorn.fine_tuning.evaluator import evaluate_model, save_eval_results
         from franktheunicorn.fine_tuning.trainer import run_fine_tune
 
         project_name = str(options["project"])
@@ -142,32 +141,18 @@ class Command(BaseCommand):
         if training_result.model_dir:
             self.stdout.write(f"  Version: v{training_result.version}")
 
-        # Step 4: Run evaluation.
+        # Step 4: Evaluation. Real inference isn't wired yet — scoring the
+        # gold data against itself would trivially report "PASSED" for any
+        # model, so be explicit that no evaluation ran rather than misleading
+        # the operator with perfect placeholder metrics.
         eval_path = dataset_dir / "eval.jsonl"
         if eval_path.exists() and training_result.model_dir:
-            import json
-
-            self.stdout.write("Running evaluation...")
-            eval_data = [json.loads(line) for line in eval_path.read_text().splitlines() if line]
-            # In eval-only or post-training mode, use eval data as both
-            # predictions and gold (placeholder until real inference is wired).
-            predictions = eval_data
-            eval_result = evaluate_model(predictions, eval_data)
-            save_eval_results(eval_result, training_result.model_dir)
-
-            training_result.eval_passed = eval_result.passed
-            training_result.eval_metrics = {
-                "category_accuracy": eval_result.category_accuracy,
-                "rouge_l": eval_result.rouge_l,
-                "tone_score": eval_result.tone_score,
-                "fp_rate": eval_result.fp_rate,
-            }
-
-            if eval_result.passed:
-                self.stdout.write(self.style.SUCCESS("Evaluation PASSED"))
-            else:
-                self.stdout.write(
-                    self.style.WARNING(f"Evaluation FAILED: {'; '.join(eval_result.failures)}")
+            self.stdout.write(
+                self.style.WARNING(
+                    "Evaluation skipped — model inference is not wired up yet. "
+                    "Run predictions through franktheunicorn.fine_tuning.evaluator "
+                    "manually once an inference path exists."
                 )
+            )
         elif not eval_path.exists():
             self.stdout.write("No eval data found — skipping evaluation.")

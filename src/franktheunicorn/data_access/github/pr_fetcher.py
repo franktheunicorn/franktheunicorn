@@ -1,4 +1,12 @@
-"""Dual-path fetcher for pull request summaries."""
+"""Dual-path fetcher for pull request summaries.
+
+NOT WIRED into the live pipeline (like ``review/auto_poster.py``): the
+worker's PR ingestion goes through ``backends/poller.py`` + the forge
+clients. Kept as the designed data_access-layer implementation (design doc
+§7.3). Before wiring it in, fix the known gaps: merged-PR state parity
+(API reports "closed" where scrape reports "merged"), and pagination for
+``/files`` beyond 100 entries.
+"""
 
 from __future__ import annotations
 

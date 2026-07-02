@@ -84,8 +84,45 @@ class TestFetchMailingListImap:
         assert "SPARK-123" in thread.pr_references
         assert thread.blame_hit is True
         assert thread.fetched_via == FetchMethod.API
-        conn.select.assert_called_once_with("INBOX")
+        conn.select.assert_called_once_with("INBOX", readonly=True)
+        # Multi-word-safe: the SEARCH criterion must be RFC 3501 quoted.
+        conn.search.assert_called_once_with(None, "SUBJECT", '"rebase"')
         conn.logout.assert_called_once()
+
+    @patch(_CONNECT)
+    def test_multiword_query_is_quoted(self, mock_connect: MagicMock) -> None:
+        conn = MagicMock()
+        mock_connect.return_value = conn
+        conn.search.return_value = ("OK", [b""])
+
+        fetch_mailing_list_imap(_config(), 'Fix "executor" memory leak')
+        conn.search.assert_called_once_with(None, "SUBJECT", '"Fix \\"executor\\" memory leak"')
+
+    @patch(_CONNECT)
+    def test_non_ascii_query_returns_empty(self, mock_connect: MagicMock) -> None:
+        conn = MagicMock()
+        mock_connect.return_value = conn
+
+        result = fetch_mailing_list_imap(_config(), "café résumé")
+        assert result.threads == []
+        conn.search.assert_not_called()
+
+    @patch(_CONNECT)
+    def test_keeps_newest_matches_when_over_cap(self, mock_connect: MagicMock) -> None:
+        """SEARCH ids ascend oldest→newest; the cap must keep the tail."""
+        from franktheunicorn.data_access.mailing_list import imap_fetcher
+
+        ids = " ".join(str(i) for i in range(1, 30)).encode()
+        conn = MagicMock()
+        mock_connect.return_value = conn
+        conn.search.return_value = ("OK", [ids])
+        conn.fetch.return_value = ("NO", [None])  # content is irrelevant here
+
+        fetch_mailing_list_imap(_config(), "rebase")
+        fetched_ids = [c.args[0] for c in conn.fetch.call_args_list]
+        assert len(fetched_ids) == imap_fetcher.MAX_MESSAGES
+        assert fetched_ids[0] == b"10"  # 29 ids, keep newest 20 → start at 10
+        assert fetched_ids[-1] == b"29"
 
     @patch(_CONNECT)
     def test_filters_non_matching_subject(self, mock_connect: MagicMock) -> None:
@@ -176,7 +213,7 @@ class TestConnect:
 
         fetch_mailing_list_imap(_config(use_ssl=True), "rebase")
 
-        mock_ssl.assert_called_once_with("imap.example.com", 993)
+        mock_ssl.assert_called_once_with("imap.example.com", 993, timeout=30.0)
         conn.login.assert_called_once_with("bot@example.com", "secret")
 
     @patch(_IMAP_PLAIN)
@@ -186,5 +223,5 @@ class TestConnect:
 
         fetch_mailing_list_imap(_config(use_ssl=False), "rebase")
 
-        mock_plain.assert_called_once_with("imap.example.com", 993)
+        mock_plain.assert_called_once_with("imap.example.com", 993, timeout=30.0)
         conn.login.assert_called_once_with("bot@example.com", "secret")

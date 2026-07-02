@@ -109,7 +109,7 @@ class TestProcessPendingCommands:
         )
         mock_pc = MagicMock()
 
-        def fake_process_pr(pr, project_config, opc, force, log_lines):
+        def fake_process_pr(pr, project_config, opc, repo_path=None, *, force, log_lines):
             log_lines.append("ran agent A")
             return [MagicMock(), MagicMock(), MagicMock()]
 
@@ -177,8 +177,9 @@ class TestProcessPendingCommands:
 
     def test_already_running_command_is_skipped(self, db_pr: PullRequest) -> None:
         operator_config = MagicMock()
-        # A command already in flight (perhaps from a previous worker that
-        # crashed mid-run) must not be re-claimed by select_for_update.
+        # A command already in flight must not be re-claimed mid-run by
+        # select_for_update. (Rows orphaned by a *dead* worker are recovered
+        # separately: requeue_interrupted_commands runs at worker startup.)
         cmd = WorkerCommand.objects.create(
             command="run_dual_tests",
             pull_request=db_pr,
@@ -189,6 +190,55 @@ class TestProcessPendingCommands:
             process_pending_commands(operator_config)
 
         mock_dispatch.assert_not_called()
+
+    def test_requeue_interrupted_commands(self, db_pr: PullRequest) -> None:
+        from franktheunicorn.worker.commands import requeue_interrupted_commands
+
+        orphaned = WorkerCommand.objects.create(
+            command="run_dual_tests",
+            pull_request=db_pr,
+        )
+        WorkerCommand.objects.filter(pk=orphaned.pk).update(status="running")
+        done = WorkerCommand.objects.create(
+            command="run_dual_tests",
+            pull_request=db_pr,
+        )
+        WorkerCommand.objects.filter(pk=done.pk).update(status="completed")
+
+        count = requeue_interrupted_commands()
+
+        assert count == 1
+        orphaned.refresh_from_db()
+        done.refresh_from_db()
+        assert orphaned.status == "pending"
+        assert orphaned.started_at is None
+        assert done.status == "completed"
+
+    def test_keyboard_interrupt_marks_command_failed(self, db_pr: PullRequest) -> None:
+        """SIGTERM (KeyboardInterrupt) mid-dispatch must not strand the row
+        in status="running" — the worker converts SIGTERM to
+        KeyboardInterrupt, which except Exception does not catch."""
+        import pytest
+
+        operator_config = MagicMock()
+        cmd = WorkerCommand.objects.create(
+            command="run_dual_tests",
+            pull_request=db_pr,
+        )
+
+        with (
+            patch(
+                "franktheunicorn.worker.commands._dispatch",
+                side_effect=KeyboardInterrupt,
+            ),
+            pytest.raises(KeyboardInterrupt),
+        ):
+            process_pending_commands(operator_config)
+
+        cmd.refresh_from_db()
+        assert cmd.status == "failed"
+        assert "Interrupted" in cmd.error
+        assert cmd.finished_at is not None
 
     def test_processes_in_creation_order(self, db_pr: PullRequest) -> None:
         operator_config = MagicMock()

@@ -1,4 +1,11 @@
-"""Dual-path fetcher for pull request reviews."""
+"""Dual-path fetcher for pull request reviews.
+
+NOT WIRED into the live pipeline (like ``review/auto_poster.py``): review
+data on the live path comes from the forge clients. Kept as the designed
+data_access-layer implementation (design doc §7.3). Before wiring it in,
+add pagination (``/reviews`` truncates at GitHub's default 30) and fill
+the scrape path's missing fields (review ids, inline comments).
+"""
 
 from __future__ import annotations
 

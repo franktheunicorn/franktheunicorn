@@ -14,14 +14,14 @@ os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'franktheunicorn.settings')
 django.setup()
 
 from django.conf import settings
+from franktheunicorn.backends.mock import MockForgeClient
+from franktheunicorn.backends.poller import poll_project
 from franktheunicorn.config.loader import load_operator_config, load_project_configs
-from franktheunicorn.github.mock import MockGitHubClient
-from franktheunicorn.github.poller import poll_project
 from franktheunicorn.review.drafter import draft_review
 
 operator = load_operator_config(settings.FRANK_OPERATOR_CONFIG)
 projects = load_project_configs(settings.FRANK_PROJECTS_DIR)
-client = MockGitHubClient(settings.FRANK_FIXTURES_DIR)
+client = MockForgeClient(settings.FRANK_FIXTURES_DIR)
 
 for pc in projects:
     if pc.enabled:

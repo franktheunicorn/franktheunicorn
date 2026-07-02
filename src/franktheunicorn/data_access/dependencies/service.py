@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
+from franktheunicorn.data_access.base import RateLimitError
 from franktheunicorn.data_access.dependencies.changelog_fetcher import (
     ChangelogFetcher,
     PythonChangelogFetcher,
@@ -75,8 +76,18 @@ def detect_and_fetch_changelogs(
         ).exists():
             continue
 
-        # Fetch changelog
-        entry = _fetch_changelog_for_transition(transition, client, rate_limiter)
+        # Fetch changelog. On rate limit, defer the remaining transitions to
+        # a later cycle rather than persisting permanent "no release found"
+        # rows produced by an exhausted budget.
+        try:
+            entry = _fetch_changelog_for_transition(transition, client, rate_limiter)
+        except RateLimitError:
+            logger.info(
+                "GitHub rate-limited while fetching changelogs for PR #%d; "
+                "deferring remaining dependencies.",
+                pr.number,
+            )
+            break
 
         # Persist to DB
         dep_change = DependencyChangeModel.objects.create(
@@ -121,6 +132,8 @@ def _fetch_changelog_for_transition(
 
     try:
         return fetcher.fetch(transition)
+    except RateLimitError:
+        raise  # caller defers remaining transitions to a later cycle
     except Exception:
         logger.exception(
             "Failed to fetch changelog for %s %s→%s",

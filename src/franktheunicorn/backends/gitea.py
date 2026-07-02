@@ -239,6 +239,12 @@ class GiteaClient(ForgeClient):
 def _to_gitea_comment(comment: ReviewComment, diff_text: str) -> dict[str, Any] | None:
     """Convert a normalized ReviewComment to Gitea's wire format.
 
+    Gitea's ``new_position``/``old_position`` fields are *file line numbers*
+    (``CreateCodeComment``'s signed line), NOT GitHub-style diff positions —
+    sending a diff offset attaches the comment to the wrong line. The diff
+    lookup is kept purely as a validity check so comments on lines outside
+    the diff are dropped (Gitea errors on those) rather than misplaced.
+
     Returns ``None`` if the comment has a line number that cannot be
     located in the diff — caller is responsible for logging and dropping.
     """
@@ -252,7 +258,7 @@ def _to_gitea_comment(comment: ReviewComment, diff_text: str) -> dict[str, Any] 
     if position is None:
         return None
     if comment.side == "LEFT":
-        out["old_position"] = position
+        out["old_position"] = target_line
     else:
-        out["new_position"] = position
+        out["new_position"] = target_line
     return out

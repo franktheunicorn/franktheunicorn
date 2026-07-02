@@ -71,17 +71,24 @@ def _is_code_file(path: str) -> bool:
     return suffix not in SKIP_EXTENSIONS
 
 
-def _parse_porcelain_blame(output: str) -> dict[int, str]:
-    """Parse `git blame --porcelain` output into {line_number: author} mapping.
+def _parse_porcelain_blame(output: str) -> dict[int, set[str]]:
+    """Parse `git blame --porcelain` output into {line_number: identities}.
+
+    Each line maps to the set of identity strings for its commit author:
+    display name, email, and the email local-part. Blame data is matched
+    against the operator's *forge login* downstream, and git display names
+    ("Holden Karau") rarely equal logins ("holdenk") — the email local-part
+    usually does, so carrying all three makes the flagship blame signal
+    actually fire in production.
 
     Porcelain format: each blame entry starts with a header line
     ``<sha> <orig_line> <final_line> [<num_lines>]``. The first time a commit
-    appears, full metadata follows (including ``author <name>``). Subsequent
-    appearances only show the header + the source line. We track authors by
-    commit SHA to handle this.
+    appears, full metadata follows (including ``author <name>`` and
+    ``author-mail <addr>``). Subsequent appearances only show the header +
+    the source line. We track identities by commit SHA to handle this.
     """
-    authors: dict[int, str] = {}
-    commit_authors: dict[str, str] = {}
+    identities: dict[int, set[str]] = {}
+    commit_identities: dict[str, set[str]] = {}
     current_sha = ""
     current_line = 0
 
@@ -92,17 +99,25 @@ def _parse_porcelain_blame(output: str) -> dict[int, str]:
             current_line = int(match.group(2))
         elif line.startswith("author "):
             author_name = line[7:].strip()
-            if current_sha:
-                commit_authors[current_sha] = author_name
+            if current_sha and author_name:
+                commit_identities.setdefault(current_sha, set()).add(author_name)
+        elif line.startswith("author-mail "):
+            email = line[len("author-mail ") :].strip().strip("<>")
+            if current_sha and email:
+                idents = commit_identities.setdefault(current_sha, set())
+                idents.add(email)
+                local_part = email.split("@", 1)[0]
+                if local_part:
+                    idents.add(local_part)
         elif line.startswith("\t"):
-            # Source line — associate with the current commit's author.
+            # Source line — associate with the current commit's identities.
             if current_line > 0 and current_sha:
-                author = commit_authors.get(current_sha, "")
-                if author:
-                    authors[current_line] = author
+                idents = commit_identities.get(current_sha, set())
+                if idents:
+                    identities[current_line] = idents
             current_line = 0
 
-    return authors
+    return identities
 
 
 def _parse_diff_changed_lines(diff_output: str) -> set[int]:
@@ -123,6 +138,25 @@ def _parse_diff_changed_lines(diff_output: str) -> set[int]:
         for line_no in range(start, start + count):
             changed.add(line_no)
     return changed
+
+
+def _get_merge_base(repo_path: Path, base_ref: str, head_ref: str) -> str | None:
+    """Return the merge-base commit of base and head, or None on failure."""
+    try:
+        result = subprocess.run(
+            ["git", "merge-base", base_ref, head_ref],
+            capture_output=True,
+            text=True,
+            cwd=str(repo_path),
+            timeout=15,
+        )
+        if result.returncode != 0:
+            return None
+        sha = result.stdout.strip()
+        return sha or None
+    except Exception:
+        logger.debug("git merge-base failed for %s..%s", base_ref, head_ref, exc_info=True)
+        return None
 
 
 def _get_changed_lines_for_file(
@@ -162,11 +196,11 @@ def _get_changed_lines_for_file(
 
 
 def _classify_authors(
-    blame: dict[int, str],
+    blame: dict[int, set[str]],
     changed_lines: set[int],
     near_window: int = NEAR_LINES_WINDOW,
 ) -> tuple[set[str], set[str]]:
-    """Classify blame authors into direct (changed lines) and near (adjacent).
+    """Classify blame identities into direct (changed lines) and near (adjacent).
 
     Returns (direct_authors, near_only_authors) where near_only excludes
     anyone already in direct_authors.
@@ -182,11 +216,11 @@ def _classify_authors(
     # Remove the changed lines themselves from near — those are "direct".
     near_lines -= changed_lines
 
-    for line_no, author in blame.items():
+    for line_no, idents in blame.items():
         if line_no in changed_lines:
-            direct_authors.add(author)
+            direct_authors.update(idents)
         elif line_no in near_lines:
-            near_authors.add(author)
+            near_authors.update(idents)
 
     # near_only: people near the changes but who didn't author the changed lines.
     near_only = near_authors - direct_authors
@@ -197,8 +231,8 @@ def fetch_blame_for_file(
     repo_path: Path,
     file_path: str,
     base_ref: str = "HEAD",
-) -> dict[int, str] | None:
-    """Run git blame for a single file and return {line: author} mapping.
+) -> dict[int, set[str]] | None:
+    """Run git blame for a single file and return {line: identities} mapping.
 
     Returns None if the file doesn't exist or blame fails.
     """
@@ -261,6 +295,16 @@ def fetch_blame_for_files(
             MAX_BLAME_FILES,
         )
         code_files = code_files[:MAX_BLAME_FILES]
+
+    # Anchor blame and diff at the merge-base: a two-dot diff against the
+    # base *tip* counts base-branch drift since the fork point as "changed
+    # lines", crediting the operator's recent main-branch work to every
+    # stale PR — and old-side line numbers from that diff wouldn't match
+    # the blamed revision anyway.
+    if head_ref:
+        merge_base = _get_merge_base(repo_path, base_ref, head_ref)
+        if merge_base:
+            base_ref = merge_base
 
     results: list[dict[str, object]] = []
 

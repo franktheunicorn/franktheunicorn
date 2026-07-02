@@ -17,37 +17,45 @@ class TestIssueLinkCheckPrompt:
         assert "findings" in system
         assert "file_path" in system  # schema fields present
 
-    def test_system_prompt_includes_github_issue_context(self) -> None:
+    def test_issue_context_in_user_message_not_system_prompt(self) -> None:
+        """Linked-issue text is attacker-controlled (anyone can file an issue),
+        so it must land in the user message under the untrusted header — never
+        interpolated into the system prompt."""
         ctx = make_pr_context(
             linked_issues_context="GitHub Issue #99: Fix login bug\nState: open | Author: bob"
         )
         check = IssueLinkCheck()
-        system, _user = check.build_prompt("diff here", ctx)
-        assert "Fix login bug" in system
-        assert "Linked GitHub issue(s)" in system
+        system, user = check.build_prompt("diff here", ctx)
+        assert "Fix login bug" not in system
+        assert "Fix login bug" in user
+        assert "Linked GitHub issue(s)" in user
+        assert "EXTERNAL CONTEXT" in user
 
-    def test_system_prompt_includes_jira_context(self) -> None:
+    def test_jira_context_in_user_message(self) -> None:
         ctx = make_pr_context(jira_context="SPARK-12345: Improve shuffle performance")
         check = IssueLinkCheck()
-        system, _user = check.build_prompt("diff here", ctx)
-        assert "SPARK-12345" in system
-        assert "Linked JIRA ticket" in system
+        system, user = check.build_prompt("diff here", ctx)
+        assert "SPARK-12345" not in system
+        assert "SPARK-12345" in user
+        assert "Linked JIRA ticket" in user
 
-    def test_system_prompt_includes_both_github_and_jira(self) -> None:
+    def test_both_github_and_jira_in_user_message(self) -> None:
         ctx = make_pr_context(
             linked_issues_context="GitHub Issue #10: Add caching",
             jira_context="SPARK-100: Cache layer",
         )
         check = IssueLinkCheck()
-        system, _user = check.build_prompt("diff here", ctx)
-        assert "Linked GitHub issue(s)" in system
-        assert "Linked JIRA ticket" in system
+        system, user = check.build_prompt("diff here", ctx)
+        assert "Add caching" not in system
+        assert "Cache layer" not in system
+        assert "Linked GitHub issue(s)" in user
+        assert "Linked JIRA ticket" in user
 
-    def test_system_prompt_handles_no_linked_issues(self) -> None:
+    def test_no_linked_issues_noted_in_user_message(self) -> None:
         ctx = make_pr_context(linked_issues_context="", jira_context="")
         check = IssueLinkCheck()
-        system, _user = check.build_prompt("diff here", ctx)
-        assert "No linked issues were found" in system
+        system, user = check.build_prompt("diff here", ctx)
+        assert "No linked issues were found" in user
         assert "empty findings array" in system
 
     def test_user_message_delegates_to_build_user_message(self) -> None:

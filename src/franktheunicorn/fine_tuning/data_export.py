@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -169,8 +170,47 @@ def _build_diff_input(
     return "\n".join(parts)
 
 
+def _voice_record_to_example(record: dict[str, Any], project_name: str) -> dict[str, Any] | None:
+    """Convert a curator record into an instruction-format training example.
+
+    The curator (``curator/dataset.py``) writes raw comment records keyed
+    ``{author, body, diff_context, file_path, pr_title, ...}`` — not the
+    Alpaca ``{instruction, input, output}`` shape this exporter emits. Without
+    this transform every curated comment was silently dropped at merge time.
+    Records already in instruction format pass through unchanged.
+    """
+    if "instruction" in record and ("output" in record or "chosen" in record):
+        return record
+
+    body = str(record.get("body", "") or "")
+    if not body:
+        return None
+
+    structure = classify_comment_structure(body)
+    input_parts: list[str] = []
+    pr_title = str(record.get("pr_title", "") or "")
+    file_path = str(record.get("file_path", "") or "")
+    diff_context = str(record.get("diff_context", "") or "")
+    if pr_title:
+        input_parts.append(f"PR title: {pr_title}")
+    if file_path:
+        input_parts.append(f"File: {file_path}")
+    if diff_context:
+        input_parts.append(f"Diff:\n{diff_context}")
+
+    return {
+        "instruction": (
+            f"You are reviewing a PR to {project_name}. "
+            "Review the following diff and produce review comments in the operator's voice."
+        ),
+        "input": "\n".join(input_parts),
+        "output": body,
+        "weight": STRUCTURE_WEIGHTS.get(structure, 1.0),
+    }
+
+
 def _load_voice_curated(voice_dir: Path, project_name: str) -> list[dict[str, Any]]:
-    """Load voice-curated JSONL for a project if it exists."""
+    """Load voice-curated JSONL for a project, in instruction format."""
     # Try project subdirectory first, then flat file.
     safe_name = project_name.replace("/", "-")
     candidates = [
@@ -182,11 +222,16 @@ def _load_voice_curated(voice_dir: Path, project_name: str) -> list[dict[str, An
             examples = []
             for line in path.read_text().strip().split("\n"):
                 line = line.strip()
-                if line:
-                    try:
-                        examples.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        logger.debug("Skipping invalid JSONL line in %s", path)
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    logger.debug("Skipping invalid JSONL line in %s", path)
+                    continue
+                example = _voice_record_to_example(record, project_name)
+                if example is not None:
+                    examples.append(example)
             logger.info("Loaded %d voice-curated examples from %s", len(examples), path)
             return examples
     return []
@@ -263,6 +308,7 @@ def export_training_data(
 
     # Build training examples from actions.
     examples: list[dict[str, Any]] = []
+    dpo_pairs: list[dict[str, Any]] = []
     seen_finding_ids: set[int] = set()
     structure_counts: dict[str, int] = {}
     skipped = 0
@@ -290,7 +336,11 @@ def export_training_data(
         is_shepherd = action.action_type in SHEPHERD_ACTION_TYPES
 
         if action.action_type in ("edit_draft", "edit_shepherd"):
-            # DPO pair: original is rejected, edited is chosen.
+            # Edited finding: the edited text is an SFT example in the
+            # operator's voice, and the (original → edited) pair goes to the
+            # separate DPO file. DPO rows must NOT land in train.jsonl — the
+            # generated Axolotl config declares the dataset type "alpaca",
+            # which requires an "output" field DPO rows don't have.
             edited_text = draft.edited_body or draft.comment_body
             original_text = draft.comment_body
 
@@ -306,14 +356,23 @@ def export_training_data(
                 example = build_instruction_example(
                     instruction_context=instruction_context,
                     diff_input=diff_input,
-                    output_text="",
+                    output_text=edited_text,
                     weight=weight,
                     finding_id=draft.pk,
-                    is_dpo=True,
-                    chosen=edited_text,
-                    rejected=original_text,
                 )
                 examples.append(example)
+                dpo_pairs.append(
+                    build_instruction_example(
+                        instruction_context=instruction_context,
+                        diff_input=diff_input,
+                        output_text="",
+                        weight=weight,
+                        finding_id=draft.pk,
+                        is_dpo=True,
+                        chosen=edited_text,
+                        rejected=original_text,
+                    )
+                )
             else:
                 # Edit with no actual change — treat as acceptance.
                 structure = (
@@ -383,6 +442,11 @@ def export_training_data(
             error="No training examples generated",
         )
 
+    # Shuffle (seeded, for reproducible exports) before splitting: examples
+    # arrive ordered — actions by created_at, then all voice rows appended —
+    # so an unshuffled 80/20 split puts the voice data entirely in eval.
+    random.Random(1337).shuffle(examples)
+
     # Split train/eval (80/20).
     split_idx = max(1, int(len(examples) * 0.8))
     train_examples = examples[:split_idx]
@@ -401,6 +465,14 @@ def export_training_data(
         for ex in eval_examples:
             f.write(json.dumps(ex) + "\n")
 
+    # DPO preference pairs live in their own file — they are not part of the
+    # alpaca SFT dataset and would be malformed rows there.
+    if dpo_pairs:
+        dpo_path = output_dir / "dpo.jsonl"
+        with open(dpo_path, "w") as f:
+            for ex in dpo_pairs:
+                f.write(json.dumps(ex) + "\n")
+
     metadata = {
         "project": project.full_name,
         "project_id": project_id,
@@ -408,6 +480,7 @@ def export_training_data(
         "total_examples": len(examples),
         "train_count": len(train_examples),
         "eval_count": len(eval_examples),
+        "dpo_count": len(dpo_pairs),
         "skipped_count": skipped,
         "structure_counts": structure_counts,
         "voice_curated_count": len(voice_examples),

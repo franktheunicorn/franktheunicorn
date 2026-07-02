@@ -430,17 +430,11 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
     personality_name = operator_config.personality
     project_config = get_project_config(pr.project.full_name)
 
-    # v1.5: Separate CodeRabbit-sourced findings.
-    coderabbit_drafts = [d for d in drafts if any("coderabbit" in s for s in (d.sources or []))]
-    agent_drafts = [d for d in drafts if not any("coderabbit" in s for s in (d.sources or []))]
-
-    # v1.5: External context (JIRA, community, Sentry).
+    # v1.5: External context (JIRA).
     jira_context = pr.jira_cache if pr.jira_cache else None
     jira_server = (
         project_config.jira.server if project_config and project_config.jira.server else ""
     )
-    community_context = pr.community_context_cache if pr.community_context_cache else None
-    sentry_context = pr.sentry_context_cache if pr.sentry_context_cache else None
 
     # Agent run summary: which agents ran, their stats, and which didn't.
     agent_run_summary = build_agent_run_summary(pr, operator_config, project_config)
@@ -454,8 +448,6 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
             "pr": pr,
             "drafts": drafts,
             "suppressed_drafts": suppressed_drafts,
-            "agent_drafts": agent_drafts,
-            "coderabbit_drafts": coderabbit_drafts,
             "agent_vibes": agent_vibes,
             "dep_changes": dep_changes,
             "test_runs": test_runs,
@@ -463,8 +455,6 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
             "personality_name": personality_name,
             "jira_context": jira_context,
             "jira_server": jira_server,
-            "community_context": community_context,
-            "sentry_context": sentry_context,
             "agent_run_summary": agent_run_summary,
             "prev_pr": prev_pr,
             "next_pr": next_pr,
@@ -545,48 +535,86 @@ def edit_draft(request: HttpRequest, draft_id: int) -> HttpResponse:
     return render(request, "dashboard/_draft_item.html", {"draft": draft})
 
 
-@require_POST
-def recall_draft(request: HttpRequest, draft_id: int) -> HttpResponse:
-    """Recall (delete) a posted comment from GitHub within the recall window."""
-    draft = get_object_or_404(ReviewDraft, pk=draft_id)
-    if draft.status != "posted" or not draft.forge_comment_id:
-        return HttpResponse(
-            '<div class="recall-result" style="color: #c00;">Cannot recall: not posted.</div>'
-        )
+def _make_posting_client(pr: PullRequest) -> object | None:
+    """Build a forge client for the PR's project (GitHub, Gitea, GitLab).
+
+    Mirrors ``poller.ingest_single_pr``'s resolution: the project's YAML
+    ``forge`` picks the registry entry. Hardcoding GitHub here posted
+    reviews for Gitea/GitLab projects to api.github.com — at best a 404, at
+    worst a same-named public GitHub repo. Falls back to a plain GitHub
+    client when config resolution fails (e.g. tests with no YAML on disk).
+    """
     try:
+        from franktheunicorn.backends import make_client
+        from franktheunicorn.config.loader import get_operator_config, get_project_config
+        from franktheunicorn.config.resolver import get_forge_entry
+
+        operator_config = get_operator_config()
+        project_config = get_project_config(pr.project.full_name)
+        forge_name = getattr(project_config, "forge", None) or "github"
+        entry = get_forge_entry(operator_config, forge_name)
+        return make_client(entry)
+    except Exception:
+        logger.debug(
+            "Forge resolution failed for %s; falling back to GitHub client.",
+            pr.project.full_name,
+            exc_info=True,
+        )
         from django.conf import settings
 
         from franktheunicorn.backends.github import GitHubClient
-        from franktheunicorn.backends.poster import GitHubPoster
 
         token = getattr(settings, "FRANK_GITHUB_TOKEN", "")
         if not token:
-            return HttpResponse(
-                '<div class="recall-result" style="color: #c00;">Cannot recall: no token.</div>'
-            )
-        client = GitHubClient(token=token)
+            return None
+        return GitHubClient(token=token)
+
+
+@require_POST
+def recall_draft(request: HttpRequest, draft_id: int) -> HttpResponse:
+    """Recall (delete) a posted comment from the forge within the recall window."""
+    draft = get_object_or_404(
+        ReviewDraft.objects.select_related("pull_request__project"), pk=draft_id
+    )
+
+    def _item_with_error(message: str) -> HttpResponse:
+        # Re-render the full draft item — returning a bare error div would
+        # replace (and erase) the finding via the outerHTML swap.
+        return render(
+            request,
+            "dashboard/_draft_item.html",
+            {"draft": draft, "recall_error": message},
+        )
+
+    if draft.status != "posted" or not draft.forge_comment_id:
+        return _item_with_error("Cannot recall: not posted.")
+    try:
+        from franktheunicorn.backends.poster import GitHubPoster
+
+        client = _make_posting_client(draft.pull_request)
+        if client is None:
+            return _item_with_error("Cannot recall: no forge client/token configured.")
         try:
-            poster = GitHubPoster(client)
+            poster = GitHubPoster(client)  # type: ignore[arg-type]
             success = poster.recall_comment(draft)
         finally:
-            client.close()
+            client.close()  # type: ignore[attr-defined]
         if success:
             return render(request, "dashboard/_draft_item.html", {"draft": draft})
-        return HttpResponse(
-            '<div class="recall-result" style="color: #c00;">'
-            "Recall failed (outside 24h window or API error).</div>"
-        )
+        return _item_with_error("Recall failed (outside 24h window or API error).")
     except Exception:
         logger.exception("Failed to recall draft %d", draft.pk)
-        return HttpResponse('<div class="recall-result" style="color: #c00;">Recall failed.</div>')
+        return _item_with_error("Recall failed.")
 
 
 @require_POST
 def post_review(request: HttpRequest, pr_id: int) -> HttpResponse:
-    """Post all approved findings for a PR as a single GitHub review."""
-    pr = get_object_or_404(PullRequest, pk=pr_id)
+    """Post approved and edited findings for a PR as a single forge review."""
+    pr = get_object_or_404(PullRequest.objects.select_related("project"), pk=pr_id)
+    # Edited drafts are included: the operator's rewrite is the strongest
+    # approval signal, and the poster prefers edited_body when present.
     approved = list(
-        ReviewDraft.objects.filter(pull_request=pr, status="accepted").order_by(
+        ReviewDraft.objects.filter(pull_request=pr, status__in=["accepted", "edited"]).order_by(
             "file_path", "line_number"
         )
     )
@@ -595,24 +623,20 @@ def post_review(request: HttpRequest, pr_id: int) -> HttpResponse:
         return HttpResponse('<div class="post-result">No approved findings to post.</div>')
 
     try:
-        from django.conf import settings
-
-        from franktheunicorn.backends.github import GitHubClient
         from franktheunicorn.backends.poster import GitHubPoster
 
-        token = getattr(settings, "FRANK_GITHUB_TOKEN", "")
-        if not token:
+        client = _make_posting_client(pr)
+        if client is None:
             return HttpResponse(
                 '<div class="post-result" style="color: #c00;">'
-                "Cannot post: GITHUB_TOKEN not configured.</div>"
+                "Cannot post: no forge client/token configured.</div>"
             )
 
-        client = GitHubClient(token=token)
         try:
-            poster = GitHubPoster(client)
+            poster = GitHubPoster(client)  # type: ignore[arg-type]
             poster.post_review(pr, approved)
         finally:
-            client.close()
+            client.close()  # type: ignore[attr-defined]
 
         return HttpResponse(
             f'<div class="post-result" style="color: #2e7d32;">'
@@ -697,6 +721,10 @@ def send_feedback(request: HttpRequest, pr_id: int) -> HttpResponse:
 def anti_pattern_list(request: HttpRequest) -> HttpResponse:
     """List all anti-patterns with filtering."""
     project_filter = request.GET.get("project")
+    # Ignore malformed filters (?project=abc would 500 in the pk lookup),
+    # matching the index view's treatment of bad query params.
+    if project_filter and not project_filter.isdigit():
+        project_filter = None
     aps = AntiPattern.objects.all()
     if project_filter:
         aps = aps.filter(project__pk=project_filter)
@@ -775,22 +803,9 @@ def stats(request: HttpRequest) -> HttpResponse:
     total_drafts = ReviewDraft.objects.count()
     posted_drafts = ReviewDraft.objects.filter(status="posted").count()
 
-    # Merge queue stats (v2).
-    merge_eligible_count = PullRequest.objects.filter(
-        state="open", merge_queue_eligible=True
-    ).count()
-
     # Rejection predictor stats (v1.75).
     suppressed_count = ReviewDraft.objects.filter(is_auto_suppressed=True).count()
     scored_count = ReviewDraft.objects.filter(rejection_probability__isnull=False).count()
-
-    # Shepherding stats (v2).
-    shepherd_actions = OperatorAction.objects.filter(
-        action_type__in=["accept_shepherd", "reject_shepherd", "edit_shepherd"],
-    )
-    shepherd_total = shepherd_actions.count()
-    shepherd_rejected = shepherd_actions.filter(action_type="reject_shepherd").count()
-    shepherd_rejection_rate = shepherd_rejected / shepherd_total if shepherd_total > 0 else 0.0
 
     return render(
         request,
@@ -805,10 +820,6 @@ def stats(request: HttpRequest) -> HttpResponse:
             "posted_drafts": posted_drafts,
             "suppressed_count": suppressed_count,
             "scored_count": scored_count,
-            "shepherd_total": shepherd_total,
-            "shepherd_rejected": shepherd_rejected,
-            "shepherd_rejection_rate": shepherd_rejection_rate,
-            "merge_eligible_count": merge_eligible_count,
         },
     )
 

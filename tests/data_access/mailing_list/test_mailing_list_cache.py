@@ -12,9 +12,7 @@ from franktheunicorn.data_access.cache import FileCache
 from franktheunicorn.data_access.mailing_list.fetcher import MailingListFetcher
 
 ARCHIVE_URL = "https://lists.apache.org/list.html?dev@spark.apache.org"
-API_URL = (
-    "https://lists.apache.org/api/stats.lua?list=dev&domain=spark.apache.org&d=lte1y&q=mapInArrow"
-)
+API_URL = "https://lists.apache.org/api/stats.lua?list=dev&domain=spark.apache.org&d=lte%3D1y&q=mapInArrow"
 
 
 class TestMailingListCache:
@@ -94,7 +92,7 @@ class TestMailingListCache:
     ) -> None:
         api_url_other = (
             "https://lists.apache.org/api/stats.lua"
-            "?list=dev&domain=spark.apache.org&d=lte1y&q=otherQuery"
+            "?list=dev&domain=spark.apache.org&d=lte%3D1y&q=otherQuery"
         )
         httpx_mock.add_response(url=API_URL, json=search_api_json)
         httpx_mock.add_response(

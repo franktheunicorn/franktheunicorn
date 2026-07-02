@@ -56,6 +56,21 @@ class Command(BaseCommand):
 
         filepath.write_text(yaml_content)
         self.stdout.write(self.style.SUCCESS(f"Created {filepath}"))
+
+        # Create the Project row too. The worker's poll would create it
+        # eventually, but analyze_repo (which we point the user at next)
+        # requires it to exist — without this, add_project and analyze_repo
+        # pointed at each other in a dead loop on a fresh install.
+        from franktheunicorn.core.models import Project
+
+        _project, created = Project.objects.get_or_create(
+            owner=owner,
+            repo=repo_name,
+            defaults={"review_context": "general open-source", "enabled": True},
+        )
+        if created:
+            self.stdout.write(self.style.SUCCESS(f"Registered project {owner}/{repo_name}"))
+
         self.stdout.write(
             f"Run 'python manage.py analyze_repo --repo {repo}' "
             f"to bootstrap codebase context from git history."

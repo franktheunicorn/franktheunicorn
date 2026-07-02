@@ -130,11 +130,15 @@ diff --git a/pom.xml b/pom.xml
         assert len(docs) == 2
 
     def test_fetch_error_swallowed(self, cache_db: str, httpx_mock: HTTPXMock) -> None:
-        # 404 on PyPI raises NotFoundError; resolver should swallow and return
-        # an empty list rather than propagate. NotFoundError is a FetchError,
-        # so DataFetcher.fetch() does not retry via the scrape path here.
+        # 404 on the PyPI API falls through to the scrape path (dual-path
+        # fallback); when that 404s too, the resolver swallows the error and
+        # returns an empty list rather than propagate.
         httpx_mock.add_response(
             url="https://pypi.org/pypi/pandas/json",
+            status_code=404,
+        )
+        httpx_mock.add_response(
+            url="https://pypi.org/project/pandas/",
             status_code=404,
         )
         config = APIMisuseConfig(enabled=True, scrape_hosted_docs=False)

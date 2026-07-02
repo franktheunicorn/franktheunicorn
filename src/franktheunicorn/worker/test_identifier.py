@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import re
 
+# Anchored to path-segment boundaries: an unanchored "test_" would classify
+# e.g. "src/latest_news.py" or "contest_rules.py" as test files, leaking PR
+# source files into the base-branch run of the differential test verdict.
 _TEST_FILE_PATTERNS = (
-    r"test_",
+    r"(?:^|/)test_",
     r"_test\.",
-    r"tests/",
-    r"test/",
-    r"spec/",
+    r"(?:^|/)tests?/",
+    r"(?:^|/)spec/",
     r"_spec\.",
 )
 

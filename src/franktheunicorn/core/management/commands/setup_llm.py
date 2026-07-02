@@ -653,16 +653,15 @@ class Command(BaseCommand):
 
         api_key_env = ""
         if token_input:
-            # If it looks like a raw token (long, starts with key prefix), suggest
-            # setting an env var; otherwise treat it as an env var name.
+            # If it looks like a raw token (long, starts with key prefix), persist
+            # it to .env under FRANK_LLM_API_KEY; otherwise treat it as an env
+            # var name. Setting os.environ alone would lose the token when the
+            # wizard process exits.
             key_prefixes = ("sk-", "key-", "pk-", "rk-", "gsk_", "xai-", "pplx-")
             if token_input.startswith(key_prefixes) or len(token_input) > 40:
-                self.stdout.write(
-                    "\n  Tip: store your token in an env var instead of config:\n"
-                    "    export FRANK_LLM_API_KEY=<your-token>\n"
-                )
                 api_key_env = "FRANK_LLM_API_KEY"
                 os.environ["FRANK_LLM_API_KEY"] = token_input
+                self._save_to_dotenv("FRANK_LLM_API_KEY", token_input)
             else:
                 api_key_env = token_input
                 env_vars_needed.append(token_input)
@@ -1110,7 +1109,9 @@ class Command(BaseCommand):
             "supported_agents": [
                 {
                     "name": "claude-code",
-                    "session_pattern": (r"Session:\s*(https://claude\.ai/code/session/\S+)"),
+                    # Matches both the older /session/<id> path form and the
+                    # current session_<id> form from Claude-Session trailers.
+                    "session_pattern": (r"Session:\s*(https://claude\.ai/code/session[/_]\S+)"),
                     "feedback_method": "url-open",
                 },
                 {
