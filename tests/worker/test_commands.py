@@ -109,7 +109,9 @@ class TestProcessPendingCommands:
         )
         mock_pc = MagicMock()
 
-        def fake_process_pr(pr, project_config, opc, repo_path=None, *, force, log_lines):
+        def fake_process_pr(
+            pr, project_config, opc, repo_path=None, *, forge_client=None, force, log_lines
+        ):
             log_lines.append("ran agent A")
             return [MagicMock(), MagicMock(), MagicMock()]
 
@@ -260,3 +262,32 @@ class TestProcessPendingCommands:
             process_pending_commands(operator_config)
 
         assert order == [first.pk, second.pk]
+
+
+class TestForgeClientFor:
+    """``_forge_client_for`` builds the project's forge client for the dashboard
+    "Force Run Agents" path, or returns None when the forge can't be resolved —
+    a diff-fetch setup problem must never hard-fail the trigger."""
+
+    def test_builds_client_for_registered_forge(self) -> None:
+        from franktheunicorn.backends.github import GitHubClient
+        from franktheunicorn.config.models import (
+            ForgeRegistryEntry,
+            OperatorConfig,
+            ProjectConfig,
+        )
+        from franktheunicorn.worker.commands import _forge_client_for
+
+        oc = OperatorConfig(forges=[ForgeRegistryEntry(name="github", type="github", token="t")])
+        pc = ProjectConfig(owner="acme", repo="widgets", forge="github")
+
+        assert isinstance(_forge_client_for(pc, oc), GitHubClient)
+
+    def test_returns_none_for_unregistered_forge(self) -> None:
+        from franktheunicorn.config.models import OperatorConfig, ProjectConfig
+        from franktheunicorn.worker.commands import _forge_client_for
+
+        oc = OperatorConfig(forges=[])
+        pc = ProjectConfig(owner="acme", repo="widgets", forge="ghe-internal")
+
+        assert _forge_client_for(pc, oc) is None

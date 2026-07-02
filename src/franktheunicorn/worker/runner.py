@@ -29,6 +29,7 @@ import django
 if TYPE_CHECKING:
     import httpx
 
+    from franktheunicorn.backends.base import ForgeClient
     from franktheunicorn.config.models import (
         ClaudeCLIConfig,
         CodeRabbitConfig,
@@ -106,7 +107,6 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
     from django.conf import settings
 
     from franktheunicorn.backends import make_client
-    from franktheunicorn.backends.base import ForgeClient
     from franktheunicorn.backends.mock import MockForgeClient
     from franktheunicorn.config.loader import load_operator_config, load_project_configs
     from franktheunicorn.config.resolver import ensure_github_username, get_forge_entry
@@ -575,6 +575,7 @@ def process_pr(
     diff_http: httpx.Client | None = None,
     repo_path: Path | None = None,
     *,
+    forge_client: ForgeClient | None = None,
     force: bool = False,
     log_lines: list[str] | None = None,
 ) -> list[Any]:
@@ -699,13 +700,23 @@ def process_pr(
         # Fetch the PR's real unified diff for the LLM pipeline. Without it,
         # draft_review falls back to a filename-only placeholder and the
         # backends never see the actual changes. Failure degrades gracefully
-        # to that placeholder (e.g. non-GitHub forges).
+        # to that placeholder.
+        #
+        # Prefer the project's own ForgeClient: it targets the *configured*
+        # forge (GitHub, GHE, GitLab, Gitea) with the right auth, so we get a
+        # real diff on every forge and never accidentally read a same-named
+        # public-GitHub repo. Only when no client is supplied (direct/legacy
+        # callers) do we fall back to the public-GitHub dual-path DiffFetcher.
         pr_diff = ""
         try:
-            from franktheunicorn.data_access.github.diff_fetcher import DiffFetcher
+            if forge_client is not None:
+                _log("Fetching PR diff via forge client...")
+                pr_diff = forge_client.get_pull_request_diff(pc.owner, pc.repo, pr.number)
+            else:
+                from franktheunicorn.data_access.github.diff_fetcher import DiffFetcher
 
-            _log("Fetching PR diff...")
-            pr_diff = DiffFetcher(client=diff_http).fetch(pc.owner, pc.repo, pr.number).raw_diff
+                _log("Fetching PR diff...")
+                pr_diff = DiffFetcher(client=diff_http).fetch(pc.owner, pc.repo, pr.number).raw_diff
         except Exception:
             logger.debug(
                 "Diff fetch failed for PR #%d; using changed-files placeholder.",
@@ -919,6 +930,7 @@ def _run_cycle(
                     disabled_backends=disabled_backends,
                     diff_http=diff_http,
                     repo_path=repo_path,
+                    forge_client=client,  # type: ignore[arg-type]
                 )
 
                 # Differential test verification (§9).
@@ -983,6 +995,7 @@ def _run_cycle(
         operator_config=operator_config,
         disabled_backends=disabled_backends,
         diff_http=diff_http,
+        clients=clients,
     )
 
     diff_http.close()
@@ -1058,11 +1071,16 @@ def _backfill_unreviewed_prs(
     operator_config: OperatorConfig | None,
     disabled_backends: frozenset[int],
     diff_http: httpx.Client,
+    clients: Mapping[str, object] | None = None,
 ) -> None:
     """Draft reviews for open PRs in the DB that have no review drafts yet.
 
     Handles PRs ingested via lookup_pr or other paths that bypass the normal
     poll cycle (which only sees PRs currently open on the forge).
+
+    ``clients`` maps forge-name → ``ForgeClient`` so the diff is fetched from
+    each PR's configured forge; when absent, ``process_pr`` falls back to the
+    public-GitHub dual-path fetcher.
     """
     from django.db.models import Count
 
@@ -1097,11 +1115,13 @@ def _backfill_unreviewed_prs(
 
         logger.info("Backfilling review for PR #%d (%s)", pr.number, full_name)
         try:
+            forge_client = clients.get(pc.forge) if clients else None
             drafts = process_pr(
                 pr,
                 pc,
                 operator_config,
                 disabled_backends=disabled_backends,
+                forge_client=forge_client,  # type: ignore[arg-type]
                 diff_http=diff_http,
             )
             logger.info("  Backfill PR #%d: %d drafts generated", pr.number, len(drafts))
