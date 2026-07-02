@@ -38,9 +38,13 @@ def _operator_config(auto_triage: bool = False) -> OperatorConfig:
 
 
 def _reset_poll_clock() -> None:
+    # -inf (not 0.0) so the interval gate `now - last < interval` always
+    # passes regardless of the absolute value of time.monotonic() — on a
+    # freshly-booted CI runner monotonic() can be < the poll interval, which
+    # made `now - 0.0 < interval` true and skipped the poll.
     import franktheunicorn.worker.runner as runner
 
-    runner._last_security_email_poll = 0.0
+    runner._last_security_email_poll = float("-inf")
 
 
 @pytest.mark.django_db
