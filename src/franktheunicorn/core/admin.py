@@ -6,11 +6,13 @@ from franktheunicorn.core.models import (
     AgentFeedback,
     AntiPattern,
     CostRecord,
+    EmailScanRecord,
     LLMBackendFallback,
     OperatorAction,
     Project,
     PullRequest,
     ReviewDraft,
+    SecurityReport,
     TestRun,
 )
 
@@ -164,3 +166,42 @@ class LLMBackendFallbackAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
     list_filter = ("provider", "supports_json_object")
     search_fields = ("provider", "model", "base_url")
     readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(SecurityReport)
+class SecurityReportAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
+    """Admin for triaged security reports."""
+
+    list_display = ("title", "status", "assessed_severity", "source", "created_at")
+    list_filter = ("status", "assessed_severity", "source")
+    search_fields = ("title", "reporter_name", "reporter_email", "parsed_component")
+    readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(EmailScanRecord)
+class EmailScanRecordAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
+    """Read-only audit of every email the security scanner examined."""
+
+    list_display = (
+        "scanned_at",
+        "from_email",
+        "subject",
+        "classified_security",
+        "is_forwarded",
+        "action",
+    )
+    list_filter = ("action", "classified_security", "is_forwarded")
+    search_fields = ("subject", "from_email", "from_name", "message_id")
+    readonly_fields = (
+        "scanned_at",
+        "folder",
+        "message_id",
+        "subject",
+        "from_name",
+        "from_email",
+        "is_forwarded",
+        "matched_keywords",
+        "classified_security",
+        "action",
+        "security_report",
+    )

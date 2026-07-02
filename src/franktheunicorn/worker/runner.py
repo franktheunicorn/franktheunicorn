@@ -1637,7 +1637,14 @@ _last_security_email_poll: float = 0.0
 
 
 def _poll_security_emails(operator_config: OperatorConfig) -> None:
-    """Poll security email inbox and create SecurityReport records."""
+    """Read the security inbox (read-only) and record what was examined.
+
+    This never marks messages seen and never sends anything. For every email
+    it opens it writes an ``EmailScanRecord`` (visible on the dashboard's
+    "Email Activity" page), and turns the ones that pass the security filter
+    into ``SecurityReport`` drafts. Auto-triage, when enabled, only drafts an
+    assessment — no reply is ever sent.
+    """
     global _last_security_email_poll
 
     if not operator_config.security_triage.enabled:
@@ -1652,38 +1659,92 @@ def _poll_security_emails(operator_config: OperatorConfig) -> None:
         return
 
     try:
-        from franktheunicorn.core.models import SecurityReport
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        from franktheunicorn.core.models import EmailScanRecord, SecurityReport
         from franktheunicorn.data_access.email_inbox.fetcher import fetch_security_emails
 
-        messages = fetch_security_emails(operator_config.security_triage.email)
-        for msg in messages:
-            # Skip if already ingested (by message-id).
-            if (
+        # Dedup against message-ids we've already recorded (last 180 days of
+        # scan records + all ingested reports). Read-only means we can't rely
+        # on the \Seen flag, so we track this ourselves.
+        cutoff = timezone.now() - timedelta(days=180)
+        seen_ids = set(
+            EmailScanRecord.objects.filter(scanned_at__gte=cutoff)
+            .exclude(message_id="")
+            .values_list("message_id", flat=True)
+        )
+        seen_ids.update(
+            SecurityReport.objects.filter(source="email")
+            .exclude(email_message_id="")
+            .values_list("email_message_id", flat=True)
+        )
+
+        fetch = fetch_security_emails(operator_config.security_triage.email, seen_ids)
+
+        ingested = 0
+        for msg in fetch.examined:
+            is_dup = bool(
                 msg.message_id
                 and SecurityReport.objects.filter(email_message_id=msg.message_id).exists()
-            ):
-                continue
-
-            report = SecurityReport.objects.create(
-                raw_text=msg.body,
-                title=msg.subject,
-                reporter_name=msg.from_name,
-                reporter_email=msg.from_email,
-                source="email",
-                email_message_id=msg.message_id,
-                email_received_at=msg.received_at,
             )
-            logger.info("Ingested security report from email: %s", msg.subject)
 
-            # Auto-triage if configured.
-            if operator_config.security_triage.auto_triage:
+            report = None
+            if msg.is_security_report and not is_dup:
+                report = SecurityReport.objects.create(
+                    raw_text=msg.body,
+                    title=msg.subject,
+                    reporter_name=msg.from_name,
+                    reporter_email=msg.from_email,
+                    source="email",
+                    email_message_id=msg.message_id,
+                    email_received_at=msg.received_at,
+                )
+                ingested += 1
+                logger.info(
+                    "[email-scan] ingested security report from %s: %s",
+                    msg.from_email or "unknown",
+                    msg.subject,
+                )
+
+            if report is not None:
+                action = "ingested"
+            elif is_dup:
+                action = "skipped_duplicate"
+            else:
+                action = "skipped_not_security"
+
+            # Visible audit row for *every* message we read.
+            EmailScanRecord.objects.create(
+                folder=operator_config.security_triage.email.folder,
+                message_id=msg.message_id,
+                subject=msg.subject,
+                from_name=msg.from_name,
+                from_email=msg.from_email,
+                is_forwarded=msg.is_forwarded,
+                matched_keywords=list(msg.matched_keywords),
+                classified_security=msg.is_security_report,
+                action=action,
+                security_report=report,
+            )
+
+            # Auto-triage only drafts an assessment; it sends nothing.
+            if report is not None and operator_config.security_triage.auto_triage:
                 try:
                     from franktheunicorn.security.triage import triage_report
 
                     triage_report(report, None, operator_config)
                 except Exception:
                     logger.exception("Auto-triage failed for email report %d", report.pk)
-        # Only update timestamp after successful poll so errors retry sooner.
+
+        logger.info(
+            "[email-scan] poll complete: %d examined, %d ingested, %d already scanned",
+            len(fetch.examined),
+            ingested,
+            fetch.already_scanned,
+        )
+        # Only update timestamp after a successful poll so errors retry sooner.
         _last_security_email_poll = now
     except Exception:
         logger.exception("Error polling security emails")

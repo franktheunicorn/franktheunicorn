@@ -25,6 +25,7 @@ from franktheunicorn.core.models import (
     AntiPattern,
     CostRecord,
     DependencyChange,
+    EmailScanRecord,
     OperatorAction,
     Project,
     PullRequest,
@@ -958,6 +959,46 @@ def security_report_list(request: HttpRequest) -> HttpResponse:
             "reports": reports[:100],
             "status_tabs": tabs_with_counts,
             "active_status": status_filter,
+        },
+    )
+
+
+def email_activity(request: HttpRequest) -> HttpResponse:
+    """Read-only audit of every email the security scanner has examined.
+
+    Makes the "is the tool reading my mail?" question answerable at a glance:
+    one row per message the read-only IMAP scanner opened, showing who it was
+    from, whether it was a forward, which security keywords matched, and
+    whether it became a report. The scanner never marks mail seen and never
+    sends anything.
+    """
+    records = EmailScanRecord.objects.select_related("security_report").all()
+
+    email_configured = False
+    try:
+        from django.conf import settings
+
+        from franktheunicorn.config.loader import load_operator_config
+
+        cfg = load_operator_config(settings.FRANK_OPERATOR_CONFIG)
+        email_configured = bool(cfg.security_triage.enabled and cfg.security_triage.email.enabled)
+    except Exception:
+        logger.debug("Could not load operator config for email activity view", exc_info=True)
+
+    counts = {
+        "examined": records.count(),
+        "ingested": records.filter(action="ingested").count(),
+        "skipped_not_security": records.filter(action="skipped_not_security").count(),
+        "skipped_duplicate": records.filter(action="skipped_duplicate").count(),
+    }
+
+    return render(
+        request,
+        "dashboard/email_activity.html",
+        {
+            "records": records[:200],
+            "counts": counts,
+            "email_configured": email_configured,
         },
     )
 

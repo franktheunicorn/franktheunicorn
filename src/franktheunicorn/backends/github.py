@@ -373,6 +373,11 @@ def _list_pull_requests_via_scrape(
         pr_url = f"{GITHUB_WEB_BASE}/{owner}/{repo}/pull/{pr_number}"
         results.append(
             {
+                # ``_scraped`` marks this as a degraded (HTML-scrape) record:
+                # only number/title/author/state/url are real; body, labels,
+                # additions, timestamps etc. are placeholders. The poller must
+                # not overwrite good DB values with these on an existing row.
+                "_scraped": True,
                 "number": pr_number,
                 "id": 0,
                 "title": title,

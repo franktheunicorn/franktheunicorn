@@ -581,6 +581,14 @@ class MergeQueueConfig(BaseModel):
     push_force_with_lease: bool = True
     stale_migration_strategy: str = "app-local-diff"
     restack_commit_scope: str = "merge-queue"
+    # Command used to regenerate migrations during a restack. This runs the
+    # *target repo's* project code, so operators should point it at a
+    # sandboxed invocation (e.g. ["docker", "run", "--rm", "-v", ...,
+    # "img", "python", "manage.py", "makemigrations"]) rather than executing
+    # it on the worker host. Kept behind the off-by-default restack flags.
+    restack_makemigrations_cmd: list[str] = Field(
+        default_factory=lambda: ["python", "manage.py", "makemigrations"]
+    )
 
     @field_validator("required_approvals")
     @classmethod
@@ -698,6 +706,7 @@ class SecurityEmailConfig(BaseModel):
     use_ssl: bool = True
     folder: str = "INBOX"
     poll_interval_seconds: int = 300
+    timeout_seconds: int = 30
 
     @field_validator("imap_port")
     @classmethod

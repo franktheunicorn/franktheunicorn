@@ -89,7 +89,10 @@ def poll_project(
         pr_number: int = pr_data["number"]
         logger.debug("Fetching changed files for PR #%d ...", pr_number)
 
-        # Fetch changed files for scoring
+        # Fetch changed files for scoring. On failure pass None (not []) so
+        # the upsert preserves any previously-ingested file list instead of
+        # wiping it during a rate-limit window.
+        changed_files: list[str] | None
         try:
             files_data = client.get_pull_request_files(
                 project_config.owner, project_config.repo, pr_number
@@ -97,8 +100,8 @@ def poll_project(
             changed_files = [f["filename"] for f in files_data]
             logger.debug("PR #%d touches %d file(s)", pr_number, len(changed_files))
         except Exception:
-            logger.warning("Could not fetch files for PR #%d, using empty list", pr_number)
-            changed_files = []
+            logger.warning("Could not fetch files for PR #%d; preserving existing list", pr_number)
+            changed_files = None
 
         pr_obj = _upsert_pull_request(project, pr_data, changed_files)
 
@@ -143,6 +146,8 @@ def poll_project(
             pr_obj.base_sha = base_sha
         if head_sha and pr_obj.head_sha != head_sha:
             pr_obj.head_sha = head_sha
+        if head_branch and pr_obj.head_branch != head_branch:
+            pr_obj.head_branch = head_branch
 
         # Fetch blame data if repo clone is available (v1.25).
         blame_data: list[dict[str, object]] | None = None
@@ -277,6 +282,7 @@ def poll_project(
                 "mergeable",
                 "base_sha",
                 "head_sha",
+                "head_branch",
             ]
         )
 
@@ -376,41 +382,78 @@ def _parse_github_datetime(dt_str: str | None) -> datetime | None:
 def _upsert_pull_request(
     project: Project,
     pr_data: dict[str, Any],
-    changed_files: list[str],
+    changed_files: list[str] | None,
 ) -> PullRequest:
-    """Create or update a PullRequest from raw GitHub API data."""
+    """Create or update a PullRequest from raw GitHub API data.
+
+    Handles two degraded-data cases so a rate-limit window doesn't gut
+    already-ingested PRs:
+
+    - ``pr_data["_scraped"]`` marks an HTML-scrape fallback record whose
+      body/labels/additions/timestamps are placeholders. On an *existing*
+      row those fields are preserved; only number/title/author/state/url
+      (which the scrape reliably provides) are refreshed.
+    - ``changed_files is None`` means the files fetch failed; the existing
+      ``changed_files`` is preserved rather than overwritten with ``[]``.
+    """
     pr_number: int = pr_data["number"]
     user_data = pr_data.get("user") or {}
+    is_scraped = bool(pr_data.get("_scraped"))
 
-    defaults = {
-        "github_id": pr_data.get("id", 0),
+    existing = PullRequest.objects.filter(project=project, number=pr_number).first()
+
+    # Fields the scrape path provides reliably — always safe to refresh.
+    defaults: dict[str, Any] = {
         "title": pr_data.get("title", ""),
         "author": user_data.get("login", "unknown"),
         "state": pr_data.get("state", "open"),
         "url": pr_data.get("html_url", ""),
         "diff_url": pr_data.get("diff_url", ""),
-        "body": pr_data.get("body", "") or "",
-        "labels": [lbl.get("name", "") for lbl in pr_data.get("labels", [])],
-        "requested_reviewers": [r.get("login", "") for r in pr_data.get("requested_reviewers", [])],
-        "assignees": [a.get("login", "") for a in pr_data.get("assignees", [])],
-        "changed_files": changed_files,
-        "additions": pr_data.get("additions", 0),
-        "deletions": pr_data.get("deletions", 0),
-        "is_draft": pr_data.get("draft", False),
-        "github_created_at": _parse_github_datetime(pr_data.get("created_at")),
-        "github_updated_at": _parse_github_datetime(pr_data.get("updated_at")),
     }
 
-    # Detect AI agent session from PR description (v1.25).
-    # Always set these fields so stale values are cleared on update —
-    # including the boolean, otherwise a PR whose author edited the session
-    # link away stays latched in the ai-generated queue forever.
-    body = defaults["body"]
-    session = detect_agent_session(body) if body else None
-    defaults["ai_agent_source"] = session.agent_source if session else ""
-    defaults["agent_session_url"] = session.session_url if session else ""
-    defaults["agent_task_id"] = session.task_id if session else ""
-    defaults["likely_ai_generated"] = session is not None
+    # Rich fields only the API provides. On a degraded scrape record for an
+    # *existing* row, skip them entirely so we don't null out good data; a
+    # brand-new PR (even one seen only via scrape) still gets seeded.
+    if is_scraped and existing is not None:
+        pass
+    else:
+        github_id = pr_data.get("id", 0)
+        # Never overwrite a real stored id with a scrape's 0.
+        if not github_id and existing is not None:
+            github_id = existing.github_id
+        defaults["github_id"] = github_id
+        body = pr_data.get("body", "") or ""
+        defaults.update(
+            {
+                "body": body,
+                "labels": [lbl.get("name", "") for lbl in pr_data.get("labels", [])],
+                "requested_reviewers": [
+                    r.get("login", "") for r in pr_data.get("requested_reviewers", [])
+                ],
+                "assignees": [a.get("login", "") for a in pr_data.get("assignees", [])],
+                "additions": pr_data.get("additions", 0),
+                "deletions": pr_data.get("deletions", 0),
+                "is_draft": pr_data.get("draft", False),
+                "github_created_at": _parse_github_datetime(pr_data.get("created_at")),
+                "github_updated_at": _parse_github_datetime(pr_data.get("updated_at")),
+            }
+        )
+
+        # Detect AI agent session from PR description (v1.25). Always set
+        # these fields so stale values are cleared on update — including the
+        # boolean, otherwise a PR whose author edited the session link away
+        # stays latched in the ai-generated queue forever.
+        session = detect_agent_session(body) if body else None
+        defaults["ai_agent_source"] = session.agent_source if session else ""
+        defaults["agent_session_url"] = session.session_url if session else ""
+        defaults["agent_task_id"] = session.task_id if session else ""
+        defaults["likely_ai_generated"] = session is not None
+
+    # changed_files: None means "fetch failed, keep what we have".
+    if changed_files is not None:
+        defaults["changed_files"] = changed_files
+    elif existing is None:
+        defaults["changed_files"] = []
 
     pr_obj, _created = PullRequest.objects.update_or_create(
         project=project,
@@ -444,12 +487,13 @@ def ingest_single_pr(owner: str, repo: str, pr_number: int) -> PullRequest:
     )
 
     pr_data = client.get_pull_request(owner, repo, pr_number)
+    changed_files: list[str] | None
     try:
         files_data = client.get_pull_request_files(owner, repo, pr_number)
         changed_files = [f["filename"] for f in files_data]
     except Exception:
         logger.warning("Could not fetch files for PR #%d during on-demand ingest", pr_number)
-        changed_files = []
+        changed_files = None
 
     pr_obj = _upsert_pull_request(project, pr_data, changed_files)
 

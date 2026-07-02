@@ -299,6 +299,7 @@ class TestPostMergeRestack:
                 "franktheunicorn.worker.merge_queue.select_next_pr_to_restack", return_value=next_pr
             ),
             patch("franktheunicorn.worker.merge_queue._run_git_step") as mock_step,
+            patch("franktheunicorn.worker.merge_queue._has_staged_changes", return_value=True),
             patch(
                 "franktheunicorn.worker.merge_queue.wait_for_ci_green",
                 return_value=("success", "ok"),
@@ -318,6 +319,68 @@ class TestPostMergeRestack:
         push_call = next(call for call in mock_step.call_args_list if call.args[0] == "push_branch")
         assert "--force" in push_call.args[1]
         mock_wait.assert_called_once_with(next_pr, github_client, timeout=120, poll_interval=10)
+
+    def test_restack_uses_head_branch_and_stages_before_commit(self) -> None:
+        merged_pr = PullRequestFactory(state="merged")
+        next_pr = PullRequestFactory(
+            project=merged_pr.project, number=7, state="open", head_branch="feature/cool-thing"
+        )
+        config = MergeQueueConfig(restack_enabled=True, delete_stale_migrations=False)
+
+        with (
+            patch(
+                "franktheunicorn.worker.merge_queue.select_next_pr_to_restack", return_value=next_pr
+            ),
+            patch("franktheunicorn.worker.merge_queue._run_git_step") as mock_step,
+            patch("franktheunicorn.worker.merge_queue._has_staged_changes", return_value=True),
+            patch(
+                "franktheunicorn.worker.merge_queue.wait_for_ci_green",
+                return_value=("success", "ok"),
+            ),
+        ):
+            mock_step.return_value.success = True
+            result = execute_post_merge_restack(
+                merged_pr, config, "/tmp/repo", github_client=object()
+            )
+
+        assert result.success is True
+        step_names = [call.args[0] for call in mock_step.call_args_list]
+        # The real head branch is checked out, not "pr-7".
+        checkout_call = next(
+            c for c in mock_step.call_args_list if c.args[0] == "checkout_pr_branch"
+        )
+        assert "origin/feature/cool-thing" in checkout_call.args[1]
+        # git add -A runs before the commit.
+        assert step_names.index("stage_changes") < step_names.index("commit_restack")
+
+    def test_restack_skips_commit_when_nothing_staged(self) -> None:
+        merged_pr = PullRequestFactory(state="merged")
+        next_pr = PullRequestFactory(
+            project=merged_pr.project, number=8, state="open", head_branch="feature/x"
+        )
+        config = MergeQueueConfig(restack_enabled=True, delete_stale_migrations=False)
+
+        with (
+            patch(
+                "franktheunicorn.worker.merge_queue.select_next_pr_to_restack", return_value=next_pr
+            ),
+            patch("franktheunicorn.worker.merge_queue._run_git_step") as mock_step,
+            patch("franktheunicorn.worker.merge_queue._has_staged_changes", return_value=False),
+            patch(
+                "franktheunicorn.worker.merge_queue.wait_for_ci_green",
+                return_value=("success", "ok"),
+            ),
+        ):
+            mock_step.return_value.success = True
+            result = execute_post_merge_restack(
+                merged_pr, config, "/tmp/repo", github_client=object()
+            )
+
+        assert result.success is True
+        step_names = [call.args[0] for call in mock_step.call_args_list]
+        # No commit step when the tree is clean — but the branch still pushes.
+        assert "commit_restack" not in step_names
+        assert "push_branch" in step_names
 
 
 class TestDeleteStaleMigrations:

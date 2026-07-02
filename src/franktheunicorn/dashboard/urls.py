@@ -42,6 +42,8 @@ urlpatterns = [
     # Security report triage
     path("security/", views.security_report_list, name="security_list"),
     path("security/new/", views.security_report_create, name="security_create"),
+    # Read-only transparency: everything the email scanner has looked at.
+    path("security/email-activity/", views.email_activity, name="email_activity"),
     path(
         "security/<int:report_id>/",
         views.security_report_detail,

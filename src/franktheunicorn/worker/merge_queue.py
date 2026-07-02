@@ -287,6 +287,22 @@ def _run_git_step(name: str, cmd: list[str], cwd: Path) -> RestackStepResult:
     )
 
 
+def _has_staged_changes(cwd: Path) -> bool:
+    """Return True if the index has staged changes to commit.
+
+    ``git diff --cached --quiet`` exits 1 when there are staged changes,
+    0 when the index is clean.
+    """
+    result = subprocess.run(
+        ["git", "diff", "--cached", "--quiet"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    return result.returncode != 0
+
+
 def _delete_stale_migrations_step(
     target: str,
     migration_globs: list[str],
@@ -448,7 +464,10 @@ def execute_post_merge_restack(
     if next_pr is None:
         return RestackExecutionResult(success=True, target_branch=config.restack_target_branch)
 
-    branch_name = f"pr-{next_pr.number}"
+    # Use the PR's real head branch — "pr-{number}" is not the branch name and
+    # no such ref exists on origin. Fall back to the legacy naming only if we
+    # never recorded a branch (older rows).
+    branch_name = next_pr.head_branch or f"pr-{next_pr.number}"
     target = config.restack_target_branch or "main"
     repo_dir = Path(repo_path)
     execution = RestackExecutionResult(
@@ -475,18 +494,46 @@ def execute_post_merge_restack(
             execution.error = "Step failed: delete_stale_migrations"
             return execution
 
-    steps: list[tuple[str, list[str]]] = [
+    # Rebase, then regenerate migrations. makemigrations runs the target
+    # repo's code — the command is operator-configured so it can be sandboxed.
+    pre_commit_steps: list[tuple[str, list[str]]] = [
         ("rebase_onto_target", ["git", "rebase", f"origin/{target}"]),
-        ("regenerate_migrations", ["python", "manage.py", "makemigrations"]),
-        (
+        ("regenerate_migrations", list(config.restack_makemigrations_cmd)),
+        # Stage everything: makemigrations writes *new* (untracked) files that
+        # "git commit -am" would silently leave out, and the migration
+        # deletions above also need staging.
+        ("stage_changes", ["git", "add", "-A"]),
+    ]
+    for step_name, cmd in pre_commit_steps:
+        step = _run_git_step(step_name, cmd, repo_dir)
+        execution.steps.append(step)
+        if not step.success:
+            execution.success = False
+            execution.error = f"Step failed: {step_name}"
+            return execution
+
+    # Commit only when there's something staged — a restack that produced no
+    # migration changes is normal and must not fail on "nothing to commit".
+    if _has_staged_changes(repo_dir):
+        commit_step = _run_git_step(
             "commit_restack",
             [
                 "git",
                 "commit",
-                "-am",
+                "-m",
                 f"chore({config.restack_commit_scope}): restack PR #{next_pr.number}",
             ],
-        ),
+            repo_dir,
+        )
+        execution.steps.append(commit_step)
+        if not commit_step.success:
+            execution.success = False
+            execution.error = "Step failed: commit_restack"
+            return execution
+    else:
+        logger.info("Restack of PR #%d produced no changes to commit", next_pr.number)
+
+    post_commit_steps: list[tuple[str, list[str]]] = [
         (
             "push_branch",
             [
@@ -499,7 +546,7 @@ def execute_post_merge_restack(
         ),
     ]
 
-    for step_name, cmd in steps:
+    for step_name, cmd in post_commit_steps:
         step = _run_git_step(step_name, cmd, repo_dir)
         execution.steps.append(step)
         if not step.success:
