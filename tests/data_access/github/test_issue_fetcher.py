@@ -258,7 +258,7 @@ class TestFetchRelatedIssues:
         issue_search_api_json: dict[str, Any],
     ) -> None:
         httpx_mock.add_response(
-            url="https://api.github.com/search/issues?q=mapInArrow%2Brepo%3Aapache%2Fspark%2Bis%3Aissue",
+            url="https://api.github.com/search/issues?q=mapInArrow%20repo%3Aapache%2Fspark%20is%3Aissue",
             json=issue_search_api_json,
         )
         results = issue_fetcher.fetch_related_issues("apache", "spark", "mapInArrow")
@@ -272,7 +272,7 @@ class TestFetchRelatedIssues:
         issue_fetcher: IssueFetcher,
     ) -> None:
         httpx_mock.add_response(
-            url="https://api.github.com/search/issues?q=nonexistent%2Brepo%3Aapache%2Fspark%2Bis%3Aissue",
+            url="https://api.github.com/search/issues?q=nonexistent%20repo%3Aapache%2Fspark%20is%3Aissue",
             json={"total_count": 0, "incomplete_results": False, "items": []},
         )
         results = issue_fetcher.fetch_related_issues("apache", "spark", "nonexistent")

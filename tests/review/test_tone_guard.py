@@ -17,8 +17,9 @@ class TestApplyToneGuard:
     def test_returns_original_when_no_backend(self) -> None:
         finding = ReviewFinding(body="This is wrong.", file_path="test.py")
         ctx = make_pr_context()
-        result = apply_tone_guard(finding, ctx, backend_config=None)
+        result, rewritten = apply_tone_guard(finding, ctx, backend_config=None)
         assert result.body == "This is wrong."
+        assert rewritten is False
 
     def test_rewrites_body_and_preserves_original(self) -> None:
         finding = ReviewFinding(
@@ -38,8 +39,9 @@ class TestApplyToneGuard:
             from franktheunicorn.config.models import LLMBackendConfig
 
             config = LLMBackendConfig(provider="stub")
-            result = apply_tone_guard(finding, ctx, backend_config=config)
+            result, rewritten = apply_tone_guard(finding, ctx, backend_config=config)
 
+        assert rewritten is True
         assert result.body == "Consider refactoring this section."
         assert result.title == "This is terrible code."  # original preserved
         assert result.file_path == "test.py"
@@ -58,9 +60,12 @@ class TestApplyToneGuard:
             from franktheunicorn.config.models import LLMBackendConfig
 
             config = LLMBackendConfig(provider="stub")
-            result = apply_tone_guard(finding, ctx, backend_config=config)
+            result, rewritten = apply_tone_guard(finding, ctx, backend_config=config)
 
         assert result.body == "Bad code."
+        # The failure path must report rewritten=False so drafts are not
+        # marked tone_guard_applied (auto-poster Gate 3 depends on this).
+        assert rewritten is False
 
     def test_returns_original_on_empty_response(self) -> None:
         finding = ReviewFinding(body="Original.", file_path="test.py")
@@ -74,9 +79,10 @@ class TestApplyToneGuard:
             from franktheunicorn.config.models import LLMBackendConfig
 
             config = LLMBackendConfig(provider="stub")
-            result = apply_tone_guard(finding, ctx, backend_config=config)
+            result, rewritten = apply_tone_guard(finding, ctx, backend_config=config)
 
         assert result.body == "Original."
+        assert rewritten is False
 
 
 class TestApplyToneGuardBatch:
@@ -86,10 +92,11 @@ class TestApplyToneGuardBatch:
             ReviewFinding(body="B", file_path="b.py"),
         ]
         ctx = make_pr_context()
-        result = apply_tone_guard_batch(findings, ctx, backend_config=None)
+        result, flags = apply_tone_guard_batch(findings, ctx, backend_config=None)
         assert len(result) == 2
         assert result[0].body == "A"
         assert result[1].body == "B"
+        assert flags == [False, False]
 
     def test_batch_applies_to_all(self) -> None:
         findings = [
@@ -106,10 +113,32 @@ class TestApplyToneGuardBatch:
             from franktheunicorn.config.models import LLMBackendConfig
 
             config = LLMBackendConfig(provider="stub")
-            result = apply_tone_guard_batch(findings, ctx, backend_config=config)
+            result, flags = apply_tone_guard_batch(findings, ctx, backend_config=config)
 
         assert result[0].body == "Good1"
         assert result[1].body == "Good2"
+        assert flags == [True, True]
+
+    def test_batch_flags_partial_failure(self) -> None:
+        findings = [
+            ReviewFinding(body="Bad1", file_path="a.py"),
+            ReviewFinding(body="Bad2", file_path="b.py"),
+        ]
+        ctx = make_pr_context()
+
+        mock_backend = MagicMock()
+        mock_backend._call_api.side_effect = ["Good1", RuntimeError("API down")]
+        mock_backend._resolve_api_key.return_value = "key"
+
+        with patch("franktheunicorn.review.backends.get_backend", return_value=mock_backend):
+            from franktheunicorn.config.models import LLMBackendConfig
+
+            config = LLMBackendConfig(provider="stub")
+            result, flags = apply_tone_guard_batch(findings, ctx, backend_config=config)
+
+        assert result[0].body == "Good1"
+        assert result[1].body == "Bad2"  # original kept on failure
+        assert flags == [True, False]
 
 
 class TestToneGuardPersonality:

@@ -42,7 +42,9 @@ class GitHubIssueResult(FetchResult):
                 body += "... (truncated)"
             parts.append(f"Body: {body}")
         if self.comments:
-            parts.append("Recent comments:")
+            # Both fetch paths return comments oldest-first (API default,
+            # page order) — label honestly rather than claiming recency.
+            parts.append("First comments:")
             for comment in self.comments[:5]:
                 body = comment.body[:300]
                 if len(comment.body) > 300:

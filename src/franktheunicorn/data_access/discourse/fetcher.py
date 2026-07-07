@@ -25,11 +25,21 @@ from franktheunicorn.data_access.discourse.types import (
 
 logger = logging.getLogger(__name__)
 
-_cache = FileCache("discourse")
-
 
 class DiscourseFetcher(DataFetcher[DiscourseSearchResult]):
     """Fetches Discourse search results via REST API or HTML scrape."""
+
+    def __init__(
+        self,
+        *args: Any,
+        cache: FileCache | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        # Constructor-injected (no module singleton) so tests and callers can
+        # scope the cache; the fetch method is part of the key so cached API
+        # data is never replayed relabeled as a scrape result (or vice versa).
+        self._cache = cache or FileCache("discourse")
 
     def fetch_via_api(  # type: ignore[override]
         self,
@@ -40,7 +50,7 @@ class DiscourseFetcher(DataFetcher[DiscourseSearchResult]):
         """Search Discourse via the JSON API."""
         base_url = base_url.rstrip("/")
 
-        cached = _cache.get(base_url, query)
+        cached = self._cache.get(base_url, query, "api")
         if cached is not None:
             logger.debug("Discourse API cache hit for %s q=%s", base_url, query)
             return _result_from_cache(cached.data, FetchMethod.API)
@@ -56,7 +66,7 @@ class DiscourseFetcher(DataFetcher[DiscourseSearchResult]):
         data: dict[str, Any] = response.json()
         result = _parse_api_response(data, query, base_url)
 
-        _cache.put(base_url, query, data=result.to_cache_dict())
+        self._cache.put(base_url, query, "api", data=result.to_cache_dict())
         return result
 
     def fetch_via_scrape(  # type: ignore[override]
@@ -68,7 +78,7 @@ class DiscourseFetcher(DataFetcher[DiscourseSearchResult]):
         """Search Discourse by scraping the HTML search page."""
         base_url = base_url.rstrip("/")
 
-        cached = _cache.get(base_url, query)
+        cached = self._cache.get(base_url, query, "scrape")
         if cached is not None:
             logger.debug("Discourse scrape cache hit for %s q=%s", base_url, query)
             return _result_from_cache(cached.data, FetchMethod.SCRAPE)
@@ -83,7 +93,7 @@ class DiscourseFetcher(DataFetcher[DiscourseSearchResult]):
 
         result = _parse_html(response.text, query, base_url)
 
-        _cache.put(base_url, query, data=result.to_cache_dict())
+        self._cache.put(base_url, query, "scrape", data=result.to_cache_dict())
         return result
 
 

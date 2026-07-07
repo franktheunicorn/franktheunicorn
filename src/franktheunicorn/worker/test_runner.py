@@ -122,6 +122,28 @@ class TestRunner:
             )
             return None
 
+        # The poll loop calls this for every open PR every cycle — skip heads
+        # we've already produced a *result* for so unchanged PRs don't burn a
+        # container run (and a TestRun row) per poll. Only terminal runs that
+        # completed count: an orphaned "running"/"pending" row left by a
+        # killed worker must NOT block re-verification (the worker is meant to
+        # be restart-safe), and a "failed" (infra-errored) run is retryable.
+        # force=True (dashboard) bypasses.
+        if (
+            not force
+            and TestRun.objects.filter(
+                pull_request=pr,
+                head_sha=pr.head_sha,
+                status__in=("completed", "timeout"),
+            ).exists()
+        ):
+            logger.debug(
+                "PR #%d head %s already has a completed test run; skipping",
+                pr.number,
+                pr.head_sha[:12],
+            )
+            return None
+
         docker = self._get_docker()
         if docker is None:
             logger.info("Docker not available; skipping test verification for PR #%d", pr.number)
@@ -135,22 +157,29 @@ class TestRunner:
             pull_request=pr,
             run_type="pr_branch",
             status="running",
+            head_sha=pr.head_sha,
             test_scope=test_scope,
             container_image="",
             started_at=datetime.now(tz=UTC),
         )
 
         try:
-            with pr_branch_workspace(repo_path, pr.head_sha) as pr_ws:
+            # Build the test image from the *base* checkout, not the PR head:
+            # image builds run outside the sandbox (network access, no caps),
+            # so a PR that edits the Dockerfile or requirements files must
+            # not control what executes during the build. PR code only runs
+            # inside the locked-down container afterwards.
+            with pr_branch_workspace(repo_path, pr.base_sha) as build_ws:
                 image = resolve_image(
                     docker,
                     project_config.owner,
                     project_config.repo,
                     tests,
-                    pr_ws,
+                    build_ws,
                 )
-                test_run.container_image = image
+            test_run.container_image = image
 
+            with pr_branch_workspace(repo_path, pr.head_sha) as pr_ws:
                 pr_result = self._run_container(
                     docker,
                     image,
@@ -227,7 +256,10 @@ class TestRunner:
                 command=["sh", "-c", command],
                 detach=True,
                 network_mode="none",  # §9.5: no network access
-                cpu_count=resources.get("cpu_count", 4),
+                # nano_cpus, not cpu_count: cpu_count is a Windows-only
+                # HostConfig option that the Linux daemon silently ignores,
+                # which left the §9.4 CPU tiers unenforced.
+                nano_cpus=int(resources.get("cpu_count", 4) * 1_000_000_000),
                 mem_limit=resources.get("mem_limit", "8g"),
                 security_opt=["no-new-privileges"],
                 cap_drop=["ALL"],

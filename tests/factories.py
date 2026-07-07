@@ -11,6 +11,7 @@ from franktheunicorn.core.models import (
     AntiPattern,
     CostRecord,
     DependencyChange,
+    EmailScanRecord,
     LLMBackendFallback,
     OperatorAction,
     Project,
@@ -161,6 +162,10 @@ class DependencyChangeFactory(factory.django.DjangoModelFactory):  # type: ignor
 class TestRunFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
     """Factory for TestRun model instances."""
 
+    # Keep pytest from collecting this as a test class (name starts with
+    # "Test"; factory_boy's __new__ triggers a PytestCollectionWarning).
+    __test__ = False
+
     class Meta:
         model = TestRun
 
@@ -208,6 +213,23 @@ class SecurityReportFactory(factory.django.DjangoModelFactory):  # type: ignore[
     cve_matches = factory.LazyFunction(list)
     matched_cve_id = ""
     operator_notes = ""
+
+
+class EmailScanRecordFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
+    """Factory for EmailScanRecord (email-reading audit) instances."""
+
+    class Meta:
+        model = EmailScanRecord
+
+    message_id = factory.Sequence(lambda n: f"<scan-{n}@example.com>")
+    subject = factory.Faker("sentence", nb_words=6)
+    from_name = factory.Faker("name")
+    from_email = factory.Faker("email")
+    is_forwarded = False
+    matched_keywords = factory.LazyFunction(list)
+    classified_security = False
+    action = "skipped_not_security"
+    security_report = None
 
 
 class LLMBackendFallbackFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]

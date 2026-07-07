@@ -149,3 +149,28 @@ class TestSetupPyParser:
         transitions = setup_py_parser.parse(patch, "setup.py")
         assert len(transitions) == 1
         assert transitions[0].package_name == "my-package"
+
+
+class TestRangeSpecifiers:
+    def test_range_extracts_lower_bound(self) -> None:
+        """ ">=1.4,<2.0" must yield 1.4 — packaging normalizes the clause
+        order so a naive first-match on the string returns the upper bound."""
+        from franktheunicorn.data_access.dependencies.python_parsers import (
+            _parse_requirement_line,
+        )
+
+        assert _parse_requirement_line("pandas>=1.4,<2.0") == ("pandas", "1.4")
+
+    def test_pin_beats_bounds(self) -> None:
+        from franktheunicorn.data_access.dependencies.python_parsers import (
+            _parse_requirement_line,
+        )
+
+        assert _parse_requirement_line("requests==2.28.0") == ("requests", "2.28.0")
+
+    def test_upper_bound_only_falls_back(self) -> None:
+        from franktheunicorn.data_access.dependencies.python_parsers import (
+            _parse_requirement_line,
+        )
+
+        assert _parse_requirement_line("legacy<2.0") == ("legacy", "2.0")

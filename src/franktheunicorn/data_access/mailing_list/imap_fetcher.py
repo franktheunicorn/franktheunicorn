@@ -72,15 +72,32 @@ def fetch_mailing_list_imap(
 
     threads: list[MailingListThread] = []
     try:
-        conn.select(config.imap_folder)
-        status, data = conn.search(None, "SUBJECT", query)
+        # readonly: searching must not set \Seen flags on the operator's
+        # private mailbox (a plain SELECT + FETCH RFC822 marks messages read).
+        conn.select(config.imap_folder, readonly=True)
+        try:
+            criterion = _quote_search_term(query)
+        except UnicodeEncodeError:
+            # IMAP commands are ASCII; skip queries we can't encode rather
+            # than erroring the whole context pipeline.
+            logger.debug("Skipping non-ASCII IMAP query %r", query)
+            return empty
+        status, data = conn.search(None, "SUBJECT", criterion)
         if status != "OK" or not data or not data[0]:
             return empty
-        for msg_id in data[0].split()[:MAX_MESSAGES]:
-            raw = _fetch_rfc822(conn, msg_id)
-            if raw is None:
+        # SEARCH returns ids in ascending (oldest-first) order — keep the
+        # newest matches, not the oldest.
+        for msg_id in data[0].split()[-MAX_MESSAGES:]:
+            # One malformed message must not discard the threads already
+            # parsed — degrade per message, not per query.
+            try:
+                raw = _fetch_rfc822(conn, msg_id)
+                if raw is None:
+                    continue
+                thread = _parse_message(raw, query, list_name, blame_hit=blame_hit)
+            except Exception:
+                logger.debug("Skipping unparseable IMAP message", exc_info=True)
                 continue
-            thread = _parse_message(raw, query, list_name, blame_hit=blame_hit)
             if thread is not None:
                 threads.append(thread)
     except Exception:
@@ -98,13 +115,31 @@ def fetch_mailing_list_imap(
     )
 
 
+def _quote_search_term(term: str) -> str:
+    """RFC 3501-quote a SEARCH criterion value.
+
+    imaplib joins criteria with spaces and does no quoting itself, so an
+    unquoted multi-word query ("Fix executor memory leak") is an invalid
+    SEARCH command. Raises ``UnicodeEncodeError`` for non-ASCII terms, which
+    the caller treats as "skip this query".
+    """
+    term.encode("ascii")  # IMAP commands are ASCII — probe before quoting.
+    escaped = term.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
 def _connect(config: CommunitySourceConfig) -> ImapConn:
-    """Open and authenticate an IMAP connection."""
+    """Open and authenticate an IMAP connection.
+
+    Applies the source's ``timeout_seconds`` so a hung server can't block
+    the worker's poll cycle indefinitely.
+    """
+    timeout = float(config.timeout_seconds or 30)
     conn: ImapConn
     if config.use_ssl:
-        conn = imaplib.IMAP4_SSL(config.imap_host, config.imap_port)
+        conn = imaplib.IMAP4_SSL(config.imap_host, config.imap_port, timeout=timeout)
     else:
-        conn = imaplib.IMAP4(config.imap_host, config.imap_port)
+        conn = imaplib.IMAP4(config.imap_host, config.imap_port, timeout=timeout)
     conn.login(config.imap_user, config.imap_pass)
     return conn
 
@@ -154,6 +189,19 @@ def _parse_message(
     )
 
 
+def _safe_decode(data: bytes, charset: str | None) -> str:
+    """Decode bytes, falling back to latin-1 for unknown charset names.
+
+    ``errors="replace"`` does not guard against a bogus charset *name* —
+    ``bytes.decode("x-unknown")`` raises ``LookupError`` before error
+    handling applies.
+    """
+    try:
+        return data.decode(charset or "utf-8", errors="replace")
+    except LookupError:
+        return data.decode("latin-1", errors="replace")
+
+
 def _decode_header_value(value: str) -> str:
     """Decode a possibly RFC 2047-encoded header value."""
     if not value:
@@ -161,7 +209,7 @@ def _decode_header_value(value: str) -> str:
     decoded: list[str] = []
     for data, charset in decode_header(value):
         if isinstance(data, bytes):
-            decoded.append(data.decode(charset or "utf-8", errors="replace"))
+            decoded.append(_safe_decode(data, charset))
         else:
             decoded.append(data)
     return " ".join(decoded).strip()
@@ -183,12 +231,10 @@ def _body_snippet(msg: Message, limit: int = 500) -> str:
             if part.get_content_type() == "text/plain":
                 payload = part.get_payload(decode=True)
                 if isinstance(payload, bytes):
-                    charset = part.get_content_charset() or "utf-8"
-                    text = payload.decode(charset, errors="replace")
+                    text = _safe_decode(payload, part.get_content_charset())
                     break
     else:
         payload = msg.get_payload(decode=True)
         if isinstance(payload, bytes):
-            charset = msg.get_content_charset() or "utf-8"
-            text = payload.decode(charset, errors="replace")
+            text = _safe_decode(payload, msg.get_content_charset())
     return text[:limit]

@@ -167,6 +167,102 @@ class TestSessionDetectionInPoller:
         assert pr.agent_task_id == ""
 
 
+@pytest.mark.django_db
+class TestDegradedFetchDoesNotClobber:
+    """A rate-limit window (scrape fallback / failed files fetch) must not
+    gut a PR that was already fully ingested from the API."""
+
+    def _full_pr_data(self, number: int = 7) -> dict[str, Any]:
+        return {
+            "number": number,
+            "id": 900000 + number,
+            "title": "Real title",
+            "user": {"login": "alice"},
+            "state": "open",
+            "html_url": f"https://github.com/test/repo/pull/{number}",
+            "diff_url": "",
+            "body": "The full PR description with detail.",
+            "labels": [{"name": "bug"}, {"name": "tests"}],
+            "requested_reviewers": [{"login": "holdenk"}],
+            "assignees": [{"login": "bob"}],
+            "draft": False,
+            "additions": 120,
+            "deletions": 30,
+            "created_at": "2026-03-30T10:00:00Z",
+            "updated_at": "2026-03-30T10:00:00Z",
+        }
+
+    def test_scraped_record_preserves_existing_rich_fields(self) -> None:
+        project = ProjectFactory(owner="test", repo="repo")
+        # First: a healthy API ingest with full data.
+        _upsert_pull_request(project, self._full_pr_data(), ["src/a.py", "src/b.py"])
+
+        # Then: a degraded scrape record (only number/title/author/state/url).
+        scraped = {
+            "_scraped": True,
+            "number": 7,
+            "id": 0,
+            "title": "Real title (from scrape)",
+            "user": {"login": "alice"},
+            "state": "open",
+            "html_url": "https://github.com/test/repo/pull/7",
+            "diff_url": "",
+            "body": "",
+            "labels": [],
+            "requested_reviewers": [],
+            "assignees": [],
+            "draft": False,
+            "additions": 0,
+            "deletions": 0,
+            "created_at": "",
+            "updated_at": "",
+        }
+        pr = _upsert_pull_request(project, scraped, None)
+
+        # Refreshed field updates; rich fields preserved (not zeroed).
+        assert pr.title == "Real title (from scrape)"
+        assert pr.body == "The full PR description with detail."
+        assert pr.labels == ["bug", "tests"]
+        assert pr.additions == 120
+        assert pr.deletions == 30
+        assert pr.github_id == 900007  # real id not overwritten with 0
+        assert pr.changed_files == ["src/a.py", "src/b.py"]
+        assert pr.github_created_at is not None
+
+    def test_none_changed_files_preserves_existing_list(self) -> None:
+        project = ProjectFactory(owner="test", repo="repo")
+        _upsert_pull_request(project, self._full_pr_data(8), ["src/x.py"])
+        # A later cycle where the files fetch failed (None, not []).
+        pr = _upsert_pull_request(project, self._full_pr_data(8), None)
+        assert pr.changed_files == ["src/x.py"]
+
+    def test_scraped_new_pr_is_created_minimally(self) -> None:
+        project = ProjectFactory(owner="test", repo="repo")
+        scraped = {
+            "_scraped": True,
+            "number": 99,
+            "id": 0,
+            "title": "New scraped PR",
+            "user": {"login": "carol"},
+            "state": "open",
+            "html_url": "https://github.com/test/repo/pull/99",
+            "diff_url": "",
+            "body": "",
+            "labels": [],
+            "requested_reviewers": [],
+            "assignees": [],
+            "draft": False,
+            "additions": 0,
+            "deletions": 0,
+            "created_at": "",
+            "updated_at": "",
+        }
+        pr = _upsert_pull_request(project, scraped, None)
+        assert pr.pk is not None
+        assert pr.title == "New scraped PR"
+        assert pr.changed_files == []
+
+
 class _TrackingMockClient(MockGitHubClient):
     """MockGitHubClient that tracks get_issue_comments calls."""
 

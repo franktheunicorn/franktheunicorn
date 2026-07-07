@@ -12,9 +12,7 @@ from franktheunicorn.data_access.mailing_list.fetcher import (
 from franktheunicorn.data_access.mailing_list.types import MailingListSearchResult
 
 ARCHIVE_URL = "https://lists.apache.org/list.html?dev@spark.apache.org"
-API_URL = (
-    "https://lists.apache.org/api/stats.lua?list=dev&domain=spark.apache.org&d=lte1y&q=mapInArrow"
-)
+API_URL = "https://lists.apache.org/api/stats.lua?list=dev&domain=spark.apache.org&d=lte%3D1y&q=mapInArrow"
 
 
 @pytest.fixture(params=["api", "scrape"])
@@ -91,7 +89,13 @@ class TestParseArchiveUrl:
         assert list_name == "user"
         assert domain == "kafka.apache.org"
 
-    def test_fallback_for_unknown_format(self) -> None:
-        list_name, domain = _parse_archive_url("https://example.com/archive")
-        assert list_name == "dev"
-        assert domain == "spark.apache.org"
+    def test_unknown_format_raises_not_found(self) -> None:
+        """Non-Apache archive URLs must raise so fetch() falls back to the
+        scrape path — silently defaulting to Spark's dev list queried the
+        wrong archive and suppressed the fallback."""
+        import pytest
+
+        from franktheunicorn.data_access.base import NotFoundError
+
+        with pytest.raises(NotFoundError):
+            _parse_archive_url("https://example.com/archive")

@@ -33,6 +33,13 @@ class DiscordFetcher:
 
     Not a ``DataFetcher`` subclass because Discord is API-only;
     there is no dual-path scrape fallback.
+
+    CAVEAT: ``/guilds/{id}/messages/search`` is an undocumented endpoint
+    that Discord rejects for bot tokens (403 "Bots cannot use this
+    endpoint") — with a standard bot token this source returns no data and
+    logs the failure at debug. It works only with tokens that are allowed
+    to search (rare). A supported approach (bot-side per-channel indexing)
+    is future work; the orchestrator degrades gracefully either way.
     """
 
     def __init__(self, client: httpx.Client | None = None) -> None:
@@ -101,12 +108,20 @@ def _parse_api_response(
     """Parse Discord search API JSON into a DiscordSearchResult."""
     messages: list[DiscordMessage] = []
 
-    # Discord returns messages as list of lists (each inner list
-    # is a group of context messages; first element is the match).
+    # Discord returns messages as list of lists (each inner list is a group
+    # of context messages). The actual match carries "hit": true and is not
+    # necessarily at index 0 — fall back to the first element only when no
+    # hit flag is present.
     for msg_group in data.get("messages", []):
         if not msg_group:
             continue
-        msg = msg_group[0] if isinstance(msg_group, list) else msg_group
+        if isinstance(msg_group, list):
+            msg = next(
+                (m for m in msg_group if isinstance(m, dict) and m.get("hit")),
+                msg_group[0],
+            )
+        else:
+            msg = msg_group
 
         author_obj = msg.get("author", {})
         channel_id = msg.get("channel_id", "")

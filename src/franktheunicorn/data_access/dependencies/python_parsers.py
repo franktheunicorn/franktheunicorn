@@ -52,6 +52,30 @@ def _extract_version(specifier: str) -> str | None:
     return match.group(1) if match else None
 
 
+# Preference order for picking "the" version out of a multi-clause specifier:
+# a pin beats a lower bound beats an exclusive lower bound; upper bounds
+# (`<`, `<=`, `!=`) only as a last resort.
+_OPERATOR_PREFERENCE = ("==", "===", "~=", ">=", ">")
+
+
+def _version_from_specifier_set(req: Requirement) -> str | None:
+    """Pick the pinned/minimum version from a parsed requirement.
+
+    ``str(req.specifier)`` normalizes clauses into sorted order
+    (">=1.4,<2.0" stringifies as "<2.0,>=1.4"), so a first-regex-match on
+    the string returns the *upper* bound. Iterate the clauses and prefer
+    the pin/lower bound instead.
+    """
+    specs = list(req.specifier)
+    if not specs:
+        return None
+    for op in _OPERATOR_PREFERENCE:
+        for spec in specs:
+            if spec.operator == op:
+                return spec.version
+    return specs[0].version
+
+
 def _parse_requirement_line(line: str) -> tuple[str, str | None] | None:
     """Parse a requirement line into (package_name, version_or_none).
 
@@ -64,8 +88,7 @@ def _parse_requirement_line(line: str) -> tuple[str, str | None] | None:
 
     try:
         req = Requirement(line)
-        version = _extract_version(str(req.specifier)) if req.specifier else None
-        return (req.name.lower(), version)
+        return (req.name.lower(), _version_from_specifier_set(req))
     except InvalidRequirement:
         pass
 

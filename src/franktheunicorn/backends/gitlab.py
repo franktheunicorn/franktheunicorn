@@ -173,10 +173,26 @@ class GitLabClient(ForgeClient):
                         comment.line,
                     )
                     continue
+                # One POST per discussion (GitLab has no batch review API),
+                # so tolerate per-comment failures like the Gitea path does.
+                # Raising mid-loop left a partially-posted review with every
+                # draft still "accepted" — the next Post click then
+                # duplicated all the comments that had already landed. A
+                # common 400: comments on unchanged lines, which GitLab
+                # requires both old_line and new_line for.
                 disc_url = f"/projects/{pid}/merge_requests/{pr_number}/discussions"
-                response = self._client.post(disc_url, json=discussion)
-                response.raise_for_status()
-                disc_data = response.json()
+                try:
+                    response = self._client.post(disc_url, json=discussion)
+                    response.raise_for_status()
+                    disc_data = response.json()
+                except Exception:
+                    logger.warning(
+                        "Failed to post inline comment on %s:%s — dropping",
+                        comment.path,
+                        comment.line,
+                        exc_info=True,
+                    )
+                    continue
                 # First note in the new discussion is the inline comment.
                 notes = disc_data.get("notes", [])
                 if notes and comment.correlation_key and notes[0].get("id") is not None:

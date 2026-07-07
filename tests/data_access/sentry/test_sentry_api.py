@@ -30,7 +30,7 @@ class TestSentryFetchIssuesForFiles:
         sentry_issues_response: list[dict[str, Any]],
     ) -> None:
         httpx_mock.add_response(
-            url=f"{SENTRY_API_BASE}/projects/myorg/myproj/issues/?query=file%3Asrc%2Futils%2Ftransform.py",
+            url=f"{SENTRY_API_BASE}/projects/myorg/myproj/issues/?query=stack.filename%3A%22src%2Futils%2Ftransform.py%22&statsPeriod=24h",
             json=sentry_issues_response,
         )
         result = sentry_fetcher.fetch_issues_for_files(
@@ -50,7 +50,7 @@ class TestSentryFetchIssuesForFiles:
         sentry_issues_response: list[dict[str, Any]],
     ) -> None:
         httpx_mock.add_response(
-            url=f"{SENTRY_API_BASE}/projects/myorg/myproj/issues/?query=file%3Asrc%2Futils%2Ftransform.py",
+            url=f"{SENTRY_API_BASE}/projects/myorg/myproj/issues/?query=stack.filename%3A%22src%2Futils%2Ftransform.py%22&statsPeriod=24h",
             json=sentry_issues_response,
         )
         result = sentry_fetcher.fetch_issues_for_files(
@@ -73,11 +73,11 @@ class TestSentryFetchIssuesForFiles:
         sentry_issues_response: list[dict[str, Any]],
     ) -> None:
         httpx_mock.add_response(
-            url=f"{SENTRY_API_BASE}/projects/myorg/myproj/issues/?query=file%3Afile_a.py",
+            url=f"{SENTRY_API_BASE}/projects/myorg/myproj/issues/?query=stack.filename%3A%22file_a.py%22&statsPeriod=24h",
             json=sentry_issues_response,
         )
         httpx_mock.add_response(
-            url=f"{SENTRY_API_BASE}/projects/myorg/myproj/issues/?query=file%3Afile_b.py",
+            url=f"{SENTRY_API_BASE}/projects/myorg/myproj/issues/?query=stack.filename%3A%22file_b.py%22&statsPeriod=24h",
             json=sentry_issues_response,
         )
         result = sentry_fetcher.fetch_issues_for_files(
@@ -109,7 +109,7 @@ class TestSentryFetchIssuesForFiles:
         sentry_fetcher: SentryFetcher,
     ) -> None:
         httpx_mock.add_response(
-            url=f"{SENTRY_API_BASE}/projects/myorg/myproj/issues/?query=file%3Afailing.py",
+            url=f"{SENTRY_API_BASE}/projects/myorg/myproj/issues/?query=stack.filename%3A%22failing.py%22&statsPeriod=24h",
             status_code=500,
         )
         result = sentry_fetcher.fetch_issues_for_files(

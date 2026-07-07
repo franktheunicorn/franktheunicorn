@@ -1,5 +1,5 @@
 {% load markdown_filters %}
-<div class="draft-item {{ draft.status }}" id="draft-{{ draft.pk }}" data-draft-id="{{ draft.pk }}">
+<div class="draft-item {{ draft.status }}" id="draft-{{ draft.pk }}" data-draft-id="{{ draft.pk }}" data-severity="{{ draft.severity }}">
     <strong>{% if draft.file_path %}<a href="{{ draft.github_diff_url }}" target="_blank" rel="noopener noreferrer" style="color: inherit; text-decoration: none; border-bottom: 1px dotted currentColor;">{{ draft.file_path }}{% if draft.line_number %}:{{ draft.line_number }}{% endif %}{% if draft.line_end %}-{{ draft.line_end }}{% endif %}</a>{% endif %}</strong>
     {% if "coderabbit" in draft.sources %}
     <span class="source-badge source-coderabbit">CodeRabbit</span>
@@ -32,7 +32,7 @@
     <pre style="background: #f0f0f0; padding: 0.5rem; margin-top: 0.25rem; font-size: 0.8rem;">{{ draft.suggestion }}</pre>
     {% endif %}
 
-    {% if draft.status == "pending" %}
+    {% if draft.status == "pending" or draft.status == "edited" %}
     <div style="margin-top: 0.5rem;">
         <button class="action-btn approve"
                 hx-post="{% url 'dashboard:approve_draft' draft.pk %}"
@@ -42,14 +42,17 @@
                 hx-post="{% url 'dashboard:reject_draft' draft.pk %}"
                 hx-target="#draft-{{ draft.pk }}"
                 hx-swap="outerHTML"
-                hx-include="[name=reason]">Reject (r)</button>
+                hx-include="#reject-reason-{{ draft.pk }}">Reject (r)</button>
+        <input type="text" name="reason" id="reject-reason-{{ draft.pk }}"
+               placeholder="Rejection reason (feeds anti-patterns)"
+               style="font-size: 0.75rem; width: 16rem; margin-left: 0.25rem;">
         <button class="action-btn edit"
                 onclick="this.nextElementSibling.style.display='block'; this.style.display='none';">Edit (e)</button>
         <form style="display:none; margin-top: 0.5rem;"
               hx-post="{% url 'dashboard:edit_draft' draft.pk %}"
               hx-target="#draft-{{ draft.pk }}"
               hx-swap="outerHTML">
-            <textarea name="edited_body" rows="3" style="width: 100%; font-size: 0.85rem;">{{ draft.comment_body }}</textarea>
+            <textarea name="edited_body" rows="3" style="width: 100%; font-size: 0.85rem;">{% if draft.edited_body %}{{ draft.edited_body }}{% else %}{{ draft.comment_body }}{% endif %}</textarea>
             <button class="action-btn" type="submit">Save</button>
             <button class="action-btn" type="button" onclick="this.parentElement.style.display='none';">Cancel</button>
         </form>
@@ -70,5 +73,8 @@
     <div style="margin-top: 0.25rem; font-size: 0.75rem; color: var(--orange, #e65100);">
         Recalled
     </div>
+    {% endif %}
+    {% if recall_error %}
+    <div class="recall-result" style="margin-top: 0.25rem; font-size: 0.75rem; color: var(--red, #c62828);">{{ recall_error }}</div>
     {% endif %}
 </div>

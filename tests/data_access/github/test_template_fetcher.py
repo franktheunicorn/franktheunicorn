@@ -31,7 +31,7 @@ class TestTemplateFetcherAPI:
         )
         result = fetcher.fetch_via_api("apache", "spark")
         assert isinstance(result, PRTemplateSummary)
-        assert result.text == template
+        assert result.text == template.strip()
         assert result.fetched_via == FetchMethod.API
 
     def test_falls_through_to_second_candidate(
@@ -47,7 +47,7 @@ class TestTemplateFetcherAPI:
             json={"encoding": "base64", "content": _b64(template)},
         )
         result = fetcher.fetch_via_api("apache", "spark")
-        assert result.text == template
+        assert result.text == template.strip()
 
     def test_no_template_returns_empty(
         self, httpx_mock: HTTPXMock, fetcher: TemplateFetcher
@@ -91,7 +91,7 @@ class TestTemplateFetcherAPI:
             json={"encoding": "base64", "content": _b64(template)},
         )
         result = fetcher.fetch_via_api("apache", "spark")
-        assert result.text == template
+        assert result.text == template.strip()
 
 
 class TestTemplateFetcherScrape:

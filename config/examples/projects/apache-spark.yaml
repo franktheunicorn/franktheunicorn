@@ -110,7 +110,16 @@ posting:
   confidence_threshold: 0.85
   bot_token_env: "GITHUB_TOKEN_BOT"
 
+# Rejection predictor (v1.75) — opt-in. When enabled, findings are scored by
+# a per-project sklearn model (auto-trained once enough operator actions
+# accumulate) and high-P(rejection) findings are auto-suppressed.
+# rejection_predictor_enabled: true
+
 # --- v2 features ---
+
+# Shepherding (v2) — opt-in. Drafts replies to reviewers on YOUR PRs and
+# creates rebase/staleness alerts for them.
+# shepherding_enabled: true
 
 # Fine-tuned model — deployed after running `python manage.py fine_tune`
 # fine_tuned_model:

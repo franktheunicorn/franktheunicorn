@@ -9,9 +9,7 @@ from franktheunicorn.data_access.base import FetchMethod, NotFoundError
 from franktheunicorn.data_access.mailing_list.fetcher import MailingListFetcher
 
 ARCHIVE_URL = "https://lists.apache.org/list.html?dev@spark.apache.org"
-API_URL = (
-    "https://lists.apache.org/api/stats.lua?list=dev&domain=spark.apache.org&d=lte1y&q=mapInArrow"
-)
+API_URL = "https://lists.apache.org/api/stats.lua?list=dev&domain=spark.apache.org&d=lte%3D1y&q=mapInArrow"
 
 
 class TestMailingListAPIFetch:

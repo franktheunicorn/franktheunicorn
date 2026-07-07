@@ -70,7 +70,9 @@ class PullRequest(models.Model):
     ]
 
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="pull_requests")
-    github_id = models.IntegerField()
+    # BigInteger: GitHub's global PR ids passed 2^31 in 2024. SQLite masks the
+    # overflow (dynamic 64-bit INTEGER) but Postgres rejects it on insert.
+    github_id = models.BigIntegerField()
     number = models.IntegerField()
     title = models.CharField(max_length=1000)
     author = models.CharField(max_length=255)
@@ -109,6 +111,9 @@ class PullRequest(models.Model):
     # Base/head SHAs from GitHub (used by blame and the differential test runner).
     base_sha = models.CharField(max_length=64, blank=True, default="")
     head_sha = models.CharField(max_length=64, blank=True, default="")
+    # Head branch ref (e.g. "feature/foo"), used by the merge-queue restack
+    # which needs the real branch name — PR number is not the branch name.
+    head_branch = models.CharField(max_length=255, blank=True, default="")
 
     # Cached context (v1.5)
     jira_ticket_id = models.CharField(max_length=50, blank=True, default="")
@@ -440,6 +445,9 @@ class TestRun(models.Model):
     )
     run_type = models.CharField(max_length=20, choices=RUN_TYPE_CHOICES)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
+    # PR head commit this run tested — the worker skips PRs whose head
+    # already has a run, so unchanged PRs aren't re-tested every poll cycle.
+    head_sha = models.CharField(max_length=64, blank=True, default="")
     test_scope = models.JSONField(default=list)
     results = models.JSONField(null=True, blank=True)
     differential_verdict = models.CharField(
@@ -611,6 +619,51 @@ class SecurityReport(models.Model):
 
     def __str__(self) -> str:
         return f"SecurityReport: {self.title or self.raw_text[:60]}"
+
+
+class EmailScanRecord(models.Model):
+    """Audit record of a single email the security inbox poller examined.
+
+    Exists purely for transparency: it lets the operator see *exactly* which
+    of their emails the system read and why it did or didn't turn one into a
+    SecurityReport. The inbox poller is read-only (it never marks messages
+    seen and never sends anything), and one of these rows is written for
+    every message it opens.
+    """
+
+    ACTION_CHOICES = [
+        ("ingested", "Ingested as security report"),
+        ("skipped_not_security", "Skipped — did not match security filter"),
+        ("skipped_duplicate", "Skipped — already ingested"),
+    ]
+
+    scanned_at = models.DateTimeField(default=timezone.now)
+    folder = models.CharField(max_length=255, blank=True, default="")
+    # IMAP Message-ID header — used to dedup across polls without mutating
+    # the mailbox (we never set the \Seen flag).
+    message_id = models.CharField(max_length=500, blank=True, default="")
+    subject = models.CharField(max_length=500, blank=True, default="")
+    from_name = models.CharField(max_length=255, blank=True, default="")
+    from_email = models.CharField(max_length=255, blank=True, default="")
+    is_forwarded = models.BooleanField(default=False)
+    # Which security keywords matched, so the filter decision is inspectable.
+    matched_keywords = models.JSONField(default=list, blank=True)
+    classified_security = models.BooleanField(default=False)
+    action = models.CharField(max_length=32, choices=ACTION_CHOICES, default="skipped_not_security")
+    security_report = models.ForeignKey(
+        SecurityReport,
+        on_delete=models.SET_NULL,
+        related_name="scan_records",
+        null=True,
+        blank=True,
+    )
+
+    class Meta:
+        ordering = ["-scanned_at"]
+        indexes = [models.Index(fields=["-scanned_at"])]
+
+    def __str__(self) -> str:
+        return f"EmailScanRecord({self.action}): {self.subject[:60]}"
 
 
 class WorkerCommand(models.Model):

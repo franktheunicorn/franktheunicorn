@@ -71,10 +71,21 @@ class DailyDigest:
 
 
 def build_daily_digest(hours: int = 24) -> DailyDigest:
-    """Build a digest of PR activity from the last N hours."""
+    """Build a digest of PR activity from the last N hours.
+
+    "Activity" means forge-side activity (``github_updated_at``): the local
+    auto_now ``updated_at`` is bumped for every open PR on every poll cycle,
+    which made the digest include *all* open PRs, not recent ones. Rows the
+    poller hasn't stamped yet (NULL github_updated_at) fall back to the
+    local timestamp.
+    """
     cutoff = datetime.now(tz=UTC) - timedelta(hours=hours)
     recent_prs = (
-        PullRequest.objects.filter(updated_at__gte=cutoff, state="open")
+        PullRequest.objects.filter(state="open")
+        .filter(
+            Q(github_updated_at__gte=cutoff)
+            | Q(github_updated_at__isnull=True, updated_at__gte=cutoff)
+        )
         .select_related("project")
         .annotate(_pending=Count("review_drafts", filter=Q(review_drafts__status="pending")))
         .order_by("-interest_score")
@@ -172,6 +183,9 @@ def render_digest_text(digest: DailyDigest) -> str:
     lines.append(f"franktheunicorn digest — {now} — {total} PRs need attention")
     lines.append("")
 
+    def _url_line(e: DigestEntry) -> str:
+        return f"\n  {e.url}" if e.url else ""
+
     if digest.high_interest:
         lines.append("HIGH-INTEREST PRs (score >= 0.7)")
         for e in digest.high_interest:
@@ -179,13 +193,14 @@ def render_digest_text(digest: DailyDigest) -> str:
             lines.append(
                 f'  {e.project_name}#{e.pr_number} — "{e.pr_title}"'
                 f"\n  score: {e.interest_score:.2f} · {e.pending_drafts} drafts{test_str}"
+                f"{_url_line(e)}"
             )
         lines.append("")
 
     if digest.your_prs:
         lines.append("YOUR PRs NEEDING ACTION")
         for e in digest.your_prs:
-            lines.append(f'  {e.project_name}#{e.pr_number} — "{e.pr_title}"')
+            lines.append(f'  {e.project_name}#{e.pr_number} — "{e.pr_title}"{_url_line(e)}')
         lines.append("")
 
     if digest.ai_generated:
@@ -193,6 +208,7 @@ def render_digest_text(digest: DailyDigest) -> str:
         for e in digest.ai_generated:
             lines.append(
                 f'  {e.project_name}#{e.pr_number} — "{e.pr_title}"\n  {e.pending_drafts} drafts'
+                f"{_url_line(e)}"
             )
         lines.append("")
 

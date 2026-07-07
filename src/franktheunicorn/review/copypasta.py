@@ -405,7 +405,18 @@ def _create_drafts(
     pr: PullRequest,
     matches: list[CopyPastaMatch],
 ) -> list[ReviewDraft]:
-    """Convert copy-pasta matches to ReviewDraft objects."""
+    """Convert copy-pasta matches to ReviewDraft objects.
+
+    Gates each match through the anti-pattern list (the core learning loop
+    applies to every finding generator) and uses ``get_or_create`` so the
+    worker re-scanning an unchanged PR every poll cycle doesn't pile up
+    duplicate drafts.
+    """
+    from franktheunicorn.review.antipattern import (
+        check_against_anti_patterns,
+        record_anti_pattern_matches,
+    )
+
     # Deduplicate by (new_file, new_start_line) — keep first match
     seen: set[tuple[str, int]] = set()
     drafts: list[ReviewDraft] = []
@@ -437,13 +448,27 @@ def _create_drafts(
             f"Consider extracting a shared function or reusing the existing implementation."
         )
 
-        draft = ReviewDraft.objects.create(
+        ap_matches = check_against_anti_patterns(comment_body, pr.project)
+        if ap_matches:
+            record_anti_pattern_matches(ap_matches)
+            logger.info(
+                "Suppressed copypasta finding for %s:%d — matched anti-pattern(s)",
+                match.new_file,
+                match.new_start_line,
+            )
+            continue
+
+        draft, _created = ReviewDraft.objects.get_or_create(
             pull_request=pr,
             file_path=match.new_file,
             line_number=match.new_start_line,
-            comment_body=comment_body,
-            confidence=confidence,
-            status="pending",
+            backend_used="copypasta",
+            defaults={
+                "comment_body": comment_body,
+                "confidence": confidence,
+                "sources": ["copypasta"],
+                "status": "pending",
+            },
         )
         drafts.append(draft)
 

@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 
 @dataclass(frozen=True)
 class InboxMessage:
-    """A single email message fetched from an IMAP inbox."""
+    """A single email message fetched from an IMAP inbox.
+
+    ``from_name``/``from_email``/``subject`` reflect the *original* report
+    when the email is a forward (e.g. an Apache Security Team forward wrapping
+    a reporter's message): the envelope sender is the forwarder, but the
+    report is what we care about. ``matched_keywords`` records exactly which
+    security terms tripped the filter, so the classification is inspectable.
+    """
 
     message_id: str = ""
     subject: str = ""
@@ -17,3 +24,22 @@ class InboxMessage:
     body: str = ""
     received_at: datetime | None = None
     is_security_report: bool = False
+    is_forwarded: bool = False
+    matched_keywords: tuple[str, ...] = ()
+    # The outer envelope sender (the forwarder), kept for the audit trail.
+    envelope_from_email: str = ""
+
+
+@dataclass
+class EmailFetchResult:
+    """Everything a single read-only inbox poll examined.
+
+    The fetcher opens the mailbox read-only (never marks messages seen, never
+    sends), so the caller gets the full list of messages it looked at — not
+    just the security ones — and can record an audit row for each.
+    """
+
+    examined: list[InboxMessage] = field(default_factory=list)
+    unread_total: int = 0
+    already_scanned: int = 0
+    error: str = ""

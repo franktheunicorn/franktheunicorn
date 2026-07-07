@@ -107,21 +107,22 @@ class TemplateFetcher(DataFetcher[PRTemplateSummary]):
         logger.debug("No PR template found for %s/%s (scrape)", owner, repo)
         return PRTemplateSummary(fetched_via=FetchMethod.SCRAPE, text="")
 
-    def fetch(self, *args: object, **kwargs: object) -> PRTemplateSummary:
-        """Try API first; return empty template (not an error) on fallback failure."""
-        result = super().fetch(*args, **kwargs)
-        return result
-
 
 def _decode_contents(data: dict[str, Any]) -> str:
-    """Decode a GitHub Contents API file response to plain text."""
+    """Decode a GitHub Contents API file response to plain text.
+
+    Strips surrounding whitespace so the API path returns exactly what the
+    scrape path (which also strips) returns for the same file — the dual-path
+    contract requires observably identical output.
+    """
     encoding = data.get("encoding", "")
     content = data.get("content", "")
     if not content:
         return ""
     if encoding == "base64":
         try:
-            return base64.b64decode(content.replace("\n", "")).decode("utf-8", errors="replace")
+            decoded = base64.b64decode(content.replace("\n", ""))
+            return decoded.decode("utf-8", errors="replace").strip()
         except Exception:
             return ""
-    return str(content)
+    return str(content).strip()

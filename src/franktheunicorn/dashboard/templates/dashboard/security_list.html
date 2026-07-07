@@ -7,8 +7,9 @@
     Triage incoming security vulnerability reports. Paste reports or ingest from email.
 </p>
 
-<div style="margin-bottom: 1rem;">
+<div style="margin-bottom: 1rem; display: flex; gap: 0.5rem; align-items: center;">
     <a href="{% url 'dashboard:security_create' %}" class="action-btn post" style="font-size: 0.85rem; padding: 0.4rem 0.8rem; text-decoration: none;">+ New Report</a>
+    <a href="{% url 'dashboard:email_activity' %}" class="action-btn" style="font-size: 0.85rem; padding: 0.4rem 0.8rem; text-decoration: none;" title="Read-only audit of every email the scanner has read">📬 Email Activity</a>
 </div>
 
 <div class="tab-bar">

@@ -107,8 +107,10 @@ class TestParsePorcelainBlame:
             "\tprint('hello')\n"
         )
         result = _parse_porcelain_blame(output)
-        assert result[1] == "Alice"
-        assert result[2] == "Alice"
+        # Identities include display name, email, and email local-part so
+        # forge logins can match blame data.
+        assert result[1] == {"Alice", "alice@example.com", "alice"}
+        assert result[2] == {"Alice", "alice@example.com", "alice"}
 
     def test_multiple_authors(self) -> None:
         sha_a = "a" * 40
@@ -124,8 +126,8 @@ class TestParsePorcelainBlame:
             "\tline2\n"
         )
         result = _parse_porcelain_blame(output)
-        assert result[1] == "Alice"
-        assert result[2] == "Bob"
+        assert result[1] == {"Alice"}
+        assert result[2] == {"Bob"}
 
     def test_empty_output(self) -> None:
         assert _parse_porcelain_blame("") == {}
@@ -162,12 +164,12 @@ class TestParseDiffChangedLines:
 class TestClassifyAuthors:
     def test_direct_and_near_separation(self) -> None:
         blame = {
-            1: "alice",
-            2: "alice",
-            3: "bob",  # changed line
-            4: "charlie",
-            5: "alice",
-            10: "dave",  # far away
+            1: {"alice"},
+            2: {"alice"},
+            3: {"bob"},  # changed line
+            4: {"charlie"},
+            5: {"alice"},
+            10: {"dave"},  # far away
         }
         changed_lines = {3}
         direct, near_only = _classify_authors(blame, changed_lines, near_window=2)
@@ -184,9 +186,9 @@ class TestClassifyAuthors:
     def test_author_in_both_direct_and_near_is_only_direct(self) -> None:
         """If an author has lines in both changed and near, they're direct only."""
         blame = {
-            1: "alice",  # near line 3
-            3: "alice",  # changed line
-            5: "bob",  # near line 3
+            1: {"alice"},  # near line 3
+            3: {"alice"},  # changed line
+            5: {"bob"},  # near line 3
         }
         changed_lines = {3}
         direct, near_only = _classify_authors(blame, changed_lines, near_window=2)
@@ -194,7 +196,7 @@ class TestClassifyAuthors:
         assert near_only == {"bob"}
 
     def test_empty_changed_lines(self) -> None:
-        blame = {1: "alice", 2: "bob"}
+        blame = {1: {"alice"}, 2: {"bob"}}
         direct, near_only = _classify_authors(blame, set())
         assert direct == set()
         assert near_only == set()
@@ -206,14 +208,14 @@ class TestFetchBlameForFile:
         assert result is not None
         assert len(result) == 3
         # Line 2 was modified by bob, lines 1,3 by alice
-        assert result[1] == "alice"
-        assert result[2] == "bob"
-        assert result[3] == "alice"
+        assert "alice" in result[1]
+        assert "bob" in result[2]
+        assert "alice" in result[3]
 
     def test_blame_unmodified_file(self, git_repo: Path) -> None:
         result = fetch_blame_for_file(git_repo, "src/utils.py", "HEAD")
         assert result is not None
-        assert all(author == "alice" for author in result.values())
+        assert all("alice" in idents for idents in result.values())
 
     def test_blame_nonexistent_file(self, git_repo: Path) -> None:
         result = fetch_blame_for_file(git_repo, "nonexistent.py", "HEAD")

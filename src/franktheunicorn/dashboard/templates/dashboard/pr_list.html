@@ -6,7 +6,7 @@
 {# Filter bar: project type + specific project selects.
    hx-select ensures only #pr-content is swapped from the full-page response. #}
 <form class="filter-bar" method="get"
-      hx-get="/" hx-target="#pr-content" hx-select="#pr-content"
+      hx-get="/" hx-target="#pr-content" hx-select="#pr-content" hx-swap="outerHTML"
       hx-push-url="true" hx-trigger="change">
     <input type="hidden" name="queue" value="{{ active_queue }}">
     {% if available_project_types %}

@@ -1,0 +1,78 @@
+{% extends "dashboard/base.html" %}
+{% block title %}Email Activity — franktheunicorn{% endblock %}
+{% block content %}
+<p style="margin-bottom: 0.75rem;"><a class="back-link" href="{% url 'dashboard:security_list' %}">&larr; Security reports</a></p>
+
+<h2>Email Reading Activity</h2>
+
+<div class="readonly-banner">
+    <strong>Read-only.</strong> This is every message the security scanner opened in your
+    <code>{{ records.0.folder|default:"inbox" }}</code> folder. It connects over IMAP,
+    reads with <code>BODY.PEEK</code> so your mail is <strong>never marked read</strong>,
+    and <strong>never sends anything</strong> &mdash; ingesting a report and any reply are
+    separate, explicit actions you take yourself.
+    {% if not email_configured %}
+    <br><em>Email scanning is not currently enabled in operator.yaml
+    (<code>security_triage.email.enabled</code>).</em>
+    {% endif %}
+</div>
+
+<div class="filter-bar" style="gap: 1.25rem;">
+    <span><strong>{{ counts.examined }}</strong> examined</span>
+    <span><span class="scan-action scan-ingested">{{ counts.ingested }}</span> ingested as reports</span>
+    <span><span class="scan-action scan-skipped">{{ counts.skipped_not_security }}</span> not security</span>
+    <span><span class="scan-action scan-skipped">{{ counts.skipped_duplicate }}</span> already seen</span>
+</div>
+
+<div style="overflow-x: auto;">
+<table>
+    <thead>
+        <tr>
+            <th>When</th>
+            <th>From</th>
+            <th>Subject</th>
+            <th>Security filter</th>
+            <th>Result</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for r in records %}
+        <tr>
+            <td style="white-space: nowrap; font-size: 0.8rem; color: var(--muted);">{{ r.scanned_at|timesince }} ago</td>
+            <td style="font-size: 0.85rem;">
+                {{ r.from_name|default:r.from_email|default:"(unknown)" }}
+                {% if r.is_forwarded %}<span class="kw-chip" title="Unwrapped from a forwarded message">forwarded</span>{% endif %}
+            </td>
+            <td style="font-size: 0.85rem;">{{ r.subject|default:"(no subject)"|truncatechars:70 }}</td>
+            <td>
+                {% if r.classified_security %}
+                    <span class="scan-action scan-ingested">matched</span>
+                {% else %}
+                    <span class="scan-action scan-skipped">no match</span>
+                {% endif %}
+                <div style="margin-top: 0.2rem;">
+                    {% for kw in r.matched_keywords %}<span class="kw-chip">{{ kw }}</span>{% endfor %}
+                </div>
+            </td>
+            <td style="font-size: 0.8rem; white-space: nowrap;">
+                {% if r.action == "ingested" %}
+                    {% if r.security_report %}
+                    <a href="{% url 'dashboard:security_detail' r.security_report.pk %}">report #{{ r.security_report.pk }}</a>
+                    {% else %}<span class="scan-action scan-ingested">ingested</span>{% endif %}
+                {% elif r.action == "skipped_duplicate" %}
+                    <span class="scan-action scan-skipped">already seen</span>
+                {% else %}
+                    <span class="scan-action scan-skipped">not ingested</span>
+                {% endif %}
+            </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="5" class="empty-state" style="padding: 1.5rem;">
+            No emails scanned yet.
+            {% if not email_configured %}Configure <code>security_triage.email</code> in operator.yaml to enable read-only inbox scanning.{% endif %}
+        </td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+</div>
+{% endblock %}

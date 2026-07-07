@@ -253,11 +253,36 @@ class TestRejectionPredictorIntegration:
             return_value=mock_predictor,
         ):
             drafts = create_drafts_from_findings(
-                db_pr, findings, source="agent", project=db_pr.project
+                db_pr,
+                findings,
+                source="agent",
+                project=db_pr.project,
+                rejection_predictor_enabled=True,
             )
         assert len(drafts) == 1
         assert drafts[0].rejection_probability is not None
         assert 0.0 <= drafts[0].rejection_probability <= 1.0
+
+    def test_predictor_not_loaded_when_disabled(self, db_pr: PullRequest) -> None:
+        """The v1.75 predictor must not activate without explicit opt-in."""
+        findings = [
+            ReviewFinding(
+                file_path="src/main.py",
+                line_number=10,
+                title="style: fix naming",
+                body="Use snake_case.",
+                confidence=0.5,
+                severity="nit",
+            )
+        ]
+        with patch("franktheunicorn.review.drafter.load_predictor_for_project") as mock_load:
+            drafts = create_drafts_from_findings(
+                db_pr, findings, source="agent", project=db_pr.project
+            )
+        mock_load.assert_not_called()
+        assert len(drafts) == 1
+        assert drafts[0].rejection_probability is None
+        assert drafts[0].is_auto_suppressed is False
 
     def test_auto_suppress_high_probability(self, db_pr: PullRequest) -> None:
         """Findings with P(rejection) > 0.8 should be auto-suppressed."""
@@ -284,7 +309,11 @@ class TestRejectionPredictorIntegration:
             patch.object(mock_predictor, "predict_rejection", return_value=0.9),
         ):
             drafts = create_drafts_from_findings(
-                db_pr, findings, source="agent", project=db_pr.project
+                db_pr,
+                findings,
+                source="agent",
+                project=db_pr.project,
+                rejection_predictor_enabled=True,
             )
         assert len(drafts) == 1
         assert drafts[0].is_auto_suppressed is True
@@ -315,7 +344,11 @@ class TestRejectionPredictorIntegration:
             patch.object(mock_predictor, "predict_rejection", return_value=0.3),
         ):
             drafts = create_drafts_from_findings(
-                db_pr, findings, source="agent", project=db_pr.project
+                db_pr,
+                findings,
+                source="agent",
+                project=db_pr.project,
+                rejection_predictor_enabled=True,
             )
         assert len(drafts) == 1
         assert drafts[0].is_auto_suppressed is False
@@ -361,7 +394,29 @@ class TestRejectionPredictorIntegration:
             )
         ]
         with patch("franktheunicorn.review.drafter.maybe_retrain") as mock_retrain:
-            create_drafts_from_findings(db_pr, findings, source="agent", project=db_pr.project)
+            create_drafts_from_findings(
+                db_pr,
+                findings,
+                source="agent",
+                project=db_pr.project,
+                rejection_predictor_enabled=True,
+            )
             mock_retrain.assert_called_once_with(
                 db_pr.project.pk, db_pr.project.owner, db_pr.project.repo
             )
+
+    def test_retrain_not_called_when_disabled(self, db_pr: PullRequest) -> None:
+        """Auto-retrain (v1.75) must not fire without explicit opt-in."""
+        findings = [
+            ReviewFinding(
+                file_path="src/main.py",
+                line_number=10,
+                title="correctness: fix",
+                body="Fix this.",
+                confidence=0.8,
+                severity="important",
+            )
+        ]
+        with patch("franktheunicorn.review.drafter.maybe_retrain") as mock_retrain:
+            create_drafts_from_findings(db_pr, findings, source="agent", project=db_pr.project)
+            mock_retrain.assert_not_called()

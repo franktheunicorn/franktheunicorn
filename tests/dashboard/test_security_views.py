@@ -9,7 +9,49 @@ import pytest
 from django.test import Client
 
 from franktheunicorn.core.models import SecurityReport
-from tests.factories import ProjectFactory, SecurityReportFactory
+from tests.factories import (
+    EmailScanRecordFactory,
+    ProjectFactory,
+    SecurityReportFactory,
+)
+
+
+@pytest.mark.django_db
+class TestEmailActivityView:
+    def test_renders_read_only_banner(self, client: Client) -> None:
+        response = client.get("/security/email-activity/")
+        assert response.status_code == 200
+        assert b"Read-only" in response.content
+        assert b"never" in response.content.lower()
+
+    def test_shows_scanned_messages_and_keywords(self, client: Client) -> None:
+        report = SecurityReportFactory(title="Path traversal")
+        EmailScanRecordFactory(
+            message_id="<a>",
+            subject="[SECURITY] Path traversal via core_model_path",
+            from_name="Ryan Hughes",
+            from_email="security@apache.org",
+            is_forwarded=True,
+            matched_keywords=["path traversal", "vulnerability"],
+            classified_security=True,
+            action="ingested",
+            security_report=report,
+        )
+        EmailScanRecordFactory(
+            message_id="<b>",
+            subject="Lunch plans",
+            from_email="friend@example.com",
+            matched_keywords=[],
+            classified_security=False,
+            action="skipped_not_security",
+        )
+        response = client.get("/security/email-activity/")
+        body = response.content.decode()
+        assert "Ryan Hughes" in body
+        assert "path traversal" in body  # matched keyword chip
+        assert "forwarded" in body
+        assert "Lunch plans" in body  # non-security still shown for transparency
+        assert ">2</strong> examined" in body  # both messages counted
 
 
 @pytest.mark.django_db

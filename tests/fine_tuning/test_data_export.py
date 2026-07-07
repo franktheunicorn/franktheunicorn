@@ -229,10 +229,16 @@ class TestExportTrainingData:
         output_dir = tmp_path / "output"
         export_training_data(project.pk, output_dir, force=True)
 
+        # The SFT dataset (alpaca format) gets the edited text as output...
         train_lines = (output_dir / "train.jsonl").read_text().strip().split("\n")
         example = json.loads(train_lines[0])
-        assert example.get("chosen") == "Improved comment with context."
-        assert example.get("rejected") == "Original comment."
+        assert example.get("output") == "Improved comment with context."
+        assert "chosen" not in example  # DPO rows are malformed for alpaca
+        # ...and the preference pair goes to the separate DPO file.
+        dpo_lines = (output_dir / "dpo.jsonl").read_text().strip().split("\n")
+        pair = json.loads(dpo_lines[0])
+        assert pair.get("chosen") == "Improved comment with context."
+        assert pair.get("rejected") == "Original comment."
 
     def test_export_rejected_draft_is_negative(self, tmp_path: Path) -> None:
         project = ProjectFactory()
@@ -296,8 +302,11 @@ class TestExportTrainingData:
 
         train_lines = (output_dir / "train.jsonl").read_text().strip().split("\n")
         example = json.loads(train_lines[0])
-        assert example.get("chosen") == "Actually, I think the approach in the next PR is better."
-        assert example.get("rejected") == "Auto-generated response."
+        assert example.get("output") == "Actually, I think the approach in the next PR is better."
+        dpo_lines = (output_dir / "dpo.jsonl").read_text().strip().split("\n")
+        pair = json.loads(dpo_lines[0])
+        assert pair.get("chosen") == "Actually, I think the approach in the next PR is better."
+        assert pair.get("rejected") == "Auto-generated response."
 
     def test_export_nonexistent_project(self, tmp_path: Path) -> None:
         result = export_training_data(99999, tmp_path / "output")
@@ -324,6 +333,49 @@ class TestExportTrainingData:
 
         # Should include voice curated examples plus action-based examples.
         assert result.train_count + result.eval_count >= 6  # 5 actions + 1 voice
+
+    def test_export_transforms_real_curator_records(self, tmp_path: Path) -> None:
+        """Records in the actual curator schema (curator/dataset.py) must be
+        transformed into instruction format, not silently dropped — that
+        schema mismatch previously discarded every curated comment."""
+        project = ProjectFactory()
+        self._create_actions(project, 5)
+
+        data_dir = tmp_path / "data"
+        voice_dir = data_dir / "voice" / project.full_name
+        voice_dir.mkdir(parents=True)
+        curator_record = {
+            "author": "holdenk",
+            "body": "Use isNullAt(idx) here — == null misses SQL nulls.",
+            "original_body": "Use isNullAt.",
+            "diff_context": "+ if (value == null) {",
+            "file_path": "core/RDD.scala",
+            "pr_number": 42,
+            "pr_title": "Fix null handling",
+            "created_at": "2026-01-01T00:00:00Z",
+            "url": "https://github.com/apache/spark/pull/42",
+            "category": "code-style",
+            "tone_flagged": False,
+            "tone_flags": [],
+            "edited": True,
+            "note": "",
+        }
+        (voice_dir / "voice_curated.jsonl").write_text(json.dumps(curator_record) + "\n")
+
+        output_dir = tmp_path / "output"
+        result = export_training_data(project.pk, output_dir, force=True, data_dir=data_dir)
+
+        assert result.train_count + result.eval_count >= 6  # 5 actions + 1 voice
+        all_rows = [
+            json.loads(line)
+            for path in (output_dir / "train.jsonl", output_dir / "eval.jsonl")
+            for line in path.read_text().strip().split("\n")
+            if line
+        ]
+        voice_rows = [r for r in all_rows if r.get("output", "").startswith("Use isNullAt(idx)")]
+        assert len(voice_rows) == 1
+        assert "instruction" in voice_rows[0]
+        assert "core/RDD.scala" in voice_rows[0]["input"]
 
     def test_export_structure_counts_tracked(self, tmp_path: Path) -> None:
         project = ProjectFactory()

@@ -205,3 +205,35 @@ claude_cli:
 # CLI usage:
 #   python manage.py export_training_data --project apache/spark
 #   python manage.py fine_tune --project apache/spark
+
+# --- Security Report Triage (v1.5) ---
+# Ingest inbound security disclosures and draft a triage assessment.
+#
+# READ-ONLY & SEND-FREE: the inbox scanner connects over IMAP, reads with
+# BODY.PEEK so your mail is *never marked read*, and never sends anything.
+# Every message it opens is logged on the dashboard's "Email Activity" page
+# (Security -> Email Activity) with the exact keywords that matched, so you
+# can see precisely what it read and why. Turning a report into a draft, and
+# any reply, are separate explicit actions you take yourself.
+#
+# security_triage:
+#   enabled: true
+#   auto_triage: true          # draft an LLM assessment on ingest (no send)
+#   sandbox_enabled: false     # allow sandboxed POC execution (worker only)
+#   # nvd_api_key_env: "NVD_API_KEY"   # optional, for higher NVD rate limits
+#   email:
+#     enabled: true
+#     # --- Gmail over IMAP ---
+#     # 1. Enable IMAP in Gmail settings.
+#     # 2. Create an App Password (Google Account -> Security -> App
+#     #    passwords); a normal password will NOT work with 2FA on.
+#     # 3. Tip: add a Gmail filter that labels security forwards and point
+#     #    `folder` at that label so the scanner only ever reads that slice
+#     #    of your mailbox (e.g. folder: "security-reports").
+#     imap_host: "imap.gmail.com"
+#     imap_port: 993
+#     use_ssl: true
+#     imap_user: "you@gmail.com"
+#     imap_pass: "${SECURITY_EMAIL_PASS}"   # the App Password, via .env
+#     folder: "INBOX"            # or a Gmail label you filter into
+#     poll_interval_seconds: 300

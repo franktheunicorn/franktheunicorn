@@ -66,6 +66,15 @@ services:
         INSTALL_CODERABBIT: ${INSTALL_CODERABBIT:-false}
     environment:
       <<: *common-env
+    # Only the worker gets the Docker socket — it needs it for differential
+    # test containers and the security sandbox. The web container must never
+    # have Docker access (see CLAUDE.md). Override DOCKER_SOCKET in .env for
+    # rootless Docker (e.g. /run/user/1000/docker.sock).
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config
+      - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+    restart: unless-stopped
     command: python -m franktheunicorn.worker.runner
     depends_on:
       web:

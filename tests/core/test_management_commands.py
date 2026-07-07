@@ -29,6 +29,9 @@ class TestSendDigestCommand:
 
 
 class TestAddProjectCommand:
+    # add_project now also registers the Project row (so analyze_repo works
+    # on a fresh install), hence the db marker.
+    @pytest.mark.django_db
     def test_creates_yaml_file(self, tmp_path: Path) -> None:
         out = StringIO()
         call_command(
@@ -45,6 +48,7 @@ class TestAddProjectCommand:
         assert "testorg" in content
         assert "testrepo" in content
 
+    @pytest.mark.django_db
     def test_shows_analyze_hint(self, tmp_path: Path) -> None:
         out = StringIO()
         call_command(
@@ -54,6 +58,19 @@ class TestAddProjectCommand:
             stdout=out,
         )
         assert "analyze_repo" in out.getvalue()
+
+    @pytest.mark.django_db
+    def test_registers_project_row(self, tmp_path: Path) -> None:
+        """analyze_repo needs the Project row; add_project must create it."""
+        from franktheunicorn.core.models import Project
+
+        call_command(
+            "add_project",
+            "--repo=testorg/testrepo",
+            f"--output-dir={tmp_path}",
+            stdout=StringIO(),
+        )
+        assert Project.objects.filter(owner="testorg", repo="testrepo").exists()
 
     def test_invalid_repo_format(self, tmp_path: Path) -> None:
         err = StringIO()
@@ -172,6 +189,39 @@ class TestDetectCollaboratorsCommand:
         )
         output = out.getvalue()
         assert "collaborators" in output.lower()
+
+
+class TestLoginFromEmail:
+    """Collaborator keys must be forge-login-ish so they can match
+    PullRequest.author during scoring — not space-containing display names."""
+
+    def test_github_noreply_plain(self) -> None:
+        from franktheunicorn.core.management.commands.detect_collaborators import (
+            _login_from_email,
+        )
+
+        assert _login_from_email("janedoe@users.noreply.github.com") == "janedoe"
+
+    def test_github_noreply_id_prefixed(self) -> None:
+        from franktheunicorn.core.management.commands.detect_collaborators import (
+            _login_from_email,
+        )
+
+        assert _login_from_email("12345+janedoe@users.noreply.github.com") == "janedoe"
+
+    def test_plain_email_local_part(self) -> None:
+        from franktheunicorn.core.management.commands.detect_collaborators import (
+            _login_from_email,
+        )
+
+        assert _login_from_email("Jane.Doe@example.com") == "jane.doe"
+
+    def test_non_email_returns_empty(self) -> None:
+        from franktheunicorn.core.management.commands.detect_collaborators import (
+            _login_from_email,
+        )
+
+        assert _login_from_email("Jane Doe") == ""
 
 
 @pytest.mark.django_db

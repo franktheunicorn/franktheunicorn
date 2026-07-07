@@ -102,6 +102,13 @@ else:
         "default": {
             "ENGINE": "django.db.backends.sqlite3",
             "NAME": str(DATA_DIR / "frank.sqlite3"),
+            # The web app and worker share this file. WAL lets readers and a
+            # writer coexist, and the busy timeout makes contending writers
+            # wait instead of failing fast with "database is locked".
+            "OPTIONS": {
+                "timeout": 20,
+                "init_command": "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;",
+            },
         }
     }
 

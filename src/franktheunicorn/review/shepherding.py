@@ -156,22 +156,27 @@ def generate_shepherd_drafts(
 
 
 def _generate_condition_alerts(pr: PullRequest) -> list[ReviewDraft]:
-    """Generate informational alerts for PR conditions (rebase, staleness)."""
+    """Generate informational alerts for PR conditions (rebase, staleness).
+
+    Alerts are keyed on a *stable* ``backend_used`` marker: keying on text
+    that embeds the day count would mint a fresh duplicate draft every day.
+    Day counts belong only in the (default-only) comment body.
+    """
     alerts: list[ReviewDraft] = []
 
     # Rebase needed.
     if pr.mergeable is False:
-        reasoning = "Detected mergeable=False from GitHub API"
         alert, _created = ReviewDraft.objects.get_or_create(
             pull_request=pr,
-            sources=["shepherding"],
-            reasoning_trace=reasoning,
+            backend_used="shepherd-rebase",
             defaults={
                 "comment_body": "This PR has merge conflicts and needs a rebase.",
                 "confidence": 1.0,
                 "category": "other",
                 "severity": "informational",
                 "status": "pending",
+                "sources": ["shepherding"],
+                "reasoning_trace": "Detected mergeable=False from GitHub API",
             },
         )
         alerts.append(alert)
@@ -180,11 +185,9 @@ def _generate_condition_alerts(pr: PullRequest) -> list[ReviewDraft]:
     if pr.github_updated_at:
         age = timezone.now() - pr.github_updated_at
         if age > timedelta(days=STALENESS_DAYS):
-            reasoning = f"PR inactive for {age.days} days"
             alert, _created = ReviewDraft.objects.get_or_create(
                 pull_request=pr,
-                sources=["shepherding"],
-                reasoning_trace=reasoning,
+                backend_used="shepherd-stale",
                 defaults={
                     "comment_body": (
                         f"This PR has had no activity for {age.days} days. "
@@ -194,6 +197,8 @@ def _generate_condition_alerts(pr: PullRequest) -> list[ReviewDraft]:
                     "category": "other",
                     "severity": "informational",
                     "status": "pending",
+                    "sources": ["shepherding"],
+                    "reasoning_trace": f"PR inactive for {age.days} days",
                 },
             )
             alerts.append(alert)

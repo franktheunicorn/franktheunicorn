@@ -27,6 +27,10 @@ class Command(BaseCommand):
         dry_run: bool = options.get("dry_run", False)  # type: ignore[assignment]
         months: int = options.get("months", 6)  # type: ignore[assignment]
 
+        if "/" not in project_name:
+            self.stderr.write(self.style.ERROR("--project must be in owner/repo format"))
+            return
+
         self.stdout.write(f"Detecting collaborators for {project_name} (last {months} months)...")
 
         # Get operator username from config.
@@ -100,36 +104,114 @@ class Command(BaseCommand):
 
         if dry_run:
             self.stdout.write(self.style.WARNING("\n--dry-run: no changes saved"))
+            return
+
+        # Persist scores into the project YAML's collaborator_scores map —
+        # that's what the scorer reads (§2.4). Merge, don't overwrite:
+        # entries with score null are manual and are never touched.
+        saved_to = self._save_scores(project_name, results)
+        if saved_to:
+            self.stdout.write(
+                self.style.SUCCESS(f"\nSaved {len(results)} collaborator scores to {saved_to}.")
+            )
         else:
             self.stdout.write(
-                self.style.SUCCESS(f"\nDetected {len(results)} collaborators for {project_name}.")
+                self.style.WARNING(
+                    f"\nDetected {len(results)} collaborators but no project YAML found "
+                    f"for {project_name} — run add_project first, or use --dry-run."
+                )
             )
+
+    def _save_scores(
+        self,
+        project_name: str,
+        results: list[tuple[str, int, dict[str, int]]],
+    ) -> Path | None:
+        """Merge detected scores into the project YAML. Returns the path written."""
+        import os
+
+        import yaml
+        from django.conf import settings
+
+        owner, repo = project_name.split("/", 1)
+        base = Path(settings.BASE_DIR)
+        config_dir = Path(os.environ.get("FRANK_CONFIG_DIR", str(base / "config" / "active")))
+        yaml_path = config_dir / "projects" / f"{owner}-{repo}.yaml"
+        if not yaml_path.is_file():
+            return None
+
+        data = yaml.safe_load(yaml_path.read_text()) or {}
+        if not isinstance(data, dict):
+            return None
+        scores = data.get("collaborator_scores") or {}
+        if not isinstance(scores, dict):
+            scores = {}
+
+        for user, score, _signals in results:
+            # score None marks a manual entry (full weight, never overwritten).
+            if user in scores and scores[user] is None:
+                continue
+            scores[user] = score
+
+        data["collaborator_scores"] = scores
+        yaml_path.write_text(yaml.safe_dump(data, sort_keys=False))
+        return yaml_path
+
+
+def _login_from_email(email: str) -> str:
+    """Best-effort forge login from a git author email.
+
+    The scorer matches ``collaborator_scores`` keys against the forge login
+    (``PullRequest.author``), so keying on the git *display name* (``%aN``,
+    e.g. "Jane Doe") never matches a login like "janedoe". The email
+    local-part is a much better key — and for GitHub-authored commits it *is*
+    the login: ``login@users.noreply.github.com`` or the numeric-id form
+    ``12345+login@users.noreply.github.com``.
+    """
+    email = email.strip().lower()
+    if "@" not in email:
+        return ""
+    local = email.split("@", 1)[0]
+    # GitHub's "id+login" noreply form.
+    if "+" in local:
+        local = local.split("+", 1)[1]
+    return local
 
 
 def _analyze_git_log(repo_path: Path, operator: str, months: int) -> Counter[str]:
-    """Analyze git log for co-file committers."""
+    """Analyze git log for co-file committers, keyed by forge-login-ish id.
+
+    Uses the author *email* (``%ae``) rather than the display name so the
+    resulting keys can match forge logins during scoring.
+    """
     co_committers: Counter[str] = Counter()
+    op = operator.lower()
     try:
         result = subprocess.run(
-            ["git", "log", f"--since={months} months ago", "--format=%aN", "--no-merges"],
+            ["git", "log", f"--since={months} months ago", "--format=%ae", "--no-merges"],
             capture_output=True,
             text=True,
             cwd=str(repo_path),
             timeout=60,
         )
         if result.returncode == 0:
-            for author in result.stdout.strip().split("\n"):
-                author = author.strip().lower()
-                if author and author != operator.lower():
-                    co_committers[author] += 1
+            for raw_email in result.stdout.strip().split("\n"):
+                login = _login_from_email(raw_email)
+                if login and login != op:
+                    co_committers[login] += 1
     except Exception:
         logger.debug("git log analysis failed", exc_info=True)
     return co_committers
 
 
 def _analyze_co_authors(repo_path: Path, operator: str, months: int) -> Counter[str]:
-    """Analyze git log for Co-authored-by trailers."""
+    """Analyze git log for Co-authored-by trailers, keyed by forge-login-ish id.
+
+    The trailer carries ``Name <email>``; we key on the email local-part
+    (see :func:`_login_from_email`) so entries can match forge logins.
+    """
     co_authors: Counter[str] = Counter()
+    op = operator.lower()
     try:
         result = subprocess.run(
             ["git", "log", f"--since={months} months ago", "--format=%b"],
@@ -142,11 +224,11 @@ def _analyze_co_authors(repo_path: Path, operator: str, months: int) -> Counter[
             import re
 
             for line in result.stdout.split("\n"):
-                match = re.match(r"Co-authored-by:\s+(.+?)\s+<", line, re.IGNORECASE)
+                match = re.match(r"Co-authored-by:\s+.+?\s+<([^>]+)>", line, re.IGNORECASE)
                 if match:
-                    name = match.group(1).strip().lower()
-                    if name != operator.lower():
-                        co_authors[name] += 1
+                    login = _login_from_email(match.group(1))
+                    if login and login != op:
+                        co_authors[login] += 1
     except Exception:
         logger.debug("Co-author analysis failed", exc_info=True)
     return co_authors

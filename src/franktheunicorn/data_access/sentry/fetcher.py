@@ -63,9 +63,13 @@ class SentryFetcher:
 
         seen_ids: set[str] = set()
         all_issues: list[SentryIssue] = []
+        had_errors = False
 
         for path in file_paths:
             issues = self._fetch_for_path(auth_token, org_slug, project_slug, path, timeout_seconds)
+            if issues is None:
+                had_errors = True
+                continue
             for issue in issues:
                 if issue.short_id and issue.short_id not in seen_ids:
                     seen_ids.add(issue.short_id)
@@ -79,12 +83,16 @@ class SentryFetcher:
             file_paths_queried=file_paths,
         )
 
-        self._cache.put(
-            org_slug,
-            project_slug,
-            cache_key_paths,
-            data=result.to_cache_dict(),
-        )
+        # Don't cache an empty result produced by request failures — a
+        # transient outage would otherwise suppress Sentry context for the
+        # whole cache TTL.
+        if all_issues or not had_errors:
+            self._cache.put(
+                org_slug,
+                project_slug,
+                cache_key_paths,
+                data=result.to_cache_dict(),
+            )
         return result
 
     def _fetch_for_path(
@@ -94,13 +102,20 @@ class SentryFetcher:
         project_slug: str,
         file_path: str,
         timeout_seconds: int,
-    ) -> list[SentryIssue]:
-        """Fetch Sentry issues for a single file path."""
+    ) -> list[SentryIssue] | None:
+        """Fetch Sentry issues for a single file path.
+
+        Returns ``None`` on request failure (as opposed to an empty list for
+        "no issues") so the caller can avoid caching outages as results.
+        """
         url = f"{SENTRY_API_BASE}/projects/{org_slug}/{project_slug}/issues/"
         try:
             response = httpx.get(
                 url,
-                params={"query": f"file:{file_path}"},
+                # Sentry's issue-search grammar has no "file:" key (invalid
+                # keys 400) — the stack filename property is the right one.
+                # statsPeriod matches the 24h window the prompt label claims.
+                params={"query": f'stack.filename:"{file_path}"', "statsPeriod": "24h"},
                 headers={"Authorization": f"Bearer {auth_token}"},
                 timeout=timeout_seconds,
             )
@@ -114,7 +129,7 @@ class SentryFetcher:
                 file_path,
                 exc_info=True,
             )
-            return []
+            return None
 
     @staticmethod
     def _parse_issue(data: dict[str, Any]) -> SentryIssue:

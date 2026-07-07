@@ -198,6 +198,8 @@ data/*.lock
 data/*.pid
 data/cache/
 data/repos/
+data/staticfiles/
+data/rate_limits.sqlite
 
 # Generated compose overrides (created by setup.sh / manage.py setup_llm)
 compose.ollama.yaml

@@ -29,6 +29,7 @@ import django
 if TYPE_CHECKING:
     import httpx
 
+    from franktheunicorn.backends.base import ForgeClient
     from franktheunicorn.config.models import (
         ClaudeCLIConfig,
         CodeRabbitConfig,
@@ -106,7 +107,6 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
     from django.conf import settings
 
     from franktheunicorn.backends import make_client
-    from franktheunicorn.backends.base import ForgeClient
     from franktheunicorn.backends.mock import MockForgeClient
     from franktheunicorn.config.loader import load_operator_config, load_project_configs
     from franktheunicorn.config.resolver import ensure_github_username, get_forge_entry
@@ -132,6 +132,16 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
         logger.error("Another worker instance is already running (lock: %s). Exiting.", lock_path)
         lock_fd.close()
         sys.exit(1)
+
+    # The flock guarantees no other worker holds these rows, so anything
+    # still "running" was orphaned by a crash/kill — requeue it (the worker
+    # must be safe to kill and restart).
+    from franktheunicorn.worker.commands import requeue_interrupted_commands
+
+    try:
+        requeue_interrupted_commands()
+    except Exception:
+        logger.exception("Failed to requeue interrupted worker commands")
 
     operator_config = load_operator_config(settings.FRANK_OPERATOR_CONFIG)
     # Infer github_username from the token if not explicitly set. We do this
@@ -213,13 +223,19 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
 
     try:
         while True:
-            _run_cycle(
-                clients,
-                project_configs,
-                operator_config.github_username,
-                operator_config,
-                disabled_backends,
-            )
+            # A cycle failure (e.g. transient "database is locked" from the
+            # shared SQLite file) must not kill the daemon — log and retry on
+            # the next poll.
+            try:
+                _run_cycle(
+                    clients,
+                    project_configs,
+                    operator_config.github_username,
+                    operator_config,
+                    disabled_backends,
+                )
+            except Exception:
+                logger.exception("Poll cycle failed; retrying next interval.")
             # Sleep until the next poll, but wake every COMMAND_POLL_INTERVAL
             # to drain any WorkerCommand rows the dashboard queued (manual
             # test runs, force-run agents, security sandbox). This keeps
@@ -559,6 +575,7 @@ def process_pr(
     diff_http: httpx.Client | None = None,
     repo_path: Path | None = None,
     *,
+    forge_client: ForgeClient | None = None,
     force: bool = False,
     log_lines: list[str] | None = None,
 ) -> list[Any]:
@@ -680,11 +697,39 @@ def process_pr(
             ]
             effective_config = operator_config.model_copy(update={"llm_backends": active})
 
+        # Fetch the PR's real unified diff for the LLM pipeline. Without it,
+        # draft_review falls back to a filename-only placeholder and the
+        # backends never see the actual changes. Failure degrades gracefully
+        # to that placeholder.
+        #
+        # Prefer the project's own ForgeClient: it targets the *configured*
+        # forge (GitHub, GHE, GitLab, Gitea) with the right auth, so we get a
+        # real diff on every forge and never accidentally read a same-named
+        # public-GitHub repo. Only when no client is supplied (direct/legacy
+        # callers) do we fall back to the public-GitHub dual-path DiffFetcher.
+        pr_diff = ""
+        try:
+            if forge_client is not None:
+                _log("Fetching PR diff via forge client...")
+                pr_diff = forge_client.get_pull_request_diff(pc.owner, pc.repo, pr.number)
+            else:
+                from franktheunicorn.data_access.github.diff_fetcher import DiffFetcher
+
+                _log("Fetching PR diff...")
+                pr_diff = DiffFetcher(client=diff_http).fetch(pc.owner, pc.repo, pr.number).raw_diff
+        except Exception:
+            logger.debug(
+                "Diff fetch failed for PR #%d; using changed-files placeholder.",
+                pr.number,
+                exc_info=True,
+            )
+
         _log("Running LLM review pipeline...")
         drafts = draft_review(
             pr,
             pc,
             operator_config=effective_config,
+            diff=pr_diff,
             repo_health_context=health_ctx,
             community_context=community_ctx,
             jira_context=jira_ctx,
@@ -741,11 +786,14 @@ def process_pr(
                 from franktheunicorn.review.checks import run_enabled_checks
 
                 _log("Running LLM checks...")
-                diff_fetcher = DiffFetcher(client=diff_http)
-                check_pr_diff = diff_fetcher.fetch(pc.owner, pc.repo, pr.number)
+                check_diff = pr_diff
+                if not check_diff:
+                    check_diff = (
+                        DiffFetcher(client=diff_http).fetch(pc.owner, pc.repo, pr.number).raw_diff
+                    )
                 check_drafts = run_enabled_checks(
                     pr,
-                    check_pr_diff.raw_diff,
+                    check_diff,
                     project_config=pc,
                     operator_config=operator_config,
                     repo_path=repo_path,
@@ -793,7 +841,19 @@ def _run_cycle(
     # below will silently fall through. Tracked as a follow-up; see review
     # comment on PR #75.
     diff_http = httpx.Client()
-    diff_fetcher = DiffFetcher(client=diff_http)
+    # Adaptive limiter (SQLite bucket + X-RateLimit-Remaining headers) for
+    # this client's unauthenticated GitHub calls — per the rate-limiting
+    # convention in CLAUDE.md.
+    rate_limiter = None
+    try:
+        from django.conf import settings as _settings
+
+        from franktheunicorn.data_access.rate_limiter import GitHubRateLimiter
+
+        rate_limiter = GitHubRateLimiter(Path(_settings.DATA_DIR) / "rate_limits.sqlite")
+    except Exception:
+        logger.debug("Could not initialize GitHub rate limiter", exc_info=True)
+    diff_fetcher = DiffFetcher(client=diff_http, rate_limiter=rate_limiter)
     test_runner = TestRunner()
 
     all_prs: list[object] = []
@@ -870,6 +930,7 @@ def _run_cycle(
                     disabled_backends=disabled_backends,
                     diff_http=diff_http,
                     repo_path=repo_path,
+                    forge_client=client,  # type: ignore[arg-type]
                 )
 
                 # Differential test verification (§9).
@@ -909,7 +970,9 @@ def _run_cycle(
             logger.exception("Error polling %s/%s", pc.owner, pc.repo)
 
     # Fetch dependency changelogs reusing the same HTTP client.
-    _fetch_dependency_changelogs_for_cycle(all_prs, pr_to_config, diff_fetcher, diff_http)
+    _fetch_dependency_changelogs_for_cycle(
+        all_prs, pr_to_config, diff_fetcher, diff_http, rate_limiter=rate_limiter
+    )
 
     # Shepherding pass for operator's own PRs (v2 — §2.3).
     if operator_config is not None:
@@ -932,6 +995,7 @@ def _run_cycle(
         operator_config=operator_config,
         disabled_backends=disabled_backends,
         diff_http=diff_http,
+        clients=clients,
     )
 
     diff_http.close()
@@ -1007,11 +1071,16 @@ def _backfill_unreviewed_prs(
     operator_config: OperatorConfig | None,
     disabled_backends: frozenset[int],
     diff_http: httpx.Client,
+    clients: Mapping[str, object] | None = None,
 ) -> None:
     """Draft reviews for open PRs in the DB that have no review drafts yet.
 
     Handles PRs ingested via lookup_pr or other paths that bypass the normal
     poll cycle (which only sees PRs currently open on the forge).
+
+    ``clients`` maps forge-name → ``ForgeClient`` so the diff is fetched from
+    each PR's configured forge; when absent, ``process_pr`` falls back to the
+    public-GitHub dual-path fetcher.
     """
     from django.db.models import Count
 
@@ -1046,11 +1115,13 @@ def _backfill_unreviewed_prs(
 
         logger.info("Backfilling review for PR #%d (%s)", pr.number, full_name)
         try:
+            forge_client = clients.get(pc.forge) if clients else None
             drafts = process_pr(
                 pr,
                 pc,
                 operator_config,
                 disabled_backends=disabled_backends,
+                forge_client=forge_client,  # type: ignore[arg-type]
                 diff_http=diff_http,
             )
             logger.info("  Backfill PR #%d: %d drafts generated", pr.number, len(drafts))
@@ -1080,6 +1151,10 @@ def _run_shepherding_pass(
 
         pc = pr_to_config.get(pr.pk)
         if not isinstance(pc, ProjectConfig):
+            continue
+
+        # Shepherding is a v2 feature — run only when the project opted in.
+        if not pc.shepherding_enabled:
             continue
 
         try:
@@ -1220,8 +1295,10 @@ def _checkout_pr_head_with_merge(
         return False, None
 
     branch_name = f"franktheunicorn-review-{pr.number}"
+    # -B (force-reset) rather than -b: a worker killed mid-review leaves the
+    # branch behind, and -b would then fail every future cycle for this PR.
     checkout = executor.run(  # type: ignore[attr-defined]
-        ["git", "checkout", "-b", branch_name, head_sha],
+        ["git", "checkout", "-B", branch_name, head_sha],
         cwd=cwd,
         timeout=30,
     )
@@ -1358,45 +1435,28 @@ def _resolve_cwd_for_tool(
     return remote_cwd, base_ref, _REMOTE
 
 
-def _run_github_diff_fallback(
-    pr: PullRequest,
-    project_config: object,
-    operator_config: OperatorConfig | None,
-    diff_http: httpx.Client,
-) -> None:
-    """Fall back to a GitHub-fetched diff review when the local merge conflicted.
-
-    Calls draft_review() the same way the main cycle does, which will produce
-    ReviewDraft rows without a diff_source (blank = main LLM pipeline path).
-    """
-    from franktheunicorn.config.models import ProjectConfig
-    from franktheunicorn.review.drafter import draft_review
-
-    if not isinstance(project_config, ProjectConfig):
-        logger.debug("No ProjectConfig for fallback review of PR #%d; skipping.", pr.number)
-        return
-
-    logger.info(
-        "PR #%d: running GitHub-diff fallback review after local merge conflict.", pr.number
-    )
-    try:
-        draft_review(pr, project_config, operator_config)
-    except Exception:
-        logger.exception("GitHub diff fallback review failed for PR #%d", pr.number)
-
-
 def _handle_merge_conflict(
     pr: PullRequest,
     project_config: ProjectConfig | None,
     operator_config: OperatorConfig | None,
     diff_http: httpx.Client | None,
 ) -> None:
-    """Mark a PR non-mergeable and trigger the GitHub-diff fallback review."""
+    """Mark a PR non-mergeable and ensure the rebase-needed draft exists.
+
+    The main pipeline in ``process_pr`` has already run the GitHub-diff
+    review for this PR, so no fallback re-review happens here — re-running
+    ``draft_review`` per conflicting CLI tool duplicated every LLM finding
+    (and its cost) once per tool.
+    """
+    from franktheunicorn.review.drafter import ensure_conflict_draft
+
     if pr.mergeable is not False:
         pr.mergeable = False
         pr.save(update_fields=["mergeable", "updated_at"])
-    if diff_http is not None:
-        _run_github_diff_fallback(pr, project_config, operator_config, diff_http)
+    try:
+        ensure_conflict_draft(pr)
+    except Exception:
+        logger.exception("Failed to create conflict draft for PR #%d", pr.number)
 
 
 def _run_review_tool_for_pr(
@@ -1597,7 +1657,14 @@ _last_security_email_poll: float = 0.0
 
 
 def _poll_security_emails(operator_config: OperatorConfig) -> None:
-    """Poll security email inbox and create SecurityReport records."""
+    """Read the security inbox (read-only) and record what was examined.
+
+    This never marks messages seen and never sends anything. For every email
+    it opens it writes an ``EmailScanRecord`` (visible on the dashboard's
+    "Email Activity" page), and turns the ones that pass the security filter
+    into ``SecurityReport`` drafts. Auto-triage, when enabled, only drafts an
+    assessment — no reply is ever sent.
+    """
     global _last_security_email_poll
 
     if not operator_config.security_triage.enabled:
@@ -1612,38 +1679,92 @@ def _poll_security_emails(operator_config: OperatorConfig) -> None:
         return
 
     try:
-        from franktheunicorn.core.models import SecurityReport
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        from franktheunicorn.core.models import EmailScanRecord, SecurityReport
         from franktheunicorn.data_access.email_inbox.fetcher import fetch_security_emails
 
-        messages = fetch_security_emails(operator_config.security_triage.email)
-        for msg in messages:
-            # Skip if already ingested (by message-id).
-            if (
+        # Dedup against message-ids we've already recorded (last 180 days of
+        # scan records + all ingested reports). Read-only means we can't rely
+        # on the \Seen flag, so we track this ourselves.
+        cutoff = timezone.now() - timedelta(days=180)
+        seen_ids = set(
+            EmailScanRecord.objects.filter(scanned_at__gte=cutoff)
+            .exclude(message_id="")
+            .values_list("message_id", flat=True)
+        )
+        seen_ids.update(
+            SecurityReport.objects.filter(source="email")
+            .exclude(email_message_id="")
+            .values_list("email_message_id", flat=True)
+        )
+
+        fetch = fetch_security_emails(operator_config.security_triage.email, seen_ids)
+
+        ingested = 0
+        for msg in fetch.examined:
+            is_dup = bool(
                 msg.message_id
                 and SecurityReport.objects.filter(email_message_id=msg.message_id).exists()
-            ):
-                continue
-
-            report = SecurityReport.objects.create(
-                raw_text=msg.body,
-                title=msg.subject,
-                reporter_name=msg.from_name,
-                reporter_email=msg.from_email,
-                source="email",
-                email_message_id=msg.message_id,
-                email_received_at=msg.received_at,
             )
-            logger.info("Ingested security report from email: %s", msg.subject)
 
-            # Auto-triage if configured.
-            if operator_config.security_triage.auto_triage:
+            report = None
+            if msg.is_security_report and not is_dup:
+                report = SecurityReport.objects.create(
+                    raw_text=msg.body,
+                    title=msg.subject,
+                    reporter_name=msg.from_name,
+                    reporter_email=msg.from_email,
+                    source="email",
+                    email_message_id=msg.message_id,
+                    email_received_at=msg.received_at,
+                )
+                ingested += 1
+                logger.info(
+                    "[email-scan] ingested security report from %s: %s",
+                    msg.from_email or "unknown",
+                    msg.subject,
+                )
+
+            if report is not None:
+                action = "ingested"
+            elif is_dup:
+                action = "skipped_duplicate"
+            else:
+                action = "skipped_not_security"
+
+            # Visible audit row for *every* message we read.
+            EmailScanRecord.objects.create(
+                folder=operator_config.security_triage.email.folder,
+                message_id=msg.message_id,
+                subject=msg.subject,
+                from_name=msg.from_name,
+                from_email=msg.from_email,
+                is_forwarded=msg.is_forwarded,
+                matched_keywords=list(msg.matched_keywords),
+                classified_security=msg.is_security_report,
+                action=action,
+                security_report=report,
+            )
+
+            # Auto-triage only drafts an assessment; it sends nothing.
+            if report is not None and operator_config.security_triage.auto_triage:
                 try:
                     from franktheunicorn.security.triage import triage_report
 
                     triage_report(report, None, operator_config)
                 except Exception:
                     logger.exception("Auto-triage failed for email report %d", report.pk)
-        # Only update timestamp after successful poll so errors retry sooner.
+
+        logger.info(
+            "[email-scan] poll complete: %d examined, %d ingested, %d already scanned",
+            len(fetch.examined),
+            ingested,
+            fetch.already_scanned,
+        )
+        # Only update timestamp after a successful poll so errors retry sooner.
         _last_security_email_poll = now
     except Exception:
         logger.exception("Error polling security emails")
@@ -1654,6 +1775,7 @@ def _fetch_dependency_changelogs_for_cycle(
     project_configs_by_pr: Mapping[int, object],
     diff_fetcher: DiffFetcher,
     http_client: httpx.Client,
+    rate_limiter: object | None = None,
 ) -> None:
     """Fetch dependency changelogs for all PRs in a cycle that touch dependency files."""
     from franktheunicorn.config.models import ProjectConfig
@@ -1686,7 +1808,7 @@ def _fetch_dependency_changelogs_for_cycle(
         for pr, pc in eligible:
             try:
                 diff = diff_fetcher.fetch(pc.owner, pc.repo, pr.number)
-                detect_and_fetch_changelogs(pr, diff, http_client)
+                detect_and_fetch_changelogs(pr, diff, http_client, rate_limiter=rate_limiter)  # type: ignore[arg-type]
             except Exception:
                 logger.exception(
                     "Error fetching dependency changelogs for PR #%d",

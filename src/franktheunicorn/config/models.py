@@ -581,6 +581,14 @@ class MergeQueueConfig(BaseModel):
     push_force_with_lease: bool = True
     stale_migration_strategy: str = "app-local-diff"
     restack_commit_scope: str = "merge-queue"
+    # Command used to regenerate migrations during a restack. This runs the
+    # *target repo's* project code, so operators should point it at a
+    # sandboxed invocation (e.g. ["docker", "run", "--rm", "-v", ...,
+    # "img", "python", "manage.py", "makemigrations"]) rather than executing
+    # it on the worker host. Kept behind the off-by-default restack flags.
+    restack_makemigrations_cmd: list[str] = Field(
+        default_factory=lambda: ["python", "manage.py", "makemigrations"]
+    )
 
     @field_validator("required_approvals")
     @classmethod
@@ -698,6 +706,7 @@ class SecurityEmailConfig(BaseModel):
     use_ssl: bool = True
     folder: str = "INBOX"
     poll_interval_seconds: int = 300
+    timeout_seconds: int = 30
 
     @field_validator("imap_port")
     @classmethod
@@ -1060,9 +1069,19 @@ class ProjectConfig(BaseModel):
     copypasta_scan_extensions: list[str] = Field(default_factory=lambda: [".py"])
     copypasta_llm_enabled: bool = False
 
+    # v1.75 rejection predictor — opt-in. When enabled, drafts are scored
+    # with the per-project sklearn model (training it automatically once
+    # enough operator actions accumulate) and high-P(rejection) findings are
+    # auto-suppressed. Off by default: v1.5+ paths activate only via
+    # explicit config.
+    rejection_predictor_enabled: bool = False
+
     # v2 features
     fine_tuned_model: FineTunedModelConfig = Field(default_factory=FineTunedModelConfig)
     merge_queue: MergeQueueConfig = Field(default_factory=MergeQueueConfig)
+    # Shepherding pass over the operator's own PRs (draft replies to
+    # reviewers, rebase/staleness alerts). v2 — opt-in per project.
+    shepherding_enabled: bool = False
 
     # LLM sub-checks (v1) — e.g. ["coverage"]
     llm_checks: list[str] = Field(default_factory=list)

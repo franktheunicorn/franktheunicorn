@@ -177,12 +177,12 @@ def score_committer_is_on_it(
     watched_paths: list[str],
     changed_files: list[str],
     mentioned_or_assigned: bool = False,
-    recency_hours: int = 48,
 ) -> int | None:
     """Down-rank PRs where another committer is actively reviewing (§2.7).
 
     Conditions for down-ranking (all must be true):
-    - A known committer (not operator) has reviewed within *recency_hours*
+    - A known committer (not operator) appears in ``recent_reviews`` — the
+      caller is responsible for pre-filtering entries to a recency window
     - PR is NOT in operator's watch_paths
     - Operator is NOT mentioned or assigned
     """

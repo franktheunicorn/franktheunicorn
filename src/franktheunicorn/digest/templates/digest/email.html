@@ -6,7 +6,7 @@
 <h3 style="margin-top: 1.5rem;">HIGH-INTEREST PRs (score &ge; 0.7)</h3>
 {% for e in digest.high_interest %}
 <div style="margin-bottom: 0.75rem; padding: 0.5rem; background: #e8f5e9; border-radius: 4px;">
-  <strong>{{ e.project_name }}#{{ e.pr_number }}</strong> — "{{ e.pr_title }}"<br>
+  <strong><a href="{{ e.url }}" style="color: inherit;">{{ e.project_name }}#{{ e.pr_number }}</a></strong> — "{{ e.pr_title }}"<br>
   <small>score: {{ e.interest_score|floatformat:2 }} · {{ e.pending_drafts }} drafts{% if e.test_verdict %} · Tests: {{ e.test_verdict }}{% endif %}</small>
 </div>
 {% endfor %}
@@ -15,28 +15,28 @@
 {% if digest.your_prs %}
 <h3 style="margin-top: 1.5rem;">YOUR PRs NEEDING ACTION</h3>
 {% for e in digest.your_prs %}
-<div style="margin-bottom: 0.5rem;"><strong>{{ e.project_name }}#{{ e.pr_number }}</strong> — "{{ e.pr_title }}"</div>
+<div style="margin-bottom: 0.5rem;"><strong><a href="{{ e.url }}" style="color: inherit;">{{ e.project_name }}#{{ e.pr_number }}</a></strong> — "{{ e.pr_title }}"</div>
 {% endfor %}
 {% endif %}
 
 {% if digest.ai_generated %}
 <h3 style="margin-top: 1.5rem;">AI-GENERATED PRs</h3>
 {% for e in digest.ai_generated %}
-<div style="margin-bottom: 0.5rem;"><strong>{{ e.project_name }}#{{ e.pr_number }}</strong> — "{{ e.pr_title }}"<br><small>{{ e.pending_drafts }} drafts</small></div>
+<div style="margin-bottom: 0.5rem;"><strong><a href="{{ e.url }}" style="color: inherit;">{{ e.project_name }}#{{ e.pr_number }}</a></strong> — "{{ e.pr_title }}"<br><small>{{ e.pending_drafts }} drafts</small></div>
 {% endfor %}
 {% endif %}
 
 {% if digest.moderation %}
 <h3 style="margin-top: 1.5rem;">MODERATION</h3>
 {% for e in digest.moderation %}
-<div style="margin-bottom: 0.5rem;"><strong>{{ e.project_name }}#{{ e.pr_number }}</strong> — {{ e.queue }}</div>
+<div style="margin-bottom: 0.5rem;"><strong><a href="{{ e.url }}" style="color: inherit;">{{ e.project_name }}#{{ e.pr_number }}</a></strong> — {{ e.queue }}</div>
 {% endfor %}
 {% endif %}
 
 {% if digest.test_issues %}
 <h3 style="margin-top: 1.5rem;">TEST ISSUES</h3>
 {% for e in digest.test_issues %}
-<div style="margin-bottom: 0.5rem; padding: 0.3rem; background: #fff3e0; border-radius: 4px;"><strong>{{ e.project_name }}#{{ e.pr_number }}</strong> — {{ e.test_verdict }}</div>
+<div style="margin-bottom: 0.5rem; padding: 0.3rem; background: #fff3e0; border-radius: 4px;"><strong><a href="{{ e.url }}" style="color: inherit;">{{ e.project_name }}#{{ e.pr_number }}</a></strong> — {{ e.test_verdict }}</div>
 {% endfor %}
 {% endif %}
 

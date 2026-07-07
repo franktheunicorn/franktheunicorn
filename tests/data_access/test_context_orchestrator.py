@@ -189,7 +189,7 @@ class TestBuildSearchQuery:
     def test_from_title(self) -> None:
         pr = PullRequestFactory(title="Add DataFrame.mapInArrow for Connect")
         queries = _build_mailing_list_queries(pr)
-        assert any("mapInArrow" in q for q in queries)
+        assert any("mapInArrow" in q for q, _ in queries)
 
     def test_includes_file_names(self) -> None:
         pr = PullRequestFactory(
@@ -197,7 +197,7 @@ class TestBuildSearchQuery:
             changed_files=["core/rdd.py", "sql/catalyst.scala"],
         )
         queries = _build_mailing_list_queries(pr)
-        combined = " ".join(queries)
+        combined = " ".join(q for q, _ in queries)
         assert "rdd" in combined
         assert "catalyst" in combined
 
@@ -207,8 +207,8 @@ class TestBuildSearchQuery:
             changed_files=["pkg/__init__.py", "pkg/real_module.py"],
         )
         queries = _build_mailing_list_queries(pr)
-        assert all("__init__" not in q for q in queries)
-        assert any("real_module" in q for q in queries)
+        assert all("__init__" not in q for q, _ in queries)
+        assert any("real_module" in q for q, _ in queries)
 
 
 @pytest.mark.django_db
@@ -462,6 +462,25 @@ class TestFormatCommunityResultsAllTypes:
         formatted = _format_community_results(results)
         assert formatted == ""
 
+    def test_truncation_is_per_source(self) -> None:
+        """One oversized source must not starve later sources out of the
+        prompt — the char cap applies per source, not to the concatenation."""
+        big_threads = [
+            {"subject": f"Thread {i}", "date": "2026-01-01", "snippet": "x" * 190}
+            for i in range(20)
+        ]
+        results = [
+            {"type": "mailing-list", "name": "dev@spark", "threads": big_threads},
+            {
+                "type": "perplexity",
+                "name": "Perplexity search",
+                "content": "Some search result",
+                "citations": [],
+            },
+        ]
+        formatted = _format_community_results(results)
+        assert "Some search result" in formatted
+
 
 @pytest.mark.django_db
 class TestBuildSearchQueryEdgeCases:
@@ -469,7 +488,7 @@ class TestBuildSearchQueryEdgeCases:
         pr = PullRequestFactory(title="", changed_files=[])
         queries = _build_mailing_list_queries(pr)
         # With no title and no files, only a PR number query remains.
-        assert all(q.startswith("#") for q in queries) or queries == []
+        assert all(q.startswith("#") for q, _ in queries) or queries == []
 
     def test_excludes_test_and_conftest(self) -> None:
         pr = PullRequestFactory(
@@ -477,10 +496,27 @@ class TestBuildSearchQueryEdgeCases:
             changed_files=["tests/test.py", "tests/conftest.py", "src/module.py"],
         )
         queries = _build_mailing_list_queries(pr)
-        flat = " ".join(queries)
+        flat = " ".join(q for q, _ in queries)
         # "test" and "conftest" should not appear as standalone query terms.
         assert "conftest" not in flat
         assert "module" in flat
+
+    def test_title_and_filenames_not_tagged_as_blame(self) -> None:
+        """Only blame-author queries carry the blame tag — title/filename
+        queries were previously mislabeled by a shape-based heuristic
+        whenever a JIRA id occupied slot 0."""
+        pr = PullRequestFactory(
+            title="SPARK-999 Fix executor memory leak",
+            body="See SPARK-999",
+            changed_files=["core/executor.py"],
+            score_breakdown={"blame_authors": ["holdenk"]},
+        )
+        queries = _build_mailing_list_queries(pr)
+        by_query = dict(queries)
+        assert by_query.get("holdenk") is True
+        for query, is_blame in queries:
+            if query != "holdenk":
+                assert is_blame is False, f"{query!r} wrongly tagged as blame query"
 
     def test_limits_file_parts_to_five(self) -> None:
         pr = PullRequestFactory(
@@ -531,7 +567,7 @@ class TestFetchMailingList:
             name="dev@spark",
             archive_url="https://lists.apache.org/dev@spark",
         )
-        result = _fetch_mailing_list(config, ["Arrow API"], MagicMock())
+        result = _fetch_mailing_list(config, [("Arrow API", False)], MagicMock())
         assert result is not None
         assert result["type"] == "mailing-list"
         assert result["name"] == "dev@spark"
@@ -548,13 +584,13 @@ class TestFetchMailingList:
         config = CommunitySourceConfig(
             type="mailing-list", name="dev@spark", archive_url="https://lists.example.com"
         )
-        result = _fetch_mailing_list(config, ["query"], MagicMock())
+        result = _fetch_mailing_list(config, [("query", False)], MagicMock())
         assert result is None
 
     def test_returns_none_for_wrong_config_type(self) -> None:
         from franktheunicorn.data_access.context_orchestrator import _fetch_mailing_list
 
-        result = _fetch_mailing_list("not a config", ["query"], MagicMock())
+        result = _fetch_mailing_list("not a config", [("query", False)], MagicMock())
         assert result is None
 
 

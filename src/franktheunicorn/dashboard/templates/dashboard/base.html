@@ -12,109 +12,11 @@
             https://unpkg.com/htmx.org@<version>/dist/htmx.min.js #}
     <script src="{% static 'dashboard/vendor/htmx.min.js' %}"></script>
     <link rel="icon" type="image/svg+xml" href="{% static 'dashboard/img/duck-icon.svg' %}">
+    {# All dashboard CSS lives in styles.css (one custom-property set, with a
+       working prefers-color-scheme: dark override). Do not add inline page
+       styles here — an inline block was the source of the light-only theme
+       that used to override the stylesheet's dark mode. #}
     <link rel="stylesheet" href="{% static 'dashboard/styles.css' %}">
-    <style>
-        :root {
-            --bg: #fafafa; --card: #fff; --border: #e0e0e0;
-            --text: #333; --muted: #666; --accent: #0366d6;
-            --green: #2e7d32; --green-bg: #e8f5e9;
-            --orange: #e65100; --orange-bg: #fff3e0;
-            --blue: #1565c0; --blue-bg: #e3f2fd;
-            --red: #c00; --red-bg: #fee;
-            --yellow: #fdd835; --yellow-bg: #fffde7;
-            --purple: #6e40c9;
-        }
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            line-height: 1.6; color: var(--text);
-            max-width: 1024px; margin: 0 auto; padding: 1rem;
-            background: var(--bg);
-        }
-        header { border-bottom: 2px solid var(--border); padding-bottom: 0.5rem; margin-bottom: 1rem; }
-        header h1 { font-size: 1.4rem; display: inline; }
-        header h1 a { color: var(--text); text-decoration: none; }
-        nav { display: flex; gap: 1rem; align-items: center; margin-top: 0.5rem; font-size: 0.85rem; }
-        nav a { color: var(--muted); text-decoration: none; }
-        nav a:hover, nav a.active { color: var(--accent); font-weight: 600; }
-        .workspace-select { margin-left: auto; }
-        .workspace-select select { font-size: 0.8rem; padding: 0.2rem; }
-        .tab-bar { display: flex; gap: 0; border-bottom: 2px solid var(--border); margin-bottom: 1rem; overflow-x: auto; }
-        .tab-bar a {
-            padding: 0.5rem 1rem; text-decoration: none; color: var(--muted);
-            border-bottom: 2px solid transparent; margin-bottom: -2px;
-            white-space: nowrap; font-size: 0.85rem;
-        }
-        .tab-bar a:hover { color: var(--text); }
-        .tab-bar a.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
-        .tab-count { font-size: 0.7rem; background: var(--border); border-radius: 8px; padding: 0.1rem 0.4rem; margin-left: 0.3rem; }
-        .pr-list { list-style: none; }
-        .pr-item { background: var(--card); border: 1px solid var(--border); border-radius: 4px; padding: 0.75rem 1rem; margin-bottom: 0.5rem; }
-        .pr-item:hover { border-color: #999; }
-        .pr-title { font-weight: 600; }
-        .pr-title a { color: var(--accent); text-decoration: none; }
-        .pr-meta { font-size: 0.8rem; color: var(--muted); margin-top: 0.25rem; }
-        .score-badge { display: inline-block; background: var(--green-bg); color: var(--green); padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.8rem; font-weight: 600; }
-        .score-badge.low { background: var(--orange-bg); color: var(--orange); }
-        .score-badge.mid { background: var(--blue-bg); color: var(--blue); }
-        .findings-badge { display: inline-block; background: var(--yellow-bg); color: #8a6d00; padding: 0.05rem 0.35rem; border-radius: 3px; font-weight: 600; }
-        .badge-conflict { display: inline-block; background: var(--red-bg); color: var(--red); padding: 0.05rem 0.35rem; border-radius: 3px; font-weight: 600; font-size: 0.75rem; }
-        .draft-list { margin-top: 1rem; }
-        .draft-item { background: var(--yellow-bg); border-left: 3px solid var(--yellow); padding: 0.5rem 0.75rem; margin-bottom: 0.5rem; font-size: 0.9rem; }
-        .draft-item.accepted { border-left-color: var(--green); background: var(--green-bg); }
-        .draft-item.rejected { border-left-color: var(--red); background: var(--red-bg); opacity: 0.7; }
-        .draft-item.posted { border-left-color: var(--blue); background: var(--blue-bg); }
-        .draft-item.edited { border-left-color: var(--orange); background: var(--orange-bg); }
-        .draft-item.focused { outline: 2px solid var(--accent); outline-offset: 2px; }
-        .breakdown { font-size: 0.8rem; color: #555; }
-        .breakdown dt { font-weight: 600; display: inline; }
-        .breakdown dd { display: inline; margin-right: 1rem; }
-        .empty-state { color: #999; padding: 2rem; text-align: center; }
-        .empty-state img { display: block; margin: 0 auto 1rem; max-width: 120px; height: auto; opacity: 0.6; }
-        .empty-state p { margin-top: 0.5rem; }
-        a.back-link { font-size: 0.85rem; color: var(--muted); }
-        .source-badge { font-size: 0.7rem; padding: 0.1rem 0.4rem; border-radius: 3px; margin-left: 0.3rem; font-weight: 600; vertical-align: middle; }
-        .source-coderabbit { background: var(--purple); color: #fff; }
-        .source-agent { background: var(--green); color: #fff; }
-        .action-btn { font-size: 0.75rem; padding: 0.2rem 0.5rem; border: 1px solid var(--border); border-radius: 3px; cursor: pointer; background: var(--card); margin-right: 0.3rem; }
-        .action-btn:hover { background: var(--border); }
-        .action-btn.approve { color: var(--green); border-color: var(--green); }
-        .action-btn.reject { color: var(--red); border-color: var(--red); }
-        .action-btn.edit { color: var(--orange); border-color: var(--orange); }
-        .action-btn.post { color: #fff; background: var(--accent); border-color: var(--accent); }
-        .verdict-badge { font-size: 0.75rem; padding: 0.1rem 0.4rem; border-radius: 3px; font-weight: 600; }
-        .verdict-good { background: var(--green-bg); color: var(--green); }
-        .verdict-suspect { background: var(--orange-bg); color: var(--orange); }
-        .verdict-broken { background: var(--red-bg); color: var(--red); }
-        .verdict-infra { background: var(--blue-bg); color: var(--blue); }
-        table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
-        th, td { padding: 0.5rem; text-align: left; border-bottom: 1px solid var(--border); }
-        thead th { border-bottom: 2px solid var(--border); }
-        .form-row { display: flex; gap: 0.5rem; margin-bottom: 0.5rem; align-items: center; }
-        .form-row input, .form-row select, .form-row textarea { font-size: 0.85rem; padding: 0.3rem 0.5rem; }
-        .form-row input[type=text], .form-row textarea { flex: 1; }
-        #shortcut-help { display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: var(--card); border: 2px solid var(--border); border-radius: 8px; padding: 1.5rem; z-index: 100; box-shadow: 0 4px 12px rgba(0,0,0,0.15); max-width: 400px; }
-        #shortcut-help h3 { margin-bottom: 0.5rem; }
-        #shortcut-help kbd { background: var(--border); padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.85rem; }
-        @media (max-width: 600px) {
-            body { padding: 0.5rem; }
-            .tab-bar a { padding: 0.4rem 0.6rem; font-size: 0.75rem; }
-            .empty-state img { max-width: 80px; }
-            header h1 img { width: 22px; height: 17px; }
-            .filter-bar { flex-direction: column; align-items: flex-start; }
-        }
-        .filter-bar { display: flex; gap: 0.75rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; font-size: 0.85rem; }
-        .filter-bar label { color: var(--muted); white-space: nowrap; }
-        .filter-bar select { font-size: 0.8rem; padding: 0.2rem; }
-        .pr-lookup { display: flex; gap: 0.4rem; align-items: center; margin-left: auto; }
-        .pr-lookup select, .pr-lookup input { font-size: 0.8rem; padding: 0.2rem 0.3rem; }
-        .flash { padding: 0.4rem 0.75rem; border-radius: 4px; margin-bottom: 0.75rem; font-size: 0.85rem; background: var(--red-bg); color: var(--red); }
-        .pr-nav { display: flex; align-items: center; gap: 1rem; margin-bottom: 0.75rem; font-size: 0.85rem; }
-        .pr-nav-arrows { display: flex; gap: 0.75rem; margin-left: auto; }
-        .pr-nav-arrows a { color: var(--accent); text-decoration: none; }
-        .pr-nav-arrows a:hover { text-decoration: underline; }
-        .pr-nav-arrows .muted { color: #bbb; }
-    </style>
 </head>
 <body>
     <header>

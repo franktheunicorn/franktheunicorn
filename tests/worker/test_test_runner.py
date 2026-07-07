@@ -135,6 +135,66 @@ class TestRunDifferential:
         # Two runs: PR + base.
         assert mock_docker.containers.run.call_count == 2
 
+    def test_orphaned_running_testrun_does_not_block_reverification(
+        self, tmp_path: Path, fake_workspaces: tuple[Path, Path]
+    ) -> None:
+        """A killed worker can leave a status="running" TestRun. That orphan
+        must NOT count as "already tested" — the worker is restart-safe, so
+        re-verification of the same head must still run."""
+        from franktheunicorn.core.models import TestRun
+
+        runner = DockerTestRunner()
+        pr = _ready_pr(changed_files=["tests/test_main.py"], author="trusted-dev")
+        config = ProjectConfig(
+            owner="test",
+            repo="test",
+            tests=TestExecutionConfig(enabled=True),
+            frequent_contributors=["trusted-dev"],
+        )
+        TestRun.objects.create(
+            pull_request=pr, run_type="pr_branch", status="running", head_sha=pr.head_sha
+        )
+
+        mock_docker = MagicMock()
+        mock_container = MagicMock()
+        mock_container.wait.return_value = {"StatusCode": 0}
+        mock_container.logs.return_value = b"1 passed"
+        mock_docker.containers.run.return_value = mock_container
+
+        with patch(
+            "franktheunicorn.worker.test_runner.TestRunner._get_docker",
+            return_value=mock_docker,
+        ):
+            # Not force: the skip guard applies, but the orphaned running row
+            # must not trigger it.
+            result = runner.run_differential_test(pr, config, tmp_path)
+
+        assert result is not None
+        assert result.status == "completed"
+
+    def test_completed_testrun_skips_reverification(self, tmp_path: Path) -> None:
+        """A terminal (completed) run for the same head is skipped so
+        unchanged PRs don't burn a container run every poll cycle."""
+        from franktheunicorn.core.models import TestRun
+
+        runner = DockerTestRunner()
+        pr = _ready_pr(changed_files=["tests/test_main.py"], author="trusted-dev")
+        config = ProjectConfig(
+            owner="test",
+            repo="test",
+            tests=TestExecutionConfig(enabled=True),
+            frequent_contributors=["trusted-dev"],
+        )
+        TestRun.objects.create(
+            pull_request=pr, run_type="pr_branch", status="completed", head_sha=pr.head_sha
+        )
+
+        with patch("franktheunicorn.worker.test_runner.TestRunner._get_docker") as mock_get_docker:
+            result = runner.run_differential_test(pr, config, tmp_path)
+
+        assert result is None
+        mock_get_docker.assert_not_called()  # never even reached docker
+
     def test_container_invocation_mounts_workspace(
         self, tmp_path: Path, fake_workspaces: tuple[Path, Path]
     ) -> None:

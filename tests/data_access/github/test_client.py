@@ -80,7 +80,7 @@ class TestGitHubClient:
 
     def test_list_pull_requests(self, github_client: GitHubClient, httpx_mock: HTTPXMock) -> None:
         httpx_mock.add_response(
-            url="https://api.github.com/repos/apache/spark/pulls?state=open&per_page=50",
+            url="https://api.github.com/repos/apache/spark/pulls?state=open&per_page=100&page=1",
             json=[{"id": 1, "number": 42, "title": "Test PR"}],
         )
         prs = github_client.list_pull_requests("apache", "spark")
@@ -91,7 +91,7 @@ class TestGitHubClient:
         self, github_client: GitHubClient, httpx_mock: HTTPXMock
     ) -> None:
         httpx_mock.add_response(
-            url="https://api.github.com/repos/apache/spark/pulls/42/files?per_page=100",
+            url="https://api.github.com/repos/apache/spark/pulls/42/files?per_page=100&page=1",
             json=[{"filename": "README.md", "additions": 1, "deletions": 0}],
         )
         files = github_client.get_pull_request_files("apache", "spark", 42)
@@ -120,7 +120,7 @@ class TestGitHubClient:
 
     def test_no_token(self, httpx_mock: HTTPXMock) -> None:
         httpx_mock.add_response(
-            url="https://api.github.com/repos/test/repo/pulls?state=open&per_page=50",
+            url="https://api.github.com/repos/test/repo/pulls?state=open&per_page=100&page=1",
             json=[],
         )
         client = GitHubClient()  # no token
