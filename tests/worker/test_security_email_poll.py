@@ -21,7 +21,7 @@ from franktheunicorn.data_access.email_inbox.types import EmailFetchResult, Inbo
 from franktheunicorn.worker import runner
 
 
-def _operator_config(auto_triage: bool = False) -> OperatorConfig:
+def _operator_config(auto_triage: bool = False, ingested_tag: str = "") -> OperatorConfig:
     return OperatorConfig(
         github_username="holdenk",
         security_triage=SecurityTriageConfig(
@@ -33,6 +33,7 @@ def _operator_config(auto_triage: bool = False) -> OperatorConfig:
                 imap_user="holden@gmail.com",
                 imap_pass="app-password",
                 folder="INBOX",
+                ingested_tag=ingested_tag,
             ),
         ),
     )
@@ -155,3 +156,99 @@ class TestPollSecurityEmails:
             runner._poll_security_emails(cfg)
         mock_fetch.assert_not_called()
         assert EmailScanRecord.objects.count() == 0
+
+    def test_ingested_tag_applied_only_to_newly_ingested_messages(self) -> None:
+        # A duplicate that is already in frank must not be (re-)tagged.
+        SecurityReport.objects.create(
+            raw_text="old", title="old", source="email", email_message_id="<tag-dup>"
+        )
+        _reset_poll_clock()
+        fetch = EmailFetchResult(
+            examined=[
+                InboxMessage(
+                    message_id="<tag-sec>",
+                    subject="[SECURITY] rce",
+                    body="remote code execution vulnerability exploit",
+                    is_security_report=True,
+                ),
+                InboxMessage(
+                    message_id="<tag-chatter>",
+                    subject="Lunch?",
+                    body="tacos?",
+                    is_security_report=False,
+                ),
+                InboxMessage(
+                    message_id="<tag-dup>",
+                    subject="[SECURITY] dup",
+                    body="vulnerability exploit",
+                    is_security_report=True,
+                ),
+            ]
+        )
+        cfg = _operator_config(ingested_tag="frank/ingested")
+        with (
+            patch(
+                "franktheunicorn.data_access.email_inbox.fetcher.fetch_security_emails",
+                return_value=fetch,
+            ),
+            patch(
+                "franktheunicorn.data_access.email_inbox.fetcher.tag_ingested_messages"
+            ) as mock_tag,
+        ):
+            runner._poll_security_emails(cfg)
+
+        mock_tag.assert_called_once_with(cfg.security_triage.email, ["<tag-sec>"])
+
+    def test_no_tagging_when_not_configured(self) -> None:
+        _reset_poll_clock()
+        fetch = EmailFetchResult(
+            examined=[
+                InboxMessage(
+                    message_id="<untagged-sec>",
+                    subject="[SECURITY] rce",
+                    body="remote code execution vulnerability",
+                    is_security_report=True,
+                )
+            ]
+        )
+        with (
+            patch(
+                "franktheunicorn.data_access.email_inbox.fetcher.fetch_security_emails",
+                return_value=fetch,
+            ),
+            patch(
+                "franktheunicorn.data_access.email_inbox.fetcher.tag_ingested_messages"
+            ) as mock_tag,
+        ):
+            runner._poll_security_emails(_operator_config())
+
+        mock_tag.assert_not_called()
+        assert SecurityReport.objects.count() == 1  # ingestion unaffected
+
+    def test_tagging_failure_never_breaks_the_poll(self) -> None:
+        _reset_poll_clock()
+        fetch = EmailFetchResult(
+            examined=[
+                InboxMessage(
+                    message_id="<tagfail-sec>",
+                    subject="[SECURITY] rce",
+                    body="remote code execution vulnerability",
+                    is_security_report=True,
+                )
+            ]
+        )
+        with (
+            patch(
+                "franktheunicorn.data_access.email_inbox.fetcher.fetch_security_emails",
+                return_value=fetch,
+            ),
+            patch(
+                "franktheunicorn.data_access.email_inbox.fetcher.tag_ingested_messages",
+                side_effect=RuntimeError("imap went away"),
+            ),
+        ):
+            runner._poll_security_emails(_operator_config(ingested_tag="frank/ingested"))
+
+        # Report + audit row exist despite the tagging error.
+        assert SecurityReport.objects.count() == 1
+        assert EmailScanRecord.objects.get(message_id="<tagfail-sec>").action == "ingested"

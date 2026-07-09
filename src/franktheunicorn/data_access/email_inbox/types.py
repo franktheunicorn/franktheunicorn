@@ -43,3 +43,19 @@ class EmailFetchResult:
     unread_total: int = 0
     already_scanned: int = 0
     error: str = ""
+
+
+@dataclass
+class EmailTagResult:
+    """Outcome of tagging ingested messages in the mailbox (opt-in).
+
+    ``skipped`` counts messages we chose not to touch (no message-id, or an
+    id that can't be searched safely); ``missing`` counts ids the server no
+    longer found; ``failed`` counts STORE attempts the server rejected.
+    """
+
+    tagged: int = 0
+    missing: int = 0
+    failed: int = 0
+    skipped: int = 0
+    error: str = ""

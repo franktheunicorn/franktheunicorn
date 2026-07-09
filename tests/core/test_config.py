@@ -14,7 +14,7 @@ from franktheunicorn.config.loader import (
     load_operator_config,
     load_project_configs,
 )
-from franktheunicorn.config.models import OperatorConfig, ProjectConfig
+from franktheunicorn.config.models import OperatorConfig, ProjectConfig, SecurityEmailConfig
 from franktheunicorn.config.schema import validate_yaml_file
 
 
@@ -220,6 +220,29 @@ class TestOperatorConfigValidation:
     def test_positive_poll_interval_accepted(self) -> None:
         config = OperatorConfig(poll_interval_seconds=60)
         assert config.poll_interval_seconds == 60
+
+
+class TestSecurityEmailConfigValidation:
+    def test_ingested_tag_defaults_off(self) -> None:
+        assert SecurityEmailConfig().ingested_tag == ""
+
+    @pytest.mark.parametrize("tag", ["frank/ingested", "frank-ingested", "in frank"])
+    def test_ingested_tag_accepts_gmail_style_labels(self, tag: str) -> None:
+        assert SecurityEmailConfig(ingested_tag=tag).ingested_tag == tag
+
+    def test_ingested_tag_is_stripped(self) -> None:
+        assert SecurityEmailConfig(ingested_tag="  frank/ingested ").ingested_tag == (
+            "frank/ingested"
+        )
+
+    @pytest.mark.parametrize(
+        "tag",
+        ['fr"ank', "fr\\ank", "fra\tnk", "franké"],
+        ids=["quote", "backslash", "control", "non-ascii"],
+    )
+    def test_ingested_tag_rejects_imap_unsafe_values(self, tag: str) -> None:
+        with pytest.raises(ValidationError, match="ingested_tag"):
+            SecurityEmailConfig(ingested_tag=tag)
 
     def test_none_poll_interval_accepted(self) -> None:
         config = OperatorConfig()
