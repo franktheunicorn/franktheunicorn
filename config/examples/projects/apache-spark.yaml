@@ -55,6 +55,25 @@ frequent_contributors:
 
 enabled: true
 
+# --- Alert mode (enabled by default for this project) ---
+# Frank raises an alert — and emails you, when operator.yaml `alerts:` has a
+# recipient configured — when someone raises a PR matching something you're
+# working on, or when a security report is sitting in the queue or in triage.
+# "Working on" always includes files touched by your own open Spark PRs;
+# working_paths/working_keywords declare in-flight work that isn't visible
+# on GitHub yet. Requires the master switch: `alerts.enabled: true` in
+# operator.yaml.
+alerts:
+  enabled: true
+  working_overlap: true     # PRs overlapping your in-flight work
+  security_reports: true    # security reports filed against this project
+  working_paths:
+    - "core/src/main/scala/org/apache/spark/storage/"  # e.g. decommissioning work
+    - "python/pyspark/sql/connect/"
+  working_keywords:
+    - "decommission"
+    - "spark connect"
+
 # Full-file + first-party-import context injected into review prompts.
 # Bumped budgets for a large monorepo — reduces "can't see the surrounding
 # code" false positives on catalyst/optimizer changes.

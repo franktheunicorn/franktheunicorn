@@ -998,6 +998,13 @@ def _run_cycle(
         clients=clients,
     )
 
+    # Alert mode: working-overlap + security-report alerts, batched email.
+    # Runs last so PRs and reports ingested anywhere in this cycle are seen.
+    if operator_config is not None:
+        from franktheunicorn.alerts.service import run_alert_sweep
+
+        run_alert_sweep(project_configs, operator_config)
+
     diff_http.close()
 
 

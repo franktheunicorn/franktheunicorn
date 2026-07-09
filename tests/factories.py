@@ -8,6 +8,7 @@ import factory  # type: ignore[import-untyped]
 
 from franktheunicorn.core.models import (
     AgentFeedback,
+    Alert,
     AntiPattern,
     CostRecord,
     DependencyChange,
@@ -230,6 +231,23 @@ class EmailScanRecordFactory(factory.django.DjangoModelFactory):  # type: ignore
     classified_security = False
     action = "skipped_not_security"
     security_report = None
+
+
+class AlertFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
+    """Factory for Alert model instances."""
+
+    class Meta:
+        model = Alert
+
+    alert_type = "working-overlap"
+    dedup_key = factory.Sequence(lambda n: f"working-overlap:pr:{10_000 + n}")
+    project = None
+    pull_request = None
+    security_report = None
+    title = factory.Sequence(lambda n: f"Alert #{n}")
+    reasons = factory.LazyFunction(list)
+    email_sent = False
+    emailed_at = None
 
 
 class LLMBackendFallbackFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]

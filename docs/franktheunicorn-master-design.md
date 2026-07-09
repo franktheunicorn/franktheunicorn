@@ -34,6 +34,7 @@
 - [10.8 Fine-Tuning: Dataset & Learning Patterns](#108-fine-tuning-dataset--learning-patterns)
 - [11. Dashboard (Django)](#11-dashboard-django)
 - [12. Daily Email Digest](#12-daily-email-digest)
+- [12.5 Alert Mode](#125-alert-mode)
 - [13. ET Phone Home (Optional Telemetry)](#13-et-phone-home-optional-telemetry)
 - [14. Data Model (Django)](#14-data-model-django)
 - [15. Self-Hosting & Onboarding](#15-self-hosting--onboarding)
@@ -2058,6 +2059,66 @@ Subject: franktheunicorn digest — Mar 27, 2026 — 7 PRs need attention
 💡 MONTHLY (1st)
   3 anti-patterns haven't matched in 60 days — review?
 ```
+
+---
+
+## 12.5 Alert Mode
+
+### Problem
+
+The digest is a daily summary — fine for routine review, too slow for two
+situations: someone raises a PR that collides with work the operator has in
+flight (duplicated effort, merge conflicts brewing), and a security report
+arrives and sits unnoticed in the queue.
+
+### Design
+
+The worker runs an alert sweep at the end of every poll cycle. Two alert
+types:
+
+- **Working overlap** — a PR by someone else in an alert-enabled project
+  matches what the operator is working on:
+  - it touches the same files as one of the operator's own open PRs in
+    that project (automatic — "what I'm working on" ⊇ "my open PRs"), or
+  - it touches a declared `working_paths` pattern, or
+  - its title/body mentions a declared `working_keywords` term.
+- **Security report waiting** — a `SecurityReport` is in the queue
+  (status `new`) or in triage (status `triaging`), from any source
+  (email ingestion or dashboard paste).
+
+Every alert is recorded as an `Alert` row; a unique `dedup_key` means each
+PR / report alerts at most once, so sweeps are idempotent and the first
+sweep after enabling produces one batch, not a repeating storm. All alerts
+not yet emailed are sent as a **single batched email per cycle** to
+`alerts.email` (falling back to `digest_email`), using the same SMTP
+config as the digest. No recipient configured → alerts are still recorded
+(admin/dashboard) and email is skipped silently.
+
+### Configuration
+
+```yaml
+# In config.yaml (operator) — master switch + delivery
+alerts:
+  enabled: true
+  email: "holden@example.com"   # falls back to digest_email
+  security_reports: true        # reports with no project honour this
+
+# In project config — participation + what "working on" means
+alerts:
+  enabled: true                 # default true once operator switch is on
+  working_overlap: true
+  security_reports: true        # reports attached to this project
+  working_paths:
+    - "core/src/main/scala/org/apache/spark/storage/"
+  working_keywords:
+    - "decommission"
+```
+
+### Version Targeting
+
+v1. Inert until the operator sets `alerts.enabled` (graceful feature-gate
+convention). No LLM calls — pure file/keyword matching against state the
+poll cycle already collects.
 
 ---
 
