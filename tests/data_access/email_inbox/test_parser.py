@@ -10,6 +10,7 @@ from franktheunicorn.data_access.email_inbox.parser import (
     _strip_html,
     _unwrap_forwarded,
     parse_email_message,
+    parse_pasted_report,
 )
 
 
@@ -154,6 +155,62 @@ class TestForwardedEmail:
         msg["Subject"] = "Fwd: Fwd: something"
         msg["From"] = "forwarder@example.com"
         result = parse_email_message(msg.as_bytes())
+        assert result.from_email == "real@example.com"
+        assert result.subject.startswith("[SECURITY] the actual vulnerability")
+
+
+class TestParsePastedReport:
+    """The paste path: the operator copies a report (often a forwarded email)
+    into a textarea. Metadata must be recovered from the text itself, with no
+    MIME envelope and no LLM backend required."""
+
+    def test_plain_text_has_no_recovered_metadata(self) -> None:
+        result = parse_pasted_report("A short vulnerability note about an exploit.")
+        assert result.is_forwarded is False
+        assert result.subject == ""
+        assert result.from_name == ""
+        assert result.from_email == ""
+        # Body is preserved verbatim for triage.
+        assert result.body == "A short vulnerability note about an exploit."
+
+    def test_recovers_reporter_and_title_from_forward(self) -> None:
+        result = parse_pasted_report(_APACHE_FORWARD)
+        assert result.is_forwarded is True
+        # "via security" decoration stripped from the reporter name.
+        assert result.from_name == "Ryan Hughes"
+        assert result.from_email == "security@apache.org"
+        # [SECURITY] kept; no Fwd:/Re: to strip here.
+        assert result.subject.startswith("[SECURITY] Path traversal")
+        # Full pasted text — including the Apache boilerplate — kept for triage.
+        assert "received by the Apache" in result.body
+        assert "core_model_path" in result.body
+
+    def test_classifies_security_keywords(self) -> None:
+        result = parse_pasted_report(_APACHE_FORWARD)
+        assert result.is_security_report is True
+        assert "path traversal" in result.matched_keywords
+
+    def test_empty_text_is_safe(self) -> None:
+        result = parse_pasted_report("")
+        assert result.body == ""
+        assert result.is_forwarded is False
+        assert result.is_security_report is False
+
+    def test_uses_innermost_forward(self) -> None:
+        pasted = (
+            "PMC boilerplate\n"
+            "---------- Forwarded message ---------\n"
+            "From: Middle Person <mid@example.com>\n"
+            "Subject: Fwd: original\n"
+            "\n"
+            "some text\n"
+            "---------- Forwarded message ---------\n"
+            "From: Real Reporter <real@example.com>\n"
+            "Subject: [SECURITY] the actual vulnerability with an exploit\n"
+            "\n"
+            "the real report body\n"
+        )
+        result = parse_pasted_report(pasted)
         assert result.from_email == "real@example.com"
         assert result.subject.startswith("[SECURITY] the actual vulnerability")
 

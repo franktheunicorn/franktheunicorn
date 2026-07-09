@@ -1280,6 +1280,14 @@ class ProjectConfig(BaseModel):
     # project. Defaults to "github" for backward compatibility.
     forge: str = "github"
     review_context: str = "general open-source"
+    # Prose description of the project's threat model / trust boundaries, fed
+    # into security-report triage. Many "vulnerabilities" are really the
+    # project's documented stance (e.g. Spark treats submitted code, models,
+    # and pipelines as trusted and will run arbitrary code from them). Stating
+    # that here lets triage mark such reports as expected behavior instead of
+    # flagging them as findings. Empty by default (triage falls back to
+    # README/SECURITY.md context only).
+    security_model: str = ""
     watched_paths: list[str] = Field(default_factory=list)
     ignore_paths: list[str] = Field(default_factory=list)
     tone: str = "direct"

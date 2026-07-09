@@ -56,8 +56,17 @@ def triage_report(
 
     _parse_report(report, backend)
     project_context = _load_project_context(report, project_config)
-    _analyze_report(report, backend, project_context)
+    # CVE lookup runs before analysis so the matches are available as context
+    # for the expected-behavior / duplicate call.
     _check_cves(report, operator_config)
+    security_model = project_config.security_model if project_config else ""
+    _analyze_report(
+        report,
+        backend,
+        project_context,
+        security_model=security_model,
+        cve_candidates=report.cve_matches,
+    )
 
     return report
 
@@ -140,6 +149,8 @@ def _analyze_report(
     report: SecurityReport,
     backend: BaseLLMBackend,
     project_context: str,
+    security_model: str = "",
+    cve_candidates: list[object] | None = None,
 ) -> None:
     """Run triage analysis on parsed report."""
     system_prompt, user_message = build_triage_prompt(
@@ -147,6 +158,8 @@ def _analyze_report(
         parsed_poc=report.parsed_poc,
         parsed_impact=report.parsed_impact,
         project_context=project_context,
+        security_model=security_model,
+        cve_candidates=cve_candidates,
     )
 
     try:

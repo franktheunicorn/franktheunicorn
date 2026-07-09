@@ -1019,12 +1019,19 @@ def security_report_create(request: HttpRequest) -> HttpResponse:
         if project_id:
             project = Project.objects.filter(pk=project_id).first()
 
+        # Recover reporter/title from a pasted (often forwarded) report so the
+        # metadata is filled even with no LLM backend configured. Anything the
+        # operator typed in the form wins; this only fills the blanks.
+        from franktheunicorn.data_access.email_inbox.parser import parse_pasted_report
+
+        parsed = parse_pasted_report(raw_text)
+
         report = SecurityReport.objects.create(
             raw_text=raw_text,
-            title=title,
+            title=title or parsed.subject,
             project=project,
-            reporter_name=reporter_name,
-            reporter_email=reporter_email,
+            reporter_name=reporter_name or parsed.from_name,
+            reporter_email=reporter_email or parsed.from_email,
             source="paste",
         )
 

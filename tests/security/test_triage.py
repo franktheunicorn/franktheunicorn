@@ -35,6 +35,18 @@ class _MockLLMBackend(BaseLLMBackend):
         return self._responses[idx]
 
 
+class _CapturingBackend(_MockLLMBackend):
+    """Mock backend that also records the (system, user) prompts it received."""
+
+    def __init__(self, responses: list[str]) -> None:
+        super().__init__(responses)
+        self.calls: list[tuple[str, str]] = []
+
+    def _call_api(self, system_prompt: str, user_message: str, api_key: str) -> str:
+        self.calls.append((system_prompt, user_message))
+        return super()._call_api(system_prompt, user_message, api_key)
+
+
 @pytest.fixture
 def operator_config_with_llm() -> OperatorConfig:
     return OperatorConfig(
@@ -431,3 +443,134 @@ class TestTriageReport:
 
         report.refresh_from_db()
         assert report.triage_summary == ""  # nothing was analyzed
+
+
+@pytest.mark.django_db
+class TestSecurityModelThreading:
+    """The project security model and candidate CVEs must reach the analysis
+    prompt — that context is what lets triage tell "we run arbitrary code by
+    design" reports apart from real data-file findings."""
+
+    def _analyze_json(self) -> str:
+        import json
+
+        return json.dumps(
+            {
+                "poc_plausible": False,
+                "poc_assessment": "",
+                "is_expected_behavior": True,
+                "expected_behavior_explanation": "Models are trusted.",
+                "assessed_severity": "informational",
+                "triage_summary": "Expected under the project security model.",
+            }
+        )
+
+    def test_analyze_report_includes_security_model_and_cves(self, db: Any) -> None:
+        from franktheunicorn.security.triage import _analyze_report
+        from tests.factories import SecurityReportFactory
+
+        backend = _CapturingBackend(responses=[self._analyze_json()])
+        report = SecurityReportFactory(
+            parsed_component="ParquetFileFormat.scala", status="triaging"
+        )
+
+        _analyze_report(
+            report,
+            backend,
+            "",
+            security_model="Loaded models are trusted; data files are not.",
+            cve_candidates=[{"cve_id": "CVE-2025-30065", "description": "Parquet RCE"}],
+        )
+
+        assert backend.calls, "backend was never called"
+        _system, user = backend.calls[-1]
+        assert "Loaded models are trusted; data files are not." in user
+        assert "CVE-2025-30065" in user
+
+    @patch("franktheunicorn.security.triage.search_cves", return_value=[])
+    @patch("franktheunicorn.security.triage._get_triage_backend")
+    def test_triage_report_threads_project_security_model(
+        self,
+        mock_get_backend: MagicMock,
+        mock_cves: MagicMock,
+        db: Any,
+    ) -> None:
+        import json
+
+        from franktheunicorn.config.models import ProjectConfig
+        from tests.factories import SecurityReportFactory
+
+        parse_json = json.dumps(
+            {
+                "title": "RCE via ExternalCommandExecutor",
+                "component": "SparkConnectPlanner.scala",
+                "poc": "upload jar; ExecuteExternalCommand",
+                "impact": "RCE",
+                "severity": "critical",
+            }
+        )
+        backend = _CapturingBackend(responses=[parse_json, self._analyze_json()])
+        mock_get_backend.return_value = backend
+
+        report = SecurityReportFactory(raw_text="RCE report", title="", status="new")
+        project_config = ProjectConfig(
+            owner="apache",
+            repo="spark",
+            security_model="Spark treats submitted code and runners as trusted.",
+        )
+        config = OperatorConfig(
+            github_username="holdenk",
+            llm_backends=[LLMBackendConfig(provider="stub")],
+            security_triage=SecurityTriageConfig(enabled=True),
+        )
+
+        triage_report(report, project_config, config)
+
+        # The final LLM call is the analysis; it must carry the security model.
+        assert len(backend.calls) >= 2
+        _system, analyze_user = backend.calls[-1]
+        assert "Spark treats submitted code and runners as trusted." in analyze_user
+
+    @patch("franktheunicorn.security.triage._analyze_report")
+    @patch("franktheunicorn.security.triage.search_cves", return_value=[])
+    @patch("franktheunicorn.security.triage._get_triage_backend")
+    def test_cve_lookup_runs_before_analysis(
+        self,
+        mock_get_backend: MagicMock,
+        mock_cves: MagicMock,
+        mock_analyze: MagicMock,
+        db: Any,
+    ) -> None:
+        """CVE matches must be populated before analysis so they can inform
+        the expected-behavior / duplicate call."""
+        import json
+
+        from tests.factories import SecurityReportFactory
+
+        parse_json = json.dumps({"title": "t", "component": "c", "poc": "p", "impact": "i"})
+        backend = _MockLLMBackend(responses=[parse_json])
+        mock_get_backend.return_value = backend
+
+        from franktheunicorn.security.cve_lookup import CVEMatch
+
+        mock_cves.return_value = [CVEMatch(cve_id="CVE-2025-30065", description="Parquet RCE")]
+
+        # When _analyze_report is called, cve_candidates must already be filled.
+        captured: dict[str, Any] = {}
+
+        def _capture(*args: Any, **kwargs: Any) -> None:
+            captured["cve_candidates"] = kwargs.get("cve_candidates")
+
+        mock_analyze.side_effect = _capture
+
+        report = SecurityReportFactory(raw_text="parquet vuln", title="", status="new")
+        config = OperatorConfig(
+            github_username="holdenk",
+            llm_backends=[LLMBackendConfig(provider="stub")],
+            security_triage=SecurityTriageConfig(enabled=True),
+        )
+
+        triage_report(report, None, config)
+
+        assert captured.get("cve_candidates"), "analysis ran before CVE lookup populated matches"
+        assert captured["cve_candidates"][0]["cve_id"] == "CVE-2025-30065"

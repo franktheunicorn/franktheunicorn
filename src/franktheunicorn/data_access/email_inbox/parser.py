@@ -116,6 +116,49 @@ def parse_email_message(raw_bytes: bytes) -> InboxMessage:
     )
 
 
+def parse_pasted_report(text: str) -> InboxMessage:
+    """Parse a security report pasted directly into the dashboard.
+
+    The paste path is the "not ready to connect an inbox yet" fallback: the
+    operator copies a report — very often a *forwarded* Apache Security Team
+    email — into a textarea. This mirrors :func:`parse_email_message` but
+    operates on the pasted text as the body (there is no MIME envelope to
+    decode). It unwraps a forwarded block so ``subject``/``from_*`` describe
+    the original disclosure rather than the forwarding boilerplate, which
+    means the reporter and title are recovered even when no LLM backend is
+    configured to parse the report. Operator-entered values always take
+    precedence over what this recovers; it only fills the blanks.
+    """
+    body = text or ""
+
+    unwrapped = _unwrap_forwarded(body)
+    is_forwarded = unwrapped is not None
+    if unwrapped is not None:
+        subject = _strip_subject_prefixes(unwrapped.get("subject", ""))
+        inner_name, inner_email = _split_addr(unwrapped.get("from", ""))
+        from_name = _clean_sender_name(inner_name)
+        from_email = inner_email
+    else:
+        subject = ""
+        from_name = ""
+        from_email = ""
+
+    is_security, matched = _classify_security(subject, body)
+
+    # Pasted reports carry no reliable received timestamp (any date lives
+    # inside the forwarded block in client-specific formatting), so
+    # ``received_at`` is intentionally left unset.
+    return InboxMessage(
+        subject=subject,
+        from_name=from_name,
+        from_email=from_email,
+        body=body,
+        is_security_report=is_security,
+        is_forwarded=is_forwarded,
+        matched_keywords=matched,
+    )
+
+
 def _unwrap_forwarded(body: str) -> dict[str, str] | None:
     """Extract the innermost forwarded message's headers from a body.
 

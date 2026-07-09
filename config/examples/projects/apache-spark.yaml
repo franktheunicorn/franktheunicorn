@@ -20,6 +20,49 @@ ignore_paths:
 tone: "constructive and thorough"
 test_expectations: "tests required for all new features and bug fixes"
 
+# Threat model / trust boundaries, fed into security-report triage. This is
+# what lets triage tell "we run arbitrary code by design" reports apart from
+# real findings, instead of flagging (or dismissing) everything the same way.
+#
+# The dividing line is the INPUT CHANNEL the exploit travels through:
+#   - Trusted (expected behavior, not a finding): anything reachable only by a
+#     party who can already submit code to the cluster. Submitted jobs, SQL,
+#     UDFs, and *loaded ML models/pipelines* all run arbitrary code by design;
+#     a malicious model that reads files or runs code, or a Spark Connect
+#     ExternalCommandRunner that executes a command, is the documented
+#     contract. Exposing an unauthenticated endpoint (Connect gRPC, the REST
+#     submission server) is a deployment/configuration responsibility, not a
+#     code vulnerability.
+#   - Untrusted (real finding): a normally-untrusted artifact triggering code
+#     execution or file access. A *data file* read by the engine (Parquet/ORC/
+#     Avro, including its footer/key-value metadata and summary files like
+#     _common_metadata) must never load classes, deserialize pickles, or run
+#     code — reading data is not a trust boundary you get to cross. The Web UIs
+#     (History Server, Worker, Driver, Master on 4040/8080/18080) are an attack
+#     surface: reflected/stored XSS and injection there are real, though often
+#     lower severity because a hardened deploy authenticates them.
+#
+# Net: "malicious model/pipeline runs code" or "authenticated job runs a
+# command" => expected. "malicious Parquet/data file runs code" or "XSS in a
+# log/UI page" => triage as a real finding and assess severity on its merits.
+security_model: |
+  Spark treats anyone who can submit code, SQL, UDFs, jobs, or ML
+  models/pipelines to a cluster as fully trusted: those inputs run arbitrary
+  code by design, so reports amounting to "a crafted model / submitted command
+  / Spark Connect runner executes code" describe documented behavior, not a
+  vulnerability. Securing and authenticating cluster endpoints (Spark Connect
+  gRPC, the REST submission server, the Web UIs) is the operator's deployment
+  responsibility rather than a code-level flaw.
+
+  However, reading DATA is not a trust boundary. A crafted data file (Parquet,
+  ORC, Avro, etc.) — including its schema footer, key-value metadata, and
+  summary files such as _common_metadata — must never cause class loading,
+  pickle/Java deserialization, reflection, or code execution. Treat "loading a
+  malicious data file runs code / reads arbitrary files" as a genuine finding.
+  Likewise the Spark Web UIs (History Server, Worker, Driver, Master) are a
+  real attack surface: reflected or stored XSS and injection in log/UI pages
+  are genuine findings, usually low-to-medium severity.
+
 # LLM sub-checks — each runs a focused prompt and feeds findings through
 # the standard anti-pattern pipeline.  Add or remove as needed.
 llm_checks:
