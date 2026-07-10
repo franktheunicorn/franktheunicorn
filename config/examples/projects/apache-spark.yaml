@@ -45,6 +45,21 @@ test_expectations: "tests required for all new features and bug fixes"
 # Net: "malicious model/pipeline runs code" or "authenticated job runs a
 # command" => expected. "malicious Parquet/data file runs code" or "XSS in a
 # log/UI page" => triage as a real finding and assess severity on its merits.
+#
+# You don't have to inline this. Triage resolves the security model in order:
+#   1. the inline `security_model` prose below, else
+#   2. `security_model_file:` — an explicit repo-relative path, else
+#   3. auto-discovery of a conventional threat-model file committed to the repo
+#      (.frank/security-model.md, SECURITY_MODEL.md, THREAT_MODEL.md,
+#       docs/security-model.md, docs/threat-model.md).
+# So you can instead drop the text below into `.frank/security-model.md` in the
+# Spark checkout and delete this block — frank will load it automatically.
+# (This is why it's inlined here for Spark: upstream keeps its security posture
+# in docs/security.md — which frank DOES auto-read as supporting context — plus
+# a SECURITY.md reporting-policy pointer, but there is no standalone
+# machine-readable trust-boundary file to auto-load. SECURITY.md is
+# deliberately NOT used as the model: by convention it's a reporting policy.)
+# security_model_file: ".frank/security-model.md"
 security_model: |
   Spark treats anyone who can submit code, SQL, UDFs, jobs, or ML
   models/pipelines to a cluster as fully trusted: those inputs run arbitrary

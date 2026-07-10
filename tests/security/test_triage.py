@@ -531,6 +531,47 @@ class TestSecurityModelThreading:
         _system, analyze_user = backend.calls[-1]
         assert "Spark treats submitted code and runners as trusted." in analyze_user
 
+    @patch("franktheunicorn.security.triage.search_cves", return_value=[])
+    @patch("franktheunicorn.security.triage._get_triage_backend")
+    def test_triage_autoloads_security_model_from_repo(
+        self,
+        mock_get_backend: MagicMock,
+        mock_cves: MagicMock,
+        db: Any,
+        tmp_path: Path,
+    ) -> None:
+        """End-to-end: with no inline security_model, triage picks up a
+        conventional threat-model file committed to the repo."""
+        import json
+
+        from franktheunicorn.config.models import ProjectConfig
+        from tests.factories import ProjectFactory, SecurityReportFactory
+
+        repo = tmp_path / "acme" / "widget"
+        repo.mkdir(parents=True)
+        (repo / "THREAT_MODEL.md").write_text(
+            "Data files are untrusted; loaded models are trusted."
+        )
+
+        parse_json = json.dumps({"title": "t", "component": "c", "poc": "p", "impact": "i"})
+        backend = _CapturingBackend(responses=[parse_json, self._analyze_json()])
+        mock_get_backend.return_value = backend
+
+        project = ProjectFactory(owner="acme", repo="widget")
+        report = SecurityReportFactory(project=project, raw_text="report", title="", status="new")
+        project_config = ProjectConfig(owner="acme", repo="widget")  # no inline model
+        config = OperatorConfig(
+            github_username="holdenk",
+            llm_backends=[LLMBackendConfig(provider="stub")],
+            security_triage=SecurityTriageConfig(enabled=True),
+        )
+
+        with patch("django.conf.settings.FRANK_REPOS_DIR", str(tmp_path), create=True):
+            triage_report(report, project_config, config)
+
+        _system, analyze_user = backend.calls[-1]
+        assert "Data files are untrusted; loaded models are trusted." in analyze_user
+
     @patch("franktheunicorn.security.triage._analyze_report")
     @patch("franktheunicorn.security.triage.search_cves", return_value=[])
     @patch("franktheunicorn.security.triage._get_triage_backend")
@@ -574,3 +615,116 @@ class TestSecurityModelThreading:
 
         assert captured.get("cve_candidates"), "analysis ran before CVE lookup populated matches"
         assert captured["cve_candidates"][0]["cve_id"] == "CVE-2025-30065"
+
+
+class TestResolveSecurityModel:
+    """The security model is resolved dynamically for ANY repo — nothing is
+    Spark-specific. Precedence: inline prose > explicit file > auto-discovery."""
+
+    def _pc(self, owner: str = "acme", repo: str = "widget", **kw: Any) -> Any:
+        from franktheunicorn.config.models import ProjectConfig
+
+        return ProjectConfig(owner=owner, repo=repo, **kw)
+
+    def test_none_config_returns_empty(self) -> None:
+        from franktheunicorn.security.triage import _resolve_security_model
+
+        assert _resolve_security_model(None) == ""
+
+    def test_inline_prose_wins_without_repo(self) -> None:
+        """Inline prose short-circuits before any repo lookup."""
+        from franktheunicorn.security.triage import _resolve_security_model
+
+        pc = self._pc(security_model="Submitted code is trusted.")
+        assert _resolve_security_model(pc) == "Submitted code is trusted."
+
+    def test_autodiscovers_dotfrank_file(self, tmp_path: Path) -> None:
+        from franktheunicorn.security.triage import _resolve_security_model
+
+        repo = tmp_path / "acme" / "widget"
+        (repo / ".frank").mkdir(parents=True)
+        (repo / ".frank" / "security-model.md").write_text("Data files are untrusted input.")
+        with patch("django.conf.settings.FRANK_REPOS_DIR", str(tmp_path), create=True):
+            assert _resolve_security_model(self._pc()) == "Data files are untrusted input."
+
+    def test_autodiscovers_generic_threat_model_name(self, tmp_path: Path) -> None:
+        from franktheunicorn.security.triage import _resolve_security_model
+
+        repo = tmp_path / "acme" / "widget"
+        repo.mkdir(parents=True)
+        (repo / "THREAT_MODEL.md").write_text("Only authenticated clients are trusted.")
+        with patch("django.conf.settings.FRANK_REPOS_DIR", str(tmp_path), create=True):
+            assert _resolve_security_model(self._pc()) == "Only authenticated clients are trusted."
+
+    def test_explicit_file_path_loads(self, tmp_path: Path) -> None:
+        from franktheunicorn.security.triage import _resolve_security_model
+
+        repo = tmp_path / "acme" / "widget"
+        (repo / "docs").mkdir(parents=True)
+        (repo / "docs" / "trust.md").write_text("Models are trusted artifacts.")
+        pc = self._pc(security_model_file="docs/trust.md")
+        with patch("django.conf.settings.FRANK_REPOS_DIR", str(tmp_path), create=True):
+            assert _resolve_security_model(pc) == "Models are trusted artifacts."
+
+    def test_inline_wins_over_repo_file(self, tmp_path: Path) -> None:
+        from franktheunicorn.security.triage import _resolve_security_model
+
+        repo = tmp_path / "acme" / "widget"
+        (repo / ".frank").mkdir(parents=True)
+        (repo / ".frank" / "security-model.md").write_text("FROM FILE")
+        pc = self._pc(security_model="FROM INLINE")
+        with patch("django.conf.settings.FRANK_REPOS_DIR", str(tmp_path), create=True):
+            assert _resolve_security_model(pc) == "FROM INLINE"
+
+    def test_explicit_path_cannot_escape_repo(self, tmp_path: Path) -> None:
+        """A security_model_file must not read files outside the repo."""
+        from franktheunicorn.security.triage import _resolve_security_model
+
+        repo = tmp_path / "acme" / "widget"
+        repo.mkdir(parents=True)
+        (tmp_path / "secret.md").write_text("SECRET")
+        pc = self._pc(security_model_file="../../secret.md")
+        with patch("django.conf.settings.FRANK_REPOS_DIR", str(tmp_path), create=True):
+            assert _resolve_security_model(pc) == ""
+
+    def test_no_file_present_returns_empty(self, tmp_path: Path) -> None:
+        from franktheunicorn.security.triage import _resolve_security_model
+
+        (tmp_path / "acme" / "widget").mkdir(parents=True)
+        with patch("django.conf.settings.FRANK_REPOS_DIR", str(tmp_path), create=True):
+            assert _resolve_security_model(self._pc()) == ""
+
+    def test_works_for_an_arbitrary_non_spark_repo(self, tmp_path: Path) -> None:
+        """Same mechanism, different owner/repo — proves it is not hardcoded."""
+        from franktheunicorn.security.triage import _resolve_security_model
+
+        repo = tmp_path / "someorg" / "someproject"
+        repo.mkdir(parents=True)
+        (repo / "SECURITY_MODEL.md").write_text("Trust boundaries for an arbitrary project.")
+        pc = self._pc(owner="someorg", repo="someproject")
+        with patch("django.conf.settings.FRANK_REPOS_DIR", str(tmp_path), create=True):
+            assert "arbitrary project" in _resolve_security_model(pc)
+
+
+@pytest.mark.django_db
+class TestSecurityDocContext:
+    def test_load_project_context_reads_security_doc(self, db: Any, tmp_path: Path) -> None:
+        """docs/security.md (where Spark and many projects keep their security
+        posture) is pulled into triage context for any repo."""
+        from franktheunicorn.config.models import ProjectConfig
+        from franktheunicorn.security.triage import _load_project_context
+        from tests.factories import SecurityReportFactory
+
+        repo_dir = tmp_path / "testorg" / "testrepo"
+        (repo_dir / "docs").mkdir(parents=True)
+        (repo_dir / "docs" / "security.md").write_text(
+            "Authentication is off by default; secure your cluster."
+        )
+        report = SecurityReportFactory(raw_text="test")
+        pc = ProjectConfig(owner="testorg", repo="testrepo")
+
+        with patch("django.conf.settings.FRANK_REPOS_DIR", str(tmp_path), create=True):
+            result = _load_project_context(report, pc)
+
+        assert "Authentication is off by default" in result
+        assert "docs/security.md" in result
