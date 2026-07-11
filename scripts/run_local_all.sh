@@ -121,13 +121,13 @@ read_service_backend() {
 screen_running() {
     local session="$1"
     command -v screen >/dev/null 2>&1 || return 1
-    screen -ls 2>/dev/null | grep -q "[.]${session}[[:space:]]"
+    { screen -ls 2>/dev/null || true; } | grep -q "[.]${session}[[:space:]]"
 }
 
 tmux_running() {
     local session="$1"
     command -v tmux >/dev/null 2>&1 || return 1
-    tmux has-session -t "${session}" 2>/dev/null
+    tmux has-session -t "=${session}" 2>/dev/null
 }
 
 pid_running() {
@@ -170,8 +170,8 @@ command_for_service() {
     local service="$1" py="$2"
     case "${service}" in
         web)
-            printf 'cd %q && export DJANGO_SETTINGS_MODULE=%q DJANGO_DEBUG=%q && exec %q -m gunicorn franktheunicorn.wsgi:application --bind %q --workers 2 --access-logfile -' \
-                "${REPO_ROOT}" "${DJANGO_SETTINGS_MODULE}" "${DJANGO_DEBUG}" "${py}" "${WEB_BIND}"
+            printf 'cd %q && export DJANGO_SETTINGS_MODULE=%q DJANGO_DEBUG=false && exec %q -m gunicorn franktheunicorn.wsgi:application --bind %q --workers 2 --access-logfile -' \
+                "${REPO_ROOT}" "${DJANGO_SETTINGS_MODULE}" "${py}" "${WEB_BIND}"
             ;;
         worker)
             printf 'cd %q && export DJANGO_SETTINGS_MODULE=%q DJANGO_DEBUG=%q && exec %q -m franktheunicorn.worker.runner' \
@@ -209,7 +209,11 @@ start_service() {
             tmux new-session -d -s "${session}" "${run_cmd} >> $(printf '%q' "${log}") 2>&1"
             ;;
         nohup)
-            nohup bash -lc "${run_cmd}" >> "${log}" 2>&1 &
+            if command -v setsid >/dev/null 2>&1; then
+                nohup setsid bash -lc "${run_cmd}" >> "${log}" 2>&1 &
+            else
+                nohup bash -lc "trap '' INT; ${run_cmd}" >> "${log}" 2>&1 &
+            fi
             ;;
         *)
             err "Unknown backend: ${backend}"
@@ -232,6 +236,12 @@ stop_pid_if_running() {
     pid="$(cat "${pid_file}")"
     kill "${pid}" 2>/dev/null || true
     wait_for_pid_exit "${pid}" 10 || kill -9 "${pid}" 2>/dev/null || true
+    if kill -0 "${pid}" 2>/dev/null; then
+        warn "${service}: pid ${pid} is still running"
+        return 1
+    fi
+
+    rm -f "${pid_file}"
     info "${service}: stopped pid ${pid}"
     return 0
 }
@@ -250,6 +260,8 @@ stop_service() {
                 stopped="true"
                 sleep 1
             fi
+            # Always use the pidfile as a backstop. Session detection can be
+            # flaky, and the pidfile is the only handle for orphaned children.
             if stop_pid_if_running "${service}"; then
                 stopped="true"
             fi
@@ -264,6 +276,8 @@ stop_service() {
                 stopped="true"
                 sleep 1
             fi
+            # Always use the pidfile as a backstop. Session detection can be
+            # flaky, and the pidfile is the only handle for orphaned children.
             if stop_pid_if_running "${service}"; then
                 stopped="true"
             fi
@@ -289,7 +303,9 @@ stop_service() {
             ;;
     esac
 
-    rm -f "${pid_file}" "$(service_backend_file "${service}")"
+    if ! pid_running "${pid_file}"; then
+        rm -f "$(service_backend_file "${service}")"
+    fi
 }
 
 wait_for_pid_exit() {
@@ -305,7 +321,7 @@ wait_for_pid_exit() {
 
 http_ok() {
     if command -v curl >/dev/null 2>&1; then
-        curl -fsS --max-time 3 "${WEB_URL}" >/dev/null 2>&1
+        curl -fsSL --max-time 3 "${WEB_URL}" >/dev/null 2>&1
     else
         "$(python_cmd)" - <<PY >/dev/null 2>&1
 import urllib.request
@@ -318,6 +334,12 @@ wait_for_web() {
     local timeout="${1:-60}" elapsed=0
     info "Waiting for web health at ${WEB_URL} ..."
     until http_ok; do
+        if ! service_running web; then
+            err "web exited before becoming healthy"
+            err "Recent web log:"
+            tail -n 40 "$(service_log web)" >&2 || true
+            return 1
+        fi
         if [ "${elapsed}" -ge "${timeout}" ]; then
             err "web did not respond within ${timeout}s"
             err "Recent web log:"
@@ -335,7 +357,7 @@ bootstrap() {
     info "Running migrations ..."
     "${py}" manage.py migrate --run-syncdb
     info "Collecting static files ..."
-    "${py}" manage.py collectstatic --noinput
+    DJANGO_DEBUG=false "${py}" manage.py collectstatic --noinput
 }
 
 attach_hint() {
