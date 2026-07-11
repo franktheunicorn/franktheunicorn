@@ -4,6 +4,7 @@ from django.contrib import admin
 
 from franktheunicorn.core.models import (
     AgentFeedback,
+    Alert,
     AntiPattern,
     CostRecord,
     EmailScanRecord,
@@ -176,6 +177,24 @@ class SecurityReportAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
     list_filter = ("status", "assessed_severity", "source")
     search_fields = ("title", "reporter_name", "reporter_email", "parsed_component")
     readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(Alert)
+class AlertAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
+    """Admin for alert-mode notifications."""
+
+    list_display = (
+        "alert_type",
+        "title",
+        "project",
+        "pull_request",
+        "security_report",
+        "email_sent",
+        "created_at",
+    )
+    list_filter = ("alert_type", "email_sent", "project")
+    search_fields = ("title", "dedup_key")
+    readonly_fields = ("created_at", "emailed_at")
 
 
 @admin.register(EmailScanRecord)

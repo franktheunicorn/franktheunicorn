@@ -62,7 +62,7 @@ def is_ai_agent(author: str, ai_agents: list[str]) -> bool:
     return author.lower() in _lowered(ai_agents) if ai_agents else False
 
 
-def _path_matches(file_path: str, pattern: str) -> bool:
+def path_matches(file_path: str, pattern: str) -> bool:
     """Check if a file path matches a watch pattern (glob or prefix).
 
     Supports both glob patterns (``python/pyspark/**``) and simple prefix
@@ -79,7 +79,7 @@ def path_overlap_fraction(changed_files: list[str], watched_paths: list[str]) ->
     """Fraction of changed_files matching any watched-path pattern (0.0-1.0)."""
     if not changed_files:
         return 0.0
-    matches = sum(1 for f in changed_files if any(_path_matches(f, wp) for wp in watched_paths))
+    matches = sum(1 for f in changed_files if any(path_matches(f, wp) for wp in watched_paths))
     return matches / len(changed_files)
 
 
@@ -193,7 +193,7 @@ def score_committer_is_on_it(
     if (
         watched_paths
         and changed_files
-        and any(_path_matches(f, wp) for f in changed_files for wp in watched_paths)
+        and any(path_matches(f, wp) for f in changed_files for wp in watched_paths)
     ):
         return None
 
@@ -246,12 +246,12 @@ def score_cve_file_history(
     if not changed_files or not cve_affected_files:
         return None
     cve_set = set(cve_affected_files)
-    # Only use _path_matches for entries that are glob/prefix patterns,
+    # Only use path_matches for entries that are glob/prefix patterns,
     # not exact file paths (avoids prefix false positives like
     # "src/auth.py" matching "src/auth.py.bak").
     patterns = [p for p in cve_affected_files if any(c in p for c in "*?[") or p.endswith("/")]
     matches = sum(
-        1 for f in changed_files if f in cve_set or any(_path_matches(f, p) for p in patterns)
+        1 for f in changed_files if f in cve_set or any(path_matches(f, p) for p in patterns)
     )
     if matches == 0:
         return None

@@ -666,6 +666,61 @@ class EmailScanRecord(models.Model):
         return f"EmailScanRecord({self.action}): {self.subject[:60]}"
 
 
+class Alert(models.Model):
+    """An alert-mode notification raised by the worker.
+
+    Two kinds today: someone else's PR overlaps work the operator has in
+    flight ("working-overlap"), and a security report is sitting in the
+    queue or in triage ("security-report"). Rows double as the dedup
+    ledger — ``dedup_key`` is unique, so each PR/report alerts at most
+    once — and as the audit log of what frank emailed (or would have
+    emailed, when no recipient is configured).
+    """
+
+    ALERT_TYPE_CHOICES = [
+        ("working-overlap", "Working Overlap"),
+        ("security-report", "Security Report"),
+    ]
+
+    alert_type = models.CharField(max_length=30, choices=ALERT_TYPE_CHOICES)
+    # One row per alerted entity, e.g. "working-overlap:pr:42" or
+    # "security-report:report:7". A plain unique column (rather than
+    # partial unique constraints over the nullable FKs) keeps SQLite happy.
+    dedup_key = models.CharField(max_length=100, unique=True)
+
+    project = models.ForeignKey(
+        Project, on_delete=models.CASCADE, related_name="alerts", null=True, blank=True
+    )
+    pull_request = models.ForeignKey(
+        PullRequest, on_delete=models.CASCADE, related_name="alerts", null=True, blank=True
+    )
+    security_report = models.ForeignKey(
+        SecurityReport, on_delete=models.CASCADE, related_name="alerts", null=True, blank=True
+    )
+
+    title = models.CharField(max_length=500)
+    # Human-readable reason strings, e.g. which files overlap which of the
+    # operator's open PRs, or which working_paths pattern matched.
+    reasons = models.JSONField(default=list, blank=True)
+
+    email_sent = models.BooleanField(default=False)
+    emailed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    # Explicit manager declaration so django-stubs can resolve
+    # ``Alert.objects`` (same workaround as WorkerCommand below).
+    objects: models.Manager[Alert] = models.Manager()
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["email_sent", "created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Alert[{self.alert_type}]: {self.title}"
+
+
 class WorkerCommand(models.Model):
     """A queued action requested from the dashboard for the worker to run.
 

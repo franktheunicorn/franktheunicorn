@@ -65,6 +65,20 @@ digest_enabled: false
 #   from_address: "frank@example.com"
 #   use_tls: true
 
+# --- Alert Mode ---
+# Frank alerts you when someone raises a PR matching something you're
+# working on (files touched by your own open PRs, or per-project
+# working_paths/working_keywords), or when a security report is waiting
+# in the queue or in triage. One batched email per worker cycle, sent
+# with the same SMTP settings as the digest (`email:` above). Alerts are
+# always recorded (visible in the admin) even without an email recipient.
+# Per-project tuning lives in each project YAML under `alerts:` — see
+# config/examples/projects/apache-spark.yaml for a default-enabled example.
+# alerts:
+#   enabled: true
+#   email: "you@example.com"   # empty falls back to digest_email
+#   security_reports: true     # also covers reports not tied to a project
+
 # --- LLM Backend Configuration ---
 # Multiple backends can run simultaneously. Each produces findings
 # independently; results are combined and deduped via anti-patterns.

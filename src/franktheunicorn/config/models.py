@@ -669,6 +669,47 @@ class AgentFeedbackConfig(BaseModel):
     supported_agents: list[SupportedAgentConfig] = Field(default_factory=list)
 
 
+class AlertsConfig(BaseModel):
+    """Operator-level config for alert mode.
+
+    Alert mode watches for two things: PRs raised by others that overlap
+    work the operator has in flight, and security reports sitting in the
+    queue or in triage. Alerts are always recorded in the database; email
+    delivery additionally requires a recipient (``email`` here, falling
+    back to ``digest_email``) and SMTP settings. Missing email config
+    degrades gracefully — alerts are recorded but nothing is sent.
+    """
+
+    enabled: bool = False
+    # Recipient for alert emails. Empty falls back to digest_email; if
+    # both are empty, alerts are recorded but no email is sent.
+    email: str = ""
+    # Alert on security reports in the queue (status "new") or in triage
+    # (status "triaging"). Also covers reports not tied to any project.
+    security_reports: bool = True
+
+
+class ProjectAlertsConfig(BaseModel):
+    """Per-project config for alert mode.
+
+    Only consulted when the operator-level ``alerts.enabled`` master
+    switch is on. ``working_paths``/``working_keywords`` declare what the
+    operator is actively working on; PRs by others touching the same
+    files as the operator's own open PRs always count as overlap.
+    """
+
+    enabled: bool = True
+    # Alert when someone else's PR overlaps the operator's in-flight work.
+    working_overlap: bool = True
+    # Alert on security reports attached to this project.
+    security_reports: bool = True
+    # Path patterns (glob or prefix, like watched_paths) describing code
+    # the operator is actively working on.
+    working_paths: list[str] = Field(default_factory=list)
+    # Keywords matched against PR title/body (case-insensitive).
+    working_keywords: list[str] = Field(default_factory=list)
+
+
 class EmailConfig(BaseModel):
     """Config for email digest delivery.
 
@@ -811,6 +852,7 @@ class OperatorConfig(BaseModel):
     log_level: str = "INFO"
     digest_email: str = ""
     digest_enabled: bool = False
+    alerts: AlertsConfig = Field(default_factory=AlertsConfig)
     workspaces: dict[str, object] = Field(default_factory=dict)
     coderabbit: CodeRabbitConfig = Field(default_factory=CodeRabbitConfig)
     claude_cli: ClaudeCLIConfig = Field(default_factory=ClaudeCLIConfig)
@@ -1073,6 +1115,9 @@ class ProjectConfig(BaseModel):
     # title prefix removed). At that point the normal poll cycle re-routes and
     # processes them. Set to false to review drafts immediately.
     skip_wip: bool = True
+
+    # Alert mode — active only when operator-level ``alerts.enabled`` is on.
+    alerts: ProjectAlertsConfig = Field(default_factory=ProjectAlertsConfig)
 
     # v1.5 features
     jira: JiraConfig = Field(default_factory=JiraConfig)
