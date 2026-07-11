@@ -280,6 +280,110 @@ class _TrackingMockClient(MockGitHubClient):
         return self._comments
 
 
+def _pr_data(number: int, author: str) -> dict[str, Any]:
+    return {
+        "number": number,
+        "id": 800000 + number,
+        "title": f"Fix issue {number}",
+        "user": {"login": author},
+        "state": "open",
+        "html_url": f"https://github.com/fighthealthinsurance/fighthealthinsurance/pull/{number}",
+        "diff_url": "",
+        "body": "This PR fixes a concrete issue with enough context for review.",
+        "labels": [{"name": "bug"}],
+        "requested_reviewers": [],
+        "assignees": [],
+        "draft": False,
+        "additions": 4,
+        "deletions": 1,
+        "created_at": "2026-03-30T10:00:00Z",
+        "updated_at": "2026-03-30T10:00:00Z",
+    }
+
+
+class _ContributorDetectionClient(MockGitHubClient):
+    """Mock client with controlled PR ordering and contributor fetch behavior."""
+
+    def __init__(
+        self,
+        tmp_path: Path,
+        pull_requests: list[dict[str, Any]],
+        contributors: list[str] | Exception,
+    ) -> None:
+        super().__init__(tmp_path)
+        self._pull_requests = pull_requests
+        self._contributors = contributors
+
+    def list_pull_requests(
+        self, owner: str, repo: str, state: str = "open"
+    ) -> list[dict[str, Any]]:
+        return self._pull_requests
+
+    def get_pull_request_files(self, owner: str, repo: str, pr_number: int) -> list[dict[str, Any]]:
+        return [{"filename": "src/app.py", "additions": 4, "deletions": 1, "status": "modified"}]
+
+    def list_contributors(self, owner: str, repo: str) -> list[str]:
+        if isinstance(self._contributors, Exception):
+            raise self._contributors
+        return self._contributors
+
+
+@pytest.mark.django_db
+class TestNewContributorDetection:
+    def test_newest_first_empty_cache_multiple_prs_is_not_new(self, tmp_path: Path) -> None:
+        """A newest-first batch must not latch one PR by an established local author as new."""
+        client = _ContributorDetectionClient(
+            tmp_path,
+            [_pr_data(884, "nyghtowl"), _pr_data(870, "nyghtowl")],
+            contributors=[],
+        )
+        config = ProjectConfig(owner="fighthealthinsurance", repo="fighthealthinsurance")
+
+        poll_project(client, config, operator_username="holdenk")
+
+        prs = PullRequest.objects.order_by("number")
+        assert [pr.number for pr in prs] == [870, 884]
+        assert all(not pr.is_new_contributor for pr in prs)
+        assert all(pr.queue != "new-contributor" for pr in prs)
+        project = Project.objects.get(owner="fighthealthinsurance", repo="fighthealthinsurance")
+        assert project.contributors_cache == []
+        assert project.contributors_cache_status == "empty"
+
+    def test_failed_contributor_fetch_does_not_mark_new(self, tmp_path: Path) -> None:
+        client = _ContributorDetectionClient(
+            tmp_path,
+            [_pr_data(884, "nyghtowl")],
+            contributors=RuntimeError("contributors unavailable"),
+        )
+        config = ProjectConfig(owner="fighthealthinsurance", repo="fighthealthinsurance")
+
+        [pr] = poll_project(client, config, operator_username="holdenk")
+
+        pr.refresh_from_db()
+        assert pr.is_new_contributor is False
+        assert pr.queue != "new-contributor"
+        project = Project.objects.get(owner="fighthealthinsurance", repo="fighthealthinsurance")
+        assert project.contributors_cache == []
+        assert project.contributors_cache_status == "failed"
+
+    def test_positive_first_time_contributor_still_flags_new(self, tmp_path: Path) -> None:
+        client = _ContributorDetectionClient(
+            tmp_path,
+            [_pr_data(12, "first-timer")],
+            contributors=["established-dev"],
+        )
+        config = ProjectConfig(owner="fighthealthinsurance", repo="fighthealthinsurance")
+
+        [pr] = poll_project(client, config, operator_username="holdenk")
+
+        pr.refresh_from_db()
+        assert pr.is_new_contributor is True
+        assert pr.queue == "new-contributor"
+        project = Project.objects.get(owner="fighthealthinsurance", repo="fighthealthinsurance")
+        assert project.contributors_cache == ["established-dev"]
+        assert project.contributors_cache_status == "fetched"
+
+
 @pytest.mark.django_db
 class TestReEngagementDataInPoller:
     def test_issue_comments_fetched_for_reviewed_pr(self, tmp_path: Any) -> None:

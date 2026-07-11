@@ -35,6 +35,7 @@ def compute_moderation_flags(
     pr: dict[str, object],
     operator_username: str,
     known_authors: list[str] | None = None,
+    contributor_evidence_available: bool = False,
 ) -> list[str]:
     """Return flag labels for routing: is_operator_pr, draft, wip_title, bot, large_pr,
     low_context, new_contributor, needs_tests, likely_unowned."""
@@ -62,7 +63,8 @@ def compute_moderation_flags(
         flags.append("low_context")
 
     if (
-        known_authors is not None
+        contributor_evidence_available
+        and known_authors is not None
         and author
         and author.lower() not in _lowered(known_authors)
         and not is_likely_bot(author)
