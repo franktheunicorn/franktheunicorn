@@ -218,9 +218,9 @@ class Command(BaseCommand):
         if cr_config:
             config["coderabbit"] = cr_config
 
-        claude_cli_config = self._configure_claude_cli()
-        if claude_cli_config:
-            config["claude_cli"] = claude_cli_config
+        agent_cli_reviewers = self._configure_agent_cli_reviewers()
+        if agent_cli_reviewers:
+            config["agent_cli_reviewers"] = agent_cli_reviewers
 
         snowflake_config = self._configure_snowflake_review()
         if snowflake_config:
@@ -918,52 +918,70 @@ class Command(BaseCommand):
 
         return cr_config
 
-    def _configure_claude_cli(self) -> dict[str, object] | None:
-        """Optionally configure the Claude CLI as a review backend.
+    # Agent CLIs that frank auto-detects and runs as reviewers when installed.
+    # (name, binary, prompt_mode, prompt_arg)
+    _AGENT_CLI_REVIEWERS: tuple[tuple[str, str, str, str], ...] = (
+        ("claude", "claude", "flag", "-p"),
+        ("codex", "codex", "subcommand", "exec"),
+        ("pi", "pi", "flag", "-p"),
+    )
 
-        Wraps ``claude -p`` in headless prompt mode. Auth lives wherever the
-        CLI was set up (local user, or the remote SSH host when remote.mode
-        is ``"ssh"``) — we never handle the Claude credentials here.
+    def _configure_agent_cli_reviewers(self) -> list[dict[str, object]] | None:
+        """Optionally customize the agent-CLI reviewer registry (claude/codex/pi).
+
+        These general-purpose coding agents run headless against each PR diff
+        and emit findings in the shared block format. By default each is
+        ``enabled: "auto"`` — frank uses it automatically when its binary is on
+        PATH, so **no config is needed** for the common case. This step only
+        writes explicit ``agent_cli_reviewers`` entries when the operator wants
+        to force one on/off, pin a model, or run over SSH. Auth lives wherever
+        each CLI was set up; we never handle their credentials here.
         """
-        self.stdout.write("\n--- Claude CLI (code review backend) ---\n")
+        self.stdout.write("\n--- Agent CLI reviewers (claude / codex / pi) ---\n")
+        for name, binary, _mode, _arg in self._AGENT_CLI_REVIEWERS:
+            if self._docker_mode:
+                status = "install in the worker image or run over SSH"
+            elif shutil.which(binary):
+                status = self.style.SUCCESS("found on PATH — auto-enabled")
+            else:
+                status = self.style.WARNING("not found — auto-skipped until installed")
+            self.stdout.write(f"  {name:<7} ({binary}): {status}\n")
         self.stdout.write(
-            "  Runs the local ``claude`` CLI in headless prompt mode against\n"
-            "  each PR diff. Uses the auth the CLI is already configured with.\n"
+            "  Each runs automatically when installed. Customize only to pin a\n"
+            "  model, force-enable/disable one, or run it over SSH.\n"
         )
-        enable = self._ask("Enable Claude CLI review integration? (y/N): ", default="n")
-        if enable.lower() not in ("y", "yes"):
+        customize = self._ask("Customize agent CLI reviewers? (y/N): ", default="n")
+        if customize.lower() not in ("y", "yes"):
             return None
 
-        cc_config: dict[str, object] = {"enabled": True}
+        reviewers: list[dict[str, object]] = []
+        for name, binary, mode, arg in self._AGENT_CLI_REVIEWERS:
+            choice = self._ask(
+                f"  {name}: [a]uto (if installed) / [o]n / o[f]f? ", default="a"
+            ).lower()
+            enabled: object = "auto"
+            if choice in ("o", "on"):
+                enabled = True
+            elif choice in ("f", "off"):
+                enabled = False
 
-        if self._docker_mode:
-            self.stdout.write(
-                "  In Docker mode the CLI must be installed in the worker image\n"
-                "  (set INSTALL_CLAUDE_CLI=true and rebuild) or invoked over SSH\n"
-                "  on a remote host. See https://docs.claude.com/en/docs/claude-code\n"
-            )
-            cc_config["cli_path"] = self._ask("  Path to claude CLI: ", default="claude")
-        elif shutil.which("claude"):
-            self.stdout.write(self.style.SUCCESS("  Found 'claude' on PATH.\n"))
-            cc_config["cli_path"] = "claude"
-        else:
-            self.stdout.write(
-                self.style.WARNING(
-                    "  'claude' not found on PATH.\n"
-                    "  Install: https://docs.claude.com/en/docs/claude-code\n"
-                )
-            )
-            cc_config["cli_path"] = self._ask("  Path to claude CLI: ", default="claude")
+            entry: dict[str, object] = {
+                "name": name,
+                "enabled": enabled,
+                "cli_path": binary,
+                "prompt_mode": mode,
+                "prompt_arg": arg,
+            }
+            if enabled is not False:
+                model = self._ask(f"  {name} model override (empty = CLI default): ", default="")
+                if model:
+                    entry["model"] = model
+                remote_block = self._configure_remote_execution(f"{name} agent CLI")
+                if remote_block:
+                    entry["remote"] = remote_block
+            reviewers.append(entry)
 
-        model = self._ask("  Model override (empty = CLI default): ", default="")
-        if model:
-            cc_config["model"] = model
-
-        remote_block = self._configure_remote_execution("Claude CLI")
-        if remote_block:
-            cc_config["remote"] = remote_block
-
-        return cc_config
+        return reviewers
 
     def _configure_snowflake_review(self) -> dict[str, object] | None:
         """Optionally configure the Snowflake code-review CLI integration."""

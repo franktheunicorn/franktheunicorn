@@ -176,19 +176,40 @@ digest_enabled: false
 #   extra_args: []
 #   # remote: { mode: "ssh", host: "review-worker.example.com", ... }
 
-# Claude CLI integration
-# Wraps `claude -p` in headless prompt mode. Auth is whatever the Claude
-# CLI is configured with on the executing host (local user, or the SSH
-# remote when remote.mode == "ssh").
-# Install: https://claude.ai/download  (or `npm install -g @anthropic-ai/claude-cli`)
-claude_cli:
-  enabled: true
-  cli_path: "claude"                 # or "uv run claude", "corp-wrap claude", ...
-  model: ""                          # empty = CLI default (Sonnet)
-  extra_args: []
-  timeout_seconds: 300
-  max_diff_chars: 60000              # diffs above this are truncated
-  # remote: { mode: "ssh", host: "review-worker.example.com", ... }
+# Agent CLI reviewers (claude / codex / pi)
+# General-purpose coding agents run headless against each PR diff and emit
+# findings in the shared `<file>:<line> - [Severity] <title>` block format.
+# Auth is whatever each CLI is configured with on the executing host.
+#
+# You do NOT need this block: frank ships with claude, codex, and pi
+# pre-registered as `enabled: "auto"`, meaning each runs automatically iff
+# its binary is on PATH (in local mode). Overlapping findings across agents
+# are deduped so the PR isn't commented on three times for the same spot.
+#
+# Add a block only to customize. Entries merge by `name` with the built-in
+# defaults, so you can override just one and leave the others auto. Set
+# `enabled: true`/`false` to force a reviewer on/off regardless of PATH.
+# The legacy top-level `claude_cli:` block is still accepted and is promoted
+# into this registry as the `claude` entry.
+# agent_cli_reviewers:
+#   - name: "claude"
+#     enabled: "auto"                # "auto" (default) | true | false
+#     cli_path: "claude"             # or "uv run claude", "corp-wrap claude", ...
+#     model: ""                      # empty = CLI default
+#     model_flag: "--model"
+#     prompt_mode: "flag"            # claude/pi are flag-style: <cli> -p <prompt>
+#     prompt_arg: "-p"
+#     extra_args: []
+#     timeout_seconds: 300
+#     max_diff_chars: 60000          # diffs above this are truncated
+#     deduplicate: true              # merge near-duplicate findings from other agents
+#     # remote: { mode: "ssh", host: "review-worker.example.com", ... }
+#   - name: "codex"
+#     prompt_mode: "subcommand"      # codex is subcommand-style: <cli> exec <prompt>
+#     prompt_arg: "exec"
+#   - name: "pi"
+#     prompt_mode: "flag"
+#     prompt_arg: "-p"
 
 # Snowflake code review CLI integration
 # Mirrors CodeRabbit's invocation contract; expects the same
