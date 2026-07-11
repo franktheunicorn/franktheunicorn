@@ -117,6 +117,17 @@ class TestGitHubClient:
         result = client.get_pull_request_diff("org", "repo", 42)
         assert "diff --git" in result
 
+    def test_get_commit_diff(self, httpx_mock: HTTPXMock, client: GitHubClient) -> None:
+        httpx_mock.add_response(
+            url="https://api.github.test/repos/org/repo/commits/abc1234",
+            method="GET",
+            text="diff --git a/file.py b/file.py\n",
+        )
+        result = client.get_commit_diff("org", "repo", "abc1234")
+        assert "diff --git" in result
+        req = httpx_mock.get_requests()[0]
+        assert req.headers["Accept"] == "application/vnd.github.v3.diff"
+
 
 class TestListPullRequestsAuthFallback:
     """list_pull_requests falls back to scrape on 401/403 and logs suggestions."""

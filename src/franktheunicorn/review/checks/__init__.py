@@ -22,6 +22,7 @@ from franktheunicorn.review.drafter import build_pr_context, create_drafts_from_
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from franktheunicorn.backends.base import ForgeClient
     from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig, ProjectConfig
     from franktheunicorn.core.models import PullRequest, ReviewDraft
 
@@ -49,6 +50,7 @@ class BaseCheck(ABC):
 def _get_registry() -> dict[str, type[BaseCheck]]:
     """Lazy registry to avoid circular imports at module level."""
     from franktheunicorn.review.checks.api_misuse import APIMisuseCheck
+    from franktheunicorn.review.checks.backport import BackportCheck
     from franktheunicorn.review.checks.coverage import CoverageCheck
     from franktheunicorn.review.checks.issue_link import IssueLinkCheck
     from franktheunicorn.review.checks.malicious_prompt import MaliciousPromptCheck
@@ -58,6 +60,7 @@ def _get_registry() -> dict[str, type[BaseCheck]]:
 
     return {
         "api-misuse": APIMisuseCheck,
+        "backport": BackportCheck,
         "coverage": CoverageCheck,
         "issue-link": IssueLinkCheck,
         "malicious-prompt": MaliciousPromptCheck,
@@ -74,6 +77,7 @@ def run_enabled_checks(
     operator_config: OperatorConfig | None = None,
     *,
     repo_path: Path | str | None = None,
+    forge_client: ForgeClient | None = None,
 ) -> list[ReviewDraft]:
     """Run all LLM checks enabled in project config and return resulting drafts.
 
@@ -111,7 +115,7 @@ def run_enabled_checks(
             logger.warning("Unknown LLM check '%s'; skipping.", check_name)
             continue
 
-        check = _instantiate_check(check_cls, check_name, project_config, repo_path)
+        check = _instantiate_check(check_cls, check_name, project_config, repo_path, forge_client)
         try:
             findings = _run_check_dispatch(check, pr, diff, pr_context, backend_config)
         except Exception:
@@ -138,6 +142,7 @@ def _instantiate_check(
     check_name: str,
     project_config: ProjectConfig,
     repo_path: Path | str | None,
+    forge_client: ForgeClient | None = None,
 ) -> BaseCheck:
     """Construct a check, passing config kwargs the class accepts."""
     if check_name == "api-misuse":
@@ -147,6 +152,13 @@ def _instantiate_check(
             config=project_config.api_misuse,
             package_roots=project_config.context.package_roots,
             repo_path=repo_path,
+        )
+    if check_name == "backport":
+        from franktheunicorn.review.checks.backport import BackportCheck
+
+        return BackportCheck(
+            config=project_config.backport,
+            forge_client=forge_client,
         )
     return check_cls()
 

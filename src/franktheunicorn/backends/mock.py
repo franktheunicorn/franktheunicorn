@@ -87,6 +87,13 @@ class MockForgeClient(ForgeClient):
             return fixture_path.read_text()
         return "--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n+# Updated\n"
 
+    def get_commit_diff(self, owner: str, repo: str, sha: str) -> str:
+        """Load a commit diff from a fixture or return a stub."""
+        fixture_path = self._fixtures_dir / f"{owner}_{repo}_commit_{sha}.diff"
+        if fixture_path.exists():
+            return fixture_path.read_text()
+        return "--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n+# Updated\n"
+
     def create_review(
         self, owner: str, repo: str, pr_number: int, review: ReviewBody
     ) -> dict[str, Any]:

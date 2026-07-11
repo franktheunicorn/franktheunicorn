@@ -405,6 +405,27 @@ class APIMisuseConfig(BaseModel):
         return v
 
 
+class BackportConfig(BaseModel):
+    """Config for the backport review check.
+
+    When a PR declares itself a backport / cherry-pick of another PR or commit,
+    the check fetches the source diff and flags differences from the backport's
+    diff. Enable via ``llm_checks: ["backport"]``. Deterministic (non-LLM) by
+    default; the semantic-drift LLM layer is opt-in and off by default.
+    """
+
+    enabled: bool = True
+    warn_on_missing_hunks: bool = True
+    warn_on_extra_files: bool = True
+    warn_on_altered_hunks: bool = True
+    # Glob patterns for paths where divergence is expected and should be
+    # ignored (changelogs, version bumps, lockfiles, etc.).
+    ignore_paths: list[str] = Field(default_factory=list)
+    # Optional LLM semantic-drift layer (v1.5+). Off by default; when enabled,
+    # both diffs are fed to the LLM for a semantic-similarity note.
+    llm_semantic_drift: bool = False
+
+
 KNOWN_LLM_PROVIDERS: frozenset[str] = frozenset(
     {"stub", "claude", "openai", "gemini", "ollama", "llama-cpp", "vllm"}
 )
@@ -1148,6 +1169,7 @@ class ProjectConfig(BaseModel):
     # LLM sub-checks (v1) — e.g. ["coverage"]
     llm_checks: list[str] = Field(default_factory=list)
     api_misuse: APIMisuseConfig = Field(default_factory=APIMisuseConfig)
+    backport: BackportConfig = Field(default_factory=BackportConfig)
 
     # Full-file + first-party-import context for review prompts (v1).
     context: ContextConfig = Field(default_factory=ContextConfig)
@@ -1160,6 +1182,7 @@ class ProjectConfig(BaseModel):
     def llm_checks_warn_unknown(cls, v: list[str]) -> list[str]:
         known = {
             "api-misuse",
+            "backport",
             "coverage",
             "issue-link",
             "malicious-prompt",

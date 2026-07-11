@@ -76,6 +76,17 @@ class ForgeClient(ABC):
     def get_pull_request_diff(self, owner: str, repo: str, pr_number: int) -> str:
         pass
 
+    def get_commit_diff(self, owner: str, repo: str, sha: str) -> str:
+        """Return the unified diff for a single commit.
+
+        Used by the backport check to fetch the source diff when a PR
+        declares it cherry-picks a specific commit SHA. Only GitHub
+        implements this today; other forges inherit this default and raise
+        ``NotImplementedError`` so callers degrade gracefully (the backport
+        check turns the failure into a single informational finding).
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support get_commit_diff()")
+
     @abstractmethod
     def create_review(
         self, owner: str, repo: str, pr_number: int, review: ReviewBody
