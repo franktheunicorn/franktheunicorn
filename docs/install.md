@@ -63,7 +63,7 @@ ANTHROPIC_API_KEY=sk-ant-your-key-here   # or OPENAI_API_KEY / GOOGLE_API_KEY
 
 ## 2. Start the services
 
-Pick **one** of the two paths below.
+Pick **one** of the paths below.
 
 ### Option A: Docker Compose
 
@@ -82,7 +82,32 @@ State is persisted in `./data/` (SQLite) and config is read from `./config/`.
 To stop: `Ctrl-C` or `docker compose down`. To rebuild after code changes:
 `docker compose build && docker compose up`.
 
-### Option B: Make (local development)
+### Option B: Non-Docker single-command launch
+
+Use this when you want the same two app processes as Docker Compose, but
+running directly on your machine.
+
+```bash
+make setup    # first time only: creates venv, installs deps, runs migrations
+make up       # dashboard + worker at http://localhost:7742
+```
+
+`make up` runs `scripts/run_local_all.sh`. It runs migrations and
+`collectstatic`, starts gunicorn on <http://localhost:7742>, waits for the
+dashboard to respond, then starts the worker. The script uses `screen` if
+available, then `tmux`, then `nohup`, with logs in `data/logs/`.
+
+Useful commands:
+
+```bash
+make up-status                 # process state + attach commands
+./scripts/run_local_all.sh logs # follow web + worker logs
+make down                      # stop both processes
+```
+
+Both Docker Compose and this non-Docker launcher are supported.
+
+### Option C: Make (manual local development)
 
 ```bash
 make setup    # creates venv, installs deps, runs migrations
@@ -91,7 +116,7 @@ make setup    # creates venv, installs deps, runs migrations
 Then start both services (in separate terminals, or use a multiplexer):
 
 ```bash
-make serve    # terminal 1 — dashboard at http://localhost:7742
+make serve    # terminal 1 — dashboard at http://localhost:8000
 make worker   # terminal 2 — background poller
 ```
 
