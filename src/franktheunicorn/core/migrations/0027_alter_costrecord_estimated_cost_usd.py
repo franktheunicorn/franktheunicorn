@@ -7,7 +7,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("core", "0025_alter_reviewdraft_category"),
+        ("core", "0026_project_contributors_cache_status"),
     ]
 
     operations = [
