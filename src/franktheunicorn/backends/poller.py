@@ -25,6 +25,9 @@ logger = logging.getLogger(__name__)
 
 # YAML governance value → Project.project_type choice.
 _GOVERNANCE_TO_PROJECT_TYPE = {"asf": "asf", "personal": "personal", "corporate": "org"}
+_CONTRIBUTORS_CACHE_FETCHED = "fetched"
+_CONTRIBUTORS_CACHE_EMPTY = "empty"
+_CONTRIBUTORS_CACHE_FAILED = "failed"
 
 
 def poll_project(
@@ -62,26 +65,7 @@ def poll_project(
         project_config.repo,
     )
 
-    # Fetch and cache the contributor list from the forge so new-contributor
-    # detection works even when the local DB is sparse (e.g. fresh setup).
-    try:
-        forge_contributors = client.list_contributors(project_config.owner, project_config.repo)
-        if forge_contributors:
-            project.contributors_cache = forge_contributors
-            project.save(update_fields=["contributors_cache"])
-            logger.debug(
-                "Cached %d contributor(s) for %s/%s",
-                len(forge_contributors),
-                project_config.owner,
-                project_config.repo,
-            )
-    except Exception:
-        logger.debug(
-            "Could not fetch contributors for %s/%s",
-            project_config.owner,
-            project_config.repo,
-            exc_info=True,
-        )
+    _refresh_contributors_cache(client, project, project_config.owner, project_config.repo)
 
     results: list[PullRequest] = []
 
@@ -267,6 +251,7 @@ def poll_project(
             pr_obj,
             operator_username,
             list(project.contributors_cache or []),
+            _has_contributor_evidence(project),
             project_config,
         )
 
@@ -288,6 +273,8 @@ def poll_project(
 
         results.append(pr_obj)
 
+    _reroute_pull_requests(results, operator_username, project_config)
+
     queue_summary: dict[str, int] = {}
     for pr in results:
         queue_summary[pr.queue] = queue_summary.get(pr.queue, 0) + 1
@@ -305,6 +292,7 @@ def _route_pr_to_queue(
     pr_obj: PullRequest,
     operator_username: str,
     forge_contributors: list[str] | None = None,
+    contributor_evidence_available: bool = False,
     project_config: ProjectConfig | None = None,
 ) -> None:
     """Set queue and boolean flags based on moderation flags."""
@@ -337,7 +325,12 @@ def _route_pr_to_queue(
     # incorrectly flagged as new when the local DB is sparse.
     known_authors = list({*db_authors, *(forge_contributors or [])})
 
-    flags = compute_moderation_flags(pr_dict, operator_username, known_authors)
+    flags = compute_moderation_flags(
+        pr_dict,
+        operator_username,
+        known_authors,
+        contributor_evidence_available,
+    )
 
     pr_obj.is_operator_pr = "is_operator_pr" in flags
     pr_obj.is_new_contributor = "new_contributor" in flags
@@ -370,6 +363,79 @@ def _route_pr_to_queue(
         pr_obj.queue,
         ", ".join(flags) if flags else "none",
     )
+
+
+def _has_contributor_evidence(project: Project) -> bool:
+    """Return True when cached forge contributors can prove an author is absent."""
+    return bool(project.contributors_cache)
+
+
+def _refresh_contributors_cache(
+    client: ForgeClient,
+    project: Project,
+    owner: str,
+    repo: str,
+) -> None:
+    """Refresh contributor cache while preserving fetch status for routing."""
+    try:
+        forge_contributors = client.list_contributors(owner, repo)
+    except Exception:
+        project.contributors_cache_status = _CONTRIBUTORS_CACHE_FAILED
+        project.save(update_fields=["contributors_cache_status"])
+        logger.debug("Could not fetch contributors for %s/%s", owner, repo, exc_info=True)
+        return
+
+    if forge_contributors:
+        project.contributors_cache = forge_contributors
+        project.contributors_cache_status = _CONTRIBUTORS_CACHE_FETCHED
+        project.save(update_fields=["contributors_cache", "contributors_cache_status"])
+        logger.debug("Cached %d contributor(s) for %s/%s", len(forge_contributors), owner, repo)
+        return
+
+    project.contributors_cache = []
+    project.contributors_cache_status = _CONTRIBUTORS_CACHE_EMPTY
+    project.save(update_fields=["contributors_cache", "contributors_cache_status"])
+    logger.debug("Contributor fetch for %s/%s returned no contributors", owner, repo)
+
+
+def _reroute_pull_requests(
+    pull_requests: list[PullRequest],
+    operator_username: str,
+    project_config: ProjectConfig,
+) -> None:
+    """Recompute moderation queues after a batch has fully populated local authors."""
+    for pr_obj in pull_requests:
+        before = (
+            pr_obj.queue,
+            pr_obj.is_operator_pr,
+            pr_obj.is_new_contributor,
+            pr_obj.is_low_context,
+            pr_obj.is_likely_unowned,
+        )
+        _route_pr_to_queue(
+            pr_obj,
+            operator_username,
+            list(pr_obj.project.contributors_cache or []),
+            _has_contributor_evidence(pr_obj.project),
+            project_config,
+        )
+        after = (
+            pr_obj.queue,
+            pr_obj.is_operator_pr,
+            pr_obj.is_new_contributor,
+            pr_obj.is_low_context,
+            pr_obj.is_likely_unowned,
+        )
+        if after != before:
+            pr_obj.save(
+                update_fields=[
+                    "queue",
+                    "is_operator_pr",
+                    "is_new_contributor",
+                    "is_low_context",
+                    "is_likely_unowned",
+                ]
+            )
 
 
 def _parse_github_datetime(dt_str: str | None) -> datetime | None:
@@ -509,29 +575,13 @@ def ingest_single_pr(owner: str, repo: str, pr_number: int) -> PullRequest:
     # Hydrate contributors_cache if missing so new-contributor detection isn't
     # limited to DB-only PR authors (which are sparse on first/force ingest).
     if not project.contributors_cache:
-        try:
-            forge_contributors = client.list_contributors(owner, repo)
-            if forge_contributors:
-                project.contributors_cache = forge_contributors
-                project.save(update_fields=["contributors_cache"])
-                logger.debug(
-                    "Cached %d contributor(s) for %s/%s during single-PR ingest",
-                    len(forge_contributors),
-                    owner,
-                    repo,
-                )
-        except Exception:
-            logger.debug(
-                "Could not fetch contributors for %s/%s during single-PR ingest",
-                owner,
-                repo,
-                exc_info=True,
-            )
+        _refresh_contributors_cache(client, project, owner, repo)
 
     _route_pr_to_queue(
         pr_obj,
         operator_config.github_username or "",
         list(project.contributors_cache or []),
+        _has_contributor_evidence(project),
         project_config if isinstance(project_config, ProjectConfig) else None,
     )
 

@@ -39,14 +39,33 @@ class TestComputeModerationFlags:
 
     def test_new_contributor(self) -> None:
         assert "new_contributor" in compute_moderation_flags(
-            {"author": "newbie"}, "op", known_authors=["alice"]
+            {"author": "newbie"},
+            "op",
+            known_authors=["alice"],
+            contributor_evidence_available=True,
         )
         assert "new_contributor" not in compute_moderation_flags(
-            {"author": "alice"}, "op", known_authors=["alice"]
+            {"author": "alice"},
+            "op",
+            known_authors=["alice"],
+            contributor_evidence_available=True,
+        )
+
+    def test_absence_without_contributor_evidence_is_not_new(self) -> None:
+        assert "new_contributor" not in compute_moderation_flags(
+            {"author": "newbie"},
+            "op",
+            known_authors=["alice"],
+            contributor_evidence_available=False,
         )
 
     def test_bot_not_new_contributor(self) -> None:
-        flags = compute_moderation_flags({"author": "dependabot[bot]"}, "op", known_authors=[])
+        flags = compute_moderation_flags(
+            {"author": "dependabot[bot]"},
+            "op",
+            known_authors=[],
+            contributor_evidence_available=True,
+        )
         assert "new_contributor" not in flags and "bot" in flags
 
     def test_needs_tests(self) -> None:

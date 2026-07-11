@@ -33,6 +33,7 @@ class Project(models.Model):
     repo_health_snapshot = models.JSONField(default=dict, blank=True)
     repo_health_analyzed_at = models.DateTimeField(null=True, blank=True)
     contributors_cache = models.JSONField(default=list, blank=True)
+    contributors_cache_status = models.CharField(max_length=20, blank=True, default="unknown")
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
 
