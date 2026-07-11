@@ -29,7 +29,7 @@ from django.utils import timezone
 
 from franktheunicorn.config.models import ProjectConfig
 from franktheunicorn.core.models import Alert, Project, PullRequest, SecurityReport
-from franktheunicorn.scoring.signals import _path_matches
+from franktheunicorn.scoring.signals import path_matches
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -88,7 +88,7 @@ def find_working_overlap_reasons(pr: PullRequest, project_config: ProjectConfig)
 
         if alerts_config.working_paths:
             matched = sorted(
-                f for f in changed if any(_path_matches(f, p) for p in alerts_config.working_paths)
+                f for f in changed if any(path_matches(f, p) for p in alerts_config.working_paths)
             )
             if matched:
                 reasons.append(f"touches your working paths: {_format_file_list(matched)}")
@@ -186,9 +186,10 @@ def sweep_security_report_alerts(
     """Raise alerts for security reports in the queue or in triage.
 
     Reports attached to a configured project honour that project's
-    ``alerts`` opt-out; reports with no project (or a project without a
-    config) are governed by the operator-level toggle alone. Returns the
-    newly created alerts.
+    ``enabled`` flag and ``alerts`` opt-outs — a disabled project is
+    silent here just like everywhere else in the worker. Reports with no
+    project (or a project without a config) are governed by the
+    operator-level toggle alone. Returns the newly created alerts.
     """
     if not (operator_config.alerts.enabled and operator_config.alerts.security_reports):
         return []
@@ -208,7 +209,9 @@ def sweep_security_report_alerts(
     for report in candidates:
         if report.project is not None:
             pc = config_by_project.get(report.project.full_name)
-            if pc is not None and not (pc.alerts.enabled and pc.alerts.security_reports):
+            if pc is not None and not (
+                pc.enabled and pc.alerts.enabled and pc.alerts.security_reports
+            ):
                 continue
 
         where = "in the queue" if report.status == "new" else "in triage"

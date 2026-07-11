@@ -339,6 +339,15 @@ class TestSweepSecurityReportAlerts:
         operator = _operator_config(security_reports=False)
         assert sweep_security_report_alerts([_project_config(db_project)], operator) == []
 
+    def test_disabled_project_config_suppresses_report_alerts(self, db_project: Project) -> None:
+        # A project disabled outright (enabled: false) is silent here just
+        # like everywhere else in the worker — not treated as unconfigured.
+        SecurityReportFactory(project=db_project, status="new")
+        pc = _project_config(db_project)
+        pc.enabled = False
+        assert sweep_security_report_alerts([pc], _operator_config()) == []
+        assert Alert.objects.count() == 0
+
 
 @pytest.mark.django_db
 class TestAlertEmail:
