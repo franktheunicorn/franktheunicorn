@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import httpx
 import pytest
 from pytest_httpx import HTTPXMock
 
@@ -127,6 +128,17 @@ class TestGitHubClient:
         assert "diff --git" in result
         req = httpx_mock.get_requests()[0]
         assert req.headers["Accept"] == "application/vnd.github.v3.diff"
+
+    def test_list_contributors_raises_on_api_failure(
+        self, httpx_mock: HTTPXMock, client: GitHubClient
+    ) -> None:
+        httpx_mock.add_response(
+            url="https://api.github.test/repos/org/repo/contributors?per_page=100&page=1&anon=false",
+            status_code=500,
+        )
+
+        with pytest.raises(httpx.HTTPStatusError):
+            client.list_contributors("org", "repo")
 
 
 class TestListPullRequestsAuthFallback:

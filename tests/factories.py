@@ -36,6 +36,8 @@ class ProjectFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
     project_type = "personal"
     config_yaml = ""
     enabled = True
+    contributors_cache = factory.LazyFunction(list)
+    contributors_cache_status = "unknown"
 
 
 class PullRequestFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]

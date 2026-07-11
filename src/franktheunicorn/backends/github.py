@@ -217,25 +217,22 @@ class GitHubClient(ForgeClient):
         """Fetch contributor logins from the GitHub contributors API.
 
         Paginates up to 5 pages (500 contributors) so large repos aren't
-        truncated at 100. On any error returns an empty list so the caller
-        can fall back to DB-only known-author detection.
+        truncated at 100. Network/API errors are allowed to propagate so
+        callers can distinguish an unavailable source from a genuine empty
+        response.
         """
         url = f"/repos/{owner}/{repo}/contributors"
-        try:
-            all_logins: list[str] = []
-            for page in range(1, 6):
-                response = self._client.get(
-                    url, params={"per_page": 100, "page": page, "anon": "false"}
-                )
-                response.raise_for_status()
-                data: list[dict[str, Any]] = response.json()
-                if not data:
-                    break
-                all_logins.extend(entry["login"] for entry in data if entry.get("login"))
-            return all_logins
-        except Exception:
-            logger.debug("Could not fetch contributors for %s/%s", owner, repo, exc_info=True)
-            return []
+        all_logins: list[str] = []
+        for page in range(1, 6):
+            response = self._client.get(
+                url, params={"per_page": 100, "page": page, "anon": "false"}
+            )
+            response.raise_for_status()
+            data: list[dict[str, Any]] = response.json()
+            if not data:
+                break
+            all_logins.extend(entry["login"] for entry in data if entry.get("login"))
+        return all_logins
 
     def get_authenticated_user(self) -> dict[str, Any]:
         """Fetch the authenticated user's profile (GET /user)."""
