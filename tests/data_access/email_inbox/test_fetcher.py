@@ -7,7 +7,10 @@ from email.message import Message
 from unittest.mock import MagicMock, patch
 
 from franktheunicorn.config.models import SecurityEmailConfig
-from franktheunicorn.data_access.email_inbox.fetcher import fetch_security_emails
+from franktheunicorn.data_access.email_inbox.fetcher import (
+    fetch_security_emails,
+    tag_ingested_messages,
+)
 
 
 def _msg(subject: str, body: str, from_addr: str, mid: str) -> Message:
@@ -131,3 +134,135 @@ class TestFetchSecurityEmails:
         result = fetch_security_emails(email_config)
         assert result.examined == []
         assert result.unread_total == 0
+
+
+def _tag_config(email_config: SecurityEmailConfig, tag: str) -> SecurityEmailConfig:
+    return email_config.model_copy(update={"ingested_tag": tag})
+
+
+def _wire_tag_conn(
+    mock_imap: MagicMock,
+    capabilities: bytes = b"IMAP4rev1 UIDPLUS",
+    search_hits: bytes = b"7",
+) -> None:
+    """Wire the mock for the tagging path: select, capability, search, store."""
+    mock_imap.select.return_value = ("OK", [b"3"])
+    mock_imap.capability.return_value = ("OK", [capabilities])
+    mock_imap.search.return_value = ("OK", [search_hits])
+    mock_imap.store.return_value = ("OK", [b""])
+
+
+class TestTagIngestedMessages:
+    @patch("franktheunicorn.data_access.email_inbox.fetcher._connect")
+    def test_no_tag_configured_never_connects(
+        self, mock_connect: MagicMock, email_config: SecurityEmailConfig
+    ) -> None:
+        result = tag_ingested_messages(email_config, ["<sec-1>"])
+        assert result.tagged == 0
+        mock_connect.assert_not_called()
+
+    @patch("franktheunicorn.data_access.email_inbox.fetcher._connect")
+    def test_no_message_ids_never_connects(
+        self, mock_connect: MagicMock, email_config: SecurityEmailConfig
+    ) -> None:
+        result = tag_ingested_messages(_tag_config(email_config, "frank/ingested"), [])
+        assert result.tagged == 0
+        mock_connect.assert_not_called()
+
+    @patch("franktheunicorn.data_access.email_inbox.fetcher._connect")
+    def test_gmail_server_gets_a_gmail_label(
+        self, mock_connect: MagicMock, email_config: SecurityEmailConfig
+    ) -> None:
+        mock_imap = MagicMock()
+        mock_connect.return_value = mock_imap
+        _wire_tag_conn(mock_imap, capabilities=b"IMAP4rev1 X-GM-EXT-1 UIDPLUS")
+
+        result = tag_ingested_messages(_tag_config(email_config, "frank/ingested"), ["<sec-1>"])
+
+        assert result.tagged == 1
+        mock_imap.search.assert_called_once_with(None, "HEADER", "Message-ID", '"<sec-1>"')
+        mock_imap.store.assert_called_once_with("7", "+X-GM-LABELS.SILENT", '("frank/ingested")')
+
+    @patch("franktheunicorn.data_access.email_inbox.fetcher._connect")
+    def test_plain_imap_server_gets_a_keyword(
+        self, mock_connect: MagicMock, email_config: SecurityEmailConfig
+    ) -> None:
+        mock_imap = MagicMock()
+        mock_connect.return_value = mock_imap
+        _wire_tag_conn(mock_imap)  # no X-GM-EXT-1
+
+        # Spaces are legal in the config (Gmail labels allow them) but not in
+        # an IMAP keyword atom, so the fallback sanitizes them.
+        result = tag_ingested_messages(_tag_config(email_config, "in frank"), ["<sec-1>"])
+
+        assert result.tagged == 1
+        mock_imap.store.assert_called_once_with("7", "+FLAGS.SILENT", "(in_frank)")
+
+    @patch("franktheunicorn.data_access.email_inbox.fetcher._connect")
+    def test_tags_only_never_seen_and_selects_read_write(
+        self, mock_connect: MagicMock, email_config: SecurityEmailConfig
+    ) -> None:
+        mock_imap = MagicMock()
+        mock_connect.return_value = mock_imap
+        _wire_tag_conn(mock_imap, capabilities=b"X-GM-EXT-1")
+
+        tag_ingested_messages(_tag_config(email_config, "frank/ingested"), ["<sec-1>"])
+
+        # STORE needs a read-write select; the fetch path stays readonly=True.
+        assert mock_imap.select.call_args.kwargs.get("readonly") is not True
+        # The only write is the one tag — \Seen is never part of it.
+        for call in mock_imap.store.call_args_list:
+            assert "Seen" not in call.args[1] and "Seen" not in call.args[2]
+
+    @patch("franktheunicorn.data_access.email_inbox.fetcher._connect")
+    def test_message_not_found_is_counted_missing(
+        self, mock_connect: MagicMock, email_config: SecurityEmailConfig
+    ) -> None:
+        mock_imap = MagicMock()
+        mock_connect.return_value = mock_imap
+        _wire_tag_conn(mock_imap, search_hits=b"")
+
+        result = tag_ingested_messages(_tag_config(email_config, "frank/ingested"), ["<gone-1>"])
+
+        assert result.missing == 1
+        assert result.tagged == 0
+        mock_imap.store.assert_not_called()
+
+    @patch("franktheunicorn.data_access.email_inbox.fetcher._connect")
+    def test_unsearchable_message_id_is_skipped(
+        self, mock_connect: MagicMock, email_config: SecurityEmailConfig
+    ) -> None:
+        mock_imap = MagicMock()
+        mock_connect.return_value = mock_imap
+        _wire_tag_conn(mock_imap)
+
+        result = tag_ingested_messages(
+            _tag_config(email_config, "frank/ingested"), ['<bad"id>', "<ok-1>"]
+        )
+
+        assert result.skipped == 1
+        assert result.tagged == 1
+        mock_imap.search.assert_called_once_with(None, "HEADER", "Message-ID", '"<ok-1>"')
+
+    @patch("franktheunicorn.data_access.email_inbox.fetcher._connect")
+    def test_connection_error_is_reported_not_raised(
+        self, mock_connect: MagicMock, email_config: SecurityEmailConfig
+    ) -> None:
+        mock_connect.side_effect = ConnectionError("refused")
+        result = tag_ingested_messages(_tag_config(email_config, "frank/ingested"), ["<sec-1>"])
+        assert result.error == "connection failed"
+        assert result.tagged == 0
+
+    @patch("franktheunicorn.data_access.email_inbox.fetcher._connect")
+    def test_rejected_store_is_counted_failed(
+        self, mock_connect: MagicMock, email_config: SecurityEmailConfig
+    ) -> None:
+        mock_imap = MagicMock()
+        mock_connect.return_value = mock_imap
+        _wire_tag_conn(mock_imap)
+        mock_imap.store.return_value = ("NO", [b"keywords not permitted"])
+
+        result = tag_ingested_messages(_tag_config(email_config, "frank/ingested"), ["<sec-1>"])
+
+        assert result.failed == 1
+        assert result.tagged == 0

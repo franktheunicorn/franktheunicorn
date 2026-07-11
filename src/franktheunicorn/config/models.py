@@ -707,12 +707,29 @@ class SecurityEmailConfig(BaseModel):
     folder: str = "INBOX"
     poll_interval_seconds: int = 300
     timeout_seconds: int = 30
+    # Optional tag applied to messages ingested as security reports, so the
+    # mailbox itself shows what frank has picked up. Applied as a Gmail label
+    # (X-GM-LABELS) when the server supports it, else a standard IMAP keyword.
+    # Empty (the default) keeps the inbox path fully read-only.
+    ingested_tag: str = ""  # e.g. "frank/ingested"
 
     @field_validator("imap_port")
     @classmethod
     def port_must_be_positive(cls, v: int) -> int:
         if v <= 0:
             msg = "imap_port must be positive"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("ingested_tag")
+    @classmethod
+    def ingested_tag_must_be_imap_safe(cls, v: str) -> str:
+        v = v.strip()
+        # Printable ASCII only, and nothing that would break IMAP quoting.
+        # (Spaces are fine — Gmail labels allow them; the keyword fallback
+        # sanitizes them.)
+        if any(ch in v for ch in ('"', "\\")) or not all(" " <= ch <= "~" for ch in v):
+            msg = "ingested_tag must be printable ASCII without quotes or backslashes"
             raise ValueError(msg)
         return v
 

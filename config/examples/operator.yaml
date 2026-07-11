@@ -216,6 +216,13 @@ claude_cli:
 # can see precisely what it read and why. Turning a report into a draft, and
 # any reply, are separate explicit actions you take yourself.
 #
+# The single opt-in exception: set `ingested_tag` and frank will tag the
+# messages it actually ingested as security reports, so your mailbox shows
+# what's already in frank. On Gmail this is a real label (created on first
+# use, nested labels like "frank/ingested" work); on other IMAP servers it's
+# a standard keyword/flag. Mail is still never marked read, moved, or
+# deleted. Leave it unset for a fully read-only scanner.
+#
 # security_triage:
 #   enabled: true
 #   auto_triage: true          # draft an LLM assessment on ingest (no send)
@@ -237,3 +244,4 @@ claude_cli:
 #     imap_pass: "${SECURITY_EMAIL_PASS}"   # the App Password, via .env
 #     folder: "INBOX"            # or a Gmail label you filter into
 #     poll_interval_seconds: 300
+#     ingested_tag: "frank/ingested"   # optional: tag mail ingested into frank

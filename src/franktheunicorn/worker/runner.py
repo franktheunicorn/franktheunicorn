@@ -1663,7 +1663,10 @@ def _poll_security_emails(operator_config: OperatorConfig) -> None:
     it opens it writes an ``EmailScanRecord`` (visible on the dashboard's
     "Email Activity" page), and turns the ones that pass the security filter
     into ``SecurityReport`` drafts. Auto-triage, when enabled, only drafts an
-    assessment — no reply is ever sent.
+    assessment — no reply is ever sent. If the operator opts in via
+    ``ingested_tag``, messages that became reports are tagged in the mailbox
+    (Gmail label / IMAP keyword) — the one mailbox write, and still never
+    ``\\Seen``.
     """
     global _last_security_email_poll
 
@@ -1704,6 +1707,7 @@ def _poll_security_emails(operator_config: OperatorConfig) -> None:
         fetch = fetch_security_emails(operator_config.security_triage.email, seen_ids)
 
         ingested = 0
+        ingested_message_ids: list[str] = []
         for msg in fetch.examined:
             is_dup = bool(
                 msg.message_id
@@ -1722,6 +1726,8 @@ def _poll_security_emails(operator_config: OperatorConfig) -> None:
                     email_received_at=msg.received_at,
                 )
                 ingested += 1
+                if msg.message_id:
+                    ingested_message_ids.append(msg.message_id)
                 logger.info(
                     "[email-scan] ingested security report from %s: %s",
                     msg.from_email or "unknown",
@@ -1757,6 +1763,18 @@ def _poll_security_emails(operator_config: OperatorConfig) -> None:
                     triage_report(report, None, operator_config)
                 except Exception:
                     logger.exception("Auto-triage failed for email report %d", report.pk)
+
+        # Opt-in: mark ingested messages in the mailbox itself (Gmail label /
+        # IMAP keyword) so the operator's inbox shows what frank picked up.
+        # Best-effort — the reports are already ingested; a tagging failure
+        # must never fail the poll.
+        if ingested_message_ids and operator_config.security_triage.email.ingested_tag:
+            try:
+                from franktheunicorn.data_access.email_inbox.fetcher import tag_ingested_messages
+
+                tag_ingested_messages(operator_config.security_triage.email, ingested_message_ids)
+            except Exception:
+                logger.exception("Error tagging ingested security emails")
 
         logger.info(
             "[email-scan] poll complete: %d examined, %d ingested, %d already scanned",
