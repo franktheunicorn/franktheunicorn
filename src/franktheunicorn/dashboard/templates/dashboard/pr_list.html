@@ -1,10 +1,11 @@
 {% extends "dashboard/base.html" %}
 {% load static %}
 {% load markdown_filters %}
+{% load score_filters %}
 {% block title %}PRs — franktheunicorn{% endblock %}
 {% block content %}
-{# Filter bar: project type + specific project selects.
-   hx-select ensures only #pr-content is swapped from the full-page response. #}
+{% comment %} Filter bar: project type + specific project selects.
+   hx-select ensures only #pr-content is swapped from the full-page response. {% endcomment %}
 <form class="filter-bar" method="get"
       hx-get="/" hx-target="#pr-content" hx-select="#pr-content" hx-swap="outerHTML"
       hx-push-url="true" hx-trigger="change">
@@ -48,7 +49,7 @@
     <li class="pr-item">
         <div class="pr-title">
             <span class="score-badge {% if pr.interest_score < 0.2 %}low{% elif pr.interest_score < 0.5 %}mid{% endif %}">
-                {{ pr.interest_score|floatformat:2 }}
+                {{ pr.interest_score|score100 }}
             </span>
             <a href="{% url 'dashboard:pr_detail' pr.pk %}">{{ pr.project }} #{{ pr.number }}: {{ pr.title|render_markdown_inline }}</a>
         </div>
