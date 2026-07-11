@@ -9,7 +9,7 @@ ifeq ($(wildcard $(VENV)/bin/python),)
   ACTIVATE_MSG := "(run 'make venv' first or 'make setup')"
 endif
 
-.PHONY: help venv setup test lint format typecheck check serve worker worker-debug migrate clear-fallbacks check-migrations docker-up docker-build clean
+.PHONY: help venv setup test lint format typecheck check serve worker worker-debug migrate up down up-status clear-fallbacks check-migrations docker-up docker-build clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -60,6 +60,15 @@ worker-debug: venv ## Start background worker with DEBUG logging
 
 migrate: venv ## Run database migrations
 	$(PYTHON) manage.py migrate
+
+up: ## Start web + worker locally without Docker
+	./scripts/run_local_all.sh up
+
+down: ## Stop local web + worker started by make up
+	./scripts/run_local_all.sh down
+
+up-status: ## Show local web + worker status
+	./scripts/run_local_all.sh status
 
 clear-fallbacks: venv ## Clear persisted LLM backend fallback flags from DB
 	$(PYTHON) manage.py clear_llm_fallbacks --yes

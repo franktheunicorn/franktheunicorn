@@ -47,7 +47,22 @@ cp .env.example .env           # add API keys here
 docker compose up              # dashboard: http://localhost:7742
 ```
 
-**Make** (local development):
+**Non-Docker single-command launch** (uses local Python):
+```bash
+make setup                     # first time only
+make up                        # dashboard + worker: http://localhost:7742
+make up-status                 # show process status and attach commands
+make down                      # stop dashboard + worker
+```
+
+`make up` runs `scripts/run_local_all.sh`, which mirrors the default Docker
+Compose app processes without Docker: migrations and static collection run
+first, then gunicorn starts on port 7742, then the worker starts after the
+dashboard responds. It uses `screen`, `tmux`, or `nohup` depending on what's
+installed, and writes logs under `data/logs/`. Use
+`./scripts/run_local_all.sh logs` to follow both logs.
+
+**Make** (manual local development):
 ```bash
 make setup                     # creates venv, installs deps, runs migrations
 make serve                     # dashboard: http://localhost:8000
