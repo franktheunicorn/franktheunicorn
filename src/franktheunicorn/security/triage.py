@@ -56,8 +56,17 @@ def triage_report(
 
     _parse_report(report, backend)
     project_context = _load_project_context(report, project_config)
-    _analyze_report(report, backend, project_context)
+    # CVE lookup runs before analysis so the matches are available as context
+    # for the expected-behavior / duplicate call.
     _check_cves(report, operator_config)
+    security_model = _resolve_security_model(project_config)
+    _analyze_report(
+        report,
+        backend,
+        project_context,
+        security_model=security_model,
+        cve_candidates=report.cve_matches,
+    )
 
     return report
 
@@ -140,6 +149,8 @@ def _analyze_report(
     report: SecurityReport,
     backend: BaseLLMBackend,
     project_context: str,
+    security_model: str = "",
+    cve_candidates: list[object] | None = None,
 ) -> None:
     """Run triage analysis on parsed report."""
     system_prompt, user_message = build_triage_prompt(
@@ -147,6 +158,8 @@ def _analyze_report(
         parsed_poc=report.parsed_poc,
         parsed_impact=report.parsed_impact,
         project_context=project_context,
+        security_model=security_model,
+        cve_candidates=cve_candidates,
     )
 
     try:
@@ -212,23 +225,94 @@ def _read_file(path: Path, max_chars: int = 5000) -> str | None:
         return None
 
 
-def _load_project_context(
-    report: SecurityReport,
-    project_config: ProjectConfig | None,
-) -> str:
-    """Load project README and docs for triage context."""
-    if project_config is None or report.project is None:
-        return ""
+# Conventional in-repo threat-model files, in priority order. SECURITY.md is
+# deliberately excluded — by convention it is a vulnerability-reporting policy,
+# not a statement of the project's trust boundaries.
+_SECURITY_MODEL_FILENAMES: tuple[str, ...] = (
+    ".frank/security-model.md",
+    "SECURITY_MODEL.md",
+    "SECURITY-MODEL.md",
+    "THREAT_MODEL.md",
+    "docs/security-model.md",
+    "docs/threat-model.md",
+)
+
+
+def _resolve_repo_path(project_config: ProjectConfig | None) -> Path | None:
+    """Return the checked-out repo directory for a project, or None.
+
+    None when there is no project config, no configured repos dir, or the repo
+    has not been cloned yet.
+    """
+    if project_config is None:
+        return None
 
     from django.conf import settings
 
     repos_dir_str = getattr(settings, "FRANK_REPOS_DIR", "")
     if not repos_dir_str:
-        return ""
+        return None
 
     repo_path = Path(repos_dir_str) / project_config.owner / project_config.repo
+    return repo_path if repo_path.is_dir() else None
 
-    if not repo_path.is_dir():
+
+def _resolve_security_model(project_config: ProjectConfig | None) -> str:
+    """Resolve the project's security model (trust boundaries) for triage.
+
+    Precedence:
+      1. Inline ``security_model`` prose in the project YAML (explicit override).
+      2. An explicit ``security_model_file`` path, loaded from the repo.
+      3. A conventional threat-model file auto-discovered in the repo.
+      4. Empty string (triage falls back to README/SECURITY.md context only).
+
+    Files are read fresh from the checked-out base repo each time (no cache),
+    and paths are constrained to inside the repo directory.
+    """
+    if project_config is None:
+        return ""
+
+    inline = project_config.security_model.strip()
+    if inline:
+        return inline
+
+    repo_path = _resolve_repo_path(project_config)
+    if repo_path is None:
+        return ""
+
+    explicit = project_config.security_model_file.strip()
+    if explicit:
+        # Explicit path wins over auto-discovery. Constrain it to the repo.
+        text = _read_repo_file(repo_path, explicit)
+        return text.strip() if text else ""
+
+    for name in _SECURITY_MODEL_FILENAMES:
+        text = _read_repo_file(repo_path, name)
+        if text and text.strip():
+            return text.strip()
+    return ""
+
+
+def _read_repo_file(repo_path: Path, relative: str, max_chars: int = 8000) -> str | None:
+    """Read a repo-relative file, refusing to escape the repo directory."""
+    candidate = (repo_path / relative).resolve()
+    if not candidate.is_relative_to(repo_path.resolve()):
+        return None
+    if not candidate.is_file():
+        return None
+    return _read_file(candidate, max_chars=max_chars)
+
+
+def _load_project_context(
+    report: SecurityReport,
+    project_config: ProjectConfig | None,
+) -> str:
+    """Load project README and docs for triage context."""
+    if report.project is None:
+        return ""
+
+    repo_path = _resolve_repo_path(project_config)
+    if repo_path is None:
         return ""
 
     parts: list[str] = []
@@ -242,18 +326,27 @@ def _load_project_context(
                 parts.append(f"### README\n{text}")
             break
 
-    # Read SECURITY.md if present.
+    # Read SECURITY.md if present (usually the reporting policy).
     text = _read_file(repo_path / "SECURITY.md", max_chars=3000)
     if text:
         parts.append(f"### SECURITY.md\n{text}")
 
+    # Read a security guidance doc if present. Many projects keep their actual
+    # security posture here rather than in SECURITY.md — Apache Spark, for
+    # example, documents auth/encryption/trust boundaries in docs/security.md.
+    # This is supporting context, separate from the authoritative
+    # trust-boundary `security_model`.
+    for name in ("docs/security.md", "docs/security.rst", "docs/SECURITY.md"):
+        text = _read_repo_file(repo_path, name, max_chars=4000)
+        if text and text.strip():
+            parts.append(f"### {name}\n{text}")
+            break
+
     # Read the reported component file if identifiable and safe.
     if report.parsed_component:
-        component_path = (repo_path / report.parsed_component).resolve()
-        if component_path.is_relative_to(repo_path) and component_path.is_file():
-            text = _read_file(component_path)
-            if text:
-                parts.append(f"### Source: {report.parsed_component}\n{text}")
+        text = _read_repo_file(repo_path, report.parsed_component, max_chars=5000)
+        if text:
+            parts.append(f"### Source: {report.parsed_component}\n{text}")
 
     return "\n\n".join(parts)
 

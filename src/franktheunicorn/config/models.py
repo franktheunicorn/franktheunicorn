@@ -1280,6 +1280,22 @@ class ProjectConfig(BaseModel):
     # project. Defaults to "github" for backward compatibility.
     forge: str = "github"
     review_context: str = "general open-source"
+    # Prose description of the project's threat model / trust boundaries, fed
+    # into security-report triage. Many "vulnerabilities" are really the
+    # project's documented stance (e.g. Spark treats submitted code, models,
+    # and pipelines as trusted and will run arbitrary code from them). Stating
+    # that here lets triage mark such reports as expected behavior instead of
+    # flagging them as findings. Empty by default (triage falls back to
+    # README/SECURITY.md context only).
+    security_model: str = ""
+    # Repo-relative path to a threat-model document to load as the security
+    # model when ``security_model`` above is not set inline. Empty means
+    # auto-discover a conventional threat-model file (e.g.
+    # ``.frank/security-model.md``, ``THREAT_MODEL.md``) if one is present in
+    # the checked-out repo. SECURITY.md is intentionally not used here — by
+    # convention it is a vulnerability-reporting policy, not a trust-boundary
+    # statement.
+    security_model_file: str = ""
     watched_paths: list[str] = Field(default_factory=list)
     ignore_paths: list[str] = Field(default_factory=list)
     tone: str = "direct"

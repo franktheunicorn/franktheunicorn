@@ -128,6 +128,52 @@ class TestSecurityReportCreate:
         response = client.post("/security/new/", {"raw_text": ""})
         assert response.status_code == 400
 
+    def test_paste_forwarded_report_autofills_metadata(self, client: Client, db: Any) -> None:
+        """Pasting a forwarded Apache report with blank fields recovers the
+        reporter/title from the forwarded block — no LLM backend required."""
+        forwarded = (
+            "Dear PMC,\n\n"
+            "The security vulnerability report has been received by the Apache\n"
+            "Security Team and is being passed to you for action.\n\n"
+            "---------- Forwarded message ---------\n"
+            "From: Ryan Hughes via security <security@apache.org>\n"
+            "Subject: [SECURITY] Path traversal via core_model_path\n"
+            "To: <security@spark.apache.org>\n\n"
+            "Hello, I am reporting a path traversal vulnerability exploit.\n"
+        )
+        response = client.post("/security/new/", {"raw_text": forwarded})
+        assert response.status_code == 302
+
+        report = SecurityReport.objects.get()
+        assert report.reporter_name == "Ryan Hughes"  # "via security" stripped
+        assert report.reporter_email == "security@apache.org"
+        assert report.title.startswith("[SECURITY] Path traversal")
+        # Full pasted text preserved for triage.
+        assert "received by the Apache" in report.raw_text
+
+    def test_operator_fields_win_over_autofill(self, client: Client, db: Any) -> None:
+        """Anything the operator typed takes precedence over recovery."""
+        forwarded = (
+            "---------- Forwarded message ---------\n"
+            "From: Ryan Hughes via security <security@apache.org>\n"
+            "Subject: [SECURITY] Path traversal via core_model_path\n\n"
+            "vulnerability exploit report body\n"
+        )
+        response = client.post(
+            "/security/new/",
+            {
+                "raw_text": forwarded,
+                "title": "My own title",
+                "reporter_name": "Someone Else",
+            },
+        )
+        assert response.status_code == 302
+        report = SecurityReport.objects.get()
+        assert report.title == "My own title"
+        assert report.reporter_name == "Someone Else"
+        # Email wasn't provided, so it still auto-fills.
+        assert report.reporter_email == "security@apache.org"
+
 
 @pytest.mark.django_db
 class TestSecurityReportDetail:

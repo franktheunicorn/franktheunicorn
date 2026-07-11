@@ -4,8 +4,11 @@
 <a href="{% url 'dashboard:security_list' %}" class="back-link">&larr; Security Reports</a>
 <h2 style="margin-top: 0.5rem;">Submit Security Report</h2>
 <p style="font-size: 0.85rem; color: var(--muted); margin-bottom: 1rem;">
-    Paste a security vulnerability report for triage. The LLM will parse the report,
-    assess POC validity, check for expected behavior, and search for matching CVEs.
+    Paste a security vulnerability report for triage &mdash; no inbox connection required.
+    You can paste a forwarded email (e.g. an Apache Security Team forward) verbatim; the
+    reporter and title are recovered from the forwarded message, so leave those fields
+    blank to auto-fill them. If an LLM backend is configured, triage will also parse the
+    report, assess POC validity, check for expected behavior, and search for matching CVEs.
 </p>
 
 <form method="post" action="{% url 'dashboard:security_create' %}"
@@ -14,7 +17,7 @@
 
     <div class="form-row">
         <label for="title" style="min-width: 6rem; font-size: 0.85rem; font-weight: 600;">Title</label>
-        <input type="text" id="title" name="title" placeholder="Brief title (optional — LLM will generate one)">
+        <input type="text" id="title" name="title" placeholder="Brief title (optional — auto-filled from a forwarded report, or by the LLM)">
     </div>
 
     <div class="form-row">

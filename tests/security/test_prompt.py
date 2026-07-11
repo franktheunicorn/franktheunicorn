@@ -74,3 +74,69 @@ class TestBuildTriagePrompt:
             project_context="",
         )
         assert "expected" in system.lower() or "documented" in system.lower()
+
+    def test_system_prompt_mentions_trust_boundaries(self) -> None:
+        system, _ = build_triage_prompt(
+            parsed_component="x",
+            parsed_poc="y",
+            parsed_impact="z",
+            project_context="",
+        )
+        lowered = system.lower()
+        assert "security model" in lowered
+        assert "trusted" in lowered
+        # It should call out the input-channel distinction (data file vs code).
+        assert "data file" in lowered
+
+    def test_security_model_included_when_provided(self) -> None:
+        _, user = build_triage_prompt(
+            parsed_component="x",
+            parsed_poc="y",
+            parsed_impact="z",
+            project_context="",
+            security_model="Loaded models are trusted and may run arbitrary code.",
+        )
+        assert "Loaded models are trusted and may run arbitrary code." in user
+        assert "Trust Boundaries" in user
+
+    def test_security_model_suppresses_no_docs_message(self) -> None:
+        """With a security model present, the 'no documentation' filler is
+        pointless — the model has authoritative context."""
+        _, user = build_triage_prompt(
+            parsed_component="x",
+            parsed_poc="y",
+            parsed_impact="z",
+            project_context="",
+            security_model="Data files are untrusted input.",
+        )
+        assert "No project documentation available" not in user
+
+    def test_cve_candidates_rendered(self) -> None:
+        _, user = build_triage_prompt(
+            parsed_component="x",
+            parsed_poc="y",
+            parsed_impact="z",
+            project_context="",
+            cve_candidates=[
+                {
+                    "cve_id": "CVE-2025-30065",
+                    "description": "Parquet deserialization RCE",
+                    "cvss_score": 10.0,
+                    "status": "Analyzed",
+                }
+            ],
+        )
+        assert "CVE-2025-30065" in user
+        assert "Parquet deserialization RCE" in user
+        assert "Candidate CVE Matches" in user
+
+    def test_cve_candidates_tolerate_bad_entries(self) -> None:
+        """Malformed entries (not dicts) are skipped, not crashed on."""
+        _, user = build_triage_prompt(
+            parsed_component="x",
+            parsed_poc="y",
+            parsed_impact="z",
+            project_context="",
+            cve_candidates=["not a dict", {"cve_id": "CVE-2024-1"}],
+        )
+        assert "CVE-2024-1" in user
