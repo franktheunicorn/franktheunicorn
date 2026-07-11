@@ -308,6 +308,21 @@ class TestSweepSecurityReportAlerts:
         # Falls back to raw_text when the report has no title yet.
         assert report.raw_text[:40] in created[0].title
 
+    def test_multiline_pasted_report_gets_single_line_title(self) -> None:
+        # A title with CR/LF would later blow up the email Subject header
+        # (Django BadHeaderError), stranding the alert unsent forever.
+        SecurityReportFactory(
+            project=None,
+            status="new",
+            title="",
+            raw_text="SQL injection in login form\r\nSteps to reproduce:\n1. do the thing",
+        )
+        created = sweep_security_report_alerts([], _operator_config())
+        assert len(created) == 1
+        assert "\n" not in created[0].title
+        assert "\r" not in created[0].title
+        assert "SQL injection in login form Steps to reproduce:" in created[0].title
+
     def test_project_opt_out(self, db_project: Project) -> None:
         SecurityReportFactory(project=db_project, status="new")
         configs = [_project_config(db_project, security_reports=False)]
@@ -337,6 +352,18 @@ class TestAlertEmail:
 
         operator.alerts.email = "alerts@example.com"
         assert alert_email_recipient(operator) == "alerts@example.com"
+
+    def test_multiline_title_still_sends_single_alert_email(self, mailoutbox: list[Any]) -> None:
+        # Even if a multi-line title reaches the DB (pre-sanitizer rows,
+        # future alert types), the subject must be flattened — a newline
+        # there raises BadHeaderError and the alert would retry forever.
+        AlertFactory(title="Security report in the queue: line one\nline two")
+        sent = send_pending_alert_emails(_operator_config(email="me@example.com"))
+        assert sent == 1
+        assert len(mailoutbox) == 1
+        expected = "[frank alert] Security report in the queue: line one line two"
+        assert mailoutbox[0].subject == expected
+        assert Alert.objects.get().email_sent is True
 
     def test_sends_single_alert_email(self, mailoutbox: list[Any]) -> None:
         AlertFactory(title="apache/spark#1 overlaps", reasons=["touches core/shuffle.py"])

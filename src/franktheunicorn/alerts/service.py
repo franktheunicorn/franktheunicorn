@@ -52,6 +52,16 @@ def _format_file_list(files: list[str]) -> str:
     return f"{shown} (+{extra} more)" if extra > 0 else shown
 
 
+def _single_line(text: str) -> str:
+    """Collapse all whitespace (including CR/LF) into single spaces.
+
+    Alert titles end up in email Subject headers, and Django raises
+    BadHeaderError on newlines there — which would strand the alert
+    unsent and retried forever.
+    """
+    return " ".join(text.split())
+
+
 def find_working_overlap_reasons(pr: PullRequest, project_config: ProjectConfig) -> list[str]:
     """Explain how ``pr`` overlaps the operator's in-flight work.
 
@@ -202,7 +212,9 @@ def sweep_security_report_alerts(
                 continue
 
         where = "in the queue" if report.status == "new" else "in triage"
-        title_text = report.title or report.raw_text[:80]
+        # Pasted reports may have no title yet; fall back to the raw text,
+        # flattened first so a multi-line paste yields a usable one-liner.
+        title_text = _single_line(report.title) or _single_line(report.raw_text)[:80]
         reasons = [f"status: {report.status} ({where})", f"source: {report.source}"]
         if report.assessed_severity and report.assessed_severity != "unknown":
             reasons.append(f"assessed severity: {report.assessed_severity}")
@@ -272,7 +284,9 @@ def send_pending_alert_emails(operator_config: OperatorConfig) -> int:
         return 0
 
     if len(pending) == 1:
-        subject = f"[frank alert] {pending[0].title}"
+        # Defensively flatten the title: a newline in an email Subject
+        # raises BadHeaderError, stranding the alert unsent forever.
+        subject = f"[frank alert] {_single_line(pending[0].title)}"
     else:
         subject = f"[frank alert] {len(pending)} new alerts"
 
