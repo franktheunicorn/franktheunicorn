@@ -6,7 +6,7 @@ import logging
 import shlex
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from franktheunicorn.config.schema import GITHUB_NAME_PATTERN, KNOWN_GOVERNANCE_VALUES
 
@@ -273,6 +273,9 @@ def _default_agent_cli_reviewers() -> list[AgentCLIReviewerConfig]:
         AgentCLIReviewerConfig(
             name="claude", cli_path="claude", prompt_mode="flag", prompt_arg="-p"
         ),
+        # ``codex exec`` accepts ``-m, --model <MODEL>`` (verified via
+        # ``codex exec --help``), so the default ``model_flag="--model"`` works
+        # for codex; no override needed.
         AgentCLIReviewerConfig(
             name="codex", cli_path="codex", prompt_mode="subcommand", prompt_arg="exec"
         ),
@@ -949,6 +952,11 @@ class OperatorConfig(BaseModel):
     agent_cli_reviewers: list[AgentCLIReviewerConfig] = Field(
         default_factory=_default_agent_cli_reviewers
     )
+    # Runtime cache for the PATH-resolved agent reviewer set (see
+    # worker.runner.resolve_agent_cli_reviewers). Populated once at worker
+    # startup so per-PR processing doesn't re-probe ``shutil.which``. Excluded
+    # from serialization/equality (PrivateAttr); ``None`` means "not resolved".
+    _resolved_agent_cli_reviewers: list[AgentCLIReviewerConfig] | None = PrivateAttr(default=None)
     snowflake_review: SnowflakeReviewConfig = Field(default_factory=SnowflakeReviewConfig)
     agent_feedback: AgentFeedbackConfig = Field(default_factory=AgentFeedbackConfig)
     sentry: SentryConfig = Field(default_factory=SentryConfig)
@@ -1008,9 +1016,13 @@ class OperatorConfig(BaseModel):
                 self.agent_cli_reviewers.append(seed)
                 by_name[seed.name] = seed
 
+        # Promote iff the operator actually provided a ``claude_cli:`` block.
+        # ``model_fields_set`` distinguishes "explicitly configured" (even
+        # ``claude_cli: {enabled: false}``) from "never set" (the seed default
+        # object), so an explicit disable survives as ``enabled=False`` instead
+        # of silently reverting to the "auto" seed and auto-running Claude.
         legacy = self.claude_cli
-        legacy_is_set = legacy.enabled or legacy != ClaudeCLIConfig()
-        if legacy_is_set:
+        if "claude_cli" in self.model_fields_set:
             promoted = AgentCLIReviewerConfig(
                 name="claude",
                 enabled=legacy.enabled,

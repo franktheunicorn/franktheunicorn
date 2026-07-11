@@ -84,6 +84,46 @@ class TestBuildInvocation:
         )
         assert cfg.cli_argv + cfg.build_invocation("PROMPT") == ["codex", "exec", "PROMPT"]
 
+    def test_full_argv_ordering_subcommand_prompt_trailing(self) -> None:
+        # Subcommand ALWAYS first, model + extra args in the middle, prompt
+        # ALWAYS the trailing positional. Guards against build_invocation drift.
+        cfg = AgentCLIReviewerConfig(
+            name="codex",
+            cli_path="codex",
+            prompt_mode="subcommand",
+            prompt_arg="exec",
+            model="o3",
+            extra_args=["--full-auto", "--json"],
+        )
+        assert cfg.cli_argv + cfg.build_invocation("PROMPT") == [
+            "codex",
+            "exec",
+            "--model",
+            "o3",
+            "--full-auto",
+            "--json",
+            "PROMPT",
+        ]
+
+    def test_full_argv_ordering_flag_prompt_trailing(self) -> None:
+        cfg = AgentCLIReviewerConfig(
+            name="claude",
+            cli_path="claude",
+            prompt_mode="flag",
+            prompt_arg="-p",
+            model="opus",
+            extra_args=["--permission-mode", "plan"],
+        )
+        assert cfg.cli_argv + cfg.build_invocation("PROMPT") == [
+            "claude",
+            "--model",
+            "opus",
+            "--permission-mode",
+            "plan",
+            "-p",
+            "PROMPT",
+        ]
+
 
 # ---------------------------------------------------------------------------
 # CLI runner tests (via mocked executor)
@@ -360,3 +400,19 @@ class TestLegacyClaudeCLIPromotion:
         codex_entries = [r for r in oc.agent_cli_reviewers if r.name == "codex"]
         assert len(codex_entries) == 1
         assert codex_entries[0].enabled is False
+
+    def test_explicit_legacy_disable_survives_and_does_not_autorun(self) -> None:
+        # H1 regression: `claude_cli: {enabled: false}` must stay disabled and
+        # NOT auto-run even when the claude binary is on PATH.
+        oc = OperatorConfig(claude_cli=ClaudeCLIConfig(enabled=False))
+        claude = next(r for r in oc.agent_cli_reviewers if r.name == "claude")
+        assert claude.enabled is False
+        with patch("franktheunicorn.worker.runner.shutil.which", return_value="/usr/bin/claude"):
+            resolved = resolve_agent_cli_reviewers(oc)
+        assert "claude" not in {r.name for r in resolved}
+
+    def test_no_legacy_block_leaves_claude_auto(self) -> None:
+        # Never configuring claude_cli keeps the seed at "auto" (auto-detect).
+        oc = OperatorConfig()
+        claude = next(r for r in oc.agent_cli_reviewers if r.name == "claude")
+        assert claude.enabled == "auto"

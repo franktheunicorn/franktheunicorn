@@ -473,11 +473,17 @@ def resolve_agent_cli_reviewers(
     ``"auto"`` means "use it iff installed": in local mode we probe
     ``shutil.which``; in SSH mode we enable optimistically and rely on the
     executor's graceful-skip (a missing remote binary yields ``[]``) rather
-    than paying for a per-PR remote probe. This is cheap (a PATH scan) and
-    logs nothing, so it is safe to call once per PR.
+    than paying for a per-PR remote probe.
+
+    The result is memoized on the ``OperatorConfig`` (PATH does not change
+    between PRs), so the ``shutil.which`` probe runs once — typically at worker
+    startup — and every subsequent call reuses the cached list.
     """
     if operator_config is None:
         return []
+    cached = operator_config._resolved_agent_cli_reviewers
+    if cached is not None:
+        return cached
     resolved: list[AgentCLIReviewerConfig] = []
     for rc in operator_config.agent_cli_reviewers:
         if rc.enabled == "auto":
@@ -486,11 +492,16 @@ def resolve_agent_cli_reviewers(
             active = bool(rc.enabled)
         if active:
             resolved.append(rc)
+    operator_config._resolved_agent_cli_reviewers = resolved
     return resolved
 
 
 def _check_agent_cli_reviewers(operator_config: OperatorConfig) -> None:
-    """Log the resolved agent-CLI reviewer set once at startup (no per-PR noise)."""
+    """Resolve + log the agent-CLI reviewer set once at startup (no per-PR noise).
+
+    Also primes the memoized cache on ``operator_config`` so per-PR processing
+    reuses this result instead of re-probing PATH.
+    """
     resolved = resolve_agent_cli_reviewers(operator_config)
     if resolved:
         logger.info(
@@ -499,13 +510,12 @@ def _check_agent_cli_reviewers(operator_config: OperatorConfig) -> None:
         )
     else:
         logger.info("Agent CLI reviewers enabled: (none)")
-    # Surface auto entries skipped because their binary is absent locally.
+    # Surface auto+local entries skipped because their binary is absent. Derived
+    # from the resolved set (for auto+local, "resolved" == "available"), so this
+    # reuses the single PATH probe rather than re-running it.
+    resolved_names = {rc.name for rc in resolved}
     for rc in operator_config.agent_cli_reviewers:
-        if (
-            rc.enabled == "auto"
-            and rc.remote.mode != "ssh"
-            and not _agent_cli_available_locally(rc)
-        ):
+        if rc.enabled == "auto" and rc.remote.mode != "ssh" and rc.name not in resolved_names:
             logger.info(
                 "Agent CLI reviewer %r skipped: %r not found on PATH",
                 rc.name,

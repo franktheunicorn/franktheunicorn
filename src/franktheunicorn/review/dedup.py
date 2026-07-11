@@ -99,6 +99,11 @@ def is_duplicate_finding(
     constructing throwaway objects. Same file + exact line always matches; a
     nearby line matches only when the bodies are similar (Jaccard) or one is a
     substring of the other.
+
+    TODO(dedup): same-line matches merge unconditionally (distance == 0 →
+    True), inheriting ``_should_merge``'s behavior — two genuinely distinct
+    findings on the same line can be over-merged. Tracked for a follow-up that
+    tightens same-line matching with a body-similarity check.
     """
     if file_a != file_b:
         return False
