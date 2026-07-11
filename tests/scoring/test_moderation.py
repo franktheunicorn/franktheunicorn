@@ -117,5 +117,58 @@ class TestComputeModerationFlags:
         }
         assert "likely_unowned" not in compute_moderation_flags(pr, "op")
 
+    def test_mentioned_via_requested_reviewer(self) -> None:
+        assert "mentioned" in compute_moderation_flags(
+            {"author": "alice", "requested_reviewers": ["holdenk"]}, "holdenk"
+        )
+
+    def test_mentioned_via_assignee(self) -> None:
+        assert "mentioned" in compute_moderation_flags(
+            {"author": "alice", "assignees": ["holdenk"]}, "holdenk"
+        )
+
+    def test_mentioned_via_body_at_mention(self) -> None:
+        assert "mentioned" in compute_moderation_flags(
+            {"author": "alice", "body": "hey @holdenk can you take a look?"}, "holdenk"
+        )
+
+    def test_mentioned_case_insensitive(self) -> None:
+        assert "mentioned" in compute_moderation_flags(
+            {"author": "alice", "requested_reviewers": ["HoldenK"]}, "holdenk"
+        )
+
+    def test_not_mentioned_when_uninvolved(self) -> None:
+        flags = compute_moderation_flags(
+            {
+                "author": "alice",
+                "body": "a routine change to the parser",
+                "requested_reviewers": ["bob"],
+                "assignees": ["carol"],
+            },
+            "holdenk",
+        )
+        assert "mentioned" not in flags
+
+    def test_mentioned_independent_of_operator_pr(self) -> None:
+        # Operator both authored AND is a requested reviewer: both flags set,
+        # mentioned is not suppressed by is_operator_pr.
+        flags = compute_moderation_flags(
+            {"author": "holdenk", "requested_reviewers": ["holdenk"]}, "holdenk"
+        )
+        assert "is_operator_pr" in flags
+        assert "mentioned" in flags
+
+    def test_not_mentioned_when_operator_username_empty(self) -> None:
+        assert "mentioned" not in compute_moderation_flags(
+            {"author": "alice", "requested_reviewers": ["holdenk"]}, ""
+        )
+
+    def test_substring_username_does_not_false_fire(self) -> None:
+        # "@holden" must not match operator "holdenk" (word-boundary anchored).
+        flags = compute_moderation_flags(
+            {"author": "alice", "body": "cc @holden not the operator"}, "holdenk"
+        )
+        assert "mentioned" not in flags
+
     def test_graceful_missing_keys(self) -> None:
         assert isinstance(compute_moderation_flags({}, "op"), list)

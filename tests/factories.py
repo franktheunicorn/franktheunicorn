@@ -59,6 +59,7 @@ class PullRequestFactory(factory.django.DjangoModelFactory):  # type: ignore[mis
     body = ""
     labels = factory.LazyFunction(list)
     requested_reviewers = factory.LazyFunction(list)
+    assignees = factory.LazyFunction(list)
     changed_files = factory.LazyFunction(list)
     additions = 0
     deletions = 0

@@ -210,6 +210,26 @@ class TestProjectConfig:
         assert "sql/catalyst/" in config.watched_paths
         assert config.governance == "asf"
 
+    def test_auto_review_policy_defaults_to_mentioned_or_authored(self) -> None:
+        # Backward compatible: configs without the field get the token-saver
+        # default, not "all".
+        config = ProjectConfig(owner="apache", repo="spark")
+        assert config.auto_review_policy == "mentioned_or_authored"
+
+    @pytest.mark.parametrize("value", ["all", "mentioned_or_authored", "none"])
+    def test_auto_review_policy_accepts_known_values(self, value: str) -> None:
+        config = ProjectConfig(owner="apache", repo="spark", auto_review_policy=value)
+        assert config.auto_review_policy == value
+
+    def test_auto_review_policy_normalizes_case(self) -> None:
+        config = ProjectConfig(owner="apache", repo="spark", auto_review_policy="  ALL  ")
+        assert config.auto_review_policy == "all"
+
+    @pytest.mark.parametrize("value", ["everything", "mentioned", "off", ""])
+    def test_auto_review_policy_rejects_unknown_values(self, value: str) -> None:
+        with pytest.raises(ValidationError, match="auto_review_policy"):
+            ProjectConfig(owner="apache", repo="spark", auto_review_policy=value)
+
 
 class TestOperatorConfigValidation:
     @pytest.mark.parametrize("value", [-1, 0], ids=["negative", "zero"])

@@ -638,6 +638,33 @@ def _build_repo_health_context(pr: object) -> str:
         return ""
 
 
+def _should_auto_review(pr: PullRequest, operator_username: str) -> bool:
+    """Shared review-gating predicate for the ``mentioned_or_authored`` policy.
+
+    Returns True when the operator authored the PR, is a requested reviewer,
+    is an assignee, or is @-mentioned in the PR body — i.e. the operator is
+    personally involved. Reuses the same ``is_operator_involved`` predicate
+    that drives the "Mentioned" dashboard queue, so gating and routing never
+    disagree.
+
+    An empty ``operator_username`` returns True: with no operator identity we
+    cannot tell who is involved, so we fall back to reviewing everything
+    (pre-gating behavior — safe default).
+    """
+    from franktheunicorn.scoring.signals import is_operator_involved
+
+    if not operator_username:
+        return True
+    if pr.author and pr.author.lower() == operator_username.lower():
+        return True
+    return is_operator_involved(
+        body=pr.body or "",
+        assignees=list(pr.assignees or []),
+        requested_reviewers=list(pr.requested_reviewers or []),
+        operator_username=operator_username,
+    )
+
+
 def process_pr(
     pr: PullRequest,
     pc: ProjectConfig,
@@ -698,6 +725,27 @@ def process_pr(
         if not force and pr.queue == "wip":
             logger.debug("PR #%d is in the wip queue; skipping review pipeline.", pr.number)
             return []
+
+        # Default review-gating policy (token saver). Ingestion/scoring/routing
+        # already happened upstream; here we decide whether to spend LLM tokens
+        # auto-reviewing this PR. ``force=True`` (dashboard "Force Run Agents")
+        # always bypasses this gate.
+        if not force:
+            policy = getattr(pc, "auto_review_policy", "mentioned_or_authored")
+            operator_username = operator_config.github_username if operator_config else ""
+            if policy == "none":
+                _log(
+                    f"Auto-review policy 'none' for {getattr(pc, 'full_name', '?')}; "
+                    f"skipping LLM review for PR #{pr.number} (still ingested/scored)."
+                )
+                return []
+            if policy == "mentioned_or_authored" and not _should_auto_review(pr, operator_username):
+                _log(
+                    f"Auto-review policy 'mentioned_or_authored': operator not involved in "
+                    f"PR #{pr.number}; skipping LLM review (still ingested/scored)."
+                )
+                return []
+            # policy == "all" falls through to the full pipeline.
 
         _log(f"Starting agent run for PR #{pr.number}: {pr.title}")
 
