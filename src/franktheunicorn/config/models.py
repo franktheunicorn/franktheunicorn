@@ -410,20 +410,37 @@ class BackportConfig(BaseModel):
 
     When a PR declares itself a backport / cherry-pick of another PR or commit,
     the check fetches the source diff and flags differences from the backport's
-    diff. Enable via ``llm_checks: ["backport"]``. Deterministic (non-LLM) by
-    default; the semantic-drift LLM layer is opt-in and off by default.
+    diff. Enable via ``llm_checks: ["backport"]``. The check is deterministic
+    (non-LLM).
+
+    ``ignore_paths`` are ``fnmatch`` globs of paths where divergence between the
+    source and the backport is expected and should be suppressed (changelogs,
+    version bumps, lockfiles, etc.). A trailing slash (or a bare directory
+    name) matches everything under that directory: ``"docs/"`` and ``"docs"``
+    both ignore ``docs/anything.md``. Plain globs like ``"*.lock"`` or
+    ``"CHANGELOG*"`` also work.
     """
 
     enabled: bool = True
     warn_on_missing_hunks: bool = True
     warn_on_extra_files: bool = True
     warn_on_altered_hunks: bool = True
-    # Glob patterns for paths where divergence is expected and should be
-    # ignored (changelogs, version bumps, lockfiles, etc.).
     ignore_paths: list[str] = Field(default_factory=list)
-    # Optional LLM semantic-drift layer (v1.5+). Off by default; when enabled,
-    # both diffs are fed to the LLM for a semantic-similarity note.
+    # Hard cap on the fetched source diff size; larger sources short-circuit to
+    # a single informational finding instead of being parsed (OOM guard).
+    max_source_diff_chars: int = 1_000_000
+    # Reserved flag for a future LLM semantic-drift layer. Currently a no-op:
+    # setting it True does nothing yet (the deterministic comparison is the
+    # only path). Kept so config written against it validates.
     llm_semantic_drift: bool = False
+
+    @field_validator("max_source_diff_chars")
+    @classmethod
+    def max_source_diff_chars_positive(cls, v: int) -> int:
+        if v <= 0:
+            msg = "max_source_diff_chars must be positive"
+            raise ValueError(msg)
+        return v
 
 
 KNOWN_LLM_PROVIDERS: frozenset[str] = frozenset(

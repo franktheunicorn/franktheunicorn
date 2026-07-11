@@ -3,11 +3,11 @@
 When a PR declares itself a backport or cherry-pick of another PR or commit,
 this check fetches the ORIGINAL (source) diff, compares it against the
 backport PR's diff, and flags SEEMING DIFFERENCES so a human can eyeball
-whether the backport faithfully mirrors the original.
+whether the backport faithfully mirrors the original. When the PR is not a
+declared backport the check is a silent no-op (no findings).
 
 It is a deterministic, non-LLM check: detection is regex based and the
-comparison is a diff-of-diffs over :class:`unidiff.PatchSet`. When the PR is
-not a declared backport the check is a silent no-op (no findings).
+comparison is a diff-of-diffs over :class:`unidiff.PatchSet`.
 
 Enable via::
 
@@ -28,6 +28,7 @@ from __future__ import annotations
 import fnmatch
 import logging
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -48,25 +49,44 @@ logger = logging.getLogger(__name__)
 
 # --- reference detection ---------------------------------------------------
 
-# A commit SHA: 7-40 hex chars, optionally prefixed with the word "commit".
-_SHA_REF_SRC = r"(?:commit\s+)?(?P<sha>[0-9a-fA-F]{7,40})\b"
+# True if the PR text declares a backport/cherry-pick at all (cue anywhere).
+_DECLARES_BACKPORT = re.compile(r"back[\s-]?port|cherry[\s-]?pick", re.IGNORECASE)
 
-# A PR reference boundary fragment. Structurally mirrors ``ISSUE_REF_PATTERN``
-# (optional ``owner/repo`` then ``#<number>``); the authoritative parse of
-# owner/repo/number reuses ``ISSUE_REF_PATTERN`` itself in ``_parse_pr_ref``.
-_PR_REF_SRC = r"(?:[\w.-]+/[\w.-]+)?#\d+"
-
-# Matches a backport/cherry-pick cue immediately followed by a reference. The
-# reference must directly follow the cue (only "of"/"from"/"for" connectors and
-# punctuation/whitespace between) so passing mentions like "we should backport
-# this someday, see #99" do not trigger a fetch.
-_BACKPORT_PATTERN = re.compile(
-    r"(?P<kind>back[\s-]?port|cherry[\s-]?pick)(?:ed|s|ing)?"
-    r"(?:\s+(?:of|from|for))?"
-    r"\s*:?\s*"
-    r"(?P<ref>" + _SHA_REF_SRC + r"|" + _PR_REF_SRC + r")",
-    re.IGNORECASE,
+# A single source reference: a commit SHA (optionally qualified by
+# "commit"/"sha") or a PR reference (``#123`` / ``org/repo#123``). The trailing
+# ``\b`` anchors keep us from matching hex-adjacent substrings. A short,
+# *unqualified* hex token (e.g. "deadbeef" in prose) is deliberately parsed
+# out here but rejected in ``_ref_from_match`` — only full 40-char SHAs or
+# ``commit <sha>``-qualified tokens count as commit references.
+_REF_SRC = (
+    r"(?:(?P<shaqual>commit|sha)\s+)?(?P<sha>[0-9a-fA-F]{7,40})\b"
+    r"|"
+    r"(?P<prref>(?:[\w.-]+/[\w.-]+)?#\d+)\b"
 )
+
+# Ref directly attached to a backport/cherry-pick cue: "backport of #123",
+# "cherry-picked from abc…", "backport #123".
+_KEYWORD_REF = re.compile(
+    r"\b(?:back[\s-]?port|cherry[\s-]?pick)(?:ed|s|ing)?"
+    r"(?:\s+(?:of|from|for))?\s*:?\s*"
+    r"(?:" + _REF_SRC + r")",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# Ref attached to a source-indicating connector anywhere in the text: "from
+# #123", "of #123", "source: #123", "Original: #123". Only consulted once the
+# text is known to declare a backport, so a bare "fixes #123" / "closes #123"
+# (whose verbs are not source connectors) never counts as a backport source.
+_CONNECTOR_REF = re.compile(
+    r"(?:^|[^\w/])(?:from|of|source|origin(?:al)?|orig)\s*:?\s*"
+    r"(?:" + _REF_SRC + r")",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# A unified diff always carries either a "diff --git" header or an "@@ -" hunk
+# marker; an HTML interstitial / rate-limit page / login redirect carries
+# neither. Used to reject non-diff 200 bodies before parsing.
+_DIFF_MARKERS = ("diff --git", "@@ -")
 
 
 @dataclass(frozen=True)
@@ -108,34 +128,62 @@ def _parse_pr_ref(ref_text: str, default_owner: str, default_repo: str) -> Backp
     )
 
 
+def _ref_from_match(
+    match: re.Match[str], default_owner: str, default_repo: str
+) -> BackportReference | None:
+    """Build a reference from a regex match, applying SHA-qualification rules."""
+    groups = match.groupdict()
+    prref = groups.get("prref")
+    if prref:
+        return _parse_pr_ref(prref, default_owner, default_repo)
+
+    sha = groups.get("sha")
+    if sha:
+        qualified = bool(groups.get("shaqual"))
+        # Only a full 40-char SHA or an explicitly qualified token is a commit
+        # reference; a short unqualified hex token is prose, not a source.
+        if qualified or len(sha) == 40:
+            return BackportReference(
+                kind="sha", owner=default_owner, repo=default_repo, sha=sha, raw=sha
+            )
+    return None
+
+
 def detect_backport_references(
     text: str, default_owner: str, default_repo: str
 ) -> list[BackportReference]:
     """Find all backport/cherry-pick source references in ``text``.
 
-    Recognizes ``backport of #123``, ``cherry-pick of #123``, ``backport from
-    #123``, cross-repo ``org/repo#123`` forms, and commit-SHA cherry-picks
-    (``cherry-pick of <7-40 hex>``). Returns references in first-seen order,
-    de-duplicated. The first entry is the primary reference.
+    Detection is two-phase: (1) the text must *declare* a backport/cherry-pick
+    somewhere, then (2) source references are gathered from cue-adjacent forms
+    (``backport of #123``) and from source-indicating connectors anywhere in
+    the text (``From #123``, ``Original: #123``, ``cherry-picked from <sha>``).
+    A plain ``fixes #123`` / ``closes #123`` or a bare issue mention is never
+    treated as a backport source.
+
+    Recognizes same-repo ``#123``, cross-repo ``org/repo#123``, and commit-SHA
+    references (full 40-char SHA, or a ``commit``/``sha``-qualified token).
+    Returns references in first-seen order, de-duplicated; the first entry is
+    the primary reference.
     """
+    text = text or ""
+    if not _DECLARES_BACKPORT.search(text):
+        return []
+
+    positioned: list[tuple[int, BackportReference]] = []
+    for pattern in (_KEYWORD_REF, _CONNECTOR_REF):
+        for match in pattern.finditer(text):
+            ref = _ref_from_match(match, default_owner, default_repo)
+            if ref is not None:
+                # Order by where the reference token starts, not the cue.
+                start = match.start("sha") if match.groupdict().get("sha") else match.start("prref")
+                positioned.append((start, ref))
+
+    positioned.sort(key=lambda pair: pair[0])
+
     refs: list[BackportReference] = []
     seen: set[tuple[str, str, str, str]] = set()
-
-    for match in _BACKPORT_PATTERN.finditer(text or ""):
-        sha = match.group("sha")
-        if sha:
-            ref: BackportReference | None = BackportReference(
-                kind="sha",
-                owner=default_owner,
-                repo=default_repo,
-                sha=sha,
-                raw=match.group("ref"),
-            )
-        else:
-            ref = _parse_pr_ref(match.group("ref"), default_owner, default_repo)
-        if ref is None:
-            continue
-
+    for _start, ref in positioned:
         key = (ref.kind, ref.owner, ref.repo, ref.sha.lower() or str(ref.number))
         if key in seen:
             continue
@@ -148,12 +196,17 @@ def detect_backport_references(
 # --- diff-of-diffs comparison ----------------------------------------------
 
 
-@dataclass(frozen=True)
+@dataclass
 class _FileChange:
-    """Normalized changed-line content for a single file in a diff."""
+    """Normalized changed-line content for a single file in a diff.
 
-    added: frozenset[str] = field(default_factory=frozenset)
-    removed: frozenset[str] = field(default_factory=frozenset)
+    Added/removed lines are stored as multisets (``Counter``) so a backport
+    that drops or duplicates one of several identical changed lines does not
+    compare equal to the source.
+    """
+
+    added: Counter[str] = field(default_factory=Counter)
+    removed: Counter[str] = field(default_factory=Counter)
 
 
 def _normalize(line: str) -> str:
@@ -162,29 +215,57 @@ def _normalize(line: str) -> str:
     return " ".join(line.split())
 
 
-def _changed_lines_by_file(diff: str) -> dict[str, _FileChange]:
-    """Parse a unified diff into ``{path: _FileChange}`` of normalized lines."""
-    result: dict[str, _FileChange] = {}
+def _looks_like_diff(diff: str) -> bool:
+    """True if ``diff`` carries a recognizable unified-diff marker."""
+    return any(marker in diff for marker in _DIFF_MARKERS)
+
+
+def _parse_changed_lines(diff: str) -> tuple[bool, dict[str, _FileChange]]:
+    """Parse a unified diff into ``(parsed_ok, {path: _FileChange})``.
+
+    ``parsed_ok`` distinguishes "nothing to compare" from "could not parse":
+
+    - An empty/whitespace body → ``(True, {})`` (genuinely no changes).
+    - A non-empty body that does not look like a diff, that ``PatchSet`` fails
+      to parse, or that parses to zero files → ``(False, {})`` so the caller
+      can surface a single "could not verify" finding instead of treating
+      every source file as missing from the backport.
+    """
+    if not diff.strip():
+        return True, {}
+    if not _looks_like_diff(diff):
+        return False, {}
+
     try:
         patch = PatchSet(diff)
     except Exception:
-        logger.debug("backport: could not parse a diff for comparison", exc_info=True)
-        return result
+        logger.debug("backport: could not parse a fetched body as a diff", exc_info=True)
+        return False, {}
 
+    result: dict[str, _FileChange] = {}
     for patched_file in patch:
-        added: set[str] = set()
-        removed: set[str] = set()
+        added: Counter[str] = Counter()
+        removed: Counter[str] = Counter()
         for hunk in patched_file:
             for line in hunk:
                 norm = _normalize(line.value)
                 if not norm:
                     continue
                 if line.is_added:
-                    added.add(norm)
+                    added[norm] += 1
                 elif line.is_removed:
-                    removed.add(norm)
-        result[patched_file.path] = _FileChange(added=frozenset(added), removed=frozenset(removed))
-    return result
+                    removed[norm] += 1
+        # Skip files with no content change (rename/mode-only, or a header with
+        # no hunks — e.g. a truncated/non-diff body that only looked like one).
+        if added or removed:
+            result[patched_file.path] = _FileChange(added=added, removed=removed)
+
+    if not result:
+        # Looked like a diff but produced no changed files — treat as
+        # unparseable so the caller surfaces one "could not verify" finding
+        # rather than comparing against an empty source.
+        return False, {}
+    return True, result
 
 
 def _is_ignored(path: str, patterns: list[str]) -> bool:
@@ -197,24 +278,14 @@ def _is_ignored(path: str, patterns: list[str]) -> bool:
     return False
 
 
-def compare_diffs(
-    source_diff: str,
-    backport_diff: str,
+def _compare_maps(
+    source: dict[str, _FileChange],
+    backport: dict[str, _FileChange],
     *,
     ignore_paths: list[str],
     config: BackportConfig,
 ) -> list[ReviewFinding]:
-    """Compare a source diff against a backport diff, returning divergences.
-
-    Produces findings for (a) files changed in the source but missing from the
-    backport, (b) extra files changed only in the backport, and (c) shared
-    files whose changed lines differ. The comparison uses normalized
-    changed-line *sets*, so it is robust to hunk reordering and cosmetic
-    whitespace-only differences.
-    """
-    source = _changed_lines_by_file(source_diff)
-    backport = _changed_lines_by_file(backport_diff)
-
+    """Compare parsed source vs backport changed-line maps, returning findings."""
     source_files = {p for p in source if not _is_ignored(p, ignore_paths)}
     backport_files = {p for p in backport if not _is_ignored(p, ignore_paths)}
 
@@ -253,12 +324,12 @@ def compare_diffs(
                 )
             )
 
-    # (c) files present in both whose changed lines differ.
+    # (c) files present in both whose changed lines differ (multiset diff).
     for path in sorted(source_files & backport_files):
         src = source[path]
         bp = backport[path]
-        missing = (src.added - bp.added) | (src.removed - bp.removed)
-        extra = (bp.added - src.added) | (bp.removed - src.removed)
+        missing = (src.added - bp.added) + (src.removed - bp.removed)
+        extra = (bp.added - src.added) + (bp.removed - src.removed)
 
         report_missing = bool(missing) and config.warn_on_missing_hunks
         report_extra = bool(extra) and config.warn_on_altered_hunks
@@ -268,12 +339,13 @@ def compare_diffs(
         parts: list[str] = []
         if report_missing:
             parts.append(
-                f"{len(missing)} changed line(s) present in the source are missing "
+                f"{sum(missing.values())} changed line(s) present in the source are missing "
                 "from the backport"
             )
         if report_extra:
             parts.append(
-                f"{len(extra)} changed line(s) in the backport are not present in the source"
+                f"{sum(extra.values())} changed line(s) in the backport are not present "
+                "in the source"
             )
         findings.append(
             ReviewFinding(
@@ -293,6 +365,26 @@ def compare_diffs(
     return findings
 
 
+def compare_diffs(
+    source_diff: str,
+    backport_diff: str,
+    *,
+    ignore_paths: list[str],
+    config: BackportConfig,
+) -> list[ReviewFinding]:
+    """Compare a source diff against a backport diff, returning divergences.
+
+    Produces findings for (a) files changed in the source but missing from the
+    backport, (b) extra files changed only in the backport, and (c) shared
+    files whose changed lines differ. The comparison uses normalized changed-
+    line *multisets*, so it is robust to hunk reordering and cosmetic
+    whitespace-only differences while still catching dropped/duplicated lines.
+    """
+    _, source = _parse_changed_lines(source_diff)
+    _, backport = _parse_changed_lines(backport_diff)
+    return _compare_maps(source, backport, ignore_paths=ignore_paths, config=config)
+
+
 # --- the check -------------------------------------------------------------
 
 
@@ -304,7 +396,8 @@ class BackportCheck(BaseCheck):
     """Flags differences between a declared backport PR and its source diff.
 
     Deterministic (non-LLM) ``scan()`` is the primary path. The optional
-    LLM semantic-drift layer is off by default (see ``BackportConfig``).
+    LLM semantic-drift layer is a reserved, currently-unimplemented flag (see
+    ``BackportConfig.llm_semantic_drift``).
     """
 
     name = "backport"
@@ -330,10 +423,8 @@ class BackportCheck(BaseCheck):
         self,
         pr: PullRequest,
         diff: str,
-        backend_config: LLMBackendConfig,
+        _backend_config: LLMBackendConfig,
     ) -> list[ReviewFinding]:
-        del backend_config  # deterministic path needs no LLM backend
-
         if not self._config.enabled:
             return []
 
@@ -343,7 +434,7 @@ class BackportCheck(BaseCheck):
 
         refs = detect_backport_references(text, owner, repo)
         if not refs:
-            # Not a declared backport — silent no-op.
+            # Not a declared backport (or no resolvable source) — silent no-op.
             return []
 
         primary = refs[0]
@@ -356,14 +447,38 @@ class BackportCheck(BaseCheck):
                 pr.number,
                 exc_info=True,
             )
-            return [self._fetch_failure_finding(primary, _reason(exc))]
+            return [self._info_finding(primary, f"the source could not be fetched: {_reason(exc)}")]
+
+        if len(source_diff) > self._config.max_source_diff_chars:
+            return [
+                self._info_finding(
+                    primary,
+                    f"the source diff is too large to verify ({len(source_diff)} bytes)",
+                )
+            ]
 
         if not source_diff.strip():
-            return [self._fetch_failure_finding(primary, "the source diff was empty")]
+            return [self._info_finding(primary, "the source diff was empty")]
 
-        findings = compare_diffs(
-            source_diff,
-            diff or "",
+        source_ok, source_map = _parse_changed_lines(source_diff)
+        if not source_ok:
+            return [
+                self._info_finding(
+                    primary, "the fetched source could not be parsed as a diff (could not verify)"
+                )
+            ]
+
+        backport_ok, backport_map = _parse_changed_lines(diff or "")
+        if not backport_ok:
+            return [
+                self._info_finding(
+                    primary, "the backport diff could not be parsed as a diff (could not verify)"
+                )
+            ]
+
+        findings = _compare_maps(
+            source_map,
+            backport_map,
             ignore_paths=self._config.ignore_paths,
             config=self._config,
         )
@@ -371,32 +486,43 @@ class BackportCheck(BaseCheck):
         if len(refs) > 1:
             findings.append(self._multiple_refs_note(refs))
 
-        # Optional LLM semantic-drift layer (off by default). Kept as a clear
-        # extension point rather than implemented, to keep this PR tight.
-        # TODO(v1.5): when self._config.llm_semantic_drift is True, feed both
-        # diffs to the LLM/agent-cli path (reusing review.prompt helpers) for a
-        # semantic-similarity note, and append it here.
+        # The optional LLM semantic-drift layer (config.llm_semantic_drift) is a
+        # reserved flag: it is intentionally not implemented yet, so the
+        # deterministic comparison above remains the only path.
 
         return findings
 
     def _fetch_source_diff(self, ref: BackportReference) -> str:
         if self._forge_client is None:
             raise BackportSourceError("no forge client was available to fetch the source diff")
+
+        client_name = type(self._forge_client).__name__
         if ref.kind == "pr":
             assert ref.number is not None
-            return self._forge_client.get_pull_request_diff(ref.owner, ref.repo, ref.number)
-        return self._forge_client.get_commit_diff(ref.owner, ref.repo, ref.sha)
+            raw = self._forge_client.get_pull_request_diff(ref.owner, ref.repo, ref.number)
+        else:
+            try:
+                raw = self._forge_client.get_commit_diff(ref.owner, ref.repo, ref.sha)
+            except NotImplementedError as exc:
+                raise BackportSourceError(
+                    f"source forge {client_name} does not support fetching a commit diff"
+                ) from exc
+
+        if raw is None:
+            raise BackportSourceError(
+                f"source forge {client_name} does not support fetching the backport source diff"
+            )
+        return raw
 
     @staticmethod
-    def _fetch_failure_finding(ref: BackportReference, reason: str) -> ReviewFinding:
+    def _info_finding(ref: BackportReference, reason: str) -> ReviewFinding:
         return ReviewFinding(
             file_path="",
             line_number=None,
             title="backport: source could not be verified",
             body=(
-                f"This PR declares a backport of {ref.describe()} but the source "
-                f"could not be fetched to verify it faithfully mirrors the original "
-                f"({reason})."
+                f"This PR declares a backport of {ref.describe()} but {reason}, so the "
+                "backport could not be verified to faithfully mirror the original."
             ),
             confidence=0.5,
             severity="informational",
@@ -418,7 +544,13 @@ class BackportCheck(BaseCheck):
         )
 
 
+# Cap on how much of a raw error string ends up in a finding / DB row.
+_REASON_MAX_CHARS = 200
+
+
 def _reason(exc: Exception) -> str:
-    """Compact, human-readable reason string for a fetch failure."""
-    text = str(exc).strip()
-    return text if text else type(exc).__name__
+    """Compact, truncated, human-readable reason string for a fetch failure."""
+    text = str(exc).strip() or type(exc).__name__
+    if len(text) > _REASON_MAX_CHARS:
+        text = text[:_REASON_MAX_CHARS].rstrip() + "…"
+    return text

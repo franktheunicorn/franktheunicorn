@@ -70,18 +70,33 @@ class TestDetectBackportReferences:
         assert refs[0].describe() == "other/proj#88"
 
     @pytest.mark.parametrize(
-        "text",
+        ("text", "expected_sha"),
         [
-            "Cherry-pick of abc1234",
-            "cherry-pick of commit abc1234ef",
-            "Backport of deadbeef1234",
+            # Explicitly qualified short hex.
+            ("cherry-pick of commit abc1234ef", "abc1234ef"),
+            ("Cherry-pick of sha abc1234", "abc1234"),
+            ("Backport. Cherry-picked from commit deadbeef1234", "deadbeef1234"),
+            # A full 40-char SHA needs no qualifier.
+            ("Backport of " + "a" * 40, "a" * 40),
         ],
     )
-    def test_sha_reference_forms(self, text: str) -> None:
+    def test_sha_reference_forms(self, text: str, expected_sha: str) -> None:
         refs = detect_backport_references(text, "apache", "spark")
         assert len(refs) == 1
         assert refs[0].kind == "sha"
-        assert refs[0].describe().startswith("commit ")
+        assert refs[0].sha == expected_sha
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # FIX 6: a short, unqualified hex token in prose is not a commit ref.
+            "Backport of deadbeef cleanup for 3.5",
+            "Cherry-pick of abc1234 improves speed",
+            "This backport touches file abcdef1 only",
+        ],
+    )
+    def test_unqualified_short_sha_is_not_a_reference(self, text: str) -> None:
+        assert detect_backport_references(text, "apache", "spark") == []
 
     @pytest.mark.parametrize(
         "text",
@@ -100,6 +115,30 @@ class TestDetectBackportReferences:
         text = "Backport of #1 and cherry-pick of #2. Also backport of #1 again."
         refs = detect_backport_references(text, "apache", "spark")
         assert [r.describe() for r in refs] == ["#1", "#2"]
+
+    # FIX 2: the source ref need not sit immediately after the cue.
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("Backport fix to 3.5\nFrom #123", "#123"),
+            ("This is a backport. Original: #123", "#123"),
+            ("A cherry-pick.\nsource: #77", "#77"),
+            ("Backport to release branch.\ncherry-picked from other/proj#9", "other/proj#9"),
+        ],
+    )
+    def test_non_adjacent_source_ref_when_declared(self, text: str, expected: str) -> None:
+        refs = detect_backport_references(text, "apache", "spark")
+        assert len(refs) == 1
+        assert refs[0].describe() == expected
+
+    def test_fixes_closes_is_not_a_backport_source(self) -> None:
+        # Declared backport, but the only refs are fixes/closes → those are NOT
+        # backport sources, so nothing resolvable → no-op.
+        assert detect_backport_references("This backport. Fixes #99. Closes #100", "o", "r") == []
+
+    def test_fixes_ref_ignored_alongside_real_source(self) -> None:
+        refs = detect_backport_references("Backport of #5. Fixes #99.", "apache", "spark")
+        assert [r.describe() for r in refs] == ["#5"]
 
 
 # --- diff-of-diffs comparison ----------------------------------------------
@@ -192,6 +231,18 @@ class TestCompareDiffs:
         cfg = self._config(warn_on_missing_hunks=False)
         assert compare_diffs(source, backport, ignore_paths=[], config=cfg) == []
 
+    def test_multiset_catches_dropped_duplicate_line(self) -> None:
+        # FIX 3: source adds an identical line twice; backport adds it once.
+        # A set-based comparison would treat these as equal; a multiset must
+        # flag the dropped occurrence.
+        source = _file_diff("foo.py", ["a"], ["a", "dup", "dup"])
+        backport = _file_diff("foo.py", ["a"], ["a", "dup"])
+        findings = compare_diffs(source, backport, ignore_paths=[], config=self._config())
+        assert len(findings) == 1
+        assert findings[0].file_path == "foo.py"
+        assert "differs from source" in findings[0].title
+        assert "1 changed line(s) present in the source are missing" in findings[0].body
+
 
 # --- scan() -----------------------------------------------------------------
 
@@ -209,12 +260,12 @@ class TestBackportCheckScan:
     def test_not_a_backport_is_noop(self) -> None:
         pr = self._pr(title="Fix a bug", body="Nothing special")
         check = BackportCheck(forge_client=self._forge())
-        assert check.scan(pr, "some diff", backend_config=MagicMock()) == []
+        assert check.scan(pr, "some diff", MagicMock()) == []
 
     def test_disabled_config_is_noop(self) -> None:
         pr = self._pr(title="Backport of #5", body="")
         check = BackportCheck(config=BackportConfig(enabled=False), forge_client=self._forge())
-        assert check.scan(pr, "diff", backend_config=MagicMock()) == []
+        assert check.scan(pr, "diff", MagicMock()) == []
 
     def test_faithful_backport_no_findings(self) -> None:
         foo = _file_diff("foo.py", ["a"], ["a", "X"])
@@ -222,7 +273,7 @@ class TestBackportCheckScan:
         forge = self._forge()
         forge.get_pull_request_diff.return_value = foo
         check = BackportCheck(forge_client=forge)
-        findings = check.scan(pr, foo, backend_config=MagicMock())
+        findings = check.scan(pr, foo, MagicMock())
         assert findings == []
         forge.get_pull_request_diff.assert_called_once()
 
@@ -236,16 +287,16 @@ class TestBackportCheckScan:
         forge = self._forge()
         forge.get_pull_request_diff.return_value = source
         check = BackportCheck(forge_client=forge)
-        findings = check.scan(pr, backport, backend_config=MagicMock())
+        findings = check.scan(pr, backport, MagicMock())
         assert any(f.file_path == "bar.py" for f in findings)
 
     def test_sha_reference_uses_get_commit_diff(self) -> None:
         foo = _file_diff("foo.py", ["a"], ["a", "X"])
-        pr = self._pr(title="Cherry-pick of abc1234ef", body="", number=202)
+        pr = self._pr(title="Cherry-pick of commit abc1234ef", body="", number=202)
         forge = self._forge()
         forge.get_commit_diff.return_value = foo
         check = BackportCheck(forge_client=forge)
-        findings = check.scan(pr, foo, backend_config=MagicMock())
+        findings = check.scan(pr, foo, MagicMock())
         assert findings == []
         forge.get_commit_diff.assert_called_once()
         args = forge.get_commit_diff.call_args[0]
@@ -256,7 +307,7 @@ class TestBackportCheckScan:
         forge = self._forge()
         forge.get_pull_request_diff.side_effect = RuntimeError("404 not found")
         check = BackportCheck(forge_client=forge)
-        findings = check.scan(pr, "diff", backend_config=MagicMock())
+        findings = check.scan(pr, "diff", MagicMock())
         assert len(findings) == 1
         assert findings[0].severity == "informational"
         assert "could not be" in findings[0].body
@@ -265,7 +316,7 @@ class TestBackportCheckScan:
     def test_no_forge_client_returns_info_finding(self) -> None:
         pr = self._pr(title="Backport of #5", body="", number=204)
         check = BackportCheck(forge_client=None)
-        findings = check.scan(pr, "diff", backend_config=MagicMock())
+        findings = check.scan(pr, "diff", MagicMock())
         assert len(findings) == 1
         assert findings[0].severity == "informational"
 
@@ -274,7 +325,7 @@ class TestBackportCheckScan:
         forge = self._forge()
         forge.get_pull_request_diff.return_value = "   \n"
         check = BackportCheck(forge_client=forge)
-        findings = check.scan(pr, "diff", backend_config=MagicMock())
+        findings = check.scan(pr, "diff", MagicMock())
         assert len(findings) == 1
         assert findings[0].severity == "informational"
 
@@ -288,10 +339,77 @@ class TestBackportCheckScan:
         forge = self._forge()
         forge.get_pull_request_diff.return_value = foo
         check = BackportCheck(forge_client=forge)
-        findings = check.scan(pr, foo, backend_config=MagicMock())
+        findings = check.scan(pr, foo, MagicMock())
         notes = [f for f in findings if "multiple source references" in f.title]
         assert len(notes) == 1
         assert "#6" in notes[0].body
+
+    def test_non_diff_source_body_single_info_finding(self) -> None:
+        # FIX 1: a 200 that is an HTML interstitial (not a diff) must produce
+        # exactly ONE informational finding, never per-file spam.
+        html = "<!DOCTYPE html><html><body>Rate limit exceeded</body></html>"
+        backport = _diff(
+            _file_diff("foo.py", ["a"], ["a", "X"]),
+            _file_diff("bar.py", ["p"], ["p", "Y"]),
+        )
+        pr = self._pr(title="Backport of #5", body="", number=207)
+        forge = self._forge()
+        forge.get_pull_request_diff.return_value = html
+        check = BackportCheck(forge_client=forge)
+        findings = check.scan(pr, backport, MagicMock())
+        assert len(findings) == 1
+        assert findings[0].severity == "informational"
+        assert "could not be parsed as a diff" in findings[0].body
+
+    def test_diff_marker_but_unparseable_source_single_info_finding(self) -> None:
+        # FIX 1: a body carrying a diff marker but no real files still parses to
+        # empty → single info finding, not per-file findings.
+        looks_like_diff_but_empty = "diff --git a/x b/x\n(no hunks here, truncated)\n"
+        backport = _diff(_file_diff("foo.py", ["a"], ["a", "X"]))
+        pr = self._pr(title="Backport of #5", body="", number=208)
+        forge = self._forge()
+        forge.get_pull_request_diff.return_value = looks_like_diff_but_empty
+        check = BackportCheck(forge_client=forge)
+        findings = check.scan(pr, backport, MagicMock())
+        assert len(findings) == 1
+        assert findings[0].severity == "informational"
+        assert "could not be parsed as a diff" in findings[0].body
+
+    def test_oversize_source_diff_returns_info_finding(self) -> None:
+        # FIX 4: an over-threshold source diff short-circuits with one finding.
+        big = _file_diff("foo.py", ["a"], ["a"] + [f"line{i}" for i in range(100)])
+        assert len(big) > 50
+        pr = self._pr(title="Backport of #5", body="", number=209)
+        forge = self._forge()
+        forge.get_pull_request_diff.return_value = big
+        check = BackportCheck(config=BackportConfig(max_source_diff_chars=50), forge_client=forge)
+        findings = check.scan(pr, big, MagicMock())
+        assert len(findings) == 1
+        assert findings[0].severity == "informational"
+        assert "too large to verify" in findings[0].body
+
+    def test_get_pull_request_diff_none_returns_info_finding(self) -> None:
+        # FIX 5: a forge that returns None (unsupported) → clear info finding,
+        # never a NoneType crash.
+        pr = self._pr(title="Backport of #5", body="", number=210)
+        forge = self._forge()
+        forge.get_pull_request_diff.return_value = None
+        check = BackportCheck(forge_client=forge)
+        findings = check.scan(pr, "diff", MagicMock())
+        assert len(findings) == 1
+        assert findings[0].severity == "informational"
+        assert "does not support" in findings[0].body
+
+    def test_unsupported_get_commit_diff_returns_info_finding(self) -> None:
+        # FIX 5: get_commit_diff raising NotImplementedError → info finding.
+        pr = self._pr(title="Cherry-pick of commit abc1234ef", body="", number=211)
+        forge = self._forge()
+        forge.get_commit_diff.side_effect = NotImplementedError("nope")
+        check = BackportCheck(forge_client=forge)
+        findings = check.scan(pr, "diff", MagicMock())
+        assert len(findings) == 1
+        assert findings[0].severity == "informational"
+        assert "does not support fetching a commit diff" in findings[0].body
 
 
 # --- integration through run_enabled_checks ---------------------------------
@@ -353,3 +471,7 @@ class TestRegistryAndConfig:
         assert pr_ref.describe() == "#9"
         sha_ref = BackportReference(kind="sha", owner="o", repo="r", sha="abcdef1234567")
         assert sha_ref.describe() == "commit abcdef123456"
+
+    def test_max_source_diff_chars_must_be_positive(self) -> None:
+        with pytest.raises(ValueError, match="max_source_diff_chars must be positive"):
+            BackportConfig(max_source_diff_chars=0)
