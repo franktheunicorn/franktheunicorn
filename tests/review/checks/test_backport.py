@@ -131,6 +131,20 @@ class TestDetectBackportReferences:
         assert len(refs) == 1
         assert refs[0].describe() == expected
 
+    # FIX A: "of" and mid-sentence "original" are common in prose and must NOT
+    # be treated as a backport source, even inside a declared backport.
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "This is a backport. Part of #123.",
+            "This backport fails because of #123.",
+            "This is a backport. The fix is a variation of #123.",
+            "This backport restores the original #123 behavior.",
+        ],
+    )
+    def test_of_and_prose_original_not_a_source(self, text: str) -> None:
+        assert detect_backport_references(text, "apache", "spark") == []
+
     def test_fixes_closes_is_not_a_backport_source(self) -> None:
         # Declared backport, but the only refs are fixes/closes → those are NOT
         # backport sources, so nothing resolvable → no-op.
@@ -230,6 +244,20 @@ class TestCompareDiffs:
         # Disable missing-hunk warnings → no finding.
         cfg = self._config(warn_on_missing_hunks=False)
         assert compare_diffs(source, backport, ignore_paths=[], config=cfg) == []
+
+    def test_non_diff_source_yields_single_info_not_per_file(self) -> None:
+        # FIX B: compare_diffs must honor parse status too — a non-diff source
+        # body returns one info finding, never per-file 'not changed in source'.
+        html = "<!DOCTYPE html><html><body>rate limited</body></html>"
+        backport = _diff(
+            _file_diff("foo.py", ["a"], ["a", "X"]),
+            _file_diff("bar.py", ["p"], ["p", "Y"]),
+        )
+        findings = compare_diffs(html, backport, ignore_paths=[], config=self._config())
+        assert len(findings) == 1
+        assert findings[0].severity == "informational"
+        assert findings[0].file_path == ""
+        assert not any("not changed in source" in f.title for f in findings)
 
     def test_multiset_catches_dropped_duplicate_line(self) -> None:
         # FIX 3: source adds an identical line twice; backport adds it once.

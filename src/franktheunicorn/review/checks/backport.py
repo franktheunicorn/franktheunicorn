@@ -74,11 +74,21 @@ _KEYWORD_REF = re.compile(
 )
 
 # Ref attached to a source-indicating connector anywhere in the text: "from
-# #123", "of #123", "source: #123", "Original: #123". Only consulted once the
-# text is known to declare a backport, so a bare "fixes #123" / "closes #123"
-# (whose verbs are not source connectors) never counts as a backport source.
+# #123", or a label-like "source: #123" / "Original: #123". Only consulted once
+# the text is known to declare a backport.
+#
+# "of" is deliberately EXCLUDED here: it is far too common in prose ("part of
+# #123", "because of #123", "a variation of #123") to be a reliable source
+# signal, and the legitimate cue-adjacent form ("backport of #5") is already
+# handled by _KEYWORD_REF. "source"/"original" are restricted to a label form
+# (line start or immediately after punctuation) so mid-sentence prose like
+# "restores the original #123 behavior" is not treated as a source.
 _CONNECTOR_REF = re.compile(
-    r"(?:^|[^\w/])(?:from|of|source|origin(?:al)?|orig)\s*:?\s*"
+    r"(?:"
+    r"(?:^|[^\w/])from\s+"
+    r"|"
+    r"(?:^|[.;:,)\]}\-]\s*)(?:source|original|orig)\s*:?\s*"
+    r")"
     r"(?:" + _REF_SRC + r")",
     re.IGNORECASE | re.MULTILINE,
 )
@@ -379,10 +389,31 @@ def compare_diffs(
     files whose changed lines differ. The comparison uses normalized changed-
     line *multisets*, so it is robust to hunk reordering and cosmetic
     whitespace-only differences while still catching dropped/duplicated lines.
+
+    If either side is not parseable as a diff (e.g. an HTML interstitial), a
+    single informational "could not verify" finding is returned rather than
+    per-file spam — mirroring :meth:`BackportCheck.scan`'s contract.
     """
-    _, source = _parse_changed_lines(source_diff)
-    _, backport = _parse_changed_lines(backport_diff)
+    source_ok, source = _parse_changed_lines(source_diff)
+    backport_ok, backport = _parse_changed_lines(backport_diff)
+    if not source_ok or not backport_ok:
+        side = "source" if not source_ok else "backport"
+        return [_unverifiable_finding(f"the {side} could not be parsed as a diff")]
     return _compare_maps(source, backport, ignore_paths=ignore_paths, config=config)
+
+
+def _unverifiable_finding(detail: str) -> ReviewFinding:
+    """A ref-agnostic informational finding for an unverifiable comparison."""
+    return ReviewFinding(
+        file_path="",
+        line_number=None,
+        title="backport: source could not be verified",
+        body=(
+            f"The backport could not be verified against its source: {detail} (could not verify)."
+        ),
+        confidence=0.5,
+        severity="informational",
+    )
 
 
 # --- the check -------------------------------------------------------------

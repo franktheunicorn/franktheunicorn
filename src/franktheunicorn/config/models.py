@@ -426,8 +426,11 @@ class BackportConfig(BaseModel):
     warn_on_extra_files: bool = True
     warn_on_altered_hunks: bool = True
     ignore_paths: list[str] = Field(default_factory=list)
-    # Hard cap on the fetched source diff size; larger sources short-circuit to
-    # a single informational finding instead of being parsed (OOM guard).
+    # Hard cap on the size (in characters) of the EXTERNALLY-FETCHED SOURCE diff
+    # only — the original PR/commit diff this check pulls from the forge. It does
+    # NOT cap the PR's own backport diff (the runner already bounds that). A
+    # source larger than this short-circuits to a single informational finding
+    # instead of being parsed (OOM guard).
     max_source_diff_chars: int = 1_000_000
     # Reserved flag for a future LLM semantic-drift layer. Currently a no-op:
     # setting it True does nothing yet (the deterministic comparison is the
