@@ -16,6 +16,7 @@ import argparse
 import fcntl
 import logging
 import os
+import shutil
 import signal
 import sys
 import time
@@ -31,7 +32,7 @@ if TYPE_CHECKING:
 
     from franktheunicorn.backends.base import ForgeClient
     from franktheunicorn.config.models import (
-        ClaudeCLIConfig,
+        AgentCLIReviewerConfig,
         CodeRabbitConfig,
         OperatorConfig,
         ProjectConfig,
@@ -217,6 +218,7 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
     )
 
     disabled_backends = _check_backends(operator_config)
+    _check_agent_cli_reviewers(operator_config)
     _check_ssh_configs(operator_config)
 
     signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
@@ -457,6 +459,60 @@ def _check_backends(operator_config: OperatorConfig) -> frozenset[int]:
     return frozenset(disabled)
 
 
+def _agent_cli_available_locally(config: AgentCLIReviewerConfig) -> bool:
+    """True when the reviewer's launcher binary is on the local PATH."""
+    return shutil.which(config.cli_argv[0]) is not None
+
+
+def resolve_agent_cli_reviewers(
+    operator_config: OperatorConfig | None,
+) -> list[AgentCLIReviewerConfig]:
+    """Resolve which agent-CLI reviewers should run for this operator.
+
+    Enablement is tri-state. An explicit ``True``/``False`` wins. The default
+    ``"auto"`` means "use it iff installed": in local mode we probe
+    ``shutil.which``; in SSH mode we enable optimistically and rely on the
+    executor's graceful-skip (a missing remote binary yields ``[]``) rather
+    than paying for a per-PR remote probe. This is cheap (a PATH scan) and
+    logs nothing, so it is safe to call once per PR.
+    """
+    if operator_config is None:
+        return []
+    resolved: list[AgentCLIReviewerConfig] = []
+    for rc in operator_config.agent_cli_reviewers:
+        if rc.enabled == "auto":
+            active = rc.remote.mode == "ssh" or _agent_cli_available_locally(rc)
+        else:
+            active = bool(rc.enabled)
+        if active:
+            resolved.append(rc)
+    return resolved
+
+
+def _check_agent_cli_reviewers(operator_config: OperatorConfig) -> None:
+    """Log the resolved agent-CLI reviewer set once at startup (no per-PR noise)."""
+    resolved = resolve_agent_cli_reviewers(operator_config)
+    if resolved:
+        logger.info(
+            "Agent CLI reviewers enabled: %s",
+            ", ".join(f"{rc.name} ({rc.cli_argv[0]})" for rc in resolved),
+        )
+    else:
+        logger.info("Agent CLI reviewers enabled: (none)")
+    # Surface auto entries skipped because their binary is absent locally.
+    for rc in operator_config.agent_cli_reviewers:
+        if (
+            rc.enabled == "auto"
+            and rc.remote.mode != "ssh"
+            and not _agent_cli_available_locally(rc)
+        ):
+            logger.info(
+                "Agent CLI reviewer %r skipped: %r not found on PATH",
+                rc.name,
+                rc.cli_argv[0],
+            )
+
+
 def _check_ssh_configs(operator_config: OperatorConfig) -> frozenset[str]:
     """Probe SSH connectivity for each enabled tool that uses remote SSH execution.
 
@@ -470,11 +526,16 @@ def _check_ssh_configs(operator_config: OperatorConfig) -> frozenset[str]:
 
     tool_remotes: list[tuple[str, Any]] = [
         ("coderabbit", operator_config.coderabbit),
-        ("claude_cli", operator_config.claude_cli),
         ("snowflake_review", operator_config.snowflake_review),
     ]
+    # Enabled agent-CLI reviewers configured for SSH execution get a probe too.
+    for rc in resolve_agent_cli_reviewers(operator_config):
+        tool_remotes.append((f"agent:{rc.name}", rc))
+
     for tool_name, tool_config in tool_remotes:
-        if not tool_config.enabled:
+        # Agent reviewers are already filtered to "enabled"; the purpose-built
+        # tools carry a plain bool ``enabled`` flag to honor here.
+        if getattr(tool_config, "enabled", True) is False:
             continue
         remote = tool_config.remote
         if remote.mode != "ssh":
@@ -609,9 +670,7 @@ def process_pr(
     if operator_config is not None and operator_config.coderabbit.enabled:
         cr_config = operator_config.coderabbit
 
-    claude_cli_config: ClaudeCLIConfig | None = None
-    if operator_config is not None and operator_config.claude_cli.enabled:
-        claude_cli_config = operator_config.claude_cli
+    agent_cli_reviewers = resolve_agent_cli_reviewers(operator_config)
 
     snowflake_config: SnowflakeReviewConfig | None = None
     if operator_config is not None and operator_config.snowflake_review.enabled:
@@ -757,11 +816,11 @@ def process_pr(
                 operator_config=effective_config,
                 diff_http=diff_http,
             )
-        if claude_cli_config is not None:
-            _log("Running Claude CLI...")
-            _run_claude_cli_for_pr(
+        for reviewer in agent_cli_reviewers:
+            _log(f"Running {reviewer.name} agent CLI review...")
+            _run_agent_cli_for_pr(
                 pr,
-                claude_cli_config,
+                reviewer,
                 repo_path,
                 clone_url,
                 project_config=pc,
@@ -1546,33 +1605,46 @@ def _run_coderabbit_for_pr(
     )
 
 
-def _run_claude_cli_for_pr(
+def _run_agent_cli_for_pr(
     pr: PullRequest,
-    claude_config: ClaudeCLIConfig,
+    reviewer: AgentCLIReviewerConfig,
     repo_path: Path | None,
     clone_url: str = "",
     project_config: ProjectConfig | None = None,
     operator_config: OperatorConfig | None = None,
     diff_http: httpx.Client | None = None,
 ) -> None:
-    """Run the Claude CLI review for a single PR. Never raises."""
-    from franktheunicorn.review.claude_cli import (
-        create_drafts_from_claude_cli,
-        run_claude_cli_review,
+    """Run one agent-CLI reviewer (claude/codex/pi/...) for a PR. Never raises.
+
+    Drafts are attributed to the reviewer's ``name`` and deduped across
+    agents when ``reviewer.deduplicate`` is set, so overlapping findings from
+    several agents merge attribution instead of spamming the PR N times.
+    """
+    from functools import partial
+
+    from franktheunicorn.review.agent_cli import (
+        create_drafts_from_agent_cli,
+        run_agent_cli_review,
+    )
+
+    create_drafts = partial(
+        create_drafts_from_agent_cli,
+        source=reviewer.name,
+        deduplicate=reviewer.deduplicate,
     )
 
     _run_review_tool_for_pr(
         pr,
-        "Claude CLI",
-        claude_config.remote,
+        f"{reviewer.name} agent CLI",
+        reviewer.remote,
         repo_path,
         clone_url,
         project_config,
         operator_config,
         diff_http,
-        run_review=run_claude_cli_review,
-        create_drafts=create_drafts_from_claude_cli,
-        tool_config=claude_config,
+        run_review=run_agent_cli_review,
+        create_drafts=create_drafts,
+        tool_config=reviewer,
     )
 
 

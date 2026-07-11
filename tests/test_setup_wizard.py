@@ -27,7 +27,7 @@ class TestSetupLLMCommand:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -51,7 +51,7 @@ class TestSetupLLMCommand:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -82,7 +82,7 @@ class TestSetupLLMCommand:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -116,7 +116,7 @@ class TestSetupLLMCommand:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -155,7 +155,7 @@ class TestSetupLLMCommand:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -190,7 +190,7 @@ class TestSetupLLMCommand:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -218,7 +218,7 @@ class TestSetupLLMCommand:
             "",  # projects: skip
             "y",  # coderabbit: yes
             "n",  # coderabbit remote: no (ssh detected via patched which)
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -232,7 +232,7 @@ class TestSetupLLMCommand:
         config = yaml.safe_load(output_path.read_text())
         assert config["coderabbit"]["enabled"] is True
 
-    def test_claude_cli_enabled(self, tmp_path: Path) -> None:
+    def test_agent_cli_reviewers_customized(self, tmp_path: Path) -> None:
         output_path = tmp_path / "operator.yaml"
         inputs = [
             "testuser",  # github_username
@@ -241,9 +241,14 @@ class TestSetupLLMCommand:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
-            "y",  # claude_cli: yes
-            "",  # model override: blank
-            "n",  # remote ssh: no
+            "y",  # customize agent CLI reviewers: yes
+            "o",  # claude: on
+            "opus",  # claude model override
+            "n",  # claude remote ssh: no
+            "a",  # codex: auto
+            "",  # codex model override: blank
+            "n",  # codex remote ssh: no
+            "f",  # pi: off
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -255,8 +260,11 @@ class TestSetupLLMCommand:
             call_command("setup_llm", output=str(output_path))
 
         config = yaml.safe_load(output_path.read_text())
-        assert config["claude_cli"]["enabled"] is True
-        assert config["claude_cli"]["cli_path"] == "claude"
+        reviewers = {r["name"]: r for r in config["agent_cli_reviewers"]}
+        assert reviewers["claude"]["enabled"] is True
+        assert reviewers["claude"]["model"] == "opus"
+        assert reviewers["codex"]["enabled"] == "auto"
+        assert reviewers["pi"]["enabled"] is False
 
     def test_snowflake_review_enabled(self, tmp_path: Path) -> None:
         output_path = tmp_path / "operator.yaml"
@@ -267,7 +275,7 @@ class TestSetupLLMCommand:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "y",  # snowflake_review: yes
             "n",  # remote ssh: no
             "n",  # agent_feedback: no
@@ -301,7 +309,7 @@ class TestSetupLLMCommand:
             "frank@review.example.com",  # remote host
             "",  # ssh key path: default
             "",  # remote workspace dir: default
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -335,7 +343,7 @@ class TestSetupLLMCommand:
             "frank@review.example.com",
             "",  # ssh key path
             "",  # workspace dir
-            "n",  # claude_cli
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review
             "n",  # agent_feedback
         ]
@@ -591,7 +599,7 @@ class TestSetupLLMCommand:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "y",  # agent_feedback: yes
         ]
@@ -628,7 +636,7 @@ class TestDockerMode:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -675,7 +683,7 @@ class TestDockerMode:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -720,7 +728,7 @@ class TestDockerMode:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -763,7 +771,7 @@ class TestDockerMode:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -822,7 +830,7 @@ class TestDockerMode:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -859,7 +867,7 @@ class TestDockerMode:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "y",  # coderabbit: yes
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -956,7 +964,7 @@ class TestMissingTemplateWarnings:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -987,7 +995,7 @@ class TestMissingTemplateWarnings:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -1018,7 +1026,7 @@ class TestMissingTemplateWarnings:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -1087,7 +1095,7 @@ class TestComposeGeneratorOSError:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -1115,7 +1123,7 @@ class TestComposeGeneratorOSError:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -1142,7 +1150,7 @@ class TestComposeGeneratorOSError:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -1175,7 +1183,7 @@ class TestCredentialDetectionIntegration:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -1205,7 +1213,7 @@ class TestCredentialDetectionIntegration:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -1235,7 +1243,7 @@ class TestCredentialDetectionIntegration:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -1268,7 +1276,7 @@ class TestCredentialDetectionIntegration:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -1310,7 +1318,7 @@ class TestCredentialDetectionIntegration:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -1354,7 +1362,7 @@ class TestCredentialDetectionIntegration:
             "skip",  # additional forges: skip
             "",  # projects
             "n",  # coderabbit
-            "n",  # claude_cli
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review
             "n",  # agent_feedback
         ]
@@ -1394,7 +1402,7 @@ class TestCredentialDetectionIntegration:
             "skip",  # additional forges: skip
             "",
             "n",  # coderabbit: no
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -1435,7 +1443,7 @@ class TestModelDiscoveryIntegration:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -1468,7 +1476,7 @@ class TestModelDiscoveryIntegration:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -1497,7 +1505,7 @@ class TestLlamaCppProvider:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -1531,7 +1539,7 @@ class TestLlamaCppProvider:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -1565,7 +1573,7 @@ class TestLlamaCppProvider:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -1603,7 +1611,7 @@ class TestVLLMProvider:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -1641,7 +1649,7 @@ class TestVLLMProvider:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -1680,7 +1688,7 @@ class TestCustomEndpointFallback:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -1718,7 +1726,7 @@ class TestCustomEndpointFallback:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -1754,7 +1762,7 @@ class TestCustomEndpointFallback:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -1785,7 +1793,7 @@ class TestCustomEndpointFallback:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]
@@ -1817,7 +1825,7 @@ class TestCustomEndpointFallback:
             "skip",  # additional forges: skip
             "",  # projects: skip
             "n",  # coderabbit: no
-            "n",  # claude_cli: no
+            "n",  # agent CLI reviewers: don't customize
             "n",  # snowflake_review: no
             "n",  # agent_feedback: no
         ]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import shlex
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -193,6 +194,90 @@ class ClaudeCLIConfig(BaseModel):
     def cli_argv(self) -> list[str]:
         """``cli_path`` split into argv -- supports ``"cmd arg1 arg2"``."""
         return _parse_cli_path(self.cli_path)
+
+
+class AgentCLIReviewerConfig(BaseModel):
+    """Config for a general-purpose agent CLI used as a code reviewer.
+
+    Generalizes :class:`ClaudeCLIConfig`. Any headless coding agent that
+    accepts a prompt on the command line and emits free-form text can act
+    as a reviewer: we feed it the shared block-format prompt and parse the
+    output with the shared parser. The three seeded reviewers are
+    ``claude``, ``codex``, and ``pi``; they differ only in how a prompt is
+    turned into argv:
+
+    * ``prompt_mode="flag"`` (claude, pi) → ``<cli> [--model M] <extra> -p <prompt>``
+    * ``prompt_mode="subcommand"`` (codex) → ``<cli> exec [--model M] <extra> <prompt>``
+
+    ``enabled`` is tri-state: ``True``/``False`` force the reviewer on/off,
+    while the default ``"auto"`` means "use it iff its binary is installed"
+    (resolved at worker startup — see ``worker.runner``).
+    """
+
+    name: str
+    enabled: bool | Literal["auto"] = "auto"
+    cli_path: str = ""
+    model: str = ""
+    model_flag: str = "--model"
+    prompt_mode: Literal["flag", "subcommand"] = "flag"
+    prompt_arg: str = "-p"
+    extra_args: list[str] = Field(default_factory=list)
+    timeout_seconds: int = 300
+    max_diff_chars: int = 60_000
+    deduplicate: bool = True
+    remote: RemoteExecutionConfig = Field(default_factory=RemoteExecutionConfig)
+
+    @field_validator("timeout_seconds", "max_diff_chars")
+    @classmethod
+    def must_be_positive(cls, v: int) -> int:
+        if v <= 0:
+            msg = "must be positive"
+            raise ValueError(msg)
+        return v
+
+    @model_validator(mode="after")
+    def default_cli_path_to_name(self) -> AgentCLIReviewerConfig:
+        """Default ``cli_path`` to ``name`` so a bare ``{name: codex}`` works."""
+        if not self.cli_path.strip():
+            self.cli_path = self.name
+        _validate_cli_path(self.cli_path)
+        return self
+
+    @property
+    def cli_argv(self) -> list[str]:
+        """``cli_path`` split into argv -- supports ``"cmd arg1 arg2"``."""
+        return _parse_cli_path(self.cli_path)
+
+    def build_invocation(self, prompt: str) -> list[str]:
+        """Turn a prompt into the argv suffix appended to ``cli_argv``.
+
+        Handles the model flag, any operator ``extra_args``, and the two
+        prompt-delivery styles. For ``subcommand`` mode the subcommand comes
+        first and the prompt is the trailing positional argument; for
+        ``flag`` mode the prompt follows ``prompt_arg`` (e.g. ``-p``).
+        """
+        model_part = [self.model_flag, self.model] if self.model else []
+        if self.prompt_mode == "subcommand":
+            return [self.prompt_arg, *model_part, *self.extra_args, prompt]
+        return [*model_part, *self.extra_args, self.prompt_arg, prompt]
+
+
+def _default_agent_cli_reviewers() -> list[AgentCLIReviewerConfig]:
+    """Seed the registry with the three auto-detected agent reviewers.
+
+    Each defaults to ``enabled="auto"`` so it runs only when its binary is
+    present on PATH (local mode). Operators can override any entry by name
+    in ``operator.yaml`` or add their own agents to the list.
+    """
+    return [
+        AgentCLIReviewerConfig(
+            name="claude", cli_path="claude", prompt_mode="flag", prompt_arg="-p"
+        ),
+        AgentCLIReviewerConfig(
+            name="codex", cli_path="codex", prompt_mode="subcommand", prompt_arg="exec"
+        ),
+        AgentCLIReviewerConfig(name="pi", cli_path="pi", prompt_mode="flag", prompt_arg="-p"),
+    ]
 
 
 class SnowflakeReviewConfig(BaseModel):
@@ -855,7 +940,15 @@ class OperatorConfig(BaseModel):
     alerts: AlertsConfig = Field(default_factory=AlertsConfig)
     workspaces: dict[str, object] = Field(default_factory=dict)
     coderabbit: CodeRabbitConfig = Field(default_factory=CodeRabbitConfig)
+    # Legacy single Claude-CLI reviewer. Still accepted for backwards compat;
+    # promoted into ``agent_cli_reviewers`` below (see assemble_agent_cli_registry).
     claude_cli: ClaudeCLIConfig = Field(default_factory=ClaudeCLIConfig)
+    # Generalized agent-CLI reviewer registry. Seeded with claude/codex/pi,
+    # each "auto" (runs only when its binary is installed). Operators override
+    # an entry by ``name`` or append their own agents.
+    agent_cli_reviewers: list[AgentCLIReviewerConfig] = Field(
+        default_factory=_default_agent_cli_reviewers
+    )
     snowflake_review: SnowflakeReviewConfig = Field(default_factory=SnowflakeReviewConfig)
     agent_feedback: AgentFeedbackConfig = Field(default_factory=AgentFeedbackConfig)
     sentry: SentryConfig = Field(default_factory=SentryConfig)
@@ -894,6 +987,46 @@ class OperatorConfig(BaseModel):
         if self.llm is not None and not self.llm_backends:
             self.llm_backends = [self.llm]
             self.llm = None
+        return self
+
+    @model_validator(mode="after")
+    def assemble_agent_cli_registry(self) -> OperatorConfig:
+        """Seed default agent reviewers and promote legacy ``claude_cli``.
+
+        Mirrors the ``llm:`` promotion so v1 configs keep working:
+
+        * Any of the seeded ``claude``/``codex``/``pi`` reviewers missing
+          from an operator-supplied list are appended (so a user who lists
+          one custom agent still gets auto-detection of the built-ins).
+        * A meaningfully-configured legacy ``claude_cli`` block is promoted
+          into the registry as the ``claude`` entry, replacing the seed so
+          the two never double-run (dedupe by name).
+        """
+        by_name = {rc.name: rc for rc in self.agent_cli_reviewers}
+        for seed in _default_agent_cli_reviewers():
+            if seed.name not in by_name:
+                self.agent_cli_reviewers.append(seed)
+                by_name[seed.name] = seed
+
+        legacy = self.claude_cli
+        legacy_is_set = legacy.enabled or legacy != ClaudeCLIConfig()
+        if legacy_is_set:
+            promoted = AgentCLIReviewerConfig(
+                name="claude",
+                enabled=legacy.enabled,
+                cli_path=legacy.cli_path,
+                model=legacy.model,
+                prompt_mode="flag",
+                prompt_arg="-p",
+                extra_args=list(legacy.extra_args),
+                timeout_seconds=legacy.timeout_seconds,
+                max_diff_chars=legacy.max_diff_chars,
+                remote=legacy.remote,
+            )
+            # Replace the seeded "claude" entry in place (dedupe by name).
+            self.agent_cli_reviewers = [
+                promoted if rc.name == "claude" else rc for rc in self.agent_cli_reviewers
+            ]
         return self
 
     @model_validator(mode="after")

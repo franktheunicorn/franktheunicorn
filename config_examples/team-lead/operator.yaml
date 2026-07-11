@@ -10,14 +10,18 @@ llm_backends:
     model: "claude-sonnet-4-20250514"
     api_key_env: "ANTHROPIC_API_KEY"
 
-# Claude CLI runs a second independent review pass in headless mode,
-# adding findings that the LLM backend pipeline may miss.
-claude_cli:
-  enabled: true
-  cli_path: "claude"
-  model: ""
-  timeout_seconds: 300
-  max_diff_chars: 60000
+# Agent CLI reviewers run extra independent review passes in headless mode,
+# adding findings the LLM backend pipeline may miss. claude, codex, and pi
+# are pre-registered as `enabled: "auto"` and run automatically when their
+# binary is installed — no config needed. This block only pins claude to a
+# specific model; codex and pi keep their auto defaults (merged by name).
+agent_cli_reviewers:
+  - name: "claude"
+    enabled: true
+    cli_path: "claude"
+    model: ""
+    timeout_seconds: 300
+    max_diff_chars: 60000
 
 # Forge registry — uncomment to ingest from non-GitHub forges. Each
 # project YAML picks one by ``name``. Leaving this empty falls back to

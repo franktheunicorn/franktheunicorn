@@ -83,6 +83,35 @@ def _should_merge(a: ReviewFinding, b: ReviewFinding) -> bool:
     return _is_substring_match(a.body, b.body)
 
 
+def is_duplicate_finding(
+    file_a: str,
+    line_a: int | None,
+    body_a: str,
+    file_b: str,
+    line_b: int | None,
+    body_b: str,
+) -> bool:
+    """Field-level duplicate check reusing the same heuristic as ``_should_merge``.
+
+    Works on the raw ``(file, line, body)`` triples of a finding rather than a
+    ``ReviewFinding`` object, so callers holding persisted ``ReviewDraft`` rows
+    (e.g. cross-agent CLI dedup) can compare against fresh findings without
+    constructing throwaway objects. Same file + exact line always matches; a
+    nearby line matches only when the bodies are similar (Jaccard) or one is a
+    substring of the other.
+    """
+    if file_a != file_b:
+        return False
+    distance = abs((line_a or 0) - (line_b or 0))
+    if distance > _LINE_PROXIMITY:
+        return False
+    if distance == 0:
+        return True
+    if _jaccard_similarity(body_a, body_b) >= _JACCARD_THRESHOLD:
+        return True
+    return _is_substring_match(body_a, body_b)
+
+
 def deduplicate_findings(findings: list[ReviewFinding]) -> list[ReviewFinding]:
     """Deduplicate findings that target the same file/line region.
 
