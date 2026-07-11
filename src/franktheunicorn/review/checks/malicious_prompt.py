@@ -48,7 +48,7 @@ class MaliciousPromptCheck(BaseCheck):
                 backend = candidate
 
         text = "\n\n".join(part for part in (pr.title or "", pr.body or "", diff) if part)
-        verdict = assess(text, backend)
+        verdict = assess(text, backend, project_id=pr.project_id, pr_id=pr.pk)
 
         if not verdict.is_bad:
             return []

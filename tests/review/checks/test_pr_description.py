@@ -128,7 +128,7 @@ class TestPRDescriptionCheckScan:
 
         mock_backend = MagicMock(spec=BaseLLMBackend)
         mock_backend._resolve_api_key.return_value = "fake-key"
-        mock_backend._call_api.return_value = '{"findings": []}'
+        mock_backend.metered_call.return_value = '{"findings": []}'
 
         config = LLMBackendConfig(provider="claude")
         with (
@@ -144,8 +144,8 @@ class TestPRDescriptionCheckScan:
             findings = check.scan(pr, "", backend_config=config)
 
         assert findings == []
-        mock_backend._call_api.assert_called_once()
-        call_args = mock_backend._call_api.call_args
+        mock_backend.metered_call.assert_called_once()
+        call_args = mock_backend.metered_call.call_args
         user_message = call_args[0][1]
         parsed = json.loads(user_message)
         assert "## Summary" in parsed["pr_template"]
@@ -175,7 +175,7 @@ class TestPRDescriptionCheckScan:
 
         mock_backend = MagicMock(spec=BaseLLMBackend)
         mock_backend._resolve_api_key.return_value = "fake-key"
-        mock_backend._call_api.return_value = finding_json
+        mock_backend.metered_call.return_value = finding_json
 
         config = LLMBackendConfig(provider="claude")
         with (
@@ -204,7 +204,7 @@ class TestPRDescriptionCheckScan:
 
         mock_backend = MagicMock(spec=BaseLLMBackend)
         mock_backend._resolve_api_key.return_value = "fake-key"
-        mock_backend._call_api.side_effect = RuntimeError("API down")
+        mock_backend.metered_call.side_effect = RuntimeError("API down")
 
         config = LLMBackendConfig(provider="claude")
         with (

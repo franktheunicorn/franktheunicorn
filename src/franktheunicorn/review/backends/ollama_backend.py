@@ -147,4 +147,9 @@ class OllamaBackend(BaseLLMBackend):
             format="json",
             options={"temperature": self._config.temperature},
         )
+        # Ollama reports token counts on the response as ``prompt_eval_count``
+        # (input) and ``eval_count`` (generated). They may be absent/None on
+        # some servers or cache hits — record what is available, priced at $0.
+        self._last_tokens_in = getattr(response, "prompt_eval_count", 0) or 0
+        self._last_tokens_out = getattr(response, "eval_count", 0) or 0
         return response.message.content or ""
