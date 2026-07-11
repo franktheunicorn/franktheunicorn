@@ -109,6 +109,17 @@ class GitHubClient(ForgeClient):
         response.raise_for_status()
         return response.text
 
+    def get_commit_diff(self, owner: str, repo: str, sha: str) -> str:
+        """Fetch the unified diff for a single commit.
+
+        Uses ``GET /repos/{owner}/{repo}/commits/{sha}`` with the diff media
+        type. Consumed by the backport check for cherry-pick-of-<sha> refs.
+        """
+        url = f"/repos/{owner}/{repo}/commits/{sha}"
+        response = self._client.get(url, headers={"Accept": "application/vnd.github.v3.diff"})
+        response.raise_for_status()
+        return response.text
+
     def create_review(
         self, owner: str, repo: str, pr_number: int, review: ReviewBody
     ) -> dict[str, Any]:

@@ -797,6 +797,7 @@ def process_pr(
                     project_config=pc,
                     operator_config=operator_config,
                     repo_path=repo_path,
+                    forge_client=forge_client,
                 )
                 if check_drafts:
                     _log(f"LLM checks: {len(check_drafts)} finding(s)")

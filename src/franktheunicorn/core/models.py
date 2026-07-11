@@ -168,6 +168,7 @@ class ReviewDraft(models.Model):
         ("suggested-change", "Suggested Change"),
         ("moderation", "Moderation"),
         ("issue-link", "Issue Link"),
+        ("backport", "Backport"),
         ("other", "Other"),
     ]
 

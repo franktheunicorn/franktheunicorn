@@ -217,6 +217,7 @@ def _derive_category(title: str) -> str:
         "suggested-change",
         "moderation",
         "issue-link",
+        "backport",
     ):
         if cat in lowered:
             return cat
