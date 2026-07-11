@@ -22,6 +22,7 @@ data:
   FRANK_POLL_INTERVAL: "300"
   DJANGO_DEBUG: "false"
   DJANGO_ALLOWED_HOSTS: "*"
+  GUNICORN_WORKERS: "2"
 
 ---
 # Create this secret manually:
@@ -79,7 +80,7 @@ spec:
             [
               "sh",
               "-c",
-              "python manage.py migrate --run-syncdb && python manage.py collectstatic --noinput && gunicorn franktheunicorn.wsgi:application --bind 0.0.0.0:8000 --workers 2 --access-logfile -",
+              "python manage.py migrate --run-syncdb && python manage.py collectstatic --noinput && gunicorn franktheunicorn.wsgi:application --bind 0.0.0.0:8000 --workers ${GUNICORN_WORKERS:-2} --worker-class gthread --threads 4 --timeout 90 --graceful-timeout 30 --max-requests 1000 --max-requests-jitter 100 --access-logfile -",
             ]
           ports:
             - containerPort: 8000
