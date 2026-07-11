@@ -257,11 +257,21 @@ def _parse_verdict_json(raw_text: str) -> tuple[Verdict | None, str]:
     return verdict_raw, reasoning  # type: ignore[return-value]
 
 
-def assess(text: str, backend: BaseLLMBackend | None = None) -> MaliciousPromptVerdict:
+def assess(
+    text: str,
+    backend: BaseLLMBackend | None = None,
+    *,
+    project_id: int | None = None,
+    pr_id: int | None = None,
+) -> MaliciousPromptVerdict:
     """Two-stage assessment.
 
     If the regex stage finds nothing, the LLM is skipped and the verdict is
     "no". If ``backend`` is None, a regex-only verdict is returned.
+
+    When the LLM stage runs, its token usage is recorded as a CostRecord
+    (action ``malicious-prompt``) via the backend's metered-call path, so the
+    call shows up in cost accounting like every other LLM call.
     """
     hits = regex_scan(text)
     if not hits:
@@ -281,7 +291,14 @@ def assess(text: str, backend: BaseLLMBackend | None = None) -> MaliciousPromptV
 
     user_message = _build_user_message(text, hits)
     try:
-        raw_response = backend._call_api(_LLM_SYSTEM_PROMPT, user_message, api_key)
+        raw_response = backend.metered_call(
+            _LLM_SYSTEM_PROMPT,
+            user_message,
+            action_type="malicious-prompt",
+            project_id=project_id,
+            pr_id=pr_id,
+            api_key=api_key,
+        )
     except Exception:
         logger.exception("Malicious-prompt LLM call failed; falling back to regex verdict.")
         return regex_only

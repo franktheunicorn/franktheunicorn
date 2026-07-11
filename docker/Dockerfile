@@ -36,7 +36,11 @@ EXPOSE 8000
 # pick up the WhiteNoise middleware (only inserted when DEBUG is off).
 RUN python manage.py collectstatic --noinput || true
 CMD ["gunicorn", "franktheunicorn.wsgi:application", \
-     "--bind", "0.0.0.0:8000", "--workers", "2", "--access-logfile", "-"]
+     "--bind", "0.0.0.0:8000", "--workers", "2", \
+     "--worker-class", "gthread", "--threads", "4", \
+     "--timeout", "90", "--graceful-timeout", "30", \
+     "--max-requests", "1000", "--max-requests-jitter", "100", \
+     "--access-logfile", "-"]
 
 FROM base AS worker
 

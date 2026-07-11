@@ -25,6 +25,8 @@ x-common: &common
     # static files under gunicorn; flip to "true" in .env for verbose
     # error pages while developing.
     DJANGO_DEBUG: ${DJANGO_DEBUG:-false}
+    # Gunicorn resilience — overridable at runtime with e.g. GUNICORN_WORKERS=4.
+    GUNICORN_WORKERS: ${GUNICORN_WORKERS:-2}
 
 services:
   web:
@@ -46,7 +48,7 @@ services:
     command: >
       sh -c "python manage.py migrate --run-syncdb &&
              python manage.py collectstatic --noinput &&
-             gunicorn franktheunicorn.wsgi:application --bind 0.0.0.0:8000 --workers 2 --access-logfile -"
+             gunicorn franktheunicorn.wsgi:application --bind 0.0.0.0:8000 --workers $${GUNICORN_WORKERS:-2} --worker-class gthread --threads 4 --timeout 90 --graceful-timeout 30 --max-requests 1000 --max-requests-jitter 100 --access-logfile -"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/')"]
       interval: 5s

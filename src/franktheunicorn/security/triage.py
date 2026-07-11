@@ -89,10 +89,22 @@ def _call_llm(
     backend: BaseLLMBackend,
     system_prompt: str,
     user_message: str,
+    *,
+    action_type: str,
+    project_id: int | None = None,
 ) -> dict[str, object] | None:
-    """Call the LLM backend and parse JSON response. Returns None on failure."""
-    api_key = backend._resolve_api_key()
-    raw_response = backend._call_api(system_prompt, user_message, api_key)
+    """Call the LLM backend and parse JSON response. Returns None on failure.
+
+    Goes through the backend's metered-call path so the triage call's token
+    usage is recorded as a CostRecord (previously each caller recorded cost
+    separately, which the raw ``_call_api`` bypass silently skipped).
+    """
+    raw_response = backend.metered_call(
+        system_prompt,
+        user_message,
+        action_type=action_type,
+        project_id=project_id,
+    )
     return _safe_json_parse(raw_response)
 
 
@@ -108,9 +120,16 @@ def _coerce_bool(value: object) -> bool:
 def _parse_report(report: SecurityReport, backend: BaseLLMBackend) -> None:
     """Parse raw report text into structured fields via LLM."""
     system_prompt, user_message = build_parse_prompt(report.raw_text)
+    project_id = report.project_id if report.project else None
 
     try:
-        parsed = _call_llm(backend, system_prompt, user_message)
+        parsed = _call_llm(
+            backend,
+            system_prompt,
+            user_message,
+            action_type="security-parse",
+            project_id=project_id,
+        )
     except Exception:
         logger.exception("Failed to parse security report %d", report.pk)
         return
@@ -141,9 +160,6 @@ def _parse_report(report: SecurityReport, backend: BaseLLMBackend) -> None:
             ]
         )
 
-    project_id = report.project_id if report.project else None
-    backend.record_cost(project_id, None, action_type="security-parse")
-
 
 def _analyze_report(
     report: SecurityReport,
@@ -162,8 +178,16 @@ def _analyze_report(
         cve_candidates=cve_candidates,
     )
 
+    project_id = report.project_id if report.project else None
+
     try:
-        analysis = _call_llm(backend, system_prompt, user_message)
+        analysis = _call_llm(
+            backend,
+            system_prompt,
+            user_message,
+            action_type="security-triage",
+            project_id=project_id,
+        )
     except Exception:
         logger.exception("Failed to analyze security report %d", report.pk)
         return
@@ -197,9 +221,6 @@ def _analyze_report(
                 "updated_at",
             ]
         )
-
-    project_id = report.project_id if report.project else None
-    backend.record_cost(project_id, None, action_type="security-triage")
 
 
 def _check_cves(report: SecurityReport, operator_config: OperatorConfig) -> None:
