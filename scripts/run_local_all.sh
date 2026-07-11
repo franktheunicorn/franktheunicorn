@@ -186,7 +186,7 @@ command_for_service() {
 
 start_service() {
     local service="$1" backend="$2" py="$3"
-    local session log pid_file cmd run_cmd
+    local session log pid_file cmd run_cmd pane_cmd
     session="$(service_session "${service}")"
     log="$(service_log "${service}")"
     pid_file="$(service_pid_file "${service}")"
@@ -200,13 +200,14 @@ start_service() {
     rm -f "${pid_file}"
     cmd="$(command_for_service "${service}" "${py}")"
     run_cmd="printf '%s\n' \"\$\$\" > $(printf '%q' "${pid_file}"); ${cmd}"
+    pane_cmd="exec > >(tee -a $(printf '%q' "${log}")) 2>&1; ${run_cmd}"
 
     case "${backend}" in
         screen)
-            screen -dmS "${session}" bash -lc "${run_cmd} >> $(printf '%q' "${log}") 2>&1"
+            screen -dmS "${session}" bash -lc "${pane_cmd}"
             ;;
         tmux)
-            tmux new-session -d -s "${session}" "${run_cmd} >> $(printf '%q' "${log}") 2>&1"
+            tmux new-session -d -s "${session}" "bash -lc $(printf '%q' "${pane_cmd}")"
             ;;
         nohup)
             if command -v setsid >/dev/null 2>&1; then
