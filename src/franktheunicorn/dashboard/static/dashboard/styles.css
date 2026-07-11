@@ -75,7 +75,7 @@ nav a:hover, nav a.active { color: var(--accent); font-weight: 600; }
 .workspace-select { margin-left: auto; }
 .workspace-select select { font-size: 0.8rem; padding: 0.2rem; }
 
-.tab-bar { display: flex; gap: 0; border-bottom: 2px solid var(--border); margin-bottom: 1rem; overflow-x: auto; }
+.tab-bar { display: flex; gap: 0; border-bottom: 2px solid var(--border); margin-bottom: 1rem; flex-wrap: wrap; }
 .tab-bar a {
     padding: 0.5rem 1rem; text-decoration: none; color: var(--muted);
     border-bottom: 2px solid transparent; margin-bottom: -2px;
