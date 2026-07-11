@@ -594,6 +594,8 @@ def draft_review(
             backend_config=tone_backend,
             is_new_contributor=is_new_contributor,
             new_contributor_addendum=new_contributor_addendum,
+            project_id=pr.project_id,
+            pr_id=pr.pk,
         )
 
     # Resolve governance for rejection predictor features.
