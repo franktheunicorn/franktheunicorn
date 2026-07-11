@@ -1,6 +1,7 @@
 {% extends "dashboard/base.html" %}
 {% load static %}
 {% load markdown_filters %}
+{% load score_filters %}
 {% block title %}PR #{{ pr.number }} — franktheunicorn{% endblock %}
 {% block content %}
 <div class="pr-nav">
@@ -16,7 +17,7 @@
 <div class="pr-meta" style="margin-top: 0.5rem;">
     by <strong>{{ pr.author }}</strong>
     &middot; {{ pr.additions }}+ / {{ pr.deletions }}-
-    &middot; Score: <span class="score-badge">{{ pr.interest_score|floatformat:2 }}</span>
+    &middot; Score: <span class="score-badge">{{ pr.interest_score|score100 }}</span>
     {% if pr.is_draft %}&middot; Draft{% endif %}
     {% if pr.likely_ai_generated %}&middot; AI-Generated{% endif %}
     {% if pr.is_new_contributor %}&middot; New Contributor{% endif %}
