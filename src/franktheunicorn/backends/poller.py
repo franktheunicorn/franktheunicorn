@@ -262,6 +262,7 @@ def poll_project(
                 "queue",
                 "is_operator_pr",
                 "is_new_contributor",
+                "is_mentioned",
                 "is_low_context",
                 "is_likely_unowned",
                 "mergeable",
@@ -308,6 +309,7 @@ def _route_pr_to_queue(
         "labels": pr_obj.labels,
         "changed_files": pr_obj.changed_files,
         "requested_reviewers": pr_obj.requested_reviewers,
+        "assignees": pr_obj.assignees,
     }
     if pr_obj.github_created_at:
         from datetime import UTC, datetime
@@ -334,6 +336,7 @@ def _route_pr_to_queue(
 
     pr_obj.is_operator_pr = "is_operator_pr" in flags
     pr_obj.is_new_contributor = "new_contributor" in flags
+    pr_obj.is_mentioned = "mentioned" in flags
     pr_obj.is_low_context = "low_context" in flags
     pr_obj.is_likely_unowned = "likely_unowned" in flags
 
@@ -343,9 +346,13 @@ def _route_pr_to_queue(
     is_wip = pr_obj.is_draft or "wip_title" in flags
     if skip_wip and is_wip:
         pr_obj.queue = "wip"
-    # Route to queue based on priority of flags.
+    # Route to queue based on priority of flags. A PR the operator is
+    # personally pulled into (mentioned/assigned/review-requested) outranks
+    # bot and new-contributor routing, but not the operator's own PRs.
     elif pr_obj.is_operator_pr:
         pr_obj.queue = "your-prs"
+    elif pr_obj.is_mentioned:
+        pr_obj.queue = "mentioned"
     elif pr_obj.likely_ai_generated or "bot" in flags:
         pr_obj.queue = "ai-generated"
     elif pr_obj.is_new_contributor:
@@ -409,6 +416,7 @@ def _reroute_pull_requests(
             pr_obj.queue,
             pr_obj.is_operator_pr,
             pr_obj.is_new_contributor,
+            pr_obj.is_mentioned,
             pr_obj.is_low_context,
             pr_obj.is_likely_unowned,
         )
@@ -423,6 +431,7 @@ def _reroute_pull_requests(
             pr_obj.queue,
             pr_obj.is_operator_pr,
             pr_obj.is_new_contributor,
+            pr_obj.is_mentioned,
             pr_obj.is_low_context,
             pr_obj.is_likely_unowned,
         )
@@ -432,6 +441,7 @@ def _reroute_pull_requests(
                     "queue",
                     "is_operator_pr",
                     "is_new_contributor",
+                    "is_mentioned",
                     "is_low_context",
                     "is_likely_unowned",
                 ]
@@ -592,6 +602,7 @@ def ingest_single_pr(owner: str, repo: str, pr_number: int) -> PullRequest:
             "queue",
             "is_operator_pr",
             "is_new_contributor",
+            "is_mentioned",
             "is_low_context",
             "is_likely_unowned",
         ]

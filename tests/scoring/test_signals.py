@@ -6,6 +6,7 @@ from franktheunicorn.scoring.signals import (
     WEIGHTS,
     is_ai_agent,
     is_likely_bot,
+    is_operator_involved,
     path_overlap_fraction,
     score_ai_generated,
     score_cve_file_history,
@@ -96,6 +97,30 @@ class TestHasReviewRequest:
 
     def test_case_insensitive(self) -> None:
         assert score_has_review_request(["HoldenK"], "holdenk") == WEIGHTS["has_review_request"]
+
+
+class TestIsOperatorInvolved:
+    def test_requested_reviewer(self) -> None:
+        assert is_operator_involved("", [], ["holdenk"], "holdenk") is True
+
+    def test_assignee(self) -> None:
+        assert is_operator_involved("", ["holdenk"], [], "holdenk") is True
+
+    def test_body_mention(self) -> None:
+        assert is_operator_involved("cc @holdenk pls", [], [], "holdenk") is True
+
+    def test_case_insensitive(self) -> None:
+        assert is_operator_involved("", [], ["HoldenK"], "holdenk") is True
+
+    def test_uninvolved(self) -> None:
+        assert is_operator_involved("routine change", ["alice"], ["bob"], "holdenk") is False
+
+    def test_empty_operator_username_is_false(self) -> None:
+        assert is_operator_involved("", [], ["holdenk"], "") is False
+
+    def test_does_not_key_off_authorship(self) -> None:
+        # Predicate has no author argument — authorship is a separate concept.
+        assert is_operator_involved("my own PR", [], [], "holdenk") is False
 
 
 class TestPriorReviewHistory:

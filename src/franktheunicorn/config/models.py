@@ -1296,6 +1296,21 @@ class ProjectConfig(BaseModel):
     cve_files: list[str] = Field(default_factory=list)
     new_contributor_addendum: str = ""
     enabled: bool = True
+    # Default review-gating policy (token saver). Controls which PRs the
+    # expensive LLM review pipeline runs on *automatically* during a poll:
+    #   "all"                   — auto-review every ingested PR (pre-gating
+    #                             behavior).
+    #   "mentioned_or_authored" — only auto-review PRs the operator authored or
+    #                             is personally involved in (requested reviewer,
+    #                             assignee, or @-mentioned in the PR body). The
+    #                             default — on high-volume repos (e.g. Spark)
+    #                             this avoids burning tokens reviewing every PR.
+    #   "none"                  — never auto-review.
+    # This gates ONLY the review pipeline: every PR is still ingested, scored,
+    # routed, and shown on the dashboard regardless of policy. The dashboard
+    # "Force Run Agents" button (force=True) always bypasses the gate. Configs
+    # written before this field existed default to "mentioned_or_authored".
+    auto_review_policy: str = "mentioned_or_authored"
     # When True (default), WIP/draft PRs are routed to the "wip" queue and
     # skipped by the review pipeline until they graduate (draft flag cleared,
     # title prefix removed). At that point the normal poll cycle re-routes and
@@ -1362,6 +1377,16 @@ class ProjectConfig(BaseModel):
                     name,
                     ", ".join(sorted(known)),
                 )
+        return v
+
+    @field_validator("auto_review_policy")
+    @classmethod
+    def auto_review_policy_valid(cls, v: str) -> str:
+        v = v.strip().lower()
+        known = {"all", "mentioned_or_authored", "none"}
+        if v not in known:
+            msg = f"auto_review_policy must be one of {sorted(known)}, got {v!r}"
+            raise ValueError(msg)
         return v
 
     @field_validator("copypasta_min_lines")

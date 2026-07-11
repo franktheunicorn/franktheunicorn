@@ -21,6 +21,7 @@
     {% if pr.is_draft %}&middot; Draft{% endif %}
     {% if pr.likely_ai_generated %}&middot; AI-Generated{% endif %}
     {% if pr.is_new_contributor %}&middot; New Contributor{% endif %}
+    {% if pr.is_mentioned %}&middot; <span class="badge-mentioned" title="You are a requested reviewer, assignee, or @-mentioned in this PR">Mentioned</span>{% endif %}
     {% if pr.mergeable == False %}&middot; <span class="badge-conflict" title="PR has merge conflicts">Needs Rebase</span>{% endif %}
     &middot; Queue: {{ pr.queue }}
     {% if pr.github_updated_at %}&middot; Updated upstream: <span title="{{ pr.github_updated_at|date:'Y-m-d H:i:s' }} UTC">{{ pr.github_updated_at|timesince }} ago</span>{% endif %}

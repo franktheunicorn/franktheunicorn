@@ -9,6 +9,7 @@ from franktheunicorn.core.models import (
     AgentFeedback,
     AntiPattern,
     OperatorAction,
+    Project,
     PullRequest,
     ReviewDraft,
     WorkerCommand,
@@ -54,6 +55,59 @@ class TestDashboardViews:
     def test_pr_detail_404(self, client: Client) -> None:
         response = client.get("/pr/99999/")
         assert response.status_code == 404
+
+    def test_mentioned_tab_present_with_count(self, client: Client, db_project: Project) -> None:
+        PullRequestFactory(
+            project=db_project,
+            number=501,
+            github_id=5001,
+            title="Please look at this",
+            queue="mentioned",
+            is_mentioned=True,
+        )
+        response = client.get("/")
+        assert response.status_code == 200
+        # Tab label rendered, and its badge count reflects the one mentioned PR.
+        assert b"Mentioned" in response.content
+
+    def test_queue_mentioned_filters(self, client: Client, db_project: Project) -> None:
+        PullRequestFactory(
+            project=db_project,
+            number=502,
+            github_id=5002,
+            title="Mentioned PR body here",
+            queue="mentioned",
+            is_mentioned=True,
+        )
+        PullRequestFactory(
+            project=db_project,
+            number=503,
+            github_id=5003,
+            title="Plain review PR here",
+            queue="review",
+        )
+        response = client.get("/?queue=mentioned")
+        assert response.status_code == 200
+        assert b"Mentioned PR body here" in response.content
+        assert b"Plain review PR here" not in response.content
+
+    def test_mentioned_badge_on_list(self, client: Client, db_project: Project) -> None:
+        PullRequestFactory(
+            project=db_project,
+            number=504,
+            github_id=5004,
+            title="Badge list PR",
+            queue="mentioned",
+            is_mentioned=True,
+        )
+        response = client.get("/?queue=mentioned")
+        assert b'class="badge-mentioned"' in response.content
+
+    def test_mentioned_badge_on_detail(self, client: Client, db_pr: PullRequest) -> None:
+        db_pr.is_mentioned = True
+        db_pr.save(update_fields=["is_mentioned"])
+        response = client.get(f"/pr/{db_pr.pk}/")
+        assert b'class="badge-mentioned"' in response.content
 
     def test_index_orders_by_interest_score(self, client: Client, db_pr: PullRequest) -> None:
         PullRequestFactory(

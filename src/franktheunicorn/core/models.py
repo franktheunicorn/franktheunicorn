@@ -67,6 +67,7 @@ class PullRequest(models.Model):
         ("consider-closing", "Consider Closing"),
         ("needs-triage", "Needs Triage"),
         ("your-prs", "Your PRs"),
+        ("mentioned", "Mentioned"),
         ("wip", "WIP"),
     ]
 
@@ -97,6 +98,7 @@ class PullRequest(models.Model):
     likely_ai_generated = models.BooleanField(default=False)
     is_operator_pr = models.BooleanField(default=False)
     is_new_contributor = models.BooleanField(default=False)
+    is_mentioned = models.BooleanField(default=False)
     is_low_context = models.BooleanField(default=False)
     is_likely_unowned = models.BooleanField(default=False)
     has_test_coverage = models.BooleanField(null=True, blank=True)
