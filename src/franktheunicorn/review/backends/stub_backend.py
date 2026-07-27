@@ -36,6 +36,11 @@ class StubBackend:
     def __init__(self, config: LLMBackendConfig) -> None:
         self._config = config
 
+    def complete(self, prompt: str, *, system: str = "") -> str:
+        """Deterministic stub completion (no network)."""
+        digest = hashlib.sha256(f"{system}\n{prompt}".encode()).hexdigest()[:8]
+        return f"[stub completion {digest} for {len(prompt)} chars]"
+
     def generate_findings(
         self,
         diff: str,

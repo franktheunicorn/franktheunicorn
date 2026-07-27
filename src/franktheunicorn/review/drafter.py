@@ -34,7 +34,12 @@ from franktheunicorn.scoring.rejection_predictor import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig, ProjectConfig
+    from franktheunicorn.config.models import (
+        LLMBackendConfig,
+        OperatorConfig,
+        ProjectConfig,
+        RLMScoringConfig,
+    )
     from franktheunicorn.core.models import Project, PullRequest
     from franktheunicorn.scoring.rejection_predictor import RejectionPredictor
 
@@ -187,6 +192,8 @@ def build_pr_context(
         sentry_context=sentry_context,
         full_file_context=full_file_ctx,
         imported_modules_context=imported_ctx,
+        project_id=pr.project_id,
+        pr_id=pr.pk,
     )
 
 
@@ -272,6 +279,7 @@ def create_drafts_from_findings(
     governance: str = "standard",
     diff_source: str = "",
     sources_per_finding: list[str] | None = None,
+    rlm_scoring: RLMScoringConfig | None = None,
     categories_per_finding: list[str] | None = None,
     tone_applied_per_finding: list[bool] | None = None,
     rejection_predictor_enabled: bool = False,
@@ -367,13 +375,30 @@ def create_drafts_from_findings(
                     project_id=pr.project_id,
                 )
                 rejection_probability = predictor.predict_rejection(features)
-                if rejection_probability > SUPPRESS_THRESHOLD:
-                    is_auto_suppressed = True
-                    logger.info(
-                        "Auto-suppressed finding '%s' — P(rejection)=%.2f",
-                        finding.title[:40],
-                        rejection_probability,
+
+            # Optional RLM rejection judge (v1.5) — additive, combined with the
+            # sklearn value; never replaces it. Gated by project config.
+            if rlm_scoring is not None and rlm_scoring.rejection_judge_enabled:
+                try:
+                    from franktheunicorn.scoring.rlm_rejection import (
+                        combine_rejection,
+                        judge_rejection,
                     )
+
+                    rlm_p = judge_rejection(finding, code_context, pr, rlm_scoring, governance)
+                    rejection_probability = combine_rejection(
+                        rejection_probability, rlm_p, rlm_scoring.rejection_combine
+                    )
+                except Exception:
+                    logger.debug("RLM rejection judge failed; using sklearn value only.")
+
+            if rejection_probability is not None and rejection_probability > SUPPRESS_THRESHOLD:
+                is_auto_suppressed = True
+                logger.info(
+                    "Auto-suppressed finding '%s' — P(rejection)=%.2f",
+                    finding.title[:40],
+                    rejection_probability,
+                )
 
             if tone_applied_per_finding is not None and idx < len(tone_applied_per_finding):
                 draft_tone_applied = tone_applied_per_finding[idx]
@@ -614,6 +639,7 @@ def draft_review(
         diff=diff,
         governance=governance,
         sources_per_finding=deduped_sources,
+        rlm_scoring=getattr(project_config, "rlm_scoring", None),
         categories_per_finding=categories,
         tone_applied_per_finding=tone_flags,
         rejection_predictor_enabled=getattr(project_config, "rejection_predictor_enabled", False),

@@ -19,6 +19,7 @@ _BACKENDS: dict[str, tuple[str, str]] = {
     "gemini": ("franktheunicorn.review.backends.gemini_backend", "GeminiBackend"),
     "ollama": ("franktheunicorn.review.backends.ollama_backend", "OllamaBackend"),
     "stub": ("franktheunicorn.review.backends.stub_backend", "StubBackend"),
+    "rlm": ("franktheunicorn.review.rlm.backend", "RLMBackend"),
 }
 
 
