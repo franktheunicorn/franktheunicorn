@@ -60,6 +60,9 @@ def apply_tone_guard(
     backend_config: LLMBackendConfig | None = None,
     is_new_contributor: bool = False,
     new_contributor_addendum: str = "",
+    *,
+    project_id: int | None = None,
+    pr_id: int | None = None,
 ) -> tuple[ReviewFinding, bool]:
     """Rewrite a finding's body for constructive tone.
 
@@ -80,7 +83,7 @@ def apply_tone_guard(
     from franktheunicorn.review.backends import get_backend
 
     backend = get_backend(backend_config)
-    if not hasattr(backend, "_call_api") or not hasattr(backend, "_resolve_api_key"):
+    if not hasattr(backend, "metered_call"):
         return finding, False
 
     system_prompt = _build_tone_prompt(
@@ -90,10 +93,12 @@ def apply_tone_guard(
     )
 
     try:
-        rewritten = backend._call_api(
+        rewritten = backend.metered_call(
             system_prompt,
             finding.body,
-            backend._resolve_api_key(),
+            action_type="tone-guard",
+            project_id=project_id,
+            pr_id=pr_id,
         )
     except Exception:
         logger.warning("Tone guard LLM call failed; returning original finding.", exc_info=True)
@@ -120,6 +125,9 @@ def apply_tone_guard_batch(
     backend_config: LLMBackendConfig | None = None,
     is_new_contributor: bool = False,
     new_contributor_addendum: str = "",
+    *,
+    project_id: int | None = None,
+    pr_id: int | None = None,
 ) -> tuple[list[ReviewFinding], list[bool]]:
     """Apply tone guard to a batch of findings.
 
@@ -138,6 +146,8 @@ def apply_tone_guard_batch(
             backend_config,
             is_new_contributor=is_new_contributor,
             new_contributor_addendum=new_contributor_addendum,
+            project_id=project_id,
+            pr_id=pr_id,
         )
         results.append(rewritten)
         flags.append(ok)

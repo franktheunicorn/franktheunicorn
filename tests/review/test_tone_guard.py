@@ -32,7 +32,7 @@ class TestApplyToneGuard:
         ctx = make_pr_context(tone="constructive")
 
         mock_backend = MagicMock()
-        mock_backend._call_api.return_value = "Consider refactoring this section."
+        mock_backend.metered_call.return_value = "Consider refactoring this section."
         mock_backend._resolve_api_key.return_value = "test-key"
 
         with patch("franktheunicorn.review.backends.get_backend", return_value=mock_backend):
@@ -53,7 +53,7 @@ class TestApplyToneGuard:
         ctx = make_pr_context()
 
         mock_backend = MagicMock()
-        mock_backend._call_api.side_effect = RuntimeError("API down")
+        mock_backend.metered_call.side_effect = RuntimeError("API down")
         mock_backend._resolve_api_key.return_value = "key"
 
         with patch("franktheunicorn.review.backends.get_backend", return_value=mock_backend):
@@ -72,7 +72,7 @@ class TestApplyToneGuard:
         ctx = make_pr_context()
 
         mock_backend = MagicMock()
-        mock_backend._call_api.return_value = ""
+        mock_backend.metered_call.return_value = ""
         mock_backend._resolve_api_key.return_value = "key"
 
         with patch("franktheunicorn.review.backends.get_backend", return_value=mock_backend):
@@ -106,7 +106,7 @@ class TestApplyToneGuardBatch:
         ctx = make_pr_context()
 
         mock_backend = MagicMock()
-        mock_backend._call_api.side_effect = ["Good1", "Good2"]
+        mock_backend.metered_call.side_effect = ["Good1", "Good2"]
         mock_backend._resolve_api_key.return_value = "key"
 
         with patch("franktheunicorn.review.backends.get_backend", return_value=mock_backend):
@@ -127,7 +127,7 @@ class TestApplyToneGuardBatch:
         ctx = make_pr_context()
 
         mock_backend = MagicMock()
-        mock_backend._call_api.side_effect = ["Good1", RuntimeError("API down")]
+        mock_backend.metered_call.side_effect = ["Good1", RuntimeError("API down")]
         mock_backend._resolve_api_key.return_value = "key"
 
         with patch("franktheunicorn.review.backends.get_backend", return_value=mock_backend):

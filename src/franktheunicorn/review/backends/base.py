@@ -202,21 +202,63 @@ class BaseLLMBackend:
         system_prompt = build_system_prompt(pr_context)
         user_message = build_user_message(diff, pr_context)
 
-        import time
-
-        start = time.monotonic()
-        self._last_tokens_in = 0
-        self._last_tokens_out = 0
-
         try:
-            raw_text = self._call_api(system_prompt, user_message, api_key)
+            raw_text = self._invoke(system_prompt, user_message, api_key)
         except Exception as exc:
             _log_backend_error(type(self).__name__, exc)
             return ReviewResult()
+
+        return parse_llm_review(raw_text)
+
+    def _invoke(self, system_prompt: str, user_message: str, api_key: str) -> str:
+        """Call ``_call_api`` with token/duration bookkeeping.
+
+        Resets the token counters, times the call, stores the elapsed
+        duration, and returns the raw response text. Does *not* record a
+        CostRecord — the caller decides that (the main review path records
+        via the drafter, which has the project/PR ids; ancillary paths use
+        :meth:`metered_call`). Exceptions propagate to the caller.
+        """
+        import time
+
+        self._last_tokens_in = 0
+        self._last_tokens_out = 0
+        start = time.monotonic()
+        try:
+            return self._call_api(system_prompt, user_message, api_key)
         finally:
             self._last_duration = time.monotonic() - start
 
-        return parse_llm_review(raw_text)
+    def metered_call(
+        self,
+        system_prompt: str,
+        user_message: str,
+        *,
+        action_type: str,
+        project_id: int | None = None,
+        pr_id: int | None = None,
+        api_key: str | None = None,
+    ) -> str:
+        """Invoke the LLM and record its cost in one call.
+
+        This is the single choke point for LLM calls made *outside* the main
+        ``generate_review`` path — tone guard, sub-checks, PR-description
+        auditing, malicious-prompt assessment, and security triage. It calls
+        ``_call_api`` (capturing token usage + duration) and then records a
+        CostRecord via :meth:`record_cost`, so every real LLM call shows up in
+        the cost widget and digest rather than silently bypassing accounting.
+
+        The raw response text is returned. Exceptions from ``_call_api``
+        propagate so callers keep their own fallback handling; the cost is
+        still recorded in ``finally`` (a failed call has zero tokens, so
+        :meth:`record_cost` no-ops).
+        """
+        if api_key is None:
+            api_key = self._resolve_api_key()
+        try:
+            return self._invoke(system_prompt, user_message, api_key)
+        finally:
+            self.record_cost(project_id, pr_id, action_type=action_type)
 
     def record_cost(
         self,
@@ -372,7 +414,12 @@ _COST_PER_MTOK: dict[str, tuple[float, float]] = {
     "claude": (3.0, 15.0),
     "openai": (2.5, 10.0),
     "gemini": (1.25, 5.0),
+    # Local / self-hosted providers: tokens are still recorded (so usage is
+    # visible on /stats) but priced at $0. Listed explicitly so they don't
+    # fall through to the paid default below.
     "ollama": (0.0, 0.0),
+    "vllm": (0.0, 0.0),
+    "llama-cpp": (0.0, 0.0),
     "stub": (0.0, 0.0),
 }
 

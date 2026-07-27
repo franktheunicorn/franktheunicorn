@@ -67,6 +67,7 @@ class PullRequest(models.Model):
         ("consider-closing", "Consider Closing"),
         ("needs-triage", "Needs Triage"),
         ("your-prs", "Your PRs"),
+        ("mentioned", "Mentioned"),
         ("wip", "WIP"),
     ]
 
@@ -97,6 +98,7 @@ class PullRequest(models.Model):
     likely_ai_generated = models.BooleanField(default=False)
     is_operator_pr = models.BooleanField(default=False)
     is_new_contributor = models.BooleanField(default=False)
+    is_mentioned = models.BooleanField(default=False)
     is_low_context = models.BooleanField(default=False)
     is_likely_unowned = models.BooleanField(default=False)
     has_test_coverage = models.BooleanField(null=True, blank=True)
@@ -406,8 +408,10 @@ class CostRecord(models.Model):
     backend = models.CharField(max_length=100, blank=True, default="")
     tokens_in = models.IntegerField(default=0)
     tokens_out = models.IntegerField(default=0)
+    # 6 decimal places so small-but-real calls (a short tone-guard rewrite,
+    # a cheap local model) don't round down to $0.0000 on /stats.
     estimated_cost_usd = models.DecimalField(
-        max_digits=8, decimal_places=4, default=Decimal("0.0000")
+        max_digits=12, decimal_places=6, default=Decimal("0.000000")
     )
     duration_seconds = models.FloatField(null=True, blank=True)
     created_at = models.DateTimeField(default=timezone.now)

@@ -176,21 +176,23 @@ def _run_check_dispatch(
     if callable(scan):
         return list(scan(pr, diff, backend_config))
 
-    return _run_single_check(check, diff, pr_context, backend_config)
+    return _run_single_check(check, pr, diff, pr_context, backend_config)
 
 
 def _run_single_check(
     check: BaseCheck,
+    pr: PullRequest,
     diff: str,
     pr_context: PRContext,
     backend_config: LLMBackendConfig,
 ) -> list[ReviewFinding]:
     """Run one check against a single LLM backend.
 
-    For backends that extend ``BaseLLMBackend`` we call ``_call_api`` directly
-    with the check's custom prompt.  For other backends (e.g. StubBackend) we
-    fall back to ``generate_findings`` which uses the default review prompt —
-    the findings still flow through the check pipeline.
+    For backends that extend ``BaseLLMBackend`` we call the metered LLM path
+    with the check's custom prompt (so the call's cost is recorded).  For
+    other backends (e.g. StubBackend) we fall back to ``generate_findings``
+    which uses the default review prompt — the findings still flow through
+    the check pipeline.
     """
     from franktheunicorn.review.backends import get_backend
     from franktheunicorn.review.backends.base import BaseLLMBackend
@@ -199,8 +201,13 @@ def _run_single_check(
 
     if isinstance(backend, BaseLLMBackend):
         system_prompt, user_message = check.build_prompt(diff, pr_context)
-        api_key = backend._resolve_api_key()
-        raw_text = backend._call_api(system_prompt, user_message, api_key)
+        raw_text = backend.metered_call(
+            system_prompt,
+            user_message,
+            action_type=f"check:{check.name}",
+            project_id=pr.project_id,
+            pr_id=pr.pk,
+        )
         return check.parse_response(raw_text)
 
     # Fallback for backends without _call_api (e.g. StubBackend).

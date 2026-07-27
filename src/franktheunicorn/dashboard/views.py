@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 QUEUE_TABS: list[dict[str, str]] = [
     {"key": "review", "label": "Review"},
     {"key": "your-prs", "label": "Your PRs"},
+    {"key": "mentioned", "label": "Mentioned"},
     {"key": "ai-generated", "label": "AI-Generated"},
     {"key": "new-contributor", "label": "New Contributors"},
     {"key": "consider-closing", "label": "Consider Closing"},

@@ -1,6 +1,7 @@
 {% extends "dashboard/base.html" %}
 {% load static %}
 {% load markdown_filters %}
+{% load score_filters %}
 {% block title %}PR #{{ pr.number }} — franktheunicorn{% endblock %}
 {% block content %}
 <div class="pr-nav">
@@ -16,10 +17,11 @@
 <div class="pr-meta" style="margin-top: 0.5rem;">
     by <strong>{{ pr.author }}</strong>
     &middot; {{ pr.additions }}+ / {{ pr.deletions }}-
-    &middot; Score: <span class="score-badge">{{ pr.interest_score|floatformat:2 }}</span>
+    &middot; Score: <span class="score-badge">{{ pr.interest_score|score100 }}</span>
     {% if pr.is_draft %}&middot; Draft{% endif %}
     {% if pr.likely_ai_generated %}&middot; AI-Generated{% endif %}
     {% if pr.is_new_contributor %}&middot; New Contributor{% endif %}
+    {% if pr.is_mentioned %}&middot; <span class="badge-mentioned" title="You are a requested reviewer, assignee, or @-mentioned in this PR">Mentioned</span>{% endif %}
     {% if pr.mergeable == False %}&middot; <span class="badge-conflict" title="PR has merge conflicts">Needs Rebase</span>{% endif %}
     &middot; Queue: {{ pr.queue }}
     {% if pr.github_updated_at %}&middot; Updated upstream: <span title="{{ pr.github_updated_at|date:'Y-m-d H:i:s' }} UTC">{{ pr.github_updated_at|timesince }} ago</span>{% endif %}

@@ -121,9 +121,14 @@ class PRDescriptionCheck(BaseCheck):
         if not isinstance(backend, BaseLLMBackend):
             return []
 
-        api_key = backend._resolve_api_key()
         try:
-            raw_text = backend._call_api(system_prompt, user_message, api_key)
+            raw_text = backend.metered_call(
+                system_prompt,
+                user_message,
+                action_type="check:pr-description",
+                project_id=pr.project_id,
+                pr_id=pr.pk,
+            )
         except Exception:
             logger.exception("pr-description: LLM call failed for %s/%s#%d", owner, repo, pr.number)
             return []

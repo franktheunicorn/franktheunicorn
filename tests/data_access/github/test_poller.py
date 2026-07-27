@@ -384,6 +384,111 @@ class TestNewContributorDetection:
         assert project.contributors_cache_status == "fetched"
 
 
+def _mentioned_pr_data(
+    number: int,
+    author: str,
+    *,
+    reviewers: list[str] | None = None,
+    assignees: list[str] | None = None,
+    body: str | None = None,
+) -> dict[str, Any]:
+    """PR list item with operator-involvement fields for mention-routing tests."""
+    data = _pr_data(number, author)
+    data["requested_reviewers"] = [{"login": r} for r in (reviewers or [])]
+    data["assignees"] = [{"login": a} for a in (assignees or [])]
+    if body is not None:
+        data["body"] = body
+    return data
+
+
+@pytest.mark.django_db
+class TestMentionedRouting:
+    """PART A: operator-involvement routes a PR to the 'mentioned' queue."""
+
+    def _poll_one(
+        self, tmp_path: Path, pr_data: dict[str, Any], operator: str = "holdenk"
+    ) -> PullRequest:
+        # Seed contributors with the author so an uninvolved PR isn't sidetracked
+        # into the new-contributor queue (isolates mention routing).
+        client = _ContributorDetectionClient(
+            tmp_path, [pr_data], contributors=[pr_data["user"]["login"]]
+        )
+        config = ProjectConfig(owner="apache", repo="spark")
+        [pr] = poll_project(client, config, operator_username=operator)
+        pr.refresh_from_db()
+        return pr
+
+    def test_requested_reviewer_routes_to_mentioned(self, tmp_path: Path) -> None:
+        pr = self._poll_one(tmp_path, _mentioned_pr_data(101, "alice", reviewers=["holdenk"]))
+        assert pr.is_mentioned is True
+        assert pr.queue == "mentioned"
+
+    def test_assignee_routes_to_mentioned(self, tmp_path: Path) -> None:
+        pr = self._poll_one(tmp_path, _mentioned_pr_data(102, "alice", assignees=["holdenk"]))
+        assert pr.is_mentioned is True
+        assert pr.queue == "mentioned"
+
+    def test_body_mention_routes_to_mentioned(self, tmp_path: Path) -> None:
+        pr = self._poll_one(
+            tmp_path,
+            _mentioned_pr_data(
+                103, "alice", body="ping @holdenk please review this substantial change"
+            ),
+        )
+        assert pr.is_mentioned is True
+        assert pr.queue == "mentioned"
+
+    def test_uninvolved_pr_not_mentioned(self, tmp_path: Path) -> None:
+        pr = self._poll_one(tmp_path, _mentioned_pr_data(104, "alice", reviewers=["bob"]))
+        assert pr.is_mentioned is False
+        assert pr.queue != "mentioned"
+
+    def test_operator_pr_outranks_mentioned(self, tmp_path: Path) -> None:
+        # Operator authored AND is a requested reviewer: your-prs wins.
+        pr = self._poll_one(tmp_path, _mentioned_pr_data(105, "holdenk", reviewers=["holdenk"]))
+        assert pr.is_operator_pr is True
+        assert pr.queue == "your-prs"
+
+    def test_mentioned_outranks_new_contributor(self, tmp_path: Path) -> None:
+        # A brand-new contributor who also @-requests the operator → mentioned wins.
+        client = _ContributorDetectionClient(
+            tmp_path,
+            [_mentioned_pr_data(106, "first-timer", reviewers=["holdenk"])],
+            contributors=["established-dev"],
+        )
+        config = ProjectConfig(owner="apache", repo="spark")
+        [pr] = poll_project(client, config, operator_username="holdenk")
+        pr.refresh_from_db()
+        assert pr.is_new_contributor is True
+        assert pr.is_mentioned is True
+        assert pr.queue == "mentioned"
+
+    def test_is_mentioned_persisted_to_db(self, tmp_path: Path) -> None:
+        # Prove the flag survives to the DB (poll_project's save writes it).
+        pr = self._poll_one(tmp_path, _mentioned_pr_data(107, "alice", assignees=["holdenk"]))
+        fresh = PullRequest.objects.get(pk=pr.pk)
+        assert fresh.is_mentioned is True
+        assert fresh.queue == "mentioned"
+
+    def test_is_mentioned_cleared_when_involvement_removed(self, tmp_path: Path) -> None:
+        # Re-poll after the operator is dropped as reviewer: flag/queue reset.
+        # Exercises the reroute save path (state changes between polls).
+        client = _ContributorDetectionClient(
+            tmp_path,
+            [_mentioned_pr_data(108, "alice", reviewers=["holdenk"])],
+            contributors=["alice"],
+        )
+        config = ProjectConfig(owner="apache", repo="spark")
+        [pr] = poll_project(client, config, operator_username="holdenk")
+        assert pr.is_mentioned is True and pr.queue == "mentioned"
+
+        client._pull_requests = [_mentioned_pr_data(108, "alice", reviewers=["bob"])]
+        [pr] = poll_project(client, config, operator_username="holdenk")
+        fresh = PullRequest.objects.get(pk=pr.pk)
+        assert fresh.is_mentioned is False
+        assert fresh.queue != "mentioned"
+
+
 @pytest.mark.django_db
 class TestReEngagementDataInPoller:
     def test_issue_comments_fetched_for_reviewed_pr(self, tmp_path: Any) -> None:

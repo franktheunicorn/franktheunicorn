@@ -120,6 +120,36 @@ def score_has_review_request(
     return None
 
 
+def is_operator_involved(
+    body: str,
+    assignees: list[str],
+    requested_reviewers: list[str],
+    operator_username: str,
+) -> bool:
+    """Shared operator-involvement predicate.
+
+    True when the operator is a requested reviewer, an assignee, or
+    @-mentioned in the PR body. This is the single predicate behind both the
+    "Mentioned" dashboard queue (:func:`compute_moderation_flags`) and the
+    default review-gating policy (``worker.runner._should_auto_review``), so
+    the two never drift apart.
+
+    Deliberately does *not* include authorship — an operator-authored PR is a
+    separate concept (routed to "Your PRs"). Callers that also want to treat
+    authored PRs as "involved" check the author separately. Comment mentions
+    are excluded too: this keys off the PR body + assignees + review requests
+    only, not off arbitrary commenters @-ing the operator.
+
+    An empty ``operator_username`` returns ``False`` — involvement cannot be
+    determined without knowing who the operator is.
+    """
+    if not operator_username:
+        return False
+    if score_has_review_request(requested_reviewers, operator_username) is not None:
+        return True
+    return score_mentioned_or_assigned(body, assignees, operator_username) is not None
+
+
 def score_prior_review_history(
     author: str,
     operator_username: str,

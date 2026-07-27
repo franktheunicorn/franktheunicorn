@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from franktheunicorn.scoring.signals import LARGE_PR_THRESHOLD, _lowered, is_likely_bot
+from franktheunicorn.scoring.signals import (
+    LARGE_PR_THRESHOLD,
+    _lowered,
+    is_likely_bot,
+    is_operator_involved,
+)
 
 _MIN_BODY_LENGTH: int = 50
 _SOURCE_PREFIXES: tuple[str, ...] = ("src/", "lib/", "app/", "core/")
@@ -44,6 +49,18 @@ def compute_moderation_flags(
 
     if author and author.lower() == operator_username.lower():
         flags.append("is_operator_pr")
+
+    # Operator personally pulled in: requested reviewer, assignee, or
+    # @-mentioned in the PR body. Independent of is_operator_pr — the shared
+    # predicate (also used by the review-gating policy) never keys off
+    # authorship. Drives the "Mentioned" dashboard queue.
+    if is_operator_involved(
+        body=str(pr.get("body", "") or ""),
+        assignees=_str_list(pr, "assignees"),
+        requested_reviewers=_str_list(pr, "requested_reviewers"),
+        operator_username=operator_username,
+    ):
+        flags.append("mentioned")
 
     if pr.get("is_draft"):
         flags.append("draft")

@@ -27,4 +27,10 @@ class GeminiBackend(BaseLLMBackend):
                 response_mime_type="application/json",
             ),
         )
+        # google-genai reports usage on ``usage_metadata``. Absent (or with
+        # None counts) when the provider returns none — record what we have.
+        usage = getattr(response, "usage_metadata", None)
+        if usage is not None:
+            self._last_tokens_in = getattr(usage, "prompt_token_count", 0) or 0
+            self._last_tokens_out = getattr(usage, "candidates_token_count", 0) or 0
         return response.text or ""
