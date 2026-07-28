@@ -116,11 +116,12 @@ digest_enabled: false
 #
 # Example: same, but over the Agent Client Protocol (JSON-RPC/stdio,
 # https://agentclientprotocol.com/) instead of the CLI subprocess -- useful
-# for talking to an ACP agent adapter such as `claude-code-acp` directly.
+# for talking to an ACP agent adapter directly. Requires `npx`/`node` on
+# PATH (or set `acp_command` to a locally-installed binary).
 # llm_backends:
 #   - provider: "claude-code"
 #     transport: "acp"
-#     acp_command: "claude-code-acp"   # binary/argv launched over stdio
+#     acp_command: "npx @zed-industries/claude-code-acp"  # empty = this default
 #     cli_timeout_seconds: 300         # still bounds a single ACP prompt turn
 #
 # Available providers:

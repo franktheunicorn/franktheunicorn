@@ -538,6 +538,9 @@ KNOWN_LLM_PROVIDERS: frozenset[str] = frozenset(
     {"stub", "claude", "claude-code", "openai", "gemini", "ollama", "llama-cpp", "vllm", "rlm"}
 )
 
+# Transports for the "claude-code" provider (see LLMBackendConfig.transport).
+KNOWN_LLM_TRANSPORTS: frozenset[str] = frozenset({"cli", "acp"})
+
 # Combine strategies for the optional RLM rejection judge (v1.5).
 KNOWN_RLM_COMBINE_MODES: frozenset[str] = frozenset({"max", "average", "rlm-only"})
 
@@ -561,12 +564,12 @@ class LLMBackendConfig(BaseModel):
     # picks how: "cli" (default) shells out to ``cli_path`` in headless
     # prompt mode (``claude -p ... --output-format json``); "acp" speaks
     # the Agent Client Protocol (JSON-RPC over stdio,
-    # https://agentclientprotocol.com/) to ``acp_command`` -- e.g. the
-    # ``claude-code-acp`` adapter. ``cli_timeout_seconds`` bounds a single
-    # call under either transport.
-    transport: Literal["cli", "acp"] = "cli"
+    # https://agentclientprotocol.com/) to ``acp_command`` -- empty defaults
+    # to ``npx @zed-industries/claude-code-acp``. ``cli_timeout_seconds``
+    # bounds a single call under either transport.
+    transport: str = "cli"
     cli_path: str = "claude"
-    acp_command: str = "claude-code-acp"
+    acp_command: str = ""
     cli_timeout_seconds: int = 300
     # Recursive Language Model settings (v1.5). Only consulted when
     # ``provider == "rlm"``; ignored (with a warning) for other providers.
@@ -581,6 +584,18 @@ class LLMBackendConfig(BaseModel):
                 "Unknown LLM provider '%s'; known values: %s",
                 v,
                 ", ".join(sorted(KNOWN_LLM_PROVIDERS)),
+            )
+        return v
+
+    @field_validator("transport")
+    @classmethod
+    def transport_must_be_known(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in KNOWN_LLM_TRANSPORTS:
+            logger.warning(
+                "Unknown claude-code transport '%s'; known values: %s",
+                v,
+                ", ".join(sorted(KNOWN_LLM_TRANSPORTS)),
             )
         return v
 

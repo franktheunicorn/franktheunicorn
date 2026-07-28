@@ -13,8 +13,8 @@ Two transports, picked by ``config.transport``:
   headless prompt mode (``claude -p ... --output-format json``).
 * ``"acp"`` — speaks the Agent Client Protocol (JSON-RPC over stdio,
   https://agentclientprotocol.com/) to an ACP agent adapter such as
-  ``claude-code-acp``. See :mod:`franktheunicorn.review.backends.acp_transport`
-  for the protocol client.
+  ``npx @zed-industries/claude-code-acp`` (the default ``acp_command``). See
+  :mod:`franktheunicorn.review.backends.acp_transport` for the protocol client.
 
 This is distinct from ``review/claude_cli.py`` (the standalone "agent CLI
 reviewer", configured under the operator's ``claude_cli:`` block, that runs
@@ -35,7 +35,7 @@ import shutil
 import tempfile
 from typing import TYPE_CHECKING
 
-from franktheunicorn.review.backends.acp_transport import AcpProtocolError, run_acp_prompt
+from franktheunicorn.review.backends.acp_transport import AcpProtocolError, acp_complete
 from franktheunicorn.review.backends.base import BaseLLMBackend
 from franktheunicorn.review.tool_executor import make_executor
 
@@ -52,6 +52,9 @@ logger = logging.getLogger(__name__)
 _DISALLOWED_TOOLS = ["Bash", "Edit", "Write", "Read"]
 
 _DEFAULT_CLI_TIMEOUT_SECONDS = 300
+# Reference ACP agent adapter, run via npx so no separate install step is
+# required (see https://github.com/zed-industries/claude-code-acp).
+_DEFAULT_ACP_COMMAND = "npx @zed-industries/claude-code-acp"
 
 
 class ClaudeCodeBackend(BaseLLMBackend):
@@ -73,7 +76,7 @@ class ClaudeCodeBackend(BaseLLMBackend):
         super().__init__(config)
         self._transport = getattr(config, "transport", "") or "cli"
         self._cli_path = getattr(config, "cli_path", "") or "claude"
-        self._acp_command = getattr(config, "acp_command", "") or "claude-code-acp"
+        self._acp_command = getattr(config, "acp_command", "") or _DEFAULT_ACP_COMMAND
         self._cli_timeout = (
             getattr(config, "cli_timeout_seconds", 0) or _DEFAULT_CLI_TIMEOUT_SECONDS
         )
@@ -83,7 +86,7 @@ class ClaudeCodeBackend(BaseLLMBackend):
         # PATH, so the base class's graceful-degradation paths (empty
         # findings, "" completion) kick in the same way they do for a
         # missing SDK package.
-        probe_binary = self._acp_binary_argv()[0] if self._transport == "acp" else self._cli_path
+        probe_binary = self._acp_argv()[0] if self._transport == "acp" else self._cli_path
         self._sdk_available = shutil.which(probe_binary) is not None
         if not self._sdk_available:
             logger.error(
@@ -93,10 +96,9 @@ class ClaudeCodeBackend(BaseLLMBackend):
                 self._transport,
             )
 
-    def _acp_binary_argv(self) -> list[str]:
+    def _acp_argv(self) -> list[str]:
         """Split ``acp_command`` into argv (supports ``"cmd arg1 arg2"``)."""
-        parts = shlex.split(self._acp_command) if self._acp_command else []
-        return parts or ["claude-code-acp"]
+        return shlex.split(self._acp_command) if self._acp_command else [_DEFAULT_ACP_COMMAND]
 
     def _call_api(self, system_prompt: str, user_message: str, api_key: str) -> str:
         if self._transport == "acp":
@@ -124,20 +126,22 @@ class ClaudeCodeBackend(BaseLLMBackend):
         return self._parse_output(result.stdout)
 
     def _call_acp(self, system_prompt: str, user_message: str) -> str:
+        # ACP has no dedicated system-prompt field; fold it into the single
+        # text block sent as the prompt turn.
+        text = f"{system_prompt}\n\n{user_message}" if system_prompt else user_message
         try:
-            text, tokens_in, tokens_out = run_acp_prompt(
-                self._acp_binary_argv(),
+            out, usage = acp_complete(
+                self._acp_argv(),
+                text,
                 cwd=tempfile.gettempdir(),
-                timeout=float(self._cli_timeout),
-                system_prompt=system_prompt,
-                user_message=user_message,
+                timeout=self._cli_timeout,
             )
         except AcpProtocolError as exc:
             raise RuntimeError(f"ACP agent failed: {exc}") from exc
 
-        self._last_tokens_in = tokens_in
-        self._last_tokens_out = tokens_out
-        return text
+        self._last_tokens_in = usage.get("input_tokens", 0)
+        self._last_tokens_out = usage.get("output_tokens", 0)
+        return out
 
     def _parse_output(self, stdout: str) -> str:
         """Parse the CLI's ``--output-format json`` envelope.

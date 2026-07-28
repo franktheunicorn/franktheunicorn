@@ -1,21 +1,58 @@
-"""Tests for the ACP (Agent Client Protocol) v1 JSON-RPC/stdio client.
+"""Tests for the ACP (Agent Client Protocol) JSON-RPC/stdio client.
 
-These tests never launch a real ACP agent — ``subprocess.Popen`` is
-monkeypatched to a fake process object whose stdin/stdout are in-memory
-buffers we script line by line.
+Two layers of coverage:
+
+* ``TestAcpCompleteIntegration`` spawns a real fake ACP agent (see
+  ``fixtures/fake_acp_agent.py``) as a genuine subprocess via
+  ``sys.executable`` -- real stdio, real JSON-RPC framing, no mocking of
+  ``subprocess.Popen``. This exercises the actual happy path (including a
+  stray non-JSON line the client must ignore, and a client-bound request
+  the agent sends that we must decline) plus the timeout path.
+* ``TestAcpCompleteErrorHandling`` monkeypatches ``subprocess.Popen`` with a
+  fake process whose stdin/stdout are in-memory buffers, for fast/precise
+  coverage of individual JSON-RPC error responses.
 """
 
 from __future__ import annotations
 
 import io
 import json
+import sys
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from franktheunicorn.review.backends.acp_transport import AcpProtocolError, run_acp_prompt
+from franktheunicorn.review.backends.acp_transport import AcpProtocolError, acp_complete
 
 _POPEN = "franktheunicorn.review.backends.acp_transport.subprocess.Popen"
+_FAKE_AGENT = str(Path(__file__).parent / "fixtures" / "fake_acp_agent.py")
+
+
+class TestAcpCompleteIntegration:
+    """Spawns the real fake_acp_agent.py fixture as a subprocess."""
+
+    def test_full_handshake_streamed_reply_and_unexpected_request_declined(
+        self, tmp_path: Path
+    ) -> None:
+        text, usage = acp_complete(
+            [sys.executable, _FAKE_AGENT],
+            "say hi",
+            cwd=str(tmp_path),
+            timeout=10,
+        )
+
+        assert text == "Hello world!"
+        assert usage == {"input_tokens": 7, "output_tokens": 3}
+
+    def test_timeout_raises_and_kills_hung_agent(self, tmp_path: Path) -> None:
+        with pytest.raises(AcpProtocolError, match="timed out"):
+            acp_complete(
+                [sys.executable, _FAKE_AGENT, "hang"],
+                "say hi",
+                cwd=str(tmp_path),
+                timeout=1,
+            )
 
 
 class _FakeStdin(io.StringIO):
@@ -58,85 +95,28 @@ def _handshake_lines(session_id: str = "sess_abc123") -> list[dict[str, object]]
         {
             "jsonrpc": "2.0",
             "id": 1,
-            "result": {
-                "protocolVersion": 1,
-                "agentCapabilities": {},
-                "agentInfo": {"name": "fake-acp-agent", "title": "Fake", "version": "0.0"},
-            },
+            "result": {"protocolVersion": 1, "agentCapabilities": {}, "authMethods": []},
         },
         {"jsonrpc": "2.0", "id": 2, "result": {"sessionId": session_id}},
     ]
 
 
-class TestRunAcpPromptHappyPath:
-    def test_full_handshake_and_streamed_reply(self) -> None:
-        lines = [
-            *_handshake_lines(),
-            {
-                "jsonrpc": "2.0",
-                "method": "session/update",
-                "params": {
-                    "sessionId": "sess_abc123",
-                    "update": {
-                        "sessionUpdate": "agent_message_chunk",
-                        "content": {"type": "text", "text": "hello "},
-                    },
-                },
-            },
-            {
-                "jsonrpc": "2.0",
-                "method": "session/update",
-                "params": {
-                    "sessionId": "sess_abc123",
-                    "update": {
-                        "sessionUpdate": "agent_message_chunk",
-                        "content": {"type": "text", "text": "world"},
-                    },
-                },
-            },
-            {
-                "jsonrpc": "2.0",
-                "method": "session/update",
-                "params": {
-                    "sessionId": "sess_abc123",
-                    "update": {"sessionUpdate": "usage_update", "used": 42, "size": 200000},
-                },
-            },
-            {"jsonrpc": "2.0", "id": 3, "result": {"stopReason": "end_turn"}},
-        ]
-        proc = _fake_proc(lines)
-
-        with patch(_POPEN, return_value=proc):
-            text, tokens_in, tokens_out = run_acp_prompt(
-                ["claude-code-acp"],
-                cwd="/tmp",
-                timeout=5.0,
-                system_prompt="be terse",
-                user_message="say hi",
-            )
-
-        assert text == "hello world"
-        assert tokens_in == 0
-        assert tokens_out == 42
-
+class TestAcpCompleteMockedHappyPath:
     def test_sends_correct_method_names_and_params(self) -> None:
         proc = _fake_proc([*_handshake_lines(), {"jsonrpc": "2.0", "id": 3, "result": {}}])
 
         with patch(_POPEN, return_value=proc):
-            run_acp_prompt(
-                ["claude-code-acp", "--flag"],
-                cwd="/repo",
-                timeout=5.0,
-                system_prompt="sys",
-                user_message="usr",
-            )
+            acp_complete(["claude-code-acp", "--flag"], "combined text", cwd="/repo", timeout=5)
 
         sent = proc.stdin.sent
         assert [m["method"] for m in sent] == ["initialize", "session/new", "session/prompt"]
 
         init_params = sent[0]["params"]
         assert init_params["protocolVersion"] == 1
-        assert init_params["clientCapabilities"] == {}
+        assert init_params["clientCapabilities"] == {
+            "fs": {"readTextFile": False, "writeTextFile": False},
+            "terminal": False,
+        }
         assert init_params["clientInfo"]["name"] == "franktheunicorn"
 
         session_params = sent[1]["params"]
@@ -145,158 +125,43 @@ class TestRunAcpPromptHappyPath:
 
         prompt_params = sent[2]["params"]
         assert prompt_params["sessionId"] == "sess_abc123"
-        assert prompt_params["prompt"] == [
-            {"type": "text", "text": "sys"},
-            {"type": "text", "text": "usr"},
-        ]
+        assert prompt_params["prompt"] == [{"type": "text", "text": "combined text"}]
 
-    def test_no_system_prompt_sends_single_content_block(self) -> None:
+    def test_returns_usage_from_final_response(self) -> None:
+        lines = [
+            *_handshake_lines(),
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "result": {
+                    "stopReason": "end_turn",
+                    "usage": {"input_tokens": 12, "output_tokens": 34},
+                },
+            },
+        ]
+        proc = _fake_proc(lines)
+
+        with patch(_POPEN, return_value=proc):
+            text, usage = acp_complete(["claude-code-acp"], "hi", cwd="/tmp", timeout=5)
+
+        assert text == ""
+        assert usage == {"input_tokens": 12, "output_tokens": 34}
+
+    def test_no_usage_in_response_returns_empty_dict(self) -> None:
         proc = _fake_proc([*_handshake_lines(), {"jsonrpc": "2.0", "id": 3, "result": {}}])
 
         with patch(_POPEN, return_value=proc):
-            run_acp_prompt(
-                ["claude-code-acp"],
-                cwd="/repo",
-                timeout=5.0,
-                system_prompt="",
-                user_message="usr only",
-            )
+            _, usage = acp_complete(["claude-code-acp"], "hi", cwd="/tmp", timeout=5)
 
-        prompt_params = proc.stdin.sent[2]["params"]
-        assert prompt_params["prompt"] == [{"type": "text", "text": "usr only"}]
+        assert usage == {}
 
     def test_terminates_process_on_success(self) -> None:
         proc = _fake_proc([*_handshake_lines(), {"jsonrpc": "2.0", "id": 3, "result": {}}])
 
         with patch(_POPEN, return_value=proc):
-            run_acp_prompt(
-                ["claude-code-acp"], cwd="/tmp", timeout=5.0, system_prompt="", user_message="x"
-            )
+            acp_complete(["claude-code-acp"], "hi", cwd="/tmp", timeout=5)
 
         proc.terminate.assert_called_once()
-
-
-class TestRunAcpPromptErrorHandling:
-    def test_binary_not_found_raises_protocol_error(self) -> None:
-        with (
-            patch(_POPEN, side_effect=FileNotFoundError()),
-            pytest.raises(AcpProtocolError, match="not found"),
-        ):
-            run_acp_prompt(
-                ["nonexistent-acp-agent"],
-                cwd="/tmp",
-                timeout=5.0,
-                system_prompt="",
-                user_message="hi",
-            )
-
-    def test_initialize_error_response_raises(self) -> None:
-        lines = [
-            {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "error": {"code": -32600, "message": "unsupported protocol version"},
-            },
-        ]
-        proc = _fake_proc(lines)
-
-        with (
-            patch(_POPEN, return_value=proc),
-            pytest.raises(AcpProtocolError, match="initialize failed"),
-        ):
-            run_acp_prompt(
-                ["claude-code-acp"],
-                cwd="/tmp",
-                timeout=5.0,
-                system_prompt="",
-                user_message="hi",
-            )
-
-    def test_session_new_error_response_raises(self) -> None:
-        lines = [
-            _handshake_lines()[0],
-            {"jsonrpc": "2.0", "id": 2, "error": {"code": -32000, "message": "cwd not found"}},
-        ]
-        proc = _fake_proc(lines)
-
-        with (
-            patch(_POPEN, return_value=proc),
-            pytest.raises(AcpProtocolError, match="session/new failed"),
-        ):
-            run_acp_prompt(
-                ["claude-code-acp"],
-                cwd="/tmp",
-                timeout=5.0,
-                system_prompt="",
-                user_message="hi",
-            )
-
-    def test_refusal_stop_reason_raises(self) -> None:
-        lines = [
-            *_handshake_lines(),
-            {"jsonrpc": "2.0", "id": 3, "result": {"stopReason": "refusal"}},
-        ]
-        proc = _fake_proc(lines)
-
-        with (
-            patch(_POPEN, return_value=proc),
-            pytest.raises(AcpProtocolError, match="refused"),
-        ):
-            run_acp_prompt(
-                ["claude-code-acp"],
-                cwd="/tmp",
-                timeout=5.0,
-                system_prompt="",
-                user_message="hi",
-            )
-
-    def test_agent_closes_stdout_early_raises(self) -> None:
-        # Only the initialize response, then EOF -- session/new never answered.
-        proc = _fake_proc([_handshake_lines()[0]])
-
-        with (
-            patch(_POPEN, return_value=proc),
-            pytest.raises(AcpProtocolError, match="closed stdout"),
-        ):
-            run_acp_prompt(
-                ["claude-code-acp"],
-                cwd="/tmp",
-                timeout=5.0,
-                system_prompt="",
-                user_message="hi",
-            )
-
-    def test_missing_session_id_raises(self) -> None:
-        lines = [_handshake_lines()[0], {"jsonrpc": "2.0", "id": 2, "result": {}}]
-        proc = _fake_proc(lines)
-
-        with (
-            patch(_POPEN, return_value=proc),
-            pytest.raises(AcpProtocolError, match="no sessionId"),
-        ):
-            run_acp_prompt(
-                ["claude-code-acp"],
-                cwd="/tmp",
-                timeout=5.0,
-                system_prompt="",
-                user_message="hi",
-            )
-
-    def test_timeout_raises_and_terminates(self) -> None:
-        # No lines at all: the queue.get() call will time out immediately
-        # since the reader thread puts EOF (None) right away with nothing
-        # queued -- this exercises the "closed stdout" path with a tiny
-        # timeout budget rather than actually sleeping for a full timeout.
-        proc = _fake_proc([])
-
-        with patch(_POPEN, return_value=proc), pytest.raises(AcpProtocolError):
-            run_acp_prompt(
-                ["claude-code-acp"],
-                cwd="/tmp",
-                timeout=0.2,
-                system_prompt="",
-                user_message="hi",
-            )
 
     def test_non_json_lines_are_ignored(self) -> None:
         proc = MagicMock()
@@ -312,8 +177,86 @@ class TestRunAcpPromptErrorHandling:
         proc.wait.return_value = 0
 
         with patch(_POPEN, return_value=proc):
-            text, _, _ = run_acp_prompt(
-                ["claude-code-acp"], cwd="/tmp", timeout=5.0, system_prompt="", user_message="hi"
-            )
+            text, _usage = acp_complete(["claude-code-acp"], "hi", cwd="/tmp", timeout=5)
 
         assert text == ""
+
+
+class TestAcpCompleteErrorHandling:
+    def test_binary_not_found_raises_protocol_error(self) -> None:
+        with (
+            patch(_POPEN, side_effect=FileNotFoundError()),
+            pytest.raises(AcpProtocolError, match="not found"),
+        ):
+            acp_complete(["nonexistent-acp-agent"], "hi", cwd="/tmp", timeout=5)
+
+    def test_initialize_error_response_raises(self) -> None:
+        lines = [
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": {"code": -32600, "message": "unsupported protocol version"},
+            },
+        ]
+        proc = _fake_proc(lines)
+
+        with (
+            patch(_POPEN, return_value=proc),
+            pytest.raises(AcpProtocolError, match="initialize failed"),
+        ):
+            acp_complete(["claude-code-acp"], "hi", cwd="/tmp", timeout=5)
+
+    def test_session_new_error_response_raises(self) -> None:
+        lines = [
+            _handshake_lines()[0],
+            {"jsonrpc": "2.0", "id": 2, "error": {"code": -32000, "message": "cwd not found"}},
+        ]
+        proc = _fake_proc(lines)
+
+        with (
+            patch(_POPEN, return_value=proc),
+            pytest.raises(AcpProtocolError, match="session/new failed"),
+        ):
+            acp_complete(["claude-code-acp"], "hi", cwd="/tmp", timeout=5)
+
+    def test_refusal_stop_reason_raises(self) -> None:
+        lines = [
+            *_handshake_lines(),
+            {"jsonrpc": "2.0", "id": 3, "result": {"stopReason": "refusal"}},
+        ]
+        proc = _fake_proc(lines)
+
+        with (
+            patch(_POPEN, return_value=proc),
+            pytest.raises(AcpProtocolError, match="refused"),
+        ):
+            acp_complete(["claude-code-acp"], "hi", cwd="/tmp", timeout=5)
+
+    def test_agent_closes_stdout_early_raises(self) -> None:
+        # Only the initialize response, then EOF -- session/new never answered.
+        proc = _fake_proc([_handshake_lines()[0]])
+
+        with (
+            patch(_POPEN, return_value=proc),
+            pytest.raises(AcpProtocolError, match="closed stdout"),
+        ):
+            acp_complete(["claude-code-acp"], "hi", cwd="/tmp", timeout=5)
+
+    def test_missing_session_id_raises(self) -> None:
+        lines = [_handshake_lines()[0], {"jsonrpc": "2.0", "id": 2, "result": {}}]
+        proc = _fake_proc(lines)
+
+        with (
+            patch(_POPEN, return_value=proc),
+            pytest.raises(AcpProtocolError, match="no sessionId"),
+        ):
+            acp_complete(["claude-code-acp"], "hi", cwd="/tmp", timeout=5)
+
+    def test_mocked_timeout_raises(self) -> None:
+        # No lines at all: the reader thread puts EOF (None) right away with
+        # nothing queued -- exercises the "closed stdout" timeout path
+        # without actually sleeping for a full timeout.
+        proc = _fake_proc([])
+
+        with patch(_POPEN, return_value=proc), pytest.raises(AcpProtocolError):
+            acp_complete(["claude-code-acp"], "hi", cwd="/tmp", timeout=1)
