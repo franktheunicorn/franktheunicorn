@@ -14,12 +14,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from franktheunicorn.config.models import LLMBackendConfig
+from franktheunicorn.review.backends.acp_transport import AcpProtocolError
 from franktheunicorn.review.backends.claude_code_backend import ClaudeCodeBackend
 from franktheunicorn.review.tool_executor import ExecResult
 from tests.conftest import make_pr_context
 from tests.factories import ProjectFactory
 
 _MAKE_EXECUTOR = "franktheunicorn.review.backends.claude_code_backend.make_executor"
+_RUN_ACP_PROMPT = "franktheunicorn.review.backends.claude_code_backend.run_acp_prompt"
 
 _SAMPLE_DIFF = """\
 diff --git a/src/main.py b/src/main.py
@@ -179,6 +181,94 @@ class TestClaudeCodeBackendFailureHandling:
             text = backend.complete("hi")
 
         assert text == ""
+
+
+class TestClaudeCodeBackendAcpTransport:
+    """``transport: "acp"`` dispatches to run_acp_prompt instead of the CLI."""
+
+    @patch("shutil.which", return_value="/usr/local/bin/claude-code-acp")
+    def test_availability_probes_acp_binary_not_cli_path(self, mock_which: MagicMock) -> None:
+        backend = ClaudeCodeBackend(LLMBackendConfig(provider="claude-code", transport="acp"))
+        assert backend._sdk_available is True
+        mock_which.assert_called_once_with("claude-code-acp")
+
+    @patch("shutil.which", return_value=None)
+    def test_missing_acp_binary_marks_unavailable(self, _mock_which: MagicMock) -> None:
+        backend = ClaudeCodeBackend(LLMBackendConfig(provider="claude-code", transport="acp"))
+        assert backend._sdk_available is False
+
+    @patch("shutil.which", return_value="/usr/local/bin/claude-code-acp")
+    def test_complete_calls_run_acp_prompt_with_argv_and_timeout(
+        self, _mock_which: MagicMock
+    ) -> None:
+        backend = ClaudeCodeBackend(
+            LLMBackendConfig(
+                provider="claude-code",
+                transport="acp",
+                acp_command="claude-code-acp --some-flag",
+                cli_timeout_seconds=120,
+            )
+        )
+
+        with patch(_RUN_ACP_PROMPT, return_value=("acp reply", 10, 20)) as mock_run:
+            text = backend.complete("hi there", system="be terse")
+
+        assert text == "acp reply"
+        assert backend._last_tokens_in == 10
+        assert backend._last_tokens_out == 20
+        mock_run.assert_called_once()
+        call_kwargs = mock_run.call_args.kwargs
+        assert mock_run.call_args.args[0] == ["claude-code-acp", "--some-flag"]
+        assert call_kwargs["timeout"] == 120.0
+        assert call_kwargs["system_prompt"] == "be terse"
+        assert call_kwargs["user_message"] == "hi there"
+
+    @patch("shutil.which", return_value="/usr/local/bin/claude-code-acp")
+    def test_acp_protocol_error_swallowed_by_complete(self, _mock_which: MagicMock) -> None:
+        backend = ClaudeCodeBackend(LLMBackendConfig(provider="claude-code", transport="acp"))
+
+        with patch(_RUN_ACP_PROMPT, side_effect=AcpProtocolError("agent refused")):
+            text = backend.complete("hi")
+
+        assert text == ""
+
+    @patch("shutil.which", return_value="/usr/local/bin/claude-code-acp")
+    def test_generate_review_parses_findings_via_acp(self, _mock_which: MagicMock) -> None:
+        backend = ClaudeCodeBackend(LLMBackendConfig(provider="claude-code", transport="acp"))
+        review_json = json.dumps(
+            {
+                "overall_vibe": "Fine.",
+                "findings": [
+                    {
+                        "file_path": "src/main.py",
+                        "line_number": 2,
+                        "title": "Unused import",
+                        "body": "sys is imported but never used.",
+                        "severity": "low",
+                    }
+                ],
+            }
+        )
+
+        with patch(_RUN_ACP_PROMPT, return_value=(review_json, 5, 5)):
+            result = backend.generate_review(_SAMPLE_DIFF, make_pr_context())
+
+        assert result.overall_vibe == "Fine."
+        assert len(result.findings) == 1
+
+    @patch("shutil.which", return_value="/usr/local/bin/claude")
+    def test_cli_transport_never_calls_run_acp_prompt(self, _mock_which: MagicMock) -> None:
+        # Default transport is "cli" -- make sure the ACP path is untouched.
+        backend = ClaudeCodeBackend(LLMBackendConfig(provider="claude-code"))
+        executor = _fake_executor(ExecResult(returncode=0, stdout=_cli_json("ok"), stderr=""))
+
+        with (
+            patch(_MAKE_EXECUTOR, return_value=executor),
+            patch(_RUN_ACP_PROMPT) as mock_run_acp,
+        ):
+            backend.complete("hi")
+
+        mock_run_acp.assert_not_called()
 
 
 @pytest.mark.django_db

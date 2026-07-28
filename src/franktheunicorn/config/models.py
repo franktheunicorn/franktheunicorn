@@ -555,10 +555,18 @@ class LLMBackendConfig(BaseModel):
     base_url: str = ""
     temperature: float = 0.3
     max_tokens: int = 4096
-    # Only consulted when ``provider == "claude-code"``: shells out to the
-    # local `claude` binary instead of calling the Anthropic API, so no
-    # API key is needed (billed via the CLI's own logged-in auth).
+    # Only consulted when ``provider == "claude-code"``: talks to a local
+    # Claude Code agent instead of calling the Anthropic API, so no API key
+    # is needed (billed via the agent's own logged-in auth). ``transport``
+    # picks how: "cli" (default) shells out to ``cli_path`` in headless
+    # prompt mode (``claude -p ... --output-format json``); "acp" speaks
+    # the Agent Client Protocol (JSON-RPC over stdio,
+    # https://agentclientprotocol.com/) to ``acp_command`` -- e.g. the
+    # ``claude-code-acp`` adapter. ``cli_timeout_seconds`` bounds a single
+    # call under either transport.
+    transport: Literal["cli", "acp"] = "cli"
     cli_path: str = "claude"
+    acp_command: str = "claude-code-acp"
     cli_timeout_seconds: int = 300
     # Recursive Language Model settings (v1.5). Only consulted when
     # ``provider == "rlm"``; ignored (with a warning) for other providers.

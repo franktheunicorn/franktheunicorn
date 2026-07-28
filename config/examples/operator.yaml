@@ -110,8 +110,18 @@ digest_enabled: false
 # llm_backends:
 #   - provider: "claude-code"
 #     model: ""            # empty = whatever the claude CLI defaults to
+#     transport: "cli"     # "cli" (default) or "acp"
 #     cli_path: "claude"
 #     cli_timeout_seconds: 300
+#
+# Example: same, but over the Agent Client Protocol (JSON-RPC/stdio,
+# https://agentclientprotocol.com/) instead of the CLI subprocess -- useful
+# for talking to an ACP agent adapter such as `claude-code-acp` directly.
+# llm_backends:
+#   - provider: "claude-code"
+#     transport: "acp"
+#     acp_command: "claude-code-acp"   # binary/argv launched over stdio
+#     cli_timeout_seconds: 300         # still bounds a single ACP prompt turn
 #
 # Available providers:
 #   claude       — Anthropic API (models: claude-sonnet-4-20250514, claude-opus-4-20250514)
