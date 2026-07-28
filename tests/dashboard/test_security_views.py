@@ -8,11 +8,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 from django.test import Client
 
-from franktheunicorn.core.models import SecurityReport
+from franktheunicorn.core.models import SecurityReport, SecurityTriageFeedback
 from tests.factories import (
     EmailScanRecordFactory,
     ProjectFactory,
     SecurityReportFactory,
+    SecurityTriageGuidanceFactory,
 )
 
 
@@ -394,3 +395,115 @@ class TestSecurityReportSandbox:
         assert WorkerCommand.objects.filter(
             command="run_security_sandbox", security_report=report, status="pending"
         ).exists()
+
+
+@pytest.mark.django_db
+class TestSecurityReportFeedback:
+    @patch("franktheunicorn.config.loader.get_operator_config")
+    def test_agree_records_feedback_and_returns_fragment(
+        self, mock_config: MagicMock, client: Client, db: Any
+    ) -> None:
+        from franktheunicorn.config.models import OperatorConfig
+
+        mock_config.return_value = OperatorConfig(github_username="testuser")
+        report = SecurityReportFactory(triage_summary="Looks legit.", assessed_severity="high")
+
+        response = client.post(
+            f"/security/{report.pk}/feedback/",
+            {"agreed": "yes", "comment": "Solid analysis"},
+        )
+        assert response.status_code == 200
+        assert b"Agreed" in response.content
+
+        feedback = SecurityTriageFeedback.objects.get()
+        assert feedback.report == report
+        assert feedback.agreed is True
+        assert feedback.operator_comment == "Solid analysis"
+        assert feedback.triage_summary_snapshot == "Looks legit."
+        assert feedback.assessed_severity_snapshot == "high"
+
+    @patch("franktheunicorn.config.loader.get_operator_config")
+    def test_disagree_records_feedback(
+        self, mock_config: MagicMock, client: Client, db: Any
+    ) -> None:
+        from franktheunicorn.config.models import OperatorConfig
+
+        mock_config.return_value = OperatorConfig(github_username="testuser")
+        report = SecurityReportFactory()
+
+        response = client.post(
+            f"/security/{report.pk}/feedback/",
+            {"agreed": "no", "comment": "This is expected behavior."},
+        )
+        assert response.status_code == 200
+        assert b"Disagreed" in response.content
+
+        feedback = SecurityTriageFeedback.objects.get()
+        assert feedback.agreed is False
+
+    @patch("franktheunicorn.config.loader.get_operator_config")
+    def test_shows_current_learned_guidance(
+        self, mock_config: MagicMock, client: Client, db: Any
+    ) -> None:
+        from franktheunicorn.config.models import OperatorConfig
+
+        mock_config.return_value = OperatorConfig(github_username="testuser")
+        project = ProjectFactory()
+        SecurityTriageGuidanceFactory(project=project, guidance_text="Watch for X pattern.")
+        report = SecurityReportFactory(project=project)
+
+        response = client.post(
+            f"/security/{report.pk}/feedback/",
+            {"agreed": "yes", "comment": ""},
+        )
+        assert response.status_code == 200
+        assert b"Watch for X pattern." in response.content
+
+    @patch("franktheunicorn.config.loader.get_operator_config")
+    def test_no_llm_backend_still_records_feedback(
+        self, mock_config: MagicMock, client: Client, db: Any
+    ) -> None:
+        """No LLM backend configured means distillation is skipped, but the
+        feedback row itself must still save (degrade gracefully, not fail)."""
+        from franktheunicorn.config.models import OperatorConfig
+
+        mock_config.return_value = OperatorConfig(github_username="testuser")
+        report = SecurityReportFactory()
+
+        response = client.post(f"/security/{report.pk}/feedback/", {"agreed": "yes"})
+        assert response.status_code == 200
+        assert SecurityTriageFeedback.objects.filter(report=report).exists()
+
+    def test_feedback_404_for_missing_report(self, client: Client, db: Any) -> None:
+        response = client.post("/security/99999/feedback/", {"agreed": "yes"})
+        assert response.status_code == 404
+
+
+@pytest.mark.django_db
+class TestSecurityGuidanceList:
+    def test_renders_empty_state(self, client: Client) -> None:
+        response = client.get("/security/guidance/")
+        assert response.status_code == 200
+        assert b"No learned guidance yet" in response.content
+
+    def test_renders_active_guidance_rows(self, client: Client, db: Any) -> None:
+        project = ProjectFactory(owner="apache", repo="spark")
+        SecurityTriageGuidanceFactory(
+            project=project,
+            guidance_text="- Treat model-loading RCE as expected.",
+            source_feedback_count=3,
+        )
+        SecurityTriageGuidanceFactory(project=None, guidance_text="- Global rule.")
+
+        response = client.get("/security/guidance/")
+        body = response.content.decode()
+        assert response.status_code == 200
+        assert "Treat model-loading RCE as expected." in body
+        assert "Global rule." in body
+        assert "3" in body
+
+    def test_inactive_guidance_excluded(self, client: Client, db: Any) -> None:
+        SecurityTriageGuidanceFactory(guidance_text="stale guidance", is_active=False)
+
+        response = client.get("/security/guidance/")
+        assert b"stale guidance" not in response.content

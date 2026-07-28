@@ -31,6 +31,7 @@ from franktheunicorn.core.models import (
     PullRequest,
     ReviewDraft,
     SecurityReport,
+    SecurityTriageGuidance,
     TestRun,
     WorkerCommand,
 )
@@ -1123,6 +1124,32 @@ def security_report_verdict(request: HttpRequest, report_id: int) -> HttpRespons
 
 
 @require_POST
+def security_report_feedback(request: HttpRequest, report_id: int) -> HttpResponse:
+    """Record agree/disagree feedback on a triage verdict (htmx).
+
+    Feeds the iterative learning loop: feedback is distilled into
+    ``SecurityTriageGuidance``, which future triage prompts pick up via
+    ``security.learning.resolve_triage_guidance``.
+    """
+    report = get_object_or_404(SecurityReport.objects.select_related("project"), pk=report_id)
+    agreed = request.POST.get("agreed", "") == "yes"
+    comment = request.POST.get("comment", "").strip()
+
+    from franktheunicorn.config.loader import get_operator_config
+    from franktheunicorn.security.learning import record_triage_feedback, resolve_triage_guidance
+
+    operator_config = get_operator_config()
+    record_triage_feedback(report, agreed, comment, operator_config)
+    learned_guidance = resolve_triage_guidance(report.project)
+
+    return render(
+        request,
+        "dashboard/_security_feedback.html",
+        {"report": report, "agreed": agreed, "learned_guidance": learned_guidance},
+    )
+
+
+@require_POST
 def security_report_sandbox(request: HttpRequest, report_id: int) -> HttpResponse:
     """Queue a sandbox POC execution for the worker (htmx)."""
     report = get_object_or_404(SecurityReport.objects.select_related("project"), pk=report_id)
@@ -1176,6 +1203,21 @@ def security_report_cve_check(request: HttpRequest, report_id: int) -> HttpRespo
         return HttpResponse('<div class="cve-result" style="color: #c00;">CVE lookup failed.</div>')
 
     return render(request, "dashboard/_security_cve_matches.html", {"report": report})
+
+
+def security_guidance_list(request: HttpRequest) -> HttpResponse:
+    """Overview of learned triage guidance, per project and global.
+
+    Mirrors ``anti_pattern_list`` — a read-only view of what the iterative
+    learning loop has distilled from operator agree/disagree feedback so
+    far.
+    """
+    guidance = SecurityTriageGuidance.objects.select_related("project").filter(is_active=True)
+    return render(
+        request,
+        "dashboard/security_guidance.html",
+        {"guidance_rows": guidance},
+    )
 
 
 def _auto_triage_report(report: SecurityReport) -> None:

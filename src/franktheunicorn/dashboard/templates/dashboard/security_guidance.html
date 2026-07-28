@@ -1,0 +1,38 @@
+{% extends "dashboard/base.html" %}
+{% load static %}
+{% block title %}Learned Triage Guidance — franktheunicorn{% endblock %}
+{% block content %}
+<h2>Learned Triage Guidance</h2>
+<p style="font-size: 0.85rem; color: var(--muted); margin-bottom: 1rem;">
+    Distilled from operator agree/disagree feedback on security triage verdicts.
+    Injected into future triage system prompts (per project, plus a global
+    addendum). See <a href="{% url 'dashboard:security_list' %}">Security Reports</a>.
+</p>
+
+<table>
+    <thead>
+        <tr>
+            <th>Project</th>
+            <th>Guidance</th>
+            <th>Feedback Count</th>
+            <th>Updated</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for guidance in guidance_rows %}
+        <tr>
+            <td>{% if guidance.project %}{{ guidance.project.full_name }}{% else %}<em>Global</em>{% endif %}</td>
+            <td style="max-width: 30rem;">
+                <pre style="font-size: 0.8rem; white-space: pre-wrap; word-wrap: break-word; margin: 0;">{{ guidance.guidance_text }}</pre>
+            </td>
+            <td>{{ guidance.source_feedback_count }}</td>
+            <td>{{ guidance.updated_at|timesince }} ago</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="4" class="empty-state">
+            <p>No learned guidance yet. Agree or disagree with a triage verdict to start building it.</p>
+        </td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

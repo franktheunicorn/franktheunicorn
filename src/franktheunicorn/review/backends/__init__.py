@@ -18,6 +18,7 @@ _BACKENDS: dict[str, tuple[str, str]] = {
     "openai": ("franktheunicorn.review.backends.openai_backend", "OpenAIBackend"),
     "gemini": ("franktheunicorn.review.backends.gemini_backend", "GeminiBackend"),
     "ollama": ("franktheunicorn.review.backends.ollama_backend", "OllamaBackend"),
+    "claude-code": ("franktheunicorn.review.backends.claude_code_backend", "ClaudeCodeBackend"),
     "stub": ("franktheunicorn.review.backends.stub_backend", "StubBackend"),
     "rlm": ("franktheunicorn.review.rlm.backend", "RLMBackend"),
 }

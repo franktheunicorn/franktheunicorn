@@ -140,3 +140,23 @@ class TestBuildTriagePrompt:
             cve_candidates=["not a dict", {"cve_id": "CVE-2024-1"}],
         )
         assert "CVE-2024-1" in user
+
+    def test_learned_guidance_injected_into_system_prompt(self) -> None:
+        system, _ = build_triage_prompt(
+            parsed_component="x",
+            parsed_poc="y",
+            parsed_impact="z",
+            project_context="",
+            learned_guidance="- Treat reports about `run_untrusted()` as expected.",
+        )
+        assert "OPERATOR-LEARNED TRIAGE GUIDANCE" in system
+        assert "Treat reports about `run_untrusted()` as expected." in system
+
+    def test_no_learned_guidance_omitted_from_system_prompt(self) -> None:
+        system, _ = build_triage_prompt(
+            parsed_component="x",
+            parsed_poc="y",
+            parsed_impact="z",
+            project_context="",
+        )
+        assert "OPERATOR-LEARNED TRIAGE GUIDANCE" not in system

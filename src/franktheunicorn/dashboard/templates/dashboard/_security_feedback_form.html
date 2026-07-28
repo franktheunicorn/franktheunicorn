@@ -1,0 +1,12 @@
+<form hx-post="{% url 'dashboard:security_feedback' report.pk %}"
+      hx-target="#feedback-area"
+      hx-swap="innerHTML"
+      style="margin-top: 0.5rem;">
+    {% csrf_token %}
+    <div style="margin-bottom: 0.5rem;">
+        <textarea name="comment" rows="2" placeholder="Optional comment"
+                  style="width: 100%; font-size: 0.85rem; padding: 0.3rem 0.5rem; border: 1px solid var(--border); border-radius: 4px;"></textarea>
+    </div>
+    <button class="action-btn approve" type="submit" name="agreed" value="yes">Agree</button>
+    <button class="action-btn reject" type="submit" name="agreed" value="no">Disagree</button>
+</form>

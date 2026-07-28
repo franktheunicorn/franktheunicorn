@@ -33,6 +33,7 @@ def build_triage_prompt(
     project_context: str,
     security_model: str = "",
     cve_candidates: list[object] | None = None,
+    learned_guidance: str = "",
 ) -> tuple[str, str]:
     """Build system + user prompts for triage analysis.
 
@@ -46,6 +47,10 @@ def build_triage_prompt(
     ``cve_candidates`` are CVE records from a keyword search (may be
     unrelated); they help spot reports that duplicate a known/already-fixed
     issue.
+
+    ``learned_guidance`` is the distilled addendum built from prior operator
+    agree/disagree feedback (see ``security/learning.py``). When provided,
+    it is appended to the system prompt.
 
     Returns (system_prompt, user_message).
     """
@@ -84,6 +89,12 @@ def build_triage_prompt(
         "likely duplicate CVE.\n"
         "Return ONLY the JSON object, no markdown fences or extra text."
     )
+
+    if learned_guidance:
+        system_prompt += (
+            "\n\nOPERATOR-LEARNED TRIAGE GUIDANCE (from prior agree/disagree "
+            f"feedback):\n{learned_guidance}"
+        )
 
     parts = [
         "## Reported Vulnerability\n",

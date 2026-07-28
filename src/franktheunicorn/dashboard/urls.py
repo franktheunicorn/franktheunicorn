@@ -44,6 +44,8 @@ urlpatterns = [
     path("security/new/", views.security_report_create, name="security_create"),
     # Read-only transparency: everything the email scanner has looked at.
     path("security/email-activity/", views.email_activity, name="email_activity"),
+    # Learned triage guidance overview (iterative learning loop).
+    path("security/guidance/", views.security_guidance_list, name="security_guidance"),
     path(
         "security/<int:report_id>/",
         views.security_report_detail,
@@ -58,6 +60,11 @@ urlpatterns = [
         "security/<int:report_id>/verdict/",
         views.security_report_verdict,
         name="security_verdict",
+    ),
+    path(
+        "security/<int:report_id>/feedback/",
+        views.security_report_feedback,
+        name="security_feedback",
     ),
     path(
         "security/<int:report_id>/sandbox/",

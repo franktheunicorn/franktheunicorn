@@ -101,11 +101,24 @@ digest_enabled: false
 #     model: "qwen2.5-coder:14b"
 #     base_url: "http://localhost:11434"
 #
+# Example: local Claude Code CLI — no API key; uses your logged-in `claude`
+# auth. Requires the `claude` binary on PATH (or set `cli_path`). This is
+# the Claude Code CLI (distinct from the `claude_cli:` agent-reviewer block
+# below under "CLI review tools" — that's a separate integration that runs
+# `claude` directly against a repo checkout and posts drafts tagged with
+# source "claude-cli"; this one plugs into the general LLM backend registry).
+# llm_backends:
+#   - provider: "claude-code"
+#     model: ""            # empty = whatever the claude CLI defaults to
+#     cli_path: "claude"
+#     cli_timeout_seconds: 300
+#
 # Available providers:
-#   claude  — Anthropic (models: claude-sonnet-4-20250514, claude-opus-4-20250514)
-#   openai  — OpenAI (models: gpt-4o, gpt-4o-mini)
-#   gemini  — Google (models: gemini-2.5-flash, gemini-2.5-pro)
-#   ollama  — Local via Ollama (models: qwen2.5-coder:3b/7b/14b/32b)
+#   claude       — Anthropic API (models: claude-sonnet-4-20250514, claude-opus-4-20250514)
+#   claude-code  — Local Claude Code CLI, no API key (models: whatever `claude` supports)
+#   openai       — OpenAI (models: gpt-4o, gpt-4o-mini)
+#   gemini       — Google (models: gemini-2.5-flash, gemini-2.5-pro)
+#   ollama       — Local via Ollama (models: qwen2.5-coder:3b/7b/14b/32b)
 #
 # Local models via Ollama (no API key needed):
 #   Install Ollama: https://ollama.com/download
@@ -139,7 +152,7 @@ digest_enabled: false
 # All three integrations below are subprocess wrappers around external
 # code review CLIs. They run alongside the LLM backends; their findings
 # pass through anti-pattern filtering and appear in the dashboard
-# attributed by `sources` (e.g. ["coderabbit"], ["claude-cli"]).
+# attributed by `sources` (e.g. ["coderabbit"], ["claude-code"]).
 #
 # Each tool supports a `remote:` block that runs the CLI on a remote
 # host over SSH. The remote host clones the project's git repo into

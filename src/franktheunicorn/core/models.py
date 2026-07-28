@@ -627,6 +627,73 @@ class SecurityReport(models.Model):
         return f"SecurityReport: {self.title or self.raw_text[:60]}"
 
 
+class SecurityTriageFeedback(models.Model):
+    """Operator agree/disagree feedback on a single triage verdict.
+
+    Mirrors the anti-pattern learning loop (see :class:`AntiPattern`), but
+    for security triage: each feedback row is a snapshot of what the LLM
+    said and whether the operator agreed, plus an optional comment. These
+    rows are the raw material :func:`distill_triage_guidance` summarizes
+    into a :class:`SecurityTriageGuidance` addendum.
+    """
+
+    report = models.ForeignKey(
+        SecurityReport,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="feedback",
+    )
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.CASCADE,
+        related_name="triage_feedback",
+        null=True,
+        blank=True,
+    )
+    agreed = models.BooleanField()
+    operator_comment = models.TextField(blank=True, default="")
+    triage_summary_snapshot = models.TextField(blank=True, default="")
+    assessed_severity_snapshot = models.CharField(max_length=32, blank=True, default="")
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        verdict = "agreed" if self.agreed else "disagreed"
+        return f"SecurityTriageFeedback: {verdict} on report {self.report_id}"
+
+
+class SecurityTriageGuidance(models.Model):
+    """Learned triage guidance distilled from operator feedback.
+
+    One active row per project (plus an optional global row with
+    ``project=None``), analogous to :class:`AntiPattern`. The
+    ``guidance_text`` is injected into future triage system prompts via
+    ``security.learning.resolve_triage_guidance``.
+    """
+
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.CASCADE,
+        related_name="triage_guidance",
+        null=True,
+        blank=True,
+    )
+    guidance_text = models.TextField(blank=True, default="")
+    source_feedback_count = models.IntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+
+    def __str__(self) -> str:
+        return f"SecurityTriageGuidance(project={self.project_id}): {self.guidance_text[:60]}"
+
+
 class EmailScanRecord(models.Model):
     """Audit record of a single email the security inbox poller examined.
 

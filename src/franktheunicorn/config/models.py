@@ -535,7 +535,7 @@ class BackportConfig(BaseModel):
 
 
 KNOWN_LLM_PROVIDERS: frozenset[str] = frozenset(
-    {"stub", "claude", "openai", "gemini", "ollama", "llama-cpp", "vllm", "rlm"}
+    {"stub", "claude", "claude-code", "openai", "gemini", "ollama", "llama-cpp", "vllm", "rlm"}
 )
 
 # Combine strategies for the optional RLM rejection judge (v1.5).
@@ -555,6 +555,11 @@ class LLMBackendConfig(BaseModel):
     base_url: str = ""
     temperature: float = 0.3
     max_tokens: int = 4096
+    # Only consulted when ``provider == "claude-code"``: shells out to the
+    # local `claude` binary instead of calling the Anthropic API, so no
+    # API key is needed (billed via the CLI's own logged-in auth).
+    cli_path: str = "claude"
+    cli_timeout_seconds: int = 300
     # Recursive Language Model settings (v1.5). Only consulted when
     # ``provider == "rlm"``; ignored (with a warning) for other providers.
     rlm: RLMConfig | None = None

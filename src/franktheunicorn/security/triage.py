@@ -60,12 +60,17 @@ def triage_report(
     # for the expected-behavior / duplicate call.
     _check_cves(report, operator_config)
     security_model = _resolve_security_model(project_config)
+
+    from franktheunicorn.security.learning import resolve_triage_guidance
+
+    learned_guidance = resolve_triage_guidance(report.project)
     _analyze_report(
         report,
         backend,
         project_context,
         security_model=security_model,
         cve_candidates=report.cve_matches,
+        learned_guidance=learned_guidance,
     )
 
     return report
@@ -167,6 +172,7 @@ def _analyze_report(
     project_context: str,
     security_model: str = "",
     cve_candidates: list[object] | None = None,
+    learned_guidance: str = "",
 ) -> None:
     """Run triage analysis on parsed report."""
     system_prompt, user_message = build_triage_prompt(
@@ -176,6 +182,7 @@ def _analyze_report(
         project_context=project_context,
         security_model=security_model,
         cve_candidates=cve_candidates,
+        learned_guidance=learned_guidance,
     )
 
     project_id = report.project_id if report.project else None

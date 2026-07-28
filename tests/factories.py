@@ -19,6 +19,8 @@ from franktheunicorn.core.models import (
     PullRequest,
     ReviewDraft,
     SecurityReport,
+    SecurityTriageFeedback,
+    SecurityTriageGuidance,
     TestRun,
 )
 
@@ -251,6 +253,32 @@ class AlertFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
     reasons = factory.LazyFunction(list)
     email_sent = False
     emailed_at = None
+
+
+class SecurityTriageFeedbackFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
+    """Factory for SecurityTriageFeedback model instances."""
+
+    class Meta:
+        model = SecurityTriageFeedback
+
+    report = factory.SubFactory(SecurityReportFactory)
+    project = None
+    agreed = True
+    operator_comment = ""
+    triage_summary_snapshot = ""
+    assessed_severity_snapshot = ""
+
+
+class SecurityTriageGuidanceFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
+    """Factory for SecurityTriageGuidance model instances."""
+
+    class Meta:
+        model = SecurityTriageGuidance
+
+    project = None
+    guidance_text = factory.Faker("paragraph")
+    source_feedback_count = 0
+    is_active = True
 
 
 class LLMBackendFallbackFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]

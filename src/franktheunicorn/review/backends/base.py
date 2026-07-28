@@ -458,6 +458,7 @@ _COST_PER_MTOK: dict[str, tuple[float, float]] = {
     "ollama": (0.0, 0.0),
     "vllm": (0.0, 0.0),
     "llama-cpp": (0.0, 0.0),
+    "claude-code": (0.0, 0.0),
     "stub": (0.0, 0.0),
 }
 

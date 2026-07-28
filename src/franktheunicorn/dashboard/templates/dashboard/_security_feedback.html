@@ -1,0 +1,24 @@
+<div style="background: var(--card); border: 1px solid var(--border); border-radius: 4px; padding: 0.75rem;">
+    <h3 style="font-size: 0.9rem; margin-bottom: 0.5rem;">Triage Feedback</h3>
+
+    <p style="font-size: 0.85rem; margin-bottom: 0.5rem;">
+        Feedback recorded:
+        <strong style="{% if agreed %}color: var(--green, #2e7d32);{% else %}color: var(--red);{% endif %}">
+            {% if agreed %}Agreed{% else %}Disagreed{% endif %}
+        </strong>
+    </p>
+
+    {% if learned_guidance %}
+    <details style="margin-bottom: 0.5rem;">
+        <summary style="font-size: 0.85rem; font-weight: 600; cursor: pointer;">Current learned guidance</summary>
+        <pre style="font-size: 0.8rem; background: var(--bg); padding: 0.5rem; border-radius: 3px; white-space: pre-wrap; margin-top: 0.3rem;">{{ learned_guidance }}</pre>
+    </details>
+    {% else %}
+    <p style="font-size: 0.8rem; color: var(--muted);">No learned guidance distilled yet.</p>
+    {% endif %}
+
+    <details style="margin-top: 0.5rem;">
+        <summary style="font-size: 0.8rem; cursor: pointer;">Give feedback again</summary>
+        {% include "dashboard/_security_feedback_form.html" %}
+    </details>
+</div>
