@@ -53,36 +53,50 @@ def triage_report(
         logger.warning("No LLM backend configured; skipping triage for report #%d.", report.pk)
         return report
 
-    report.status = "triaging"
-    report.save(update_fields=["status", "updated_at"])
+    # Only claim the status when it's ours to claim. A report the operator
+    # already ruled on (valid / invalid / duplicate) keeps that verdict through
+    # a re-triage — overwriting it with "triaging" here is what made
+    # _analyze_report's _AUTO_MANAGED_STATUSES guard unable to protect it.
+    if report.status in _AUTO_MANAGED_STATUSES:
+        report.status = "triaging"
+        report.save(update_fields=["status", "updated_at"])
 
-    logger.info("Parsing report #%d via LLM", report.pk)
-    _parse_report(report, backend)
-    logger.info(
-        "Parse complete for report #%d: severity=%r component=%r",
-        report.pk,
-        report.assessed_severity,
-        report.parsed_component[:60] if report.parsed_component else "",
-    )
+    # Whatever happens below, the report must not be left sitting in
+    # "triaging": that status is invisible in the "new" queue, so a model that
+    # times out or answers with unparseable JSON would silently swallow the
+    # report. _analyze_report moves it off "triaging" on success; this puts it
+    # back in the queue on every other path.
+    try:
+        logger.info("Parsing report #%d via LLM", report.pk)
+        _parse_report(report, backend)
+        logger.info(
+            "Parse complete for report #%d: severity=%r component=%r",
+            report.pk,
+            report.assessed_severity,
+            report.parsed_component[:60] if report.parsed_component else "",
+        )
 
-    project_context = _load_project_context(report, project_config)
-    # CVE lookup runs before analysis so the matches are available as context
-    # for the expected-behavior / duplicate call.
-    _check_cves(report, operator_config)
-    security_model = _resolve_security_model(project_config)
+        project_context = _load_project_context(report, project_config)
+        # CVE lookup runs before analysis so the matches are available as
+        # context for the expected-behavior / duplicate call.
+        _check_cves(report, operator_config)
+        security_model = _resolve_security_model(project_config)
 
-    from franktheunicorn.security.learning import resolve_triage_guidance
+        from franktheunicorn.security.learning import resolve_triage_guidance
 
-    learned_guidance = resolve_triage_guidance(report.project)
-    logger.info("Analyzing report #%d via LLM", report.pk)
-    _analyze_report(
-        report,
-        backend,
-        project_context,
-        security_model=security_model,
-        cve_candidates=report.cve_matches,
-        learned_guidance=learned_guidance,
-    )
+        learned_guidance = resolve_triage_guidance(report.project)
+        logger.info("Analyzing report #%d via LLM", report.pk)
+        _analyze_report(
+            report,
+            backend,
+            project_context,
+            security_model=security_model,
+            cve_candidates=report.cve_matches,
+            learned_guidance=learned_guidance,
+        )
+    finally:
+        _restore_untriaged_status(report)
+
     logger.info(
         "Triage complete for report #%d: severity=%r status=%r poc_plausible=%s",
         report.pk,
@@ -92,6 +106,18 @@ def triage_report(
     )
 
     return report
+
+
+def _restore_untriaged_status(report: SecurityReport) -> None:
+    """Return a report still marked ``triaging`` to the ``new`` queue."""
+    if report.status != "triaging":
+        return
+    report.status = "new"
+    report.save(update_fields=["status", "updated_at"])
+    logger.warning(
+        "Triage produced no verdict for report #%d; returned it to the new queue.",
+        report.pk,
+    )
 
 
 def _get_triage_backend(operator_config: OperatorConfig) -> BaseLLMBackend | None:
