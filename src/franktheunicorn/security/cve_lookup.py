@@ -74,21 +74,35 @@ def search_cves(
     own_client = http_client is None
     client = http_client or httpx.Client(timeout=_DEFAULT_TIMEOUT)
 
+    logger.info(
+        "NVD search: keyword=%r api_key=%s timeout=%ds",
+        keyword[:80],
+        "set" if api_key else "not set",
+        _DEFAULT_TIMEOUT,
+    )
     try:
         response = client.get(NVD_API_URL, params=params, headers=headers)
         if response.status_code == 403:
-            logger.warning("NVD API rate limited (403). Try setting an API key.")
+            logger.warning(
+                "NVD API rate limited (403) for keyword=%r. Set nvd_api_key_env in operator.yaml.",
+                keyword[:80],
+            )
             return []
         response.raise_for_status()
         data = response.json()
+    except httpx.TimeoutException:
+        logger.warning("NVD API timed out after %ds for keyword=%r", _DEFAULT_TIMEOUT, keyword[:80])
+        return []
     except httpx.HTTPError:
-        logger.exception("NVD API request failed")
+        logger.exception("NVD API request failed for keyword=%r", keyword[:80])
         return []
     finally:
         if own_client:
             client.close()
 
-    return _parse_nvd_response(data)
+    matches = _parse_nvd_response(data)
+    logger.info("NVD search complete: %d result(s) for keyword=%r", len(matches), keyword[:80])
+    return matches
 
 
 def _parse_nvd_response(data: dict[str, object]) -> list[CVEMatch]:

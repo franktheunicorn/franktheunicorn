@@ -43,18 +43,28 @@ def triage_report(
     4. Search CVE database for duplicates
     5. Save results to the report
     """
+    logger.info("Starting triage for security report #%d", report.pk)
+
     # Resolve the backend *before* mutating status — otherwise a deployment
     # with no LLM backends (e.g. email auto-triage on but llm_backends empty)
     # strands every report in "triaging" and it drops out of the "new" queue.
     backend = _get_triage_backend(operator_config)
     if backend is None:
-        logger.warning("No LLM backend configured; skipping triage.")
+        logger.warning("No LLM backend configured; skipping triage for report #%d.", report.pk)
         return report
 
     report.status = "triaging"
     report.save(update_fields=["status", "updated_at"])
 
+    logger.info("Parsing report #%d via LLM", report.pk)
     _parse_report(report, backend)
+    logger.info(
+        "Parse complete for report #%d: severity=%r component=%r",
+        report.pk,
+        report.assessed_severity,
+        report.parsed_component[:60] if report.parsed_component else "",
+    )
+
     project_context = _load_project_context(report, project_config)
     # CVE lookup runs before analysis so the matches are available as context
     # for the expected-behavior / duplicate call.
@@ -64,6 +74,7 @@ def triage_report(
     from franktheunicorn.security.learning import resolve_triage_guidance
 
     learned_guidance = resolve_triage_guidance(report.project)
+    logger.info("Analyzing report #%d via LLM", report.pk)
     _analyze_report(
         report,
         backend,
@@ -71,6 +82,13 @@ def triage_report(
         security_model=security_model,
         cve_candidates=report.cve_matches,
         learned_guidance=learned_guidance,
+    )
+    logger.info(
+        "Triage complete for report #%d: severity=%r status=%r poc_plausible=%s",
+        report.pk,
+        report.assessed_severity,
+        report.status,
+        report.poc_plausible,
     )
 
     return report
@@ -234,10 +252,13 @@ def _check_cves(report: SecurityReport, operator_config: OperatorConfig) -> None
     """Search NVD for matching CVEs."""
     keyword = report.parsed_component or report.title
     if not keyword:
+        logger.debug("Skipping CVE lookup for report #%d: no keyword available", report.pk)
         return
 
+    logger.info("CVE lookup for report #%d (keyword=%r)", report.pk, keyword[:80])
     api_key_env = operator_config.security_triage.nvd_api_key_env
     matches = search_cves(keyword, api_key_env=api_key_env)
+    logger.info("CVE lookup complete for report #%d: %d match(es)", report.pk, len(matches))
 
     # Always save results (even empty) so stale matches are cleared on re-run.
     report.cve_matches = [m.to_dict() for m in matches]
