@@ -5,7 +5,12 @@ from __future__ import annotations
 import hashlib
 from typing import TYPE_CHECKING
 
-from franktheunicorn.review.backends.base import PRContext, ReviewFinding, ReviewResult
+from franktheunicorn.review.backends.base import (
+    BaseLLMBackend,
+    PRContext,
+    ReviewFinding,
+    ReviewResult,
+)
 
 if TYPE_CHECKING:
     from franktheunicorn.config.models import LLMBackendConfig
@@ -30,16 +35,28 @@ _TEMPLATES = [
 ]
 
 
-class StubBackend:
-    """Deterministic stub backend for testing and demo mode."""
+class StubBackend(BaseLLMBackend):
+    """Deterministic stub backend for testing and demo mode.
+
+    Subclasses ``BaseLLMBackend`` so it satisfies the non-review call paths
+    too — security triage, the tone guard and the sub-checks all go through
+    ``metered_call``, and a stub that only implemented ``generate_review``
+    was rejected by them as "no LLM backend configured". No SDK and no API
+    key, so the inherited machinery is happy with an empty key.
+    """
 
     def __init__(self, config: LLMBackendConfig) -> None:
-        self._config = config
+        super().__init__(config)
 
     def complete(self, prompt: str, *, system: str = "") -> str:
         """Deterministic stub completion (no network)."""
-        digest = hashlib.sha256(f"{system}\n{prompt}".encode()).hexdigest()[:8]
-        return f"[stub completion {digest} for {len(prompt)} chars]"
+        return self._call_api(system, prompt, "")
+
+    def _call_api(self, system_prompt: str, user_message: str, api_key: str) -> str:
+        """Deterministic fake response. Not JSON — callers must degrade."""
+        del api_key
+        digest = hashlib.sha256(f"{system_prompt}\n{user_message}".encode()).hexdigest()[:8]
+        return f"[stub completion {digest} for {len(user_message)} chars]"
 
     def generate_findings(
         self,
