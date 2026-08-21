@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
 import pytest
 
+from franktheunicorn.backends.base import MAX_LISTED_PULL_REQUESTS
 from franktheunicorn.backends.mock import MockGitHubClient
 from franktheunicorn.backends.poller import _upsert_pull_request, poll_project
 from franktheunicorn.config.models import ProjectConfig
@@ -267,11 +268,29 @@ class _TrackingMockClient(MockGitHubClient):
     """MockGitHubClient that tracks get_issue_comments calls."""
 
     def __init__(
-        self, fixtures_dir: str | Path, comments: list[dict[str, Any]] | None = None
+        self,
+        fixtures_dir: str | Path,
+        comments: list[dict[str, Any]] | None = None,
+        updated_at: str | None = None,
     ) -> None:
         super().__init__(fixtures_dir)
         self.issue_comments_calls: list[tuple[str, str, int]] = []
         self._comments = comments or []
+        # Upstream ``updated_at`` for every listed PR. Anything that happens on
+        # a PR — a comment, a push, a reviewer change — bumps this on the forge
+        # (checked against apache/spark#57960, whose updated_at equals its last
+        # comment's timestamp), and that bump is what makes the poller spend
+        # per-PR API calls on an already-ingested PR.
+        self.updated_at = updated_at
+
+    def list_pull_requests(
+        self, owner: str, repo: str, state: str = "open"
+    ) -> list[dict[str, Any]]:
+        prs = super().list_pull_requests(owner, repo, state)
+        if self.updated_at is not None:
+            for pr_data in prs:
+                pr_data["updated_at"] = self.updated_at
+        return prs
 
     def get_issue_comments(
         self, owner: str, repo: str, issue_number: int, since: str | None = None
@@ -506,8 +525,10 @@ class TestReEngagementDataInPoller:
             posted_at=datetime(2026, 3, 25, tzinfo=UTC),
         )
 
-        # Re-poll — should now fetch issue comments for PR #42
+        # Re-poll — should now fetch issue comments for PR #42. The review
+        # posting bumped the PR upstream, so it's no longer "unchanged".
         client.issue_comments_calls.clear()
+        client.updated_at = "2026-03-26T10:00:00Z"
         poll_project(client, config, operator_username="holdenk")
         called_prs = [call[2] for call in client.issue_comments_calls]
         assert 42 in called_prs
@@ -543,7 +564,11 @@ class TestReEngagementDataInPoller:
                 "body": "Done, I addressed your feedback.",
             }
         ]
-        client_with_replies = _TrackingMockClient(tmp_path, comments=author_comments)
+        # The author's reply bumps the PR upstream, which is what earns it a
+        # re-poll.
+        client_with_replies = _TrackingMockClient(
+            tmp_path, comments=author_comments, updated_at="2026-03-27T10:00:00Z"
+        )
         prs = poll_project(client_with_replies, config, operator_username="holdenk")
         pr42 = next(p for p in prs if p.number == 42)
         score_with = pr42.interest_score
@@ -722,3 +747,187 @@ class TestPollerRefFetching:
             poll_project(client, config, operator_username="holdenk", repo_path=tmp_path)
 
         mock_blame.assert_called_once()
+
+
+class _CountingMockClient(MockGitHubClient):
+    """Mock client that counts per-PR API calls and lets the listing be edited."""
+
+    def __init__(self, tmp_path: Path, pr_list: list[dict[str, Any]]) -> None:
+        super().__init__(tmp_path)
+        self.pr_list = pr_list
+        self.detail_calls: list[int] = []
+        self.files_calls: list[int] = []
+
+    def list_pull_requests(
+        self, owner: str, repo: str, state: str = "open"
+    ) -> list[dict[str, Any]]:
+        return self.pr_list
+
+    def get_pull_request(self, owner: str, repo: str, pr_number: int) -> dict[str, Any]:
+        self.detail_calls.append(pr_number)
+        return _same_repo_detail() | {"number": pr_number, "additions": 31, "deletions": 7}
+
+    def get_pull_request_files(self, owner: str, repo: str, pr_number: int) -> list[dict[str, Any]]:
+        self.files_calls.append(pr_number)
+        return [{"filename": "src/main.py", "additions": 5, "deletions": 2, "status": "modified"}]
+
+
+def _listed_pr(number: int = 99, **overrides: Any) -> dict[str, Any]:
+    return _make_pr_list_item() | {"number": number} | overrides
+
+
+@pytest.mark.django_db
+class TestUnchangedPRSkip:
+    """An untouched PR must not cost per-PR API calls on every cycle."""
+
+    def _config(self, **overrides: Any) -> ProjectConfig:
+        return ProjectConfig(owner="apache", repo="spark", **overrides)
+
+    def test_second_poll_skips_unchanged_pr(self, tmp_path: Path) -> None:
+        client = _CountingMockClient(tmp_path, [_listed_pr()])
+        config = self._config()
+
+        assert len(poll_project(client, config, operator_username="holdenk")) == 1
+        assert client.detail_calls == [99]
+
+        client.detail_calls.clear()
+        client.files_calls.clear()
+        assert poll_project(client, config, operator_username="holdenk") == []
+        assert client.detail_calls == []
+        assert client.files_calls == []
+        # The row is still there and still open — skipped, not dropped.
+        assert PullRequest.objects.filter(number=99, state="open").count() == 1
+
+    def test_upstream_update_triggers_refresh(self, tmp_path: Path) -> None:
+        client = _CountingMockClient(tmp_path, [_listed_pr()])
+        config = self._config()
+        poll_project(client, config, operator_username="holdenk")
+
+        client.detail_calls.clear()
+        client.pr_list = [_listed_pr(updated_at="2026-04-02T11:00:00Z")]
+        assert len(poll_project(client, config, operator_username="holdenk")) == 1
+        assert client.detail_calls == [99]
+
+    def test_reviewer_change_triggers_refresh_without_timestamp_bump(self, tmp_path: Path) -> None:
+        """Routing-relevant listing fields are compared, not just updated_at."""
+        client = _CountingMockClient(tmp_path, [_listed_pr()])
+        config = self._config()
+        poll_project(client, config, operator_username="holdenk")
+
+        client.detail_calls.clear()
+        client.pr_list = [_listed_pr(requested_reviewers=[{"login": "holdenk"}])]
+        assert len(poll_project(client, config, operator_username="holdenk")) == 1
+        assert client.detail_calls == [99]
+
+    def test_label_and_title_changes_trigger_refresh(self, tmp_path: Path) -> None:
+        client = _CountingMockClient(tmp_path, [_listed_pr()])
+        config = self._config()
+        poll_project(client, config, operator_username="holdenk")
+
+        client.detail_calls.clear()
+        client.pr_list = [_listed_pr(title="Test PR (now WIP)", labels=[{"name": "SQL"}])]
+        assert len(poll_project(client, config, operator_username="holdenk")) == 1
+        assert client.detail_calls == [99]
+
+    def test_zero_refresh_hours_disables_skip(self, tmp_path: Path) -> None:
+        client = _CountingMockClient(tmp_path, [_listed_pr()])
+        config = self._config(poll_refresh_hours=0)
+        poll_project(client, config, operator_username="holdenk")
+
+        client.detail_calls.clear()
+        assert len(poll_project(client, config, operator_username="holdenk")) == 1
+        assert client.detail_calls == [99]
+
+    def test_stale_local_refresh_forces_reprocess(self, tmp_path: Path) -> None:
+        """Time-dependent signals get re-scored once the refresh window lapses."""
+        client = _CountingMockClient(tmp_path, [_listed_pr()])
+        config = self._config(poll_refresh_hours=24)
+        poll_project(client, config, operator_username="holdenk")
+
+        PullRequest.objects.filter(number=99).update(
+            updated_at=datetime(2026, 4, 1, tzinfo=UTC) - timedelta(days=3)
+        )
+        client.detail_calls.clear()
+        assert len(poll_project(client, config, operator_username="holdenk")) == 1
+        assert client.detail_calls == [99]
+
+    def test_degraded_row_is_refreshed(self, tmp_path: Path) -> None:
+        """A row left without a base SHA by an interrupted cycle gets finished."""
+        client = _CountingMockClient(tmp_path, [_listed_pr()])
+        config = self._config()
+        poll_project(client, config, operator_username="holdenk")
+
+        PullRequest.objects.filter(number=99).update(base_sha="")
+        client.detail_calls.clear()
+        assert len(poll_project(client, config, operator_username="holdenk")) == 1
+        assert client.detail_calls == [99]
+
+    def test_diff_stats_come_from_detail(self, tmp_path: Path) -> None:
+        """The listing has no additions/deletions; the detail response does."""
+        client = _CountingMockClient(tmp_path, [_listed_pr()])
+        # Simulate the real list payload, which carries no diff stats at all.
+        client.pr_list[0].pop("additions")
+        client.pr_list[0].pop("deletions")
+        poll_project(client, ProjectConfig(owner="apache", repo="spark"), "holdenk")
+
+        pr = PullRequest.objects.get(number=99)
+        assert (pr.additions, pr.deletions) == (31, 7)
+
+
+@pytest.mark.django_db
+class TestClosedPRReaping:
+    """PRs closed upstream have to drop off the dashboard queues."""
+
+    def _poll(self, client: MockGitHubClient) -> list[PullRequest]:
+        return poll_project(
+            client, ProjectConfig(owner="apache", repo="spark"), operator_username="holdenk"
+        )
+
+    def test_pr_missing_from_listing_is_closed(self, tmp_path: Path) -> None:
+        client = _CountingMockClient(tmp_path, [_listed_pr(99), _listed_pr(100)])
+        self._poll(client)
+        assert PullRequest.objects.filter(state="open").count() == 2
+
+        client.pr_list = [_listed_pr(100)]
+        self._poll(client)
+        assert PullRequest.objects.get(number=99).state == "closed"
+        assert PullRequest.objects.get(number=100).state == "open"
+
+    def test_empty_listing_closes_nothing(self, tmp_path: Path) -> None:
+        """An empty listing is indistinguishable from a failed one."""
+        client = _CountingMockClient(tmp_path, [_listed_pr(99)])
+        self._poll(client)
+
+        client.pr_list = []
+        self._poll(client)
+        assert PullRequest.objects.get(number=99).state == "open"
+
+    def test_scraped_listing_closes_nothing(self, tmp_path: Path) -> None:
+        """The HTML-scrape fallback is partial; reaping against it would be wrong."""
+        client = _CountingMockClient(tmp_path, [_listed_pr(99), _listed_pr(100)])
+        self._poll(client)
+
+        client.pr_list = [_listed_pr(100) | {"_scraped": True}]
+        self._poll(client)
+        assert PullRequest.objects.get(number=99).state == "open"
+
+    def test_truncated_listing_closes_nothing(self, tmp_path: Path) -> None:
+        """A listing at the pagination cap may be missing PRs it didn't reach."""
+        client = _CountingMockClient(tmp_path, [_listed_pr(99)])
+        self._poll(client)
+
+        client.pr_list = [_listed_pr(n) for n in range(1000, 1000 + MAX_LISTED_PULL_REQUESTS)]
+        self._poll(client)
+        assert PullRequest.objects.get(number=99).state == "open"
+
+    def test_other_projects_are_untouched(self, tmp_path: Path) -> None:
+        other = ProjectFactory(owner="holdenk", repo="spark")
+        PullRequest.objects.create(
+            project=other, github_id=1, number=7, title="theirs", author="holdenk", state="open"
+        )
+        client = _CountingMockClient(tmp_path, [_listed_pr(99)])
+        self._poll(client)
+
+        client.pr_list = [_listed_pr(100)]
+        self._poll(client)
+        assert PullRequest.objects.get(project=other, number=7).state == "open"

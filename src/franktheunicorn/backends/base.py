@@ -15,6 +15,12 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# Upper bound on how many open PRs one ``list_pull_requests`` call returns.
+# Implementations stop paginating here; callers that infer "this PR is gone
+# from the forge" from a listing must treat a result of this size as possibly
+# truncated rather than complete.
+MAX_LISTED_PULL_REQUESTS = 1000
+
 
 @dataclass
 class ReviewComment:

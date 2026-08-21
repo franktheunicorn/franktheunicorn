@@ -997,6 +997,10 @@ def _run_cycle(
 
     all_prs: list[object] = []
     pr_to_config: dict[int, ProjectConfig] = {}
+    # PRs the poller skipped as unchanged. They were seen this cycle, just not
+    # re-processed — the backfill pass must not mistake them for PRs that the
+    # poll never reached and review the lot.
+    skipped_pks: set[int] = set()
 
     for pc in project_configs:
         if not isinstance(pc, ProjectConfig) or not pc.enabled:
@@ -1049,6 +1053,7 @@ def _run_cycle(
                 project_config=pc,
                 operator_username=operator_username,
                 repo_path=repo_path,
+                skipped_pks=skipped_pks,
             )
             logger.debug("poll_project returned %d PR(s) for %s/%s", len(prs), pc.owner, pc.repo)
             for pr in prs:
@@ -1133,7 +1138,7 @@ def _run_cycle(
     # Backfill pass: draft reviews for open PRs that were ingested (e.g. via
     # lookup_pr) but never reached the main poll loop above.
     _backfill_unreviewed_prs(
-        already_polled_pks={getattr(pr, "pk", None) for pr in all_prs},
+        already_polled_pks={getattr(pr, "pk", None) for pr in all_prs} | skipped_pks,
         project_configs=project_configs,
         operator_config=operator_config,
         disabled_backends=disabled_backends,

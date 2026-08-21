@@ -116,6 +116,15 @@ copypasta_ignore_patterns:
   - "^from pyspark\\.testing import"
   - "^sc\\.stop\\(\\)$"
 
+# Poll cost control. A PR whose upstream updated_at hasn't moved — and whose
+# title/labels/reviewers/assignees/draft state are unchanged — is skipped
+# instead of re-fetching its files, detail, and comments. Time-dependent
+# signals (staleness, waiting-on-author) still get re-scored this often.
+# Every refreshed PR costs at least three API calls, so this repo's ~450 open
+# PRs came to over a thousand calls per cycle against a 5000/hour budget:
+# the quota ran dry and ingestion silently degraded to HTML scrapes.
+# 0 disables the skip.
+poll_refresh_hours: 24
 
 # People whose PRs you typically review or collaborate with
 frequent_contributors:

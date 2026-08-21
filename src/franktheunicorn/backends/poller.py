@@ -9,13 +9,15 @@ and stores results in the database. Works with any ``ForgeClient``
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from collections.abc import Mapping
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from django.db import transaction
+from django.utils import timezone
 
-from franktheunicorn.backends.base import ForgeClient
+from franktheunicorn.backends.base import MAX_LISTED_PULL_REQUESTS, ForgeClient
 from franktheunicorn.config.models import ProjectConfig
 from franktheunicorn.core.models import Project, PullRequest, ReviewDraft
 from franktheunicorn.core.session_detector import detect_agent_session
@@ -25,6 +27,18 @@ logger = logging.getLogger(__name__)
 
 # YAML governance value → Project.project_type choice.
 _GOVERNANCE_TO_PROJECT_TYPE = {"asf": "asf", "personal": "personal", "corporate": "org"}
+
+# Stored fields the (free) open-PR listing payload can be compared against,
+# so a routing-relevant edit is never skipped as "unchanged".
+_LISTING_FIELDS = (
+    "title",
+    "state",
+    "is_draft",
+    "labels",
+    "requested_reviewers",
+    "assignees",
+)
+
 _CONTRIBUTORS_CACHE_FETCHED = "fetched"
 _CONTRIBUTORS_CACHE_EMPTY = "empty"
 _CONTRIBUTORS_CACHE_FAILED = "failed"
@@ -36,6 +50,7 @@ def poll_project(
     operator_username: str,
     *,
     repo_path: Path | None = None,
+    skipped_pks: set[int] | None = None,
 ) -> list[PullRequest]:
     """
     Poll a single project for PRs, score them, and store in the DB.
@@ -44,6 +59,10 @@ def poll_project(
     is fetched for changed files and passed to the scorer.
 
     Returns the list of PullRequest objects that were created or updated.
+    PRs skipped as unchanged are not in the returned list; pass a set as
+    *skipped_pks* to collect their primary keys, so a caller that treats
+    "not returned" as "never polled" (the review backfill) doesn't go and
+    review them all instead.
     """
     project, _created = Project.objects.update_or_create(
         owner=project_config.owner,
@@ -67,10 +86,47 @@ def poll_project(
 
     _refresh_contributors_cache(client, project, project_config.owner, project_config.repo)
 
+    # Rows for PRs that vanished from the open listing were closed or merged
+    # upstream; polling only ever lists open PRs, so nothing else would clear
+    # them and they linger in the dashboard queues forever.
+    closed_count = _close_missing_pull_requests(project, raw_prs)
+    if closed_count:
+        logger.info(
+            "Polled %s: %d PR(s) closed upstream, dropped from the queues",
+            project.full_name,
+            closed_count,
+        )
+
+    # Snapshot of what we already know, for the unchanged-PR skip below.
+    known = {
+        row["number"]: row
+        for row in PullRequest.objects.filter(project=project).values(
+            "id",
+            "number",
+            "github_updated_at",
+            "updated_at",
+            "base_sha",
+            "score_breakdown",
+            *_LISTING_FIELDS,
+        )
+    }
+
     results: list[PullRequest] = []
+    skipped = 0
 
     for pr_data in raw_prs:
         pr_number: int = pr_data["number"]
+
+        known_row = known.get(pr_number)
+        if not _needs_refresh(known_row, pr_data, project_config.poll_refresh_hours):
+            skipped += 1
+            if skipped_pks is not None and known_row is not None:
+                known_pk = known_row.get("id")
+                if isinstance(known_pk, int):
+                    skipped_pks.add(known_pk)
+            logger.debug("PR #%d unchanged since last poll; skipping", pr_number)
+            continue
+
         logger.debug("Fetching changed files for PR #%d ...", pr_number)
 
         # Fetch changed files for scoring. On failure pass None (not []) so
@@ -98,6 +154,15 @@ def poll_project(
             raw_mergeable = pr_detail.get("mergeable")
             if isinstance(raw_mergeable, bool):
                 pr_obj.mergeable = raw_mergeable
+            # The list endpoint doesn't carry diff stats, so every
+            # list-ingested PR showed up on the dashboard as "0+ / 0-". The
+            # detail response has them — keep them.
+            raw_additions = pr_detail.get("additions")
+            raw_deletions = pr_detail.get("deletions")
+            if isinstance(raw_additions, int):
+                pr_obj.additions = raw_additions
+            if isinstance(raw_deletions, int):
+                pr_obj.deletions = raw_deletions
         except Exception:
             logger.debug("Could not fetch PR detail for #%d", pr_number)
 
@@ -266,6 +331,8 @@ def poll_project(
                 "is_low_context",
                 "is_likely_unowned",
                 "mergeable",
+                "additions",
+                "deletions",
                 "base_sha",
                 "head_sha",
                 "head_branch",
@@ -281,12 +348,98 @@ def poll_project(
         queue_summary[pr.queue] = queue_summary.get(pr.queue, 0) + 1
     queue_str = ", ".join(f"{q}={n}" for q, n in sorted(queue_summary.items()))
     logger.info(
-        "Polled %s: %d PRs ingested/updated (%s)",
+        "Polled %s: %d PRs ingested/updated, %d unchanged and skipped (%s)",
         project.full_name,
         len(results),
+        skipped,
         queue_str or "none",
     )
     return results
+
+
+def _needs_refresh(
+    known: Mapping[str, object] | None,
+    pr_data: dict[str, Any],
+    refresh_hours: int,
+) -> bool:
+    """Decide whether *pr_data* is worth spending per-PR API calls on.
+
+    A PR is refreshed when it's new, when anything visible in the (already
+    fetched, therefore free) listing payload moved, when the stored row is
+    incomplete because an earlier cycle was cut short, or when the last local
+    refresh is older than *refresh_hours*.
+    """
+    if refresh_hours <= 0 or known is None:
+        return True
+
+    # A degraded row from an earlier scrape fallback or interrupted cycle:
+    # finish the job.
+    if not known.get("base_sha") or not known.get("score_breakdown"):
+        return True
+
+    upstream_updated = _parse_github_datetime(pr_data.get("updated_at"))
+    stored_updated = known.get("github_updated_at")
+    if upstream_updated is None or not isinstance(stored_updated, datetime):
+        return True
+    if upstream_updated != stored_updated:
+        return True
+
+    # updated_at is the forge's summary of "something happened", but don't
+    # trust it alone — reviewer/label/title edits drive routing, and the
+    # listing already told us about them for free.
+    for field_name, listed in _listing_values(pr_data).items():
+        if listed != known.get(field_name):
+            return True
+
+    # Time-dependent signals (staleness, waiting-on-author) age without any
+    # upstream change, so re-score periodically regardless.
+    last_local = known.get("updated_at")
+    if not isinstance(last_local, datetime):
+        return True
+    return timezone.now() - last_local >= timedelta(hours=refresh_hours)
+
+
+def _listing_values(pr_data: dict[str, Any]) -> dict[str, Any]:
+    """Project a listing payload onto the stored fields it can be compared to."""
+    return {
+        "title": pr_data.get("title", ""),
+        "state": pr_data.get("state", "open"),
+        "is_draft": pr_data.get("draft", False),
+        "labels": [lbl.get("name", "") for lbl in pr_data.get("labels", [])],
+        "requested_reviewers": [r.get("login", "") for r in pr_data.get("requested_reviewers", [])],
+        "assignees": [a.get("login", "") for a in pr_data.get("assignees", [])],
+    }
+
+
+def _close_missing_pull_requests(project: Project, raw_prs: list[dict[str, Any]]) -> int:
+    """Mark open rows absent from the open-PR listing as closed.
+
+    Returns the number of rows updated. Refuses to act on a listing we can't
+    trust: an empty result, or one assembled from the HTML-scrape fallback,
+    would otherwise close every PR in the project during a rate-limit window.
+    """
+    if not raw_prs:
+        return 0
+    if any(pr_data.get("_scraped") for pr_data in raw_prs):
+        logger.debug(
+            "Skipping closed-PR reap for %s — listing came from the scrape fallback",
+            project.full_name,
+        )
+        return 0
+    # A truncated listing (pagination cap) is also unsafe to reap against.
+    if len(raw_prs) >= MAX_LISTED_PULL_REQUESTS:
+        logger.warning(
+            "Skipping closed-PR reap for %s — open-PR listing hit the %d-PR cap",
+            project.full_name,
+            MAX_LISTED_PULL_REQUESTS,
+        )
+        return 0
+
+    open_numbers = {pr_data["number"] for pr_data in raw_prs if pr_data.get("number")}
+    stale = PullRequest.objects.filter(project=project, state="open").exclude(
+        number__in=open_numbers
+    )
+    return int(stale.update(state="closed", updated_at=timezone.now()))
 
 
 def _route_pr_to_queue(

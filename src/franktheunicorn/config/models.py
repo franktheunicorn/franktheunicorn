@@ -1484,6 +1484,19 @@ class ProjectConfig(BaseModel):
     # "Force Run Agents" button (force=True) always bypasses the gate. Configs
     # written before this field existed default to "mentioned_or_authored".
     auto_review_policy: str = "mentioned_or_authored"
+    # Poll cost control. A PR whose upstream ``updated_at`` hasn't moved since
+    # the last poll — and whose listed title/labels/reviewers/assignees/draft
+    # state are unchanged — is skipped: no files/detail/comment fetches, no
+    # blame git fetches, no downstream review work. Every refreshed PR costs at
+    # least three API calls (files, detail, comments), so apache/spark's ~450
+    # open PRs came to well over a thousand calls per cycle against a 5000/hour
+    # budget. The limit ran dry mid-cycle, ingestion degraded to HTML scrapes,
+    # and new PRs stopped landing at all.
+    #
+    # Some scoring signals age on their own (staleness, "waiting on author"),
+    # so an untouched PR is still fully re-processed once this many hours have
+    # passed. 0 disables the skip and re-processes everything every cycle.
+    poll_refresh_hours: int = 24
     # When True (default), WIP/draft PRs are routed to the "wip" queue and
     # skipped by the review pipeline until they graduate (draft flag cleared,
     # title prefix removed). At that point the normal poll cycle re-routes and
@@ -1573,6 +1586,14 @@ class ProjectConfig(BaseModel):
         known = {"all", "mentioned_or_authored", "none"}
         if v not in known:
             msg = f"auto_review_policy must be one of {sorted(known)}, got {v!r}"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("poll_refresh_hours")
+    @classmethod
+    def poll_refresh_hours_valid(cls, v: int) -> int:
+        if v < 0:
+            msg = "poll_refresh_hours must be >= 0 (0 re-processes every PR every cycle)"
             raise ValueError(msg)
         return v
 
