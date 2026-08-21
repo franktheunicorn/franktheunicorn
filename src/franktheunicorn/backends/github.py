@@ -10,21 +10,42 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 from bs4 import BeautifulSoup
 
-from franktheunicorn.backends.base import ForgeClient, ReviewBody, ReviewComment, infer_username
+from franktheunicorn.backends.base import (
+    MAX_LISTED_PULL_REQUESTS,
+    ForgeClient,
+    ReviewBody,
+    ReviewComment,
+    infer_username,
+)
 from franktheunicorn.data_access.base import GITHUB_API_BASE, GITHUB_WEB_BASE
+
+if TYPE_CHECKING:
+    from franktheunicorn.data_access.rate_limiter import GitHubRateLimiter
 
 logger = logging.getLogger(__name__)
 
 
 class GitHubClient(ForgeClient):
-    """ForgeClient implementation backed by the GitHub REST API."""
+    """ForgeClient implementation backed by the GitHub REST API.
 
-    def __init__(self, token: str = "", base_url: str = GITHUB_API_BASE) -> None:
+    Pass a ``GitHubRateLimiter`` to pace reads and track the remaining hourly
+    quota. Ingestion runs hundreds of reads per cycle on a busy repo; without
+    a limiter it happily burns the whole hourly budget, and every call after
+    that comes back 403 and gets misread as a broken token.
+    """
+
+    def __init__(
+        self,
+        token: str = "",
+        base_url: str = GITHUB_API_BASE,
+        rate_limiter: GitHubRateLimiter | None = None,
+    ) -> None:
+        self._rate_limiter = rate_limiter
         headers: dict[str, str] = {
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
@@ -45,6 +66,19 @@ class GitHubClient(ForgeClient):
             timeout=30.0,
         )
 
+    def _get(self, url: str, **kwargs: Any) -> httpx.Response:
+        """GET with rate-limit pacing and quota tracking.
+
+        Reads go through here; writes (create_review, delete) are low-volume
+        and go direct.
+        """
+        if self._rate_limiter is not None:
+            self._rate_limiter.acquire()
+        response = self._client.get(url, **kwargs)
+        if self._rate_limiter is not None:
+            self._rate_limiter.update_from_headers(response.headers)
+        return response
+
     def list_pull_requests(
         self, owner: str, repo: str, state: str = "open"
     ) -> list[dict[str, Any]]:
@@ -56,10 +90,10 @@ class GitHubClient(ForgeClient):
         url = f"/repos/{owner}/{repo}/pulls"
         # Paginate: spark-scale repos have hundreds of open PRs; a single
         # 50-item page silently hid everything but the newest PRs from
-        # ingestion. Capped at 10 pages (1000 PRs) per cycle.
+        # ingestion. Capped at MAX_LISTED_PULL_REQUESTS per cycle.
         result: list[dict[str, Any]] = []
-        for page in range(1, 11):
-            response = self._client.get(url, params={"state": state, "per_page": 100, "page": page})
+        for page in range(1, (MAX_LISTED_PULL_REQUESTS // 100) + 1):
+            response = self._get(url, params={"state": state, "per_page": 100, "page": page})
             if response.status_code in (401, 403):
                 _log_auth_suggestions(owner, repo, response)
                 logger.info(
@@ -79,7 +113,7 @@ class GitHubClient(ForgeClient):
     def get_pull_request(self, owner: str, repo: str, pr_number: int) -> dict[str, Any]:
         """Fetch a single PR detail (includes mergeable status)."""
         url = f"/repos/{owner}/{repo}/pulls/{pr_number}"
-        response = self._client.get(url)
+        response = self._get(url)
         response.raise_for_status()
         result: dict[str, Any] = response.json()
         return result
@@ -94,7 +128,7 @@ class GitHubClient(ForgeClient):
         url = f"/repos/{owner}/{repo}/pulls/{pr_number}/files"
         result: list[dict[str, Any]] = []
         for page in range(1, 11):
-            response = self._client.get(url, params={"per_page": 100, "page": page})
+            response = self._get(url, params={"per_page": 100, "page": page})
             response.raise_for_status()
             data: list[dict[str, Any]] = response.json()
             result.extend(data)
@@ -105,7 +139,7 @@ class GitHubClient(ForgeClient):
     def get_pull_request_diff(self, owner: str, repo: str, pr_number: int) -> str:
         """Fetch the diff for a PR."""
         url = f"/repos/{owner}/{repo}/pulls/{pr_number}"
-        response = self._client.get(url, headers={"Accept": "application/vnd.github.v3.diff"})
+        response = self._get(url, headers={"Accept": "application/vnd.github.v3.diff"})
         response.raise_for_status()
         return response.text
 
@@ -116,7 +150,7 @@ class GitHubClient(ForgeClient):
         type. Consumed by the backport check for cherry-pick-of-<sha> refs.
         """
         url = f"/repos/{owner}/{repo}/commits/{sha}"
-        response = self._client.get(url, headers={"Accept": "application/vnd.github.v3.diff"})
+        response = self._get(url, headers={"Accept": "application/vnd.github.v3.diff"})
         response.raise_for_status()
         return response.text
 
@@ -180,7 +214,7 @@ class GitHubClient(ForgeClient):
     ) -> list[dict[str, Any]]:
         """Fetch comments from a specific review."""
         url = f"/repos/{owner}/{repo}/pulls/{pr_number}/reviews/{review_id}/comments"
-        response = self._client.get(url, params={"per_page": 100})
+        response = self._get(url, params={"per_page": 100})
         response.raise_for_status()
         result: list[dict[str, Any]] = response.json()
         return result
@@ -201,7 +235,7 @@ class GitHubClient(ForgeClient):
         params: dict[str, str | int] = {"per_page": 100}
         if since:
             params["since"] = since
-        response = self._client.get(url, params=params)
+        response = self._get(url, params=params)
         response.raise_for_status()
         result: list[dict[str, Any]] = response.json()
         return result
@@ -224,9 +258,7 @@ class GitHubClient(ForgeClient):
         url = f"/repos/{owner}/{repo}/contributors"
         all_logins: list[str] = []
         for page in range(1, 6):
-            response = self._client.get(
-                url, params={"per_page": 100, "page": page, "anon": "false"}
-            )
+            response = self._get(url, params={"per_page": 100, "page": page, "anon": "false"})
             response.raise_for_status()
             data: list[dict[str, Any]] = response.json()
             if not data:
@@ -236,7 +268,7 @@ class GitHubClient(ForgeClient):
 
     def get_authenticated_user(self) -> dict[str, Any]:
         """Fetch the authenticated user's profile (GET /user)."""
-        response = self._client.get("/user")
+        response = self._get("/user")
         response.raise_for_status()
         result: dict[str, Any] = response.json()
         return result
@@ -252,7 +284,7 @@ class GitHubClient(ForgeClient):
         url = "/search/issues"
         query = f"involves:{username} type:pr state:open"
         try:
-            response = self._client.get(url, params={"q": query, "per_page": max_results})
+            response = self._get(url, params={"q": query, "per_page": max_results})
             if response.status_code in (403, 422, 429):
                 logger.info(
                     "GitHub search rate-limited or unavailable (status %d); skipping mention scan.",
@@ -275,9 +307,42 @@ _REQUIRED_SCOPES = {"repo", "public_repo"}
 _FINE_GRAINED_NOTE = "Fine-grained PAT: enable 'Pull requests: Read' under repository permissions."
 
 
+def _is_rate_limit_response(response: httpx.Response) -> bool:
+    """True when a 403/429 is GitHub telling us the hourly quota is gone."""
+    if response.status_code not in (403, 429):
+        return False
+    remaining = response.headers.get("x-ratelimit-remaining")
+    if remaining is not None:
+        try:
+            return int(remaining) <= 0
+        except ValueError:
+            pass
+    # Secondary rate limits come back without the header but say so in the body.
+    with contextlib.suppress(Exception):
+        return "rate limit" in str(response.json().get("message", "")).lower()
+    return False
+
+
 def _log_auth_suggestions(owner: str, repo: str, response: httpx.Response | None = None) -> None:
     """Log actionable suggestions when the GitHub API returns 401 or 403."""
     status = response.status_code if response is not None else 401
+
+    # A 403 with no quota left is a rate limit, not an auth problem. Saying
+    # "check your token scopes" here sends the operator chasing the wrong bug.
+    if response is not None and _is_rate_limit_response(response):
+        reset = response.headers.get("x-ratelimit-reset", "")
+        limit = response.headers.get("x-ratelimit-limit", "?")
+        logger.error(
+            "GitHub API quota exhausted for %s/%s (limit %s/hour, resets at epoch %s). "
+            "This is a rate limit, not an auth failure — the token is fine. "
+            "Reduce poll frequency, raise poll_refresh_hours, or trim the number of "
+            "polled projects.",
+            owner,
+            repo,
+            limit,
+            reset or "unknown",
+        )
+        return
 
     # Parse granted scopes from the response header when available.
     granted: set[str] = set()

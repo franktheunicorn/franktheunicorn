@@ -254,6 +254,137 @@ class TestListPullRequestsAuthFallback:
         assert len(results) == 2
 
 
+class _RecordingLimiter:
+    """Stand-in for GitHubRateLimiter that records the calls the client makes."""
+
+    def __init__(self) -> None:
+        self.acquires = 0
+        self.header_updates: list[str | None] = []
+
+    def acquire(self) -> None:
+        self.acquires += 1
+
+    def update_from_headers(self, headers: httpx.Headers) -> None:
+        self.header_updates.append(headers.get("x-ratelimit-remaining"))
+
+    def is_rate_limited(self) -> bool:
+        return False
+
+
+class TestRateLimiterWiring:
+    """Reads pace through the limiter and feed quota headers back into it."""
+
+    def test_get_acquires_and_reports_headers(self, httpx_mock: HTTPXMock) -> None:
+        limiter = _RecordingLimiter()
+        client = GitHubClient(
+            token="t",
+            base_url="https://api.github.test",
+            rate_limiter=limiter,  # type: ignore[arg-type]
+        )
+        httpx_mock.add_response(
+            json={"number": 42},
+            headers={"x-ratelimit-remaining": "4321"},
+        )
+        client.get_pull_request("org", "repo", 42)
+        client.close()
+
+        assert limiter.acquires == 1
+        assert limiter.header_updates == ["4321"]
+
+    def test_paginated_listing_acquires_per_page(self, httpx_mock: HTTPXMock) -> None:
+        limiter = _RecordingLimiter()
+        client = GitHubClient(
+            token="t",
+            base_url="https://api.github.test",
+            rate_limiter=limiter,  # type: ignore[arg-type]
+        )
+        httpx_mock.add_response(
+            url="https://api.github.test/repos/apache/spark/pulls?state=open&per_page=100&page=1",
+            json=[{"number": n} for n in range(100)],
+            headers={"x-ratelimit-remaining": "900"},
+        )
+        httpx_mock.add_response(
+            url="https://api.github.test/repos/apache/spark/pulls?state=open&per_page=100&page=2",
+            json=[{"number": 100}],
+            headers={"x-ratelimit-remaining": "899"},
+        )
+        client.list_pull_requests("apache", "spark")
+        client.close()
+
+        assert limiter.acquires == 2
+        assert limiter.header_updates == ["900", "899"]
+
+    def test_no_limiter_still_works(self, httpx_mock: HTTPXMock, client: GitHubClient) -> None:
+        httpx_mock.add_response(json={"number": 42})
+        assert client.get_pull_request("org", "repo", 42)["number"] == 42
+
+    @pytest.fixture
+    def client(self) -> GitHubClient:
+        c = GitHubClient(token="t", base_url="https://api.github.test")
+        yield c
+        c.close()
+
+
+class TestRateLimitDiagnosis:
+    """An exhausted quota must not be reported as a broken token."""
+
+    @pytest.fixture
+    def client(self) -> GitHubClient:
+        c = GitHubClient(token="good-token", base_url="https://api.github.test")
+        yield c
+        c.close()
+
+    def _arrange_403(self, httpx_mock: HTTPXMock, headers: dict[str, str]) -> None:
+        html = (_FIXTURES / "pulls_listing_scrape.html").read_text()
+        httpx_mock.add_response(
+            url="https://api.github.test/repos/apache/spark/pulls?state=open&per_page=100&page=1",
+            status_code=403,
+            headers=headers,
+        )
+        httpx_mock.add_response(
+            url="https://github.com/apache/spark/issues?q=is%3Aopen+is%3Apr",
+            text=html,
+        )
+
+    def test_exhausted_quota_says_rate_limit(
+        self, httpx_mock: HTTPXMock, client: GitHubClient, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        self._arrange_403(
+            httpx_mock,
+            {
+                "x-ratelimit-remaining": "0",
+                "x-ratelimit-limit": "5000",
+                "x-ratelimit-reset": "1800000000",
+            },
+        )
+        with caplog.at_level(logging.ERROR, logger="franktheunicorn.backends.github"):
+            client.list_pull_requests("apache", "spark")
+
+        combined = " ".join(caplog.messages)
+        assert "quota exhausted" in combined
+        assert "not an auth failure" in combined
+        # The token advice must not appear — that's the misdiagnosis.
+        assert "public_repo" not in combined
+
+    def test_quota_remaining_still_says_auth(
+        self, httpx_mock: HTTPXMock, client: GitHubClient, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        self._arrange_403(
+            httpx_mock, {"x-ratelimit-remaining": "4999", "X-OAuth-Scopes": "read:user"}
+        )
+        with caplog.at_level(logging.ERROR, logger="franktheunicorn.backends.github"):
+            client.list_pull_requests("apache", "spark")
+
+        combined = " ".join(caplog.messages)
+        assert "quota exhausted" not in combined
+        assert "403" in combined
+        assert "read:user" in combined
+
+
 class TestListPullRequestsViaScrape:
     """Unit tests for the standalone scrape helper."""
 
