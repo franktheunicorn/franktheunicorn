@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import shlex
 from typing import Literal
 
@@ -1503,6 +1504,17 @@ class ProjectConfig(BaseModel):
     copypasta_min_lines: int = 4
     copypasta_scan_extensions: list[str] = Field(default_factory=lambda: [".py"])
     copypasta_llm_enabled: bool = False
+    # Noise suppression. Test scaffolding (main guards, license headers, the
+    # same six-line harness call in every test file) is duplicated on purpose
+    # and telling the author about it is pure noise. A duplicated block that
+    # already lives in more than this many *other* files in the repo is an
+    # established idiom, not a copy-paste — stay quiet. Set to 0 to disable
+    # the ubiquity check and report every match.
+    copypasta_max_repo_occurrences: int = 2
+    # Extra per-project regexes (matched against whitespace-collapsed lines)
+    # that count as boilerplate on top of the built-in set. A block is only
+    # reported if it still has copypasta_min_lines of non-boilerplate left.
+    copypasta_ignore_patterns: list[str] = Field(default_factory=list)
 
     # v1.75 rejection predictor — opt-in. When enabled, drafts are scored
     # with the per-project sklearn model (training it automatically once
@@ -1570,6 +1582,26 @@ class ProjectConfig(BaseModel):
         if v < 2:
             msg = "copypasta_min_lines must be at least 2"
             raise ValueError(msg)
+        return v
+
+    @field_validator("copypasta_max_repo_occurrences")
+    @classmethod
+    def copypasta_max_repo_occurrences_valid(cls, v: int) -> int:
+        if v < 0:
+            msg = "copypasta_max_repo_occurrences must be >= 0 (0 disables the check)"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("copypasta_ignore_patterns")
+    @classmethod
+    def copypasta_ignore_patterns_valid(cls, v: list[str]) -> list[str]:
+        # Fail at config load, not halfway through a review cycle.
+        for pattern in v:
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                msg = f"copypasta_ignore_patterns entry {pattern!r} is not a valid regex: {exc}"
+                raise ValueError(msg) from exc
         return v
 
     @field_validator("owner", "repo")

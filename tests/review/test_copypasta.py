@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -18,8 +19,11 @@ from franktheunicorn.review.copypasta import (
     _check_llm,
     _check_symilar,
     _check_winnowing,
+    _count_files_containing,
     _create_drafts,
+    _meaningful_lines,
     _read_repo_files,
+    _suppress_noise,
     check_copypasta,
     extract_added_chunks,
 )
@@ -660,6 +664,151 @@ class TestCopypastaConfig:
     def test_min_lines_accepts_2(self) -> None:
         config = ProjectConfig(owner="test", repo="test", copypasta_min_lines=2)
         assert config.copypasta_min_lines == 2
+
+    def test_noise_suppression_defaults(self) -> None:
+        config = ProjectConfig(owner="test", repo="test")
+        assert config.copypasta_max_repo_occurrences == 2
+        assert config.copypasta_ignore_patterns == []
+
+    def test_max_repo_occurrences_rejects_negative(self) -> None:
+        with pytest.raises(ValueError, match="copypasta_max_repo_occurrences must be >= 0"):
+            ProjectConfig(owner="test", repo="test", copypasta_max_repo_occurrences=-1)
+
+    def test_ignore_patterns_must_compile(self) -> None:
+        with pytest.raises(ValueError, match="is not a valid regex"):
+            ProjectConfig(owner="test", repo="test", copypasta_ignore_patterns=["unclosed(["])
+
+
+# -- Test noise suppression --------------------------------------------------
+
+# The tail of a pyspark test file: boilerplate every test module carries.
+_MAIN_GUARD_BLOCK = (
+    "    def test_sort(self):",
+    "        pass",
+    "",
+    "",
+    'if __name__ == "__main__":',
+    "    # noqa",
+    "    from pyspark.testing import main",
+    "",
+    "    main()",
+)
+
+# A shared test-harness call that appears in several files verbatim.
+_HARNESS_BLOCK = (
+    "            else:",
+    '                raise ValueError(f"unknown column: {col_name}")',
+    "",
+    "        self.compare_or_generate_golden_matrix(",
+    "            row_names=row_names,",
+    "            col_names=col_names,",
+    "            compute_cell=compute_cell,",
+)
+
+_REAL_DUPLICATE_BLOCK = (
+    "    total = 0",
+    "    for item in items:",
+    "        total += item.price * item.quantity",
+    "    discount = total * Decimal('0.1')",
+    "    return total - discount",
+)
+
+
+def _match(lines: tuple[str, ...], *, source: str = "existing.py") -> CopyPastaMatch:
+    return CopyPastaMatch(
+        source_file=source,
+        source_start_line=1,
+        source_end_line=len(lines),
+        new_file="new_test.py",
+        new_start_line=100,
+        num_lines=len(lines),
+        tier="symilar",
+        matched_lines=lines,
+    )
+
+
+class TestMeaningfulLines:
+    def test_strips_scaffolding(self) -> None:
+        assert _meaningful_lines(_MAIN_GUARD_BLOCK) == [
+            "def test_sort(self):",
+        ]
+
+    def test_normalizes_indentation(self) -> None:
+        assert _meaningful_lines(["    x = 1", "\tx  =   1"]) == ["x = 1", "x = 1"]
+
+    def test_extra_patterns_apply(self) -> None:
+        extra = (re.compile(r"^self\.compare_or_generate_golden_matrix\($"),)
+        assert "self.compare_or_generate_golden_matrix(" not in _meaningful_lines(
+            _HARNESS_BLOCK, extra
+        )
+
+    def test_keeps_real_code(self) -> None:
+        assert len(_meaningful_lines(_REAL_DUPLICATE_BLOCK)) == 5
+
+
+class TestSuppressNoise:
+    def test_drops_boilerplate_only_block(self) -> None:
+        kept = _suppress_noise([_match(_MAIN_GUARD_BLOCK)], {}, min_lines=4, max_repo_occurrences=2)
+        assert kept == []
+
+    def test_drops_block_living_in_many_files(self) -> None:
+        repo = {f"test_pyarrow_{i}.py": "\n".join(_HARNESS_BLOCK) for i in range(4)}
+        kept = _suppress_noise([_match(_HARNESS_BLOCK)], repo, min_lines=4, max_repo_occurrences=2)
+        assert kept == []
+
+    def test_keeps_block_in_few_files(self) -> None:
+        repo = {"billing.py": "def f(items):\n" + "\n".join(_REAL_DUPLICATE_BLOCK)}
+        match = _match(_REAL_DUPLICATE_BLOCK, source="billing.py")
+        kept = _suppress_noise([match], repo, min_lines=4, max_repo_occurrences=2)
+        assert kept == [match]
+
+    def test_ubiquity_check_disabled_by_zero(self) -> None:
+        repo = {f"test_pyarrow_{i}.py": "\n".join(_HARNESS_BLOCK) for i in range(4)}
+        match = _match(_HARNESS_BLOCK)
+        kept = _suppress_noise([match], repo, min_lines=4, max_repo_occurrences=0)
+        assert kept == [match]
+
+    def test_matches_without_lines_pass_through(self) -> None:
+        match = CopyPastaMatch(
+            source_file="a.py",
+            source_start_line=1,
+            source_end_line=9,
+            new_file="b.py",
+            new_start_line=1,
+            num_lines=9,
+            tier="symilar",
+        )
+        kept = _suppress_noise([match], {}, min_lines=4, max_repo_occurrences=2)
+        assert kept == [match]
+
+    def test_duplicate_matches_are_not_conflated(self) -> None:
+        """Two identical-looking matches must be judged independently."""
+        repo = {f"t{i}.py": "\n".join(_HARNESS_BLOCK) for i in range(4)}
+        repo["billing.py"] = "\n".join(_REAL_DUPLICATE_BLOCK)
+        noisy, real = _match(_HARNESS_BLOCK), _match(_REAL_DUPLICATE_BLOCK)
+        kept = _suppress_noise(
+            [noisy, noisy, real, real], repo, min_lines=4, max_repo_occurrences=2
+        )
+        assert kept == [real, real]
+
+
+class TestCountFilesContaining:
+    def test_counts_only_contiguous_runs(self) -> None:
+        blocks = {0: tuple(_meaningful_lines(_REAL_DUPLICATE_BLOCK))}
+        repo = {
+            "exact.py": "\n".join(_REAL_DUPLICATE_BLOCK),
+            # Same lines, but interrupted by real code in between.
+            "interrupted.py": (
+                "    total = 0\n"
+                "    for item in items:\n"
+                "        log.info('counting')\n"
+                "        total += item.price * item.quantity\n"
+            ),
+        }
+        assert _count_files_containing(blocks, repo) == {0: 1}
+
+    def test_no_blocks_no_counts(self) -> None:
+        assert _count_files_containing({}, {"a.py": "x = 1\n"}) == {}
 
 
 # -- Test create_drafts ------------------------------------------------------
