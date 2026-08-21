@@ -379,3 +379,41 @@ class TestForgeClientFor:
         pc = ProjectConfig(owner="acme", repo="widgets", forge="ghe-internal")
 
         assert _forge_client_for(pc, oc) is None
+
+
+class TestMidCycleDrain:
+    """``_drain_worker_commands`` keeps operator-triggered work responsive.
+
+    Without it, a queued security triage waits for the whole poll cycle to
+    finish, which on a busy repo is minutes — while the dashboard promises
+    "within seconds".
+    """
+
+    def test_drains_pending_commands(self) -> None:
+        from franktheunicorn.worker import runner
+
+        operator_config = MagicMock()
+        with patch(
+            "franktheunicorn.worker.commands.process_pending_commands",
+            return_value=2,
+        ) as mock_process:
+            runner._drain_worker_commands(operator_config)
+
+        mock_process.assert_called_once_with(operator_config)
+
+    def test_no_operator_config_is_a_noop(self) -> None:
+        from franktheunicorn.worker import runner
+
+        with patch("franktheunicorn.worker.commands.process_pending_commands") as mock_process:
+            runner._drain_worker_commands(None)
+
+        mock_process.assert_not_called()
+
+    def test_failure_does_not_abort_the_poll(self) -> None:
+        from franktheunicorn.worker import runner
+
+        with patch(
+            "franktheunicorn.worker.commands.process_pending_commands",
+            side_effect=RuntimeError("db locked"),
+        ):
+            runner._drain_worker_commands(MagicMock())  # must not raise

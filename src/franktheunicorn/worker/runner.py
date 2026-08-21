@@ -929,6 +929,27 @@ def process_pr(
             diff_http.close()
 
 
+def _drain_worker_commands(operator_config: OperatorConfig | None) -> None:
+    """Run any queued ``WorkerCommand`` rows without waiting for the cycle to end.
+
+    The dashboard tells the operator that a queued action (security triage, a
+    forced test run) lands "within seconds", but the drain in ``run_worker``
+    only gets a turn once the whole poll cycle is done — minutes on a busy
+    repo. Draining between PRs keeps that promise. Never raises: a bad command
+    must not abort the poll.
+    """
+    if operator_config is None:
+        return
+    try:
+        from franktheunicorn.worker.commands import process_pending_commands
+
+        processed = process_pending_commands(operator_config)
+        if processed:
+            logger.info("Drained %d worker command(s) mid-cycle", processed)
+    except Exception:
+        logger.exception("Error draining worker commands mid-cycle")
+
+
 def _run_cycle(
     clients: Mapping[str, object],
     project_configs: Sequence[object],
@@ -1084,6 +1105,10 @@ def _run_cycle(
                             repo_path,
                         )
                 logger.debug("Finished processing PR #%d (%s/%s)", pr.number, pc.owner, pc.repo)
+
+                # Operator-triggered work (security triage, forced test runs)
+                # shouldn't sit behind the rest of the cycle.
+                _drain_worker_commands(operator_config)
         except Exception:
             logger.exception("Error polling %s/%s", pc.owner, pc.repo)
 
