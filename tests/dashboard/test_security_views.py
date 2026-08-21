@@ -273,12 +273,12 @@ class TestSecurityReportVerdict:
 
 @pytest.mark.django_db
 class TestSecurityReportTriage:
-    @patch("franktheunicorn.security.triage.triage_report")
     @patch("franktheunicorn.config.loader.get_operator_config")
-    def test_triage_endpoint(
-        self, mock_config: MagicMock, mock_triage: MagicMock, client: Client, db: Any
+    def test_triage_endpoint_queues_worker_command(
+        self, mock_config: MagicMock, client: Client, db: Any
     ) -> None:
         from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig
+        from franktheunicorn.core.models import WorkerCommand
 
         mock_config.return_value = OperatorConfig(
             github_username="testuser",
@@ -288,7 +288,11 @@ class TestSecurityReportTriage:
 
         response = client.post(f"/security/{report.pk}/triage/")
         assert response.status_code == 200
-        mock_triage.assert_called_once()
+        assert b"Triage queued" in response.content
+        cmd = WorkerCommand.objects.filter(
+            command="run_security_triage", security_report=report
+        ).first()
+        assert cmd is not None
 
     @patch("franktheunicorn.config.loader.get_operator_config")
     def test_triage_no_backend_returns_error(
@@ -303,10 +307,10 @@ class TestSecurityReportTriage:
         assert response.status_code == 200
         assert b"No LLM backend configured" in response.content
 
-    @patch("franktheunicorn.security.triage.triage_report", side_effect=RuntimeError("boom"))
+    @patch("franktheunicorn.core.models.WorkerCommand.objects")
     @patch("franktheunicorn.config.loader.get_operator_config")
-    def test_triage_error_returns_error_html(
-        self, mock_config: MagicMock, mock_triage: MagicMock, client: Client, db: Any
+    def test_triage_queue_failure_returns_error_html(
+        self, mock_config: MagicMock, mock_objects: MagicMock, client: Client, db: Any
     ) -> None:
         from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig
 
@@ -314,11 +318,12 @@ class TestSecurityReportTriage:
             github_username="testuser",
             llm_backends=[LLMBackendConfig(provider="stub")],
         )
+        mock_objects.create.side_effect = RuntimeError("db error")
         report = SecurityReportFactory()
 
         response = client.post(f"/security/{report.pk}/triage/")
         assert response.status_code == 200
-        assert b"Triage failed" in response.content
+        assert b"Failed to queue triage" in response.content
 
 
 @pytest.mark.django_db

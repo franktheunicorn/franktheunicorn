@@ -8,6 +8,7 @@ operations) inside its own container where Docker access is permitted.
 Commands supported:
 - ``run_dual_tests``: differential test verification on a PR.
 - ``run_security_sandbox``: execute a security-report POC in the sandbox.
+- ``run_security_triage``: LLM triage of a security report (NVD + two LLM calls).
 - ``run_agents``: force-run the review pipeline on a PR (no trusted-author
   gate, no dedup against existing drafts).
 """
@@ -129,6 +130,7 @@ def _dispatch(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
     handlers = {
         "run_dual_tests": _run_dual_tests,
         "run_security_sandbox": _run_security_sandbox,
+        "run_security_triage": _run_security_triage,
         "run_agents": _run_agents,
     }
     handler = handlers.get(cmd.command)
@@ -203,6 +205,23 @@ def _run_security_sandbox(cmd: WorkerCommand, operator_config: OperatorConfig) -
         ]
     )
     cmd.log = f"Sandbox verdict={result.verdict}"
+
+
+def _run_security_triage(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
+    if cmd.security_report is None:
+        msg = "run_security_triage requires a security_report target"
+        raise ValueError(msg)
+
+    from franktheunicorn.config.loader import get_project_config
+    from franktheunicorn.security.triage import triage_report
+
+    report = cmd.security_report
+    project = report.project
+    project_config = get_project_config(project.full_name) if project is not None else None
+
+    triage_report(report, project_config, operator_config)
+    report.refresh_from_db()
+    cmd.log = f"Triage complete: severity={report.assessed_severity!r} status={report.status!r}"
 
 
 def _run_agents(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:

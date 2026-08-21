@@ -106,7 +106,7 @@ def get_project_config(name: str) -> ProjectConfig | None:
 
     Returns None if no matching config is found.
     """
-    configs = load_project_configs(settings.FRANK_PROJECTS_DIR)
+    configs = load_project_configs(getattr(settings, "FRANK_PROJECTS_DIR", ""))
     for config in configs:
         if name in (f"{config.owner}-{config.repo}", config.full_name):
             return config

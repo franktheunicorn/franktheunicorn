@@ -1037,11 +1037,11 @@ def security_report_create(request: HttpRequest) -> HttpResponse:
             source="paste",
         )
 
-        # Auto-triage if configured.
+        # Queue auto-triage if configured — runs in the worker, not inline.
         try:
             _auto_triage_report(report)
         except Exception:
-            logger.debug("Auto-triage failed for report %d", report.pk, exc_info=True)
+            logger.warning("Failed to queue auto-triage for report %d", report.pk, exc_info=True)
 
         return redirect("dashboard:security_detail", report_id=report.pk)
 
@@ -1071,7 +1071,7 @@ def security_report_detail(request: HttpRequest, report_id: int) -> HttpResponse
 
 @require_POST
 def security_report_triage(request: HttpRequest, report_id: int) -> HttpResponse:
-    """Trigger LLM triage on a security report (htmx)."""
+    """Queue LLM triage on a security report via the worker (htmx)."""
     report = get_object_or_404(SecurityReport.objects.select_related("project"), pk=report_id)
 
     try:
@@ -1085,20 +1085,23 @@ def security_report_triage(request: HttpRequest, report_id: int) -> HttpResponse
                 "No LLM backend configured. Add one to operator.yaml.</div>"
             )
 
-        project_config = _find_project_config(report.project) if report.project else None
-
-        from franktheunicorn.security.triage import triage_report
-
-        triage_report(report, project_config, operator_config)
-        report.refresh_from_db()
+        WorkerCommand.objects.create(
+            command="run_security_triage",
+            security_report=report,
+        )
+        logger.info("Queued manual triage for security report #%d", report.pk)
     except Exception:
-        logger.exception("Triage failed for report %d", report.pk)
+        logger.exception("Failed to queue triage for report %d", report.pk)
         return HttpResponse(
             '<div class="triage-result" style="color: #c00;">'
-            "Triage failed. Check LLM backend configuration.</div>"
+            "Failed to queue triage. Check configuration.</div>"
         )
 
-    return render(request, "dashboard/_security_triage_result.html", {"report": report})
+    return HttpResponse(
+        '<div class="triage-result triage-queued">'
+        "Triage queued — the worker will process it within seconds. "
+        '<a href="">Refresh</a> the page to see results.</div>'
+    )
 
 
 @require_POST
@@ -1221,7 +1224,7 @@ def security_guidance_list(request: HttpRequest) -> HttpResponse:
 
 
 def _auto_triage_report(report: SecurityReport) -> None:
-    """Auto-triage a new report if configured."""
+    """Queue a security report for auto-triage via the worker if configured."""
     from franktheunicorn.config.loader import get_operator_config
 
     operator_config = get_operator_config()
@@ -1230,11 +1233,11 @@ def _auto_triage_report(report: SecurityReport) -> None:
     if not operator_config.security_triage.auto_triage:
         return
 
-    project_config = _find_project_config(report.project) if report.project else None
-
-    from franktheunicorn.security.triage import triage_report
-
-    triage_report(report, project_config, operator_config)
+    WorkerCommand.objects.create(
+        command="run_security_triage",
+        security_report=report,
+    )
+    logger.info("Queued auto-triage for security report #%d", report.pk)
 
 
 def _is_sandbox_enabled() -> bool:

@@ -807,6 +807,7 @@ class WorkerCommand(models.Model):
     COMMAND_CHOICES = [
         ("run_dual_tests", "Run differential tests"),
         ("run_security_sandbox", "Run security report sandbox"),
+        ("run_security_triage", "Run LLM triage on security report"),
         ("run_agents", "Force-run review agents"),
     ]
 

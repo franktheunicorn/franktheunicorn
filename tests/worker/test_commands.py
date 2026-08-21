@@ -160,6 +160,94 @@ class TestProcessPendingCommands:
         assert report.sandbox_verdict == "safe"
         assert report.sandbox_result == "all good"
 
+    def test_security_triage_dispatch(self) -> None:
+        """The dashboard queues triage; the worker is what actually runs it."""
+        from franktheunicorn.core.models import Project
+
+        operator_config = MagicMock()
+        project = Project.objects.create(owner="acme", repo="widgets")
+        report = SecurityReport.objects.create(project=project, title="XSS in UI", raw_text="...")
+        cmd = WorkerCommand.objects.create(
+            command="run_security_triage",
+            security_report=report,
+        )
+        mock_pc = MagicMock()
+
+        def fake_triage(rpt, project_config, opc):
+            assert project_config is mock_pc
+            SecurityReport.objects.filter(pk=rpt.pk).update(
+                assessed_severity="medium", status="triaged"
+            )
+            return rpt
+
+        with (
+            patch("franktheunicorn.config.loader.get_project_config", return_value=mock_pc),
+            patch("franktheunicorn.security.triage.triage_report", side_effect=fake_triage),
+        ):
+            processed = process_pending_commands(operator_config)
+
+        assert processed == 1
+        cmd.refresh_from_db()
+        assert cmd.status == "completed"
+        # The log reflects the *stored* outcome, not the pre-triage row.
+        assert "severity='medium'" in cmd.log
+        assert "status='triaged'" in cmd.log
+
+    def test_security_triage_without_report_fails(self, db_pr: PullRequest) -> None:
+        operator_config = MagicMock()
+        cmd = WorkerCommand.objects.create(command="run_dual_tests", pull_request=db_pr)
+        WorkerCommand.objects.filter(pk=cmd.pk).update(
+            command="run_security_triage", pull_request=None
+        )
+
+        process_pending_commands(operator_config)
+
+        cmd.refresh_from_db()
+        assert cmd.status == "failed"
+        assert "requires a security_report" in cmd.error
+
+    def test_security_triage_failure_marks_command_failed(self) -> None:
+        from franktheunicorn.core.models import Project
+
+        operator_config = MagicMock()
+        project = Project.objects.create(owner="acme", repo="widgets")
+        report = SecurityReport.objects.create(project=project, title="thing", raw_text="")
+        cmd = WorkerCommand.objects.create(
+            command="run_security_triage",
+            security_report=report,
+        )
+
+        with (
+            patch("franktheunicorn.config.loader.get_project_config", return_value=None),
+            patch(
+                "franktheunicorn.security.triage.triage_report",
+                side_effect=RuntimeError("llm exploded"),
+            ),
+        ):
+            process_pending_commands(operator_config)
+
+        cmd.refresh_from_db()
+        assert cmd.status == "failed"
+        assert "llm exploded" in cmd.error
+
+    def test_security_triage_works_without_project(self) -> None:
+        """A report pasted with no project attached still triages."""
+        operator_config = MagicMock()
+        report = SecurityReport.objects.create(title="orphan report", raw_text="")
+        cmd = WorkerCommand.objects.create(
+            command="run_security_triage",
+            security_report=report,
+        )
+
+        with patch(
+            "franktheunicorn.security.triage.triage_report", return_value=report
+        ) as mock_triage:
+            process_pending_commands(operator_config)
+
+        cmd.refresh_from_db()
+        assert cmd.status == "completed"
+        assert mock_triage.call_args.args[1] is None
+
     def test_unknown_command_marked_failed(self, db_pr: PullRequest) -> None:
         operator_config = MagicMock()
         cmd = WorkerCommand.objects.create(
