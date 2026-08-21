@@ -158,6 +158,12 @@ def acp_complete(
             chunk = content.get("text")
             if isinstance(chunk, str):
                 accumulated.append(chunk)
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    chunk = block.get("text")
+                    if isinstance(chunk, str):
+                        accumulated.append(chunk)
 
     def _recv_until(match_id: int) -> dict[str, object]:
         while True:

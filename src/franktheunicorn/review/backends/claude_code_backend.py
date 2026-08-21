@@ -98,7 +98,11 @@ class ClaudeCodeBackend(BaseLLMBackend):
 
     def _acp_argv(self) -> list[str]:
         """Split ``acp_command`` into argv (supports ``"cmd arg1 arg2"``)."""
-        return shlex.split(self._acp_command) if self._acp_command else [_DEFAULT_ACP_COMMAND]
+        return (
+            shlex.split(self._acp_command)
+            if self._acp_command
+            else shlex.split(_DEFAULT_ACP_COMMAND)
+        )
 
     def _call_api(self, system_prompt: str, user_message: str, api_key: str) -> str:
         if self._transport == "acp":
