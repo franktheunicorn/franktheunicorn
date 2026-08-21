@@ -198,8 +198,12 @@ data/*.lock
 data/*.pid
 data/cache/
 data/repos/
+data/run/
 data/staticfiles/
 data/rate_limits.sqlite
+
+# Agent session transcripts (.claude/hooks and friends stay tracked)
+.claude/projects/
 
 # Generated compose overrides (created by setup.sh / manage.py setup_llm)
 compose.ollama.yaml
