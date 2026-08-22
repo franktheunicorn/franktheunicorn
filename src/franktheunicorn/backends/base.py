@@ -64,6 +64,14 @@ class ForgeClient(ABC):
     - ``MockForgeClient`` (``backends/mock.py``)
     """
 
+    # True only when ``list_pull_requests`` paginates to exhaustion, so an
+    # absent PR really means "not open on the forge any more" rather than
+    # "on a page we never asked for". The poller's closed-PR reap requires
+    # this; a client that returns one short page (Gitea and GitLab both stop
+    # at 50) would otherwise have every PR past that page marked closed.
+    # Flip it on once the implementation paginates.
+    lists_all_open_pull_requests: bool = False
+
     @abstractmethod
     def list_pull_requests(
         self, owner: str, repo: str, state: str = "open"

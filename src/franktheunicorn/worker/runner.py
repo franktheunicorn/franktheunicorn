@@ -998,9 +998,10 @@ def _run_cycle(
     all_prs: list[object] = []
     pr_to_config: dict[int, ProjectConfig] = {}
     # PRs the poller skipped as unchanged. They were seen this cycle, just not
-    # re-processed — the backfill pass must not mistake them for PRs that the
-    # poll never reached and review the lot.
-    skipped_pks: set[int] = set()
+    # re-processed: the backfill must not mistake them for PRs the poll never
+    # reached and review the lot, and the shepherding / dependency-changelog
+    # passes still want them in all_prs.
+    skipped_prs: list[object] = []
 
     for pc in project_configs:
         if not isinstance(pc, ProjectConfig) or not pc.enabled:
@@ -1048,14 +1049,21 @@ def _run_cycle(
             _maybe_refresh_repo_health(pc, repo_path)
 
             logger.debug("Calling poll_project for %s/%s ...", pc.owner, pc.repo)
+            project_skipped: list[object] = []
             prs = poll_project(
                 client=client,  # type: ignore[arg-type]
                 project_config=pc,
                 operator_username=operator_username,
                 repo_path=repo_path,
-                skipped_pks=skipped_pks,
+                skipped_prs=project_skipped,  # type: ignore[arg-type]
             )
             logger.debug("poll_project returned %d PR(s) for %s/%s", len(prs), pc.owner, pc.repo)
+            # Unchanged PRs still belong to this cycle for the passes that read
+            # stored state rather than re-fetching it.
+            for skipped in project_skipped:
+                skipped_prs.append(skipped)
+                all_prs.append(skipped)
+                pr_to_config[skipped.pk] = pc  # type: ignore[attr-defined]
             for pr in prs:
                 all_prs.append(pr)
                 pr_to_config[pr.pk] = pc
@@ -1135,10 +1143,14 @@ def _run_cycle(
     if operator_username:
         _scan_mentioned_prs(clients, operator_username, operator_config)
 
+    # The mention scan can be 100 ingests and the backfill can be many LLM
+    # reviews; don't make a queued triage wait behind either.
+    _drain_worker_commands(operator_config)
+
     # Backfill pass: draft reviews for open PRs that were ingested (e.g. via
     # lookup_pr) but never reached the main poll loop above.
     _backfill_unreviewed_prs(
-        already_polled_pks={getattr(pr, "pk", None) for pr in all_prs} | skipped_pks,
+        already_polled_pks={getattr(pr, "pk", None) for pr in all_prs},
         project_configs=project_configs,
         operator_config=operator_config,
         disabled_backends=disabled_backends,

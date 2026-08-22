@@ -142,6 +142,12 @@ class PullRequest(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     github_created_at = models.DateTimeField(null=True, blank=True)
     github_updated_at = models.DateTimeField(null=True, blank=True)
+    # When the poller last did the *full* per-PR refresh (files, detail,
+    # comments, re-score) for this row. Distinct from updated_at, which is
+    # auto_now and therefore bumped by any save at all — including the mention
+    # scan's idempotent re-ingest, which would keep resetting the poller's
+    # "it's been a day, re-check the time-dependent signals" escape hatch.
+    last_polled_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         constraints = [

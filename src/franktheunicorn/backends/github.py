@@ -39,6 +39,11 @@ class GitHubClient(ForgeClient):
     that comes back 403 and gets misread as a broken token.
     """
 
+    # list_pull_requests paginates to MAX_LISTED_PULL_REQUESTS, so a PR missing
+    # from the result is genuinely not open (unless the result hit that cap, or
+    # came from the scrape fallback — the poller checks both).
+    lists_all_open_pull_requests = True
+
     def __init__(
         self,
         token: str = "",

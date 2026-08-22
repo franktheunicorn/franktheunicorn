@@ -8,6 +8,7 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+from django.utils import timezone
 
 from franktheunicorn.backends.base import MAX_LISTED_PULL_REQUESTS
 from franktheunicorn.backends.mock import MockGitHubClient
@@ -600,8 +601,9 @@ def _make_pr_list_item() -> dict[str, Any]:
         "requested_reviewers": [],
         "assignees": [],
         "draft": False,
-        "additions": 5,
-        "deletions": 2,
+        # The real GET /repos/{o}/{r}/pulls listing carries no diff stats —
+        # those only come from the single-PR detail endpoint. Keep the fixture
+        # honest so the detail-sourced repair stays under test.
         "created_at": "2026-04-01T10:00:00Z",
         "updated_at": "2026-04-01T10:00:00Z",
     }
@@ -750,7 +752,14 @@ class TestPollerRefFetching:
 
 
 class _CountingMockClient(MockGitHubClient):
-    """Mock client that counts per-PR API calls and lets the listing be edited."""
+    """Mock client that counts per-PR API calls and lets the listing be edited.
+
+    Declares a complete listing: its pr_list is the whole truth, which is what
+    the closed-PR reap requires. Clients that return one short page (Gitea,
+    GitLab) must not set this.
+    """
+
+    lists_all_open_pull_requests = True
 
     def __init__(self, tmp_path: Path, pr_list: list[dict[str, Any]]) -> None:
         super().__init__(tmp_path)
@@ -845,7 +854,7 @@ class TestUnchangedPRSkip:
         poll_project(client, config, operator_username="holdenk")
 
         PullRequest.objects.filter(number=99).update(
-            updated_at=datetime(2026, 4, 1, tzinfo=UTC) - timedelta(days=3)
+            last_polled_at=timezone.now() - timedelta(days=3)
         )
         client.detail_calls.clear()
         assert len(poll_project(client, config, operator_username="holdenk")) == 1
@@ -865,13 +874,99 @@ class TestUnchangedPRSkip:
     def test_diff_stats_come_from_detail(self, tmp_path: Path) -> None:
         """The listing has no additions/deletions; the detail response does."""
         client = _CountingMockClient(tmp_path, [_listed_pr()])
-        # Simulate the real list payload, which carries no diff stats at all.
-        client.pr_list[0].pop("additions")
-        client.pr_list[0].pop("deletions")
         poll_project(client, ProjectConfig(owner="apache", repo="spark"), "holdenk")
 
         pr = PullRequest.objects.get(number=99)
         assert (pr.additions, pr.deletions) == (31, 7)
+
+    def test_failed_detail_fetch_keeps_existing_diff_stats(self, tmp_path: Path) -> None:
+        """A rate-limited detail call must not zero stats we already had.
+
+        The listing carries no diff stats, so writing its absent value as 0
+        would wipe every PR's numbers during the exact window where the detail
+        call fails for all of them at once.
+        """
+        client = _CountingMockClient(tmp_path, [_listed_pr()])
+        config = ProjectConfig(owner="apache", repo="spark")
+        poll_project(client, config, operator_username="holdenk")
+        assert PullRequest.objects.get(number=99).additions == 31
+
+        def boom(owner: str, repo: str, pr_number: int) -> dict[str, Any]:
+            msg = "403 rate limited"
+            raise RuntimeError(msg)
+
+        client.get_pull_request = boom  # type: ignore[method-assign]
+        client.pr_list = [_listed_pr(updated_at="2026-04-09T11:00:00Z")]
+        poll_project(client, config, operator_username="holdenk")
+
+        pr = PullRequest.objects.get(number=99)
+        assert (pr.additions, pr.deletions) == (31, 7)
+
+    def test_operator_prs_refresh_more_often(self, tmp_path: Path) -> None:
+        """mergeable only moves via the detail call, and shepherding reads it.
+
+        The base branch advancing makes a PR conflicted without touching
+        anything the listing can see, so the operator's own PRs can't wait out
+        the full poll_refresh_hours window.
+        """
+        client = _CountingMockClient(tmp_path, [_listed_pr()])
+        config = ProjectConfig(owner="apache", repo="spark", poll_refresh_hours=24)
+        poll_project(client, config, operator_username="test-user")
+
+        pr = PullRequest.objects.get(number=99)
+        assert pr.is_operator_pr is True, "fixture author should be the operator"
+        PullRequest.objects.filter(pk=pr.pk).update(
+            last_polled_at=timezone.now() - timedelta(hours=2)
+        )
+
+        client.detail_calls.clear()
+        assert len(poll_project(client, config, operator_username="test-user")) == 1
+        assert client.detail_calls == [99]
+
+    def test_third_party_prs_wait_for_the_full_window(self, tmp_path: Path) -> None:
+        client = _CountingMockClient(tmp_path, [_listed_pr()])
+        config = ProjectConfig(owner="apache", repo="spark", poll_refresh_hours=24)
+        poll_project(client, config, operator_username="somebody-else")
+
+        PullRequest.objects.filter(number=99).update(
+            last_polled_at=timezone.now() - timedelta(hours=2)
+        )
+        client.detail_calls.clear()
+        assert poll_project(client, config, operator_username="somebody-else") == []
+        assert client.detail_calls == []
+
+    def test_mention_scan_style_resave_does_not_reset_the_window(self, tmp_path: Path) -> None:
+        """updated_at is auto_now, so any save bumps it.
+
+        The mention scan re-ingests the operator's PRs every cycle via
+        update_or_create; if the skip timer read updated_at, that would keep
+        pushing the full-refresh deadline out of reach forever.
+        """
+        client = _CountingMockClient(tmp_path, [_listed_pr()])
+        config = ProjectConfig(owner="apache", repo="spark", poll_refresh_hours=24)
+        poll_project(client, config, operator_username="somebody-else")
+
+        PullRequest.objects.filter(number=99).update(
+            last_polled_at=timezone.now() - timedelta(days=2)
+        )
+        # Stand in for the mention scan's idempotent re-ingest.
+        pr = PullRequest.objects.get(number=99)
+        pr.save()
+        assert pr.updated_at > pr.last_polled_at
+
+        client.detail_calls.clear()
+        assert len(poll_project(client, config, operator_username="somebody-else")) == 1
+        assert client.detail_calls == [99]
+
+    def test_skipped_prs_are_reported_to_the_caller(self, tmp_path: Path) -> None:
+        """The cycle needs them for shepherding and the review backfill."""
+        client = _CountingMockClient(tmp_path, [_listed_pr()])
+        config = ProjectConfig(owner="apache", repo="spark")
+        poll_project(client, config, operator_username="holdenk")
+
+        skipped: list[PullRequest] = []
+        assert poll_project(client, config, "holdenk", skipped_prs=skipped) == []
+        assert [pr.number for pr in skipped] == [99]
 
 
 @pytest.mark.django_db
@@ -912,13 +1007,24 @@ class TestClosedPRReaping:
         assert PullRequest.objects.get(number=99).state == "open"
 
     def test_truncated_listing_closes_nothing(self, tmp_path: Path) -> None:
-        """A listing at the pagination cap may be missing PRs it didn't reach."""
+        """A listing at the pagination cap may be missing PRs it didn't reach.
+
+        Calls the reap directly: ingesting a thousand PRs through poll_project
+        just to prove a guard fires costs seconds per run.
+        """
+        from franktheunicorn.backends.poller import _close_missing_pull_requests
+
         client = _CountingMockClient(tmp_path, [_listed_pr(99)])
         self._poll(client)
+        project = Project.objects.get(owner="apache", repo="spark")
 
-        client.pr_list = [_listed_pr(n) for n in range(1000, 1000 + MAX_LISTED_PULL_REQUESTS)]
-        self._poll(client)
+        at_cap = [_listed_pr(n) for n in range(1000, 1000 + MAX_LISTED_PULL_REQUESTS)]
+        assert _close_missing_pull_requests(project, at_cap, client) == 0
         assert PullRequest.objects.get(number=99).state == "open"
+
+        # One under the cap is trusted, and does reap.
+        assert _close_missing_pull_requests(project, at_cap[:-1], client) == 1
+        assert PullRequest.objects.get(number=99).state == "closed"
 
     def test_other_projects_are_untouched(self, tmp_path: Path) -> None:
         other = ProjectFactory(owner="holdenk", repo="spark")
@@ -931,3 +1037,39 @@ class TestClosedPRReaping:
         client.pr_list = [_listed_pr(100)]
         self._poll(client)
         assert PullRequest.objects.get(project=other, number=7).state == "open"
+
+
+@pytest.mark.django_db
+class TestReapRequiresCompleteListing:
+    """Absence from a listing only means "closed" if the listing was complete."""
+
+    def test_client_that_does_not_paginate_never_reaps(self, tmp_path: Path) -> None:
+        """Gitea caps at 50 and GitLab at 50, neither paginating.
+
+        Reaping against one short page would close every PR on the pages we
+        never asked for.
+        """
+
+        class _ShortPageClient(_CountingMockClient):
+            lists_all_open_pull_requests = False
+
+        client = _ShortPageClient(tmp_path, [_listed_pr(99), _listed_pr(100)])
+        config = ProjectConfig(owner="apache", repo="spark")
+        poll_project(client, config, operator_username="holdenk")
+        assert PullRequest.objects.filter(state="open").count() == 2
+
+        # Second page's worth of PRs drops out of the (still truncated) listing.
+        client.pr_list = [_listed_pr(100)]
+        poll_project(client, config, operator_username="holdenk")
+
+        assert PullRequest.objects.get(number=99).state == "open"
+
+    def test_forge_clients_declare_their_listing_completeness(self) -> None:
+        from franktheunicorn.backends.gitea import GiteaClient
+        from franktheunicorn.backends.github import GitHubClient
+        from franktheunicorn.backends.gitlab import GitLabClient
+
+        assert GitHubClient.lists_all_open_pull_requests is True
+        # These stop at one page today; flipping the flag requires pagination.
+        assert GiteaClient.lists_all_open_pull_requests is False
+        assert GitLabClient.lists_all_open_pull_requests is False
