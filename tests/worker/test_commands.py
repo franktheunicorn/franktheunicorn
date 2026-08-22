@@ -409,6 +409,24 @@ class TestMidCycleDrain:
 
         mock_process.assert_not_called()
 
+    @pytest.mark.django_db
+    def test_cycle_drains_even_with_nothing_to_poll(self) -> None:
+        """The steady state is an empty poll, and that's when this matters.
+
+        With the unchanged-PR skip, poll_project returns [] for every project,
+        so a drain that only ran per-PR would never fire — while the cycle
+        still does the mention scan, the backfill and the alert sweep.
+        """
+        from franktheunicorn.config.models import OperatorConfig
+        from franktheunicorn.worker import runner
+
+        operator_config = OperatorConfig(github_username="holdenk")
+        with patch.object(runner, "_drain_worker_commands") as mock_drain:
+            runner._run_cycle({}, [], "holdenk", operator_config)
+
+        assert mock_drain.call_count >= 1
+        assert mock_drain.call_args.args == (operator_config,)
+
     def test_failure_does_not_abort_the_poll(self) -> None:
         from franktheunicorn.worker import runner
 

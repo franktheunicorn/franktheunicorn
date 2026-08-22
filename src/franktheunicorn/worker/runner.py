@@ -1125,6 +1125,11 @@ def _run_cycle(
         except Exception:
             logger.exception("Error polling %s/%s", pc.owner, pc.repo)
 
+        # Also drain per project, not only per PR: in the steady state the
+        # unchanged-PR skip leaves `prs` empty, so the per-PR drain above never
+        # runs while the cycle still does plenty of work below.
+        _drain_worker_commands(operator_config)
+
     # Fetch dependency changelogs reusing the same HTTP client.
     _fetch_dependency_changelogs_for_cycle(
         all_prs, pr_to_config, diff_fetcher, diff_http, rate_limiter=rate_limiter
@@ -1133,6 +1138,8 @@ def _run_cycle(
     # Shepherding pass for operator's own PRs (v2 — §2.3).
     if operator_config is not None:
         _run_shepherding_pass(all_prs, pr_to_config, operator_config)
+
+    _drain_worker_commands(operator_config)
 
     # Security email ingestion.
     if operator_config is not None:
