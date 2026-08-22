@@ -363,10 +363,52 @@ class TestRateLimitDiagnosis:
             client.list_pull_requests("apache", "spark")
 
         combined = " ".join(caplog.messages)
-        assert "quota exhausted" in combined
+        assert "throttling" in combined
         assert "not an auth failure" in combined
         # The token advice must not appear — that's the misdiagnosis.
         assert "public_repo" not in combined
+
+    def test_secondary_rate_limit_is_not_reported_as_auth(
+        self, httpx_mock: HTTPXMock, client: GitHubClient, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Secondary limits keep the quota headers non-zero and say so in the body.
+
+        Trusting x-ratelimit-remaining alone reports every secondary throttle
+        as a broken token.
+        """
+        import logging
+
+        html = (_FIXTURES / "pulls_listing_scrape.html").read_text()
+        httpx_mock.add_response(
+            url="https://api.github.test/repos/apache/spark/pulls?state=open&per_page=100&page=1",
+            status_code=403,
+            headers={
+                "x-ratelimit-remaining": "4998",
+                "x-ratelimit-limit": "5000",
+                "retry-after": "60",
+            },
+            json={"message": "You have exceeded a secondary rate limit."},
+        )
+        httpx_mock.add_response(
+            url="https://github.com/apache/spark/issues?q=is%3Aopen+is%3Apr", text=html
+        )
+        with caplog.at_level(logging.ERROR, logger="franktheunicorn.backends.github"):
+            client.list_pull_requests("apache", "spark")
+
+        combined = " ".join(caplog.messages)
+        assert "throttling" in combined
+        assert "retry after 60s" in combined
+        assert "public_repo" not in combined
+
+    def test_secondary_rate_limit_detected_from_body_alone(self) -> None:
+        from franktheunicorn.backends.github import _is_rate_limit_response
+
+        response = httpx.Response(
+            403,
+            headers={"x-ratelimit-remaining": "4998"},
+            json={"message": "You have exceeded a secondary rate limit."},
+        )
+        assert _is_rate_limit_response(response) is True
 
     def test_quota_remaining_still_says_auth(
         self, httpx_mock: HTTPXMock, client: GitHubClient, caplog: pytest.LogCaptureFixture
@@ -380,7 +422,7 @@ class TestRateLimitDiagnosis:
             client.list_pull_requests("apache", "spark")
 
         combined = " ".join(caplog.messages)
-        assert "quota exhausted" not in combined
+        assert "throttling" not in combined
         assert "403" in combined
         assert "read:user" in combined
 

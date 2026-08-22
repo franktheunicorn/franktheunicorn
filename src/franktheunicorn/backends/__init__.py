@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from franktheunicorn.backends.base import (
@@ -27,8 +28,28 @@ __all__ = [
 ]
 
 
+@lru_cache(maxsize=8)
+def _rate_limiter_for(db_path: str) -> GitHubRateLimiter | None:
+    """One limiter per bucket path, reused for the life of the process.
+
+    Cached deliberately, for two reasons. Each instance opens a SQLite
+    connection it never closes, and ``ingest_single_pr`` builds a client per PR
+    — up to 100 per cycle from the mention scan — so a fresh limiter each time
+    leaked a connection each time. And the header-derived remaining/reset pair
+    that the limiter calls its authoritative brake lives in plain instance
+    attributes: a new instance starts out blind to quota it has already spent.
+    """
+    try:
+        from franktheunicorn.data_access.rate_limiter import GitHubRateLimiter
+
+        return GitHubRateLimiter(db_path)
+    except Exception:
+        logger.debug("Could not initialize GitHub rate limiter", exc_info=True)
+        return None
+
+
 def _github_rate_limiter() -> GitHubRateLimiter | None:
-    """Build the shared adaptive limiter, or None when there's no data dir.
+    """The process-wide adaptive limiter, or None when there's no data dir.
 
     Same SQLite bucket the data_access fetchers use, so ingestion and the
     contextual fetchers pace against one budget instead of two.
@@ -38,11 +59,9 @@ def _github_rate_limiter() -> GitHubRateLimiter | None:
 
         from django.conf import settings
 
-        from franktheunicorn.data_access.rate_limiter import GitHubRateLimiter
-
-        return GitHubRateLimiter(Path(settings.DATA_DIR) / "rate_limits.sqlite")
+        return _rate_limiter_for(str(Path(settings.DATA_DIR) / "rate_limits.sqlite"))
     except Exception:
-        logger.debug("Could not initialize GitHub rate limiter", exc_info=True)
+        logger.debug("Could not resolve the rate-limiter bucket path", exc_info=True)
         return None
 
 

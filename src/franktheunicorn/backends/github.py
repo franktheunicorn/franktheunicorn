@@ -313,16 +313,27 @@ _FINE_GRAINED_NOTE = "Fine-grained PAT: enable 'Pull requests: Read' under repos
 
 
 def _is_rate_limit_response(response: httpx.Response) -> bool:
-    """True when a 403/429 is GitHub telling us the hourly quota is gone."""
+    """True when a 403/429 is GitHub throttling us rather than refusing us.
+
+    Covers both flavours. The primary limit zeroes x-ratelimit-remaining. A
+    *secondary* limit leaves the quota headers intact and non-zero, saying so
+    only in the body and in retry-after — so the remaining header can't be
+    treated as the last word or every secondary throttle gets misreported as a
+    broken token.
+    """
     if response.status_code not in (403, 429):
         return False
+
     remaining = response.headers.get("x-ratelimit-remaining")
     if remaining is not None:
-        try:
-            return int(remaining) <= 0
-        except ValueError:
-            pass
-    # Secondary rate limits come back without the header but say so in the body.
+        with contextlib.suppress(ValueError):
+            if int(remaining) <= 0:
+                return True
+
+    # The one header GitHub documents for secondary limits.
+    if response.headers.get("retry-after"):
+        return True
+
     with contextlib.suppress(Exception):
         return "rate limit" in str(response.json().get("message", "")).lower()
     return False
@@ -335,17 +346,20 @@ def _log_auth_suggestions(owner: str, repo: str, response: httpx.Response | None
     # A 403 with no quota left is a rate limit, not an auth problem. Saying
     # "check your token scopes" here sends the operator chasing the wrong bug.
     if response is not None and _is_rate_limit_response(response):
-        reset = response.headers.get("x-ratelimit-reset", "")
-        limit = response.headers.get("x-ratelimit-limit", "?")
+        retry_after = response.headers.get("retry-after", "")
+        when = (
+            f"retry after {retry_after}s"
+            if retry_after
+            else f"resets at epoch {response.headers.get('x-ratelimit-reset') or 'unknown'}"
+        )
         logger.error(
-            "GitHub API quota exhausted for %s/%s (limit %s/hour, resets at epoch %s). "
-            "This is a rate limit, not an auth failure — the token is fine. "
-            "Reduce poll frequency, raise poll_refresh_hours, or trim the number of "
-            "polled projects.",
+            "GitHub is throttling us on %s/%s (limit %s/hour, %s). This is a rate "
+            "limit, not an auth failure — the token is fine. Reduce poll frequency, "
+            "raise poll_refresh_hours, or trim the number of polled projects.",
             owner,
             repo,
-            limit,
-            reset or "unknown",
+            response.headers.get("x-ratelimit-limit", "?"),
+            when,
         )
         return
 
