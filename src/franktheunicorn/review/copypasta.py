@@ -442,33 +442,23 @@ def _check_symilar(
         chunk_lines = chunks_by_name[pr_ls.name].lines
 
         for repo_ls in repo_linesets:
+            # _find_common(a, b) always yields fst_lset=a (checked against
+            # pylint 4.0.6), so fst_* is the PR side and snd_* the repo side.
             for common in sym._find_common(pr_ls, repo_ls):
-                # Determine which is the PR side and which is the repo side
-                if common.fst_lset.name == pr_ls.name:
-                    pr_start = common.fst_file_start
-                    pr_end = common.fst_file_end
-                    repo_start = common.snd_file_start
-                    repo_end = common.snd_file_end
-                    repo_name = common.snd_lset.name
-                else:
-                    pr_start = common.snd_file_start
-                    pr_end = common.snd_file_end
-                    repo_start = common.fst_file_start
-                    repo_end = common.fst_file_end
-                    repo_name = common.fst_lset.name
-
                 matches.append(
                     CopyPastaMatch(
-                        source_file=repo_name,
-                        source_start_line=repo_start + 1,  # 0-indexed to 1-indexed
-                        source_end_line=repo_end,
+                        source_file=common.snd_lset.name,
+                        source_start_line=common.snd_file_start + 1,  # 0- to 1-indexed
+                        source_end_line=common.snd_file_end,
                         new_file=chunk_file,
-                        new_start_line=chunk_base_line + pr_start,
+                        new_start_line=chunk_base_line + common.fst_file_start,
                         num_lines=common.cmn_lines_nb,
                         tier="symilar",
                         # Symilar's line indices address the virtual file,
                         # whose content is exactly the chunk's lines.
-                        matched_lines=tuple(chunk_lines[pr_start:pr_end]),
+                        matched_lines=tuple(
+                            chunk_lines[common.fst_file_start : common.fst_file_end]
+                        ),
                     )
                 )
 
@@ -522,31 +512,57 @@ def _check_winnowing(
                 continue
 
             if overlap_tokens > 0 and ratio1 >= _WINNOW_MIN_OVERLAP:
-                # Extract source line range from copydetect's character-offset
-                # slices. The slices are character offsets into the raw code;
-                # convert to approximate line numbers.
-                source_start = 1
-                source_end = 1
-                if hasattr(repo_slices, "__len__") and len(repo_slices) > 0:
-                    raw = repo_fps[path].raw_code if hasattr(repo_fps[path], "raw_code") else ""
-                    if raw:
-                        source_start = raw[: int(repo_slices[0][0])].count("\n") + 1
-                        source_end = raw[: int(repo_slices[1][-1])].count("\n") + 1
+                source_range = _slice_line_range(getattr(repo_fp, "raw_code", ""), repo_slices) or (
+                    1,
+                    1,
+                )
+
+                # Narrow to the region that actually overlapped. The threshold
+                # is a ratio, so "matched" is typically part of the chunk, not
+                # all of it — and handing the whole chunk to the noise filters
+                # means the ubiquity check looks for a block that exists
+                # nowhere verbatim and therefore never fires.
+                new_range = _slice_line_range(getattr(chunk_fp, "raw_code", ""), _chunk_slices)
+                if new_range is None:
+                    matched_lines = chunk.lines
+                    new_start_line = chunk.start_line
+                else:
+                    matched_lines = chunk.lines[new_range[0] - 1 : new_range[1]]
+                    new_start_line = chunk.start_line + new_range[0] - 1
+                    if not matched_lines:  # slices outside the chunk: fall back
+                        matched_lines = chunk.lines
+                        new_start_line = chunk.start_line
 
                 matches.append(
                     CopyPastaMatch(
                         source_file=path,
-                        source_start_line=source_start,
-                        source_end_line=source_end,
+                        source_start_line=source_range[0],
+                        source_end_line=source_range[1],
                         new_file=chunk.file_path,
-                        new_start_line=chunk.start_line,
-                        num_lines=len(chunk.lines),
+                        new_start_line=new_start_line,
+                        num_lines=len(matched_lines),
                         tier="winnowing",
-                        matched_lines=chunk.lines,
+                        matched_lines=matched_lines,
                     )
                 )
 
     return matches
+
+
+def _slice_line_range(raw_code: str, slices: object) -> tuple[int, int] | None:
+    """Convert copydetect's character-offset slices to a 1-based line range.
+
+    Returns None when the slices aren't usable, so callers can fall back
+    instead of reporting line 1.
+    """
+    if not raw_code or not hasattr(slices, "__len__") or len(slices) == 0:
+        return None
+    try:
+        start = raw_code[: int(slices[0][0])].count("\n") + 1  # type: ignore[index]
+        end = raw_code[: int(slices[1][-1])].count("\n") + 1  # type: ignore[index]
+    except (IndexError, KeyError, TypeError, ValueError):
+        return None
+    return start, max(end, start)
 
 
 def _check_llm(

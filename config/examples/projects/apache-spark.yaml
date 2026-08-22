@@ -110,11 +110,14 @@ copypasta_llm_enabled: true
 # idiom and stays quiet (0 reports every match).
 copypasta_max_repo_occurrences: 2
 # Extra regexes (matched against whitespace-collapsed lines) that count as
-# boilerplate on top of the built-in set (comments, imports, main guards,
-# bare block punctuation).
+# boilerplate on top of the built-in set. Comments, imports, main guards and
+# bare block punctuation are already covered — don't re-list those (an entry
+# like "^from pyspark\\.testing import" is dead weight, the import rule has it).
+# List the project-specific scaffolding instead:
 copypasta_ignore_patterns:
-  - "^from pyspark\\.testing import"
   - "^sc\\.stop\\(\\)$"
+  - "^spark\\.stop\\(\\)$"
+  - "^self\\.spark\\.stop\\(\\)$"
 
 # Poll cost control. A PR whose upstream updated_at hasn't moved — and whose
 # title/labels/reviewers/assignees/draft state are unchanged — is skipped
