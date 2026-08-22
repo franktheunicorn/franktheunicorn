@@ -51,23 +51,33 @@
 
 <!-- Triage Results -->
 <div id="triage-area" style="margin-bottom: 1rem;">
-    {% if report.triage_summary %}
-    {% include "dashboard/_security_triage_result.html" %}
-    {% else %}
+    {# Worker state first, and outside the summary branch: a re-triage that #}
+    {# failed must be visible even when an earlier run left a summary behind, #}
+    {# otherwise the stale summary reads as current. #}
     {% if triage_command.status == "failed" %}
-    <div class="triage-result" style="color: #c00; margin-bottom: 0.5rem;">
+    <div class="triage-result triage-failed">
         Triage failed in the worker: {{ triage_command.error|default:"no error recorded" }}
     </div>
     {% elif triage_command.status == "pending" or triage_command.status == "running" %}
-    <div class="triage-result triage-queued" style="margin-bottom: 0.5rem;">
+    <div class="triage-result triage-queued">
         Triage {{ triage_command.status }} — reload for the result.
     </div>
     {% endif %}
+
+    {% if report.triage_summary %}
+    {% include "dashboard/_security_triage_result.html" %}
+    {% endif %}
+
+    {% if not triage_command or triage_command.status == "failed" or report.triage_summary %}
     <button class="action-btn post"
             hx-post="{% url 'dashboard:security_triage' report.pk %}"
             hx-target="#triage-area"
             hx-swap="innerHTML">
-        {% if triage_command.status == "failed" %}Retry LLM Triage{% else %}Run LLM Triage{% endif %}
+        {% if report.triage_summary or triage_command.status == "failed" %}
+        Re-run LLM Triage
+        {% else %}
+        Run LLM Triage
+        {% endif %}
     </button>
     {% endif %}
 </div>

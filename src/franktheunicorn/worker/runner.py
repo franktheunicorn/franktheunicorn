@@ -1942,14 +1942,21 @@ def _poll_security_emails(operator_config: OperatorConfig) -> None:
                 security_report=report,
             )
 
-            # Auto-triage only drafts an assessment; it sends nothing.
+            # Auto-triage only drafts an assessment; it sends nothing. Queue it
+            # like every other door: running it inline here blocked the poll
+            # cycle on an NVD lookup plus two LLM calls per report, skipped the
+            # in-flight dedup (so a later operator click ran the whole thing
+            # again), and hardcoded project_config=None — the command handler
+            # resolves the report's project config, including its security
+            # model.
             if report is not None and operator_config.security_triage.auto_triage:
                 try:
-                    from franktheunicorn.security.triage import triage_report
+                    from franktheunicorn.security.queue import queue_triage
 
-                    triage_report(report, None, operator_config)
+                    if queue_triage(report):
+                        logger.info("[email-scan] queued auto-triage for report #%d", report.pk)
                 except Exception:
-                    logger.exception("Auto-triage failed for email report %d", report.pk)
+                    logger.exception("Could not queue auto-triage for email report %d", report.pk)
 
         # Opt-in: mark ingested messages in the mailbox itself (Gmail label /
         # IMAP keyword) so the operator's inbox shows what frank picked up.

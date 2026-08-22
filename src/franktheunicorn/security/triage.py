@@ -20,7 +20,12 @@ _VALID_SEVERITIES: frozenset[str] = frozenset(
 
 # Statuses that can be overwritten by automatic triage analysis.
 # Operator-set statuses (valid, invalid, duplicate) are preserved on re-triage.
-_AUTO_MANAGED_STATUSES: frozenset[str] = frozenset({"new", "triaging"})
+# "expected-behavior" belongs here: triage is what sets it, so a re-triage — the
+# whole point of the learning loop — has to be able to take it back. Leaving it
+# out froze such reports permanently: neither the status claim below nor
+# _analyze_report's identical guard would touch them, so a corrected verdict was
+# computed, saved to every other field, and then never surfaced in any queue.
+_AUTO_MANAGED_STATUSES: frozenset[str] = frozenset({"new", "triaging", "expected-behavior"})
 
 if TYPE_CHECKING:
     from franktheunicorn.config.models import OperatorConfig, ProjectConfig
@@ -108,6 +113,20 @@ def triage_report(
     return report
 
 
+def _current_status(report: SecurityReport) -> str:
+    """The report's status as stored, not as this instance last saw it.
+
+    Triage is a background command, so an operator verdict can land mid-run.
+    Falls back to the in-memory value if the row can't be re-read.
+    """
+    try:
+        stored = type(report).objects.filter(pk=report.pk).values_list("status", flat=True).first()
+    except Exception:
+        logger.debug("Could not re-read status for report #%d", report.pk, exc_info=True)
+        return str(report.status)
+    return str(stored) if stored is not None else str(report.status)
+
+
 def _restore_untriaged_status(report: SecurityReport) -> None:
     """Return a report still marked ``triaging`` to the ``new`` queue.
 
@@ -115,7 +134,10 @@ def _restore_untriaged_status(report: SecurityReport) -> None:
     replace whatever exception was already on its way out with a much less
     informative one.
     """
-    if report.status != "triaging":
+    # Re-read: an operator verdict set while triage ran must not be undone.
+    stored_status = _current_status(report)
+    if stored_status != "triaging":
+        report.status = stored_status
         return
     try:
         report.status = "new"
@@ -266,8 +288,17 @@ def _analyze_report(
             report.assessed_severity = severity
 
         # Only auto-set status if operator hasn't already set a manual verdict.
-        if report.status in _AUTO_MANAGED_STATUSES:
+        # Re-read it first: triage runs in the worker now, so the operator can
+        # rule on the report from the still-open detail page while the two LLM
+        # calls are in flight, and this instance's copy is minutes stale.
+        stored_status = _current_status(report)
+        if stored_status in _AUTO_MANAGED_STATUSES:
             report.status = "expected-behavior" if report.is_expected_behavior else "new"
+        else:
+            # Adopt the operator's verdict. "status" is in update_fields below,
+            # so leaving the stale in-memory value in place would write
+            # "triaging" straight over what they just chose.
+            report.status = stored_status
 
         report.save(
             update_fields=[

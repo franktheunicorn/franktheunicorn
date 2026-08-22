@@ -8,7 +8,7 @@ the stub LLM backend so no network or API key is involved.
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from django.test import Client
@@ -138,3 +138,102 @@ class TestPasteToTriaged:
 
         report.refresh_from_db()
         assert report.status == "valid"
+
+
+@pytest.mark.django_db
+class TestRetriageOfJudgedReports:
+    """Re-triage has to be able to revise triage's own past verdicts."""
+
+    def test_expected_behavior_report_can_be_retriaged(self, no_cve_lookup: Any) -> None:
+        """'expected-behavior' is set BY triage, so triage must be able to undo it.
+
+        Leaving it out of the auto-managed set froze such reports: the new
+        verdict was computed and saved to every other field, then never
+        surfaced in any queue.
+        """
+        from franktheunicorn.security.triage import triage_report
+
+        config = _operator_config()
+        report = SecurityReport.objects.create(title="reconsider me", raw_text="...")
+        SecurityReport.objects.filter(pk=report.pk).update(status="expected-behavior")
+        report.refresh_from_db()
+
+        revised = dict(_VALID_ANALYSIS, is_expected_behavior=False, assessed_severity="high")
+        with patch("franktheunicorn.security.triage._call_llm", return_value=revised):
+            triage_report(report, None, config)
+
+        report.refresh_from_db()
+        assert report.status == "new"
+        assert report.assessed_severity == "high"
+
+    def test_operator_verdict_set_mid_run_is_not_clobbered(self, no_cve_lookup: Any) -> None:
+        """Triage is async now, so a verdict can land while the LLM is thinking."""
+        from franktheunicorn.security.triage import triage_report
+
+        config = _operator_config()
+        report = SecurityReport.objects.create(title="racy", raw_text="...")
+
+        def analyse_then_operator_rules(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            # Stand in for the operator clicking a verdict during the call.
+            SecurityReport.objects.filter(pk=report.pk).update(status="valid")
+            return dict(_VALID_ANALYSIS)
+
+        with patch(
+            "franktheunicorn.security.triage._call_llm",
+            side_effect=analyse_then_operator_rules,
+        ):
+            triage_report(report, None, config)
+
+        report.refresh_from_db()
+        assert report.status == "valid", "operator's verdict was overwritten by the worker"
+        # The analysis itself is still recorded.
+        assert report.triage_summary
+
+
+@pytest.mark.django_db
+class TestEmailIngestionQueuesTriage:
+    def test_email_report_is_queued_not_triaged_inline(self) -> None:
+        """The email door has to behave like the others: queue, don't run.
+
+        Inline triage blocked the poll cycle on an NVD lookup plus two LLM
+        calls per report, skipped the in-flight dedup (so a later operator
+        click ran the whole thing again), and hardcoded project_config=None
+        instead of letting the command handler resolve the project's security
+        model.
+        """
+        from datetime import UTC, datetime
+
+        from franktheunicorn.core.models import WorkerCommand
+        from franktheunicorn.worker import runner
+
+        config = _operator_config()
+        config.security_triage.email.enabled = True
+
+        message = MagicMock(
+            message_id="<m1>",
+            subject="[SECURITY] path traversal",
+            from_name="Reporter",
+            from_email="r@example.com",
+            body="A path traversal in the log viewer.",
+            received_at=datetime(2026, 8, 1, tzinfo=UTC),
+            is_forwarded=False,
+            matched_keywords=["path traversal"],
+            is_security_report=True,
+        )
+        fetched = MagicMock(examined=[message], already_scanned=0)
+
+        with (
+            patch("franktheunicorn.security.triage.triage_report") as mock_triage,
+            patch(
+                "franktheunicorn.data_access.email_inbox.fetcher.fetch_security_emails",
+                return_value=fetched,
+            ),
+        ):
+            runner._last_security_email_poll = 0.0
+            runner._poll_security_emails(config)
+
+        report = SecurityReport.objects.get(email_message_id="<m1>")
+        mock_triage.assert_not_called()
+        assert WorkerCommand.objects.filter(
+            command="run_security_triage", security_report=report, status="pending"
+        ).exists()

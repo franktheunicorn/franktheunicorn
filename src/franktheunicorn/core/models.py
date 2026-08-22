@@ -863,6 +863,19 @@ class WorkerCommand(models.Model):
         indexes = [
             models.Index(fields=["status", "created_at"]),
         ]
+        constraints = [
+            # At most one queued/running command of a kind per security report.
+            # Two doors queue triage (auto on ingest, the operator's button),
+            # and each run costs an NVD lookup plus two LLM calls, so a
+            # check-then-create race is worth a real constraint rather than
+            # hoping the two requests don't interleave. NULL security_report
+            # (the PR-targeted commands) never conflicts.
+            models.UniqueConstraint(
+                fields=["command", "security_report"],
+                condition=models.Q(status__in=["pending", "running"]),
+                name="unique_inflight_command_per_report",
+            ),
+        ]
 
     def __str__(self) -> str:
         if self.pull_request is not None:

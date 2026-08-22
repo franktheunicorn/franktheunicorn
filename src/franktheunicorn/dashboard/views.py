@@ -557,7 +557,8 @@ def _make_posting_client(pr: PullRequest) -> object | None:
         project_config = get_project_config(pr.project.full_name)
         forge_name = getattr(project_config, "forge", None) or "github"
         entry = get_forge_entry(operator_config, forge_name)
-        return make_client(entry)
+        # A view: track quota, but never block the operator's click on it.
+        return make_client(entry, pace_requests=False)
     except Exception:
         logger.debug(
             "Forge resolution failed for %s; falling back to GitHub client.",
@@ -1093,11 +1094,13 @@ def security_report_triage(request: HttpRequest, report_id: int) -> HttpResponse
 
         if not operator_config.llm_backends:
             return HttpResponse(
-                '<div class="triage-result" style="color: #c00;">'
+                '<div class="triage-result triage-failed">'
                 "No LLM backend configured. Add one to operator.yaml.</div>"
             )
 
-        created = _queue_triage_command(report)
+        from franktheunicorn.security.queue import queue_triage
+
+        created = queue_triage(report)
         logger.info(
             "%s manual triage for security report #%d",
             "Queued" if created else "Reused in-flight",
@@ -1106,7 +1109,7 @@ def security_report_triage(request: HttpRequest, report_id: int) -> HttpResponse
     except Exception:
         logger.exception("Failed to queue triage for report %d", report.pk)
         return HttpResponse(
-            '<div class="triage-result" style="color: #c00;">'
+            '<div class="triage-result triage-failed">'
             "Failed to queue triage. Check configuration.</div>"
         )
 
@@ -1241,27 +1244,6 @@ def security_guidance_list(request: HttpRequest) -> HttpResponse:
     )
 
 
-def _queue_triage_command(report: SecurityReport) -> bool:
-    """Queue triage for *report*, unless a run is already waiting or in flight.
-
-    Returns True if a new command was created. Auto-triage on create and the
-    operator's Triage button are two doors to the same work, and the button is
-    the obvious next move on a report whose auto-triage hasn't landed yet —
-    without this, a click (or a double-click) means two NVD lookups and two
-    pairs of LLM calls, with the second overwriting the first's verdict.
-    """
-    in_flight = WorkerCommand.objects.filter(
-        command="run_security_triage",
-        security_report=report,
-        status__in=("pending", "running"),
-    ).exists()
-    if in_flight:
-        return False
-
-    WorkerCommand.objects.create(command="run_security_triage", security_report=report)
-    return True
-
-
 def _auto_triage_report(report: SecurityReport) -> None:
     """Queue a security report for auto-triage via the worker if configured."""
     from franktheunicorn.config.loader import get_operator_config
@@ -1272,7 +1254,9 @@ def _auto_triage_report(report: SecurityReport) -> None:
     if not operator_config.security_triage.auto_triage:
         return
 
-    if _queue_triage_command(report):
+    from franktheunicorn.security.queue import queue_triage
+
+    if queue_triage(report):
         logger.info("Queued auto-triage for security report #%d", report.pk)
 
 
@@ -1302,7 +1286,7 @@ def _find_project_config(project: Project) -> ProjectConfig | None:
 def _ingest_single_pr(owner: str, repo: str, pr_number: int) -> PullRequest:
     from franktheunicorn.backends.poller import ingest_single_pr
 
-    return ingest_single_pr(owner, repo, pr_number)
+    return ingest_single_pr(owner, repo, pr_number, pace_requests=False)
 
 
 @require_POST

@@ -391,7 +391,7 @@ class TestSecurityReportTriage:
 
         assert b"Triage failed in the worker" in response.content
         assert b"model timed out" in response.content
-        assert b"Retry LLM Triage" in response.content
+        assert b"Re-run LLM Triage" in response.content
 
 
 @pytest.mark.django_db
@@ -580,3 +580,25 @@ class TestSecurityGuidanceList:
 
         response = client.get("/security/guidance/")
         assert b"stale guidance" not in response.content
+
+
+@pytest.mark.django_db
+class TestTriageFailureVisibleAlongsideSummary:
+    def test_failed_retriage_shows_even_when_a_summary_exists(
+        self, client: Client, db: Any
+    ) -> None:
+        """A stale summary must not make a failed re-run look like success."""
+        from franktheunicorn.core.models import WorkerCommand
+
+        report = SecurityReportFactory(triage_summary="An earlier verdict.")
+        cmd = WorkerCommand.objects.create(command="run_security_triage", security_report=report)
+        WorkerCommand.objects.filter(pk=cmd.pk).update(
+            status="failed", error="RuntimeError: model timed out"
+        )
+
+        body = client.get(f"/security/{report.pk}/").content
+
+        assert b"Triage failed in the worker" in body
+        assert b"model timed out" in body
+        assert b"An earlier verdict." in body  # the old result is still shown
+        assert b"Re-run LLM Triage" in body

@@ -144,8 +144,16 @@ class TestPollSecurityEmails:
         ):
             runner._poll_security_emails(_operator_config(auto_triage=True))
 
-        # Triage runs on the drafted report; there is no send path invoked.
-        assert mock_triage.call_count == 1
+        # Triage is queued for the worker rather than run inline — it costs an
+        # NVD lookup plus two LLM calls, which has no business blocking the poll
+        # cycle — and there is still no send path anywhere near it.
+        from franktheunicorn.core.models import WorkerCommand
+
+        mock_triage.assert_not_called()
+        report = SecurityReport.objects.get(email_message_id="<sec-2>")
+        assert WorkerCommand.objects.filter(
+            command="run_security_triage", security_report=report, status="pending"
+        ).exists()
 
     def test_disabled_does_nothing(self) -> None:
         _reset_poll_clock()
