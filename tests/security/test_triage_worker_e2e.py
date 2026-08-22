@@ -16,6 +16,7 @@ from django.test import Client
 from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig
 from franktheunicorn.core.models import Project, SecurityReport, WorkerCommand
 from franktheunicorn.worker.commands import process_pending_commands
+from tests.factories import ProjectFactory, SecurityReportFactory
 
 _VALID_ANALYSIS = {
     "poc_plausible": True,
@@ -64,7 +65,7 @@ class TestPasteToTriaged:
         self, client: Client, no_cve_lookup: Any, tmp_path: Any
     ) -> None:
         config = _operator_config()
-        project = Project.objects.create(owner="apache", repo="spark")
+        project = ProjectFactory(owner="apache", repo="spark")
         report = self._paste(client, project, config)
 
         cmd = WorkerCommand.objects.get(command="run_security_triage", security_report=report)
@@ -95,7 +96,7 @@ class TestPasteToTriaged:
         that state is silently lost.
         """
         config = _operator_config()
-        project = Project.objects.create(owner="apache", repo="spark")
+        project = ProjectFactory(owner="apache", repo="spark")
         report = self._paste(client, project, config)
 
         assert process_pending_commands(config) == 1
@@ -107,7 +108,7 @@ class TestPasteToTriaged:
         self, client: Client, no_cve_lookup: Any
     ) -> None:
         config = _operator_config()
-        project = Project.objects.create(owner="apache", repo="spark")
+        project = ProjectFactory(owner="apache", repo="spark")
         report = self._paste(client, project, config)
 
         with patch(
@@ -126,7 +127,7 @@ class TestPasteToTriaged:
         from franktheunicorn.security.triage import triage_report
 
         config = _operator_config()
-        report = SecurityReport.objects.create(title="already judged", raw_text="...")
+        report = SecurityReportFactory(title="already judged", raw_text="...")
         SecurityReport.objects.filter(pk=report.pk).update(status="valid")
         report.refresh_from_db()
 
@@ -154,7 +155,7 @@ class TestRetriageOfJudgedReports:
         from franktheunicorn.security.triage import triage_report
 
         config = _operator_config()
-        report = SecurityReport.objects.create(title="reconsider me", raw_text="...")
+        report = SecurityReportFactory(title="reconsider me", raw_text="...")
         SecurityReport.objects.filter(pk=report.pk).update(status="expected-behavior")
         report.refresh_from_db()
 
@@ -171,7 +172,7 @@ class TestRetriageOfJudgedReports:
         from franktheunicorn.security.triage import triage_report
 
         config = _operator_config()
-        report = SecurityReport.objects.create(title="racy", raw_text="...")
+        report = SecurityReportFactory(title="racy", raw_text="...")
 
         def analyse_then_operator_rules(*args: Any, **kwargs: Any) -> dict[str, Any]:
             # Stand in for the operator clicking a verdict during the call.

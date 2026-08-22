@@ -403,7 +403,6 @@ def _check_symilar(
     # Add PR chunks as virtual files
     chunk_names: set[str] = set()
     chunks_by_name: dict[str, CodeChunk] = {}
-    failed_chunks: set[str] = set()
     for chunk in chunks:
         name = f"{_PR_CHUNK_PREFIX}{chunk.file_path}:{chunk.start_line}"
         chunk_names.add(name)
@@ -415,7 +414,6 @@ def _check_symilar(
             # chunks (e.g. YAML, docstrings with unmatched quotes) raise
             # AstroidSyntaxError.  Skip them here — the caller will route them
             # to the winnowing tier instead.
-            failed_chunks.add(name)
             logger.debug(
                 "symilar: skipping unparseable chunk %s (will fall back to winnowing)",
                 name,

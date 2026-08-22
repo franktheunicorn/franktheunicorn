@@ -9,6 +9,7 @@ import pytest
 
 from franktheunicorn.core.models import PullRequest, SecurityReport, WorkerCommand
 from franktheunicorn.worker.commands import process_pending_commands
+from tests.factories import ProjectFactory, PullRequestFactory, SecurityReportFactory
 
 
 @pytest.mark.django_db
@@ -133,15 +134,9 @@ class TestProcessPendingCommands:
         assert "3 finding" in cmd.log
 
     def test_security_sandbox_dispatch(self) -> None:
-        from franktheunicorn.core.models import Project
-
         operator_config = MagicMock()
-        project = Project.objects.create(owner="acme", repo="widgets")
-        report = SecurityReport.objects.create(
-            project=project,
-            title="CVE thing",
-            raw_text="",
-        )
+        project = ProjectFactory(owner="acme", repo="widgets")
+        report = SecurityReportFactory(project=project, title="CVE thing", raw_text="")
         cmd = WorkerCommand.objects.create(
             command="run_security_sandbox",
             security_report=report,
@@ -163,11 +158,9 @@ class TestProcessPendingCommands:
 
     def test_security_triage_dispatch(self) -> None:
         """The dashboard queues triage; the worker is what actually runs it."""
-        from franktheunicorn.core.models import Project
-
         operator_config = MagicMock()
-        project = Project.objects.create(owner="acme", repo="widgets")
-        report = SecurityReport.objects.create(project=project, title="XSS in UI", raw_text="...")
+        project = ProjectFactory(owner="acme", repo="widgets")
+        report = SecurityReportFactory(project=project, title="XSS in UI", raw_text="...")
         cmd = WorkerCommand.objects.create(
             command="run_security_triage",
             security_report=report,
@@ -208,11 +201,9 @@ class TestProcessPendingCommands:
         assert "requires a security_report" in cmd.error
 
     def test_security_triage_failure_marks_command_failed(self) -> None:
-        from franktheunicorn.core.models import Project
-
         operator_config = MagicMock()
-        project = Project.objects.create(owner="acme", repo="widgets")
-        report = SecurityReport.objects.create(project=project, title="thing", raw_text="")
+        project = ProjectFactory(owner="acme", repo="widgets")
+        report = SecurityReportFactory(project=project, title="thing", raw_text="")
         cmd = WorkerCommand.objects.create(
             command="run_security_triage",
             security_report=report,
@@ -234,7 +225,7 @@ class TestProcessPendingCommands:
     def test_security_triage_works_without_project(self) -> None:
         """A report pasted with no project attached still triages."""
         operator_config = MagicMock()
-        report = SecurityReport.objects.create(title="orphan report", raw_text="")
+        report = SecurityReportFactory(title="orphan report", raw_text="")
         cmd = WorkerCommand.objects.create(
             command="run_security_triage",
             security_report=report,
@@ -448,16 +439,12 @@ class TestBackfillEligibility:
 
     def test_skipped_pr_without_drafts_reaches_the_backfill(self) -> None:
         from franktheunicorn.config.models import ProjectConfig
-        from franktheunicorn.core.models import Project, PullRequest
         from franktheunicorn.worker import runner
 
-        project = Project.objects.create(owner="apache", repo="spark")
-        pr = PullRequest.objects.create(
-            project=project,
-            github_id=1,
+        pr = PullRequestFactory(
+            project=ProjectFactory(owner="apache", repo="spark"),
             number=42,
             title="ingested by lookup_pr, never reviewed",
-            author="someone",
             state="open",
             base_sha="a" * 40,
             score_breakdown={"x": 1},
