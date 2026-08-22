@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -435,3 +436,50 @@ class TestMidCycleDrain:
             side_effect=RuntimeError("db locked"),
         ):
             runner._drain_worker_commands(MagicMock())  # must not raise
+
+
+@pytest.mark.django_db
+class TestBackfillEligibility:
+    """A skipped PR with no drafts must stay reviewable.
+
+    The poller's unchanged-PR skip means process_pr never sees it, so if the
+    backfill also excludes it, nothing reviews it until upstream moves.
+    """
+
+    def test_skipped_pr_without_drafts_reaches_the_backfill(self) -> None:
+        from franktheunicorn.config.models import ProjectConfig
+        from franktheunicorn.core.models import Project, PullRequest
+        from franktheunicorn.worker import runner
+
+        project = Project.objects.create(owner="apache", repo="spark")
+        pr = PullRequest.objects.create(
+            project=project,
+            github_id=1,
+            number=42,
+            title="ingested by lookup_pr, never reviewed",
+            author="someone",
+            state="open",
+            base_sha="a" * 40,
+            score_breakdown={"x": 1},
+        )
+        pc = ProjectConfig(owner="apache", repo="spark")
+
+        seen: list[int] = []
+
+        def fake_process_pr(pr_arg, *args: Any, **kwargs: Any):
+            seen.append(pr_arg.pk)
+            return []
+
+        with (
+            patch("franktheunicorn.config.loader.get_project_config", return_value=pc),
+            patch("franktheunicorn.worker.runner.process_pr", side_effect=fake_process_pr),
+        ):
+            runner._backfill_unreviewed_prs(
+                already_polled_pks=set(),  # the poll skipped it, so it isn't here
+                project_configs=[pc],
+                operator_config=None,
+                disabled_backends=frozenset(),
+                diff_http=MagicMock(),
+            )
+
+        assert seen == [pr.pk]

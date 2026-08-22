@@ -243,17 +243,10 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
             # test runs, force-run agents, security sandbox). This keeps
             # web-triggered actions responsive even when poll_interval is
             # several minutes.
-            from franktheunicorn.worker.commands import process_pending_commands
-
             command_poll_interval = 5
             elapsed = 0
             while elapsed < poll_interval:
-                try:
-                    processed = process_pending_commands(operator_config)
-                    if processed:
-                        logger.info("Drained %d worker command(s)", processed)
-                except Exception:
-                    logger.exception("Error draining worker commands")
+                _drain_worker_commands(operator_config)
                 wait = min(command_poll_interval, poll_interval - elapsed)
                 time.sleep(wait)
                 elapsed += wait
@@ -995,13 +988,16 @@ def _run_cycle(
     diff_fetcher = DiffFetcher(client=diff_http, rate_limiter=rate_limiter)
     test_runner = TestRunner()
 
+    # Every PR this cycle touched, skipped or not: the shepherding and
+    # dependency-changelog passes read stored state, so an unchanged PR is still
+    # theirs to look at.
     all_prs: list[object] = []
     pr_to_config: dict[int, ProjectConfig] = {}
-    # PRs the poller skipped as unchanged. They were seen this cycle, just not
-    # re-processed: the backfill must not mistake them for PRs the poll never
-    # reached and review the lot, and the shepherding / dependency-changelog
-    # passes still want them in all_prs.
-    skipped_prs: list[object] = []
+    # Only the PRs that actually went through process_pr. The review backfill
+    # excludes these — a skipped PR with no drafts (ingested via lookup_pr, or
+    # one whose earlier review failed) has to stay eligible for it, or nothing
+    # reviews it until its upstream updated_at moves.
+    reviewed_pks: set[int | None] = set()
 
     for pc in project_configs:
         if not isinstance(pc, ProjectConfig) or not pc.enabled:
@@ -1061,12 +1057,12 @@ def _run_cycle(
             # Unchanged PRs still belong to this cycle for the passes that read
             # stored state rather than re-fetching it.
             for skipped in project_skipped:
-                skipped_prs.append(skipped)
                 all_prs.append(skipped)
                 pr_to_config[skipped.pk] = pc  # type: ignore[attr-defined]
             for pr in prs:
                 all_prs.append(pr)
                 pr_to_config[pr.pk] = pc
+                reviewed_pks.add(pr.pk)
                 logger.debug(
                     "Processing PR #%d (%s/%s) score=%.2f",
                     pr.number,
@@ -1155,9 +1151,11 @@ def _run_cycle(
     _drain_worker_commands(operator_config)
 
     # Backfill pass: draft reviews for open PRs that were ingested (e.g. via
-    # lookup_pr) but never reached the main poll loop above.
+    # lookup_pr) or skipped as unchanged, and still have no drafts. Cheap for
+    # the ones that shouldn't be reviewed — process_pr's drafts-exist, wip and
+    # auto_review_policy gates all return before any network work.
     _backfill_unreviewed_prs(
-        already_polled_pks={getattr(pr, "pk", None) for pr in all_prs},
+        already_polled_pks=reviewed_pks,
         project_configs=project_configs,
         operator_config=operator_config,
         disabled_backends=disabled_backends,
