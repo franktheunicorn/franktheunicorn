@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-from typing import TYPE_CHECKING
 
 from franktheunicorn.review.backends.base import (
     BaseLLMBackend,
@@ -11,9 +10,6 @@ from franktheunicorn.review.backends.base import (
     ReviewFinding,
     ReviewResult,
 )
-
-if TYPE_CHECKING:
-    from franktheunicorn.config.models import LLMBackendConfig
 
 _VIBES = [
     "Overall vibes: solid change, no major concerns. Worth a closer look at edge cases.",
@@ -44,13 +40,6 @@ class StubBackend(BaseLLMBackend):
     was rejected by them as "no LLM backend configured". No SDK and no API
     key, so the inherited machinery is happy with an empty key.
     """
-
-    def __init__(self, config: LLMBackendConfig) -> None:
-        super().__init__(config)
-
-    def complete(self, prompt: str, *, system: str = "") -> str:
-        """Deterministic stub completion (no network)."""
-        return self._call_api(system, prompt, "")
 
     def _call_api(self, system_prompt: str, user_message: str, api_key: str) -> str:
         """Deterministic fake response. Not JSON — callers must degrade."""

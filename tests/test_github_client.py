@@ -475,3 +475,59 @@ class TestInferGitHubUsername:
         httpx_mock.add_response(status_code=401)
         result = infer_github_username("bad-token", base_url="https://api.github.test")
         assert result == ""
+
+
+class TestPacing:
+    """The limiter's brake is a blocking sleep: right for the worker, wrong for a view."""
+
+    def test_worker_clients_pace(self, httpx_mock: HTTPXMock) -> None:
+        limiter = _RecordingLimiter()
+        client = GitHubClient(
+            token="t",
+            base_url="https://api.github.test",
+            rate_limiter=limiter,  # type: ignore[arg-type]
+        )
+        httpx_mock.add_response(json={"number": 1})
+        client.get_pull_request("o", "r", 1)
+        client.close()
+
+        assert limiter.acquires == 1
+
+    def test_request_path_clients_track_but_do_not_wait(self, httpx_mock: HTTPXMock) -> None:
+        limiter = _RecordingLimiter()
+        client = GitHubClient(
+            token="t",
+            base_url="https://api.github.test",
+            rate_limiter=limiter,  # type: ignore[arg-type]
+            pace_requests=False,
+        )
+        httpx_mock.add_response(json={"number": 1}, headers={"x-ratelimit-remaining": "17"})
+        client.get_pull_request("o", "r", 1)
+        client.close()
+
+        assert limiter.acquires == 0, "a view must not block on the rate-limit sleep"
+        assert limiter.header_updates == ["17"], "quota tracking still happens"
+
+
+class TestLimiterCaching:
+    def test_same_path_returns_one_limiter(self, tmp_path: Path) -> None:
+        from franktheunicorn.backends import _rate_limiter_for
+
+        path = str(tmp_path / "buckets.sqlite")
+        assert _rate_limiter_for(path) is _rate_limiter_for(path)
+
+    def test_transient_failure_is_not_cached(self, tmp_path: Path) -> None:
+        """An lru_cache here would leave the process unpaced until restart."""
+        from unittest.mock import patch
+
+        from franktheunicorn.backends import _rate_limiter_for
+
+        path = str(tmp_path / "flaky.sqlite")
+        with patch(
+            "franktheunicorn.data_access.rate_limiter.GitHubRateLimiter",
+            side_effect=RuntimeError("database is locked"),
+        ):
+            assert _rate_limiter_for(path) is None
+
+        # The next call must try again rather than serve the remembered None.
+        assert _rate_limiter_for(path) is not None

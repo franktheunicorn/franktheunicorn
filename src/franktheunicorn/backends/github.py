@@ -49,8 +49,16 @@ class GitHubClient(ForgeClient):
         token: str = "",
         base_url: str = GITHUB_API_BASE,
         rate_limiter: GitHubRateLimiter | None = None,
+        *,
+        pace_requests: bool = True,
     ) -> None:
         self._rate_limiter = rate_limiter
+        # The limiter's brake is a blocking sleep — up to 30s when the quota is
+        # spent, ~1s under bucket contention. That's correct for the worker and
+        # wrong for a web request, where it would hang the operator's click.
+        # pace_requests=False keeps the quota *tracking* (headers still feed the
+        # shared limiter) and drops the waiting.
+        self._pace_requests = pace_requests
         headers: dict[str, str] = {
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
@@ -77,7 +85,7 @@ class GitHubClient(ForgeClient):
         Reads go through here; writes (create_review, delete) are low-volume
         and go direct.
         """
-        if self._rate_limiter is not None:
+        if self._rate_limiter is not None and self._pace_requests:
             self._rate_limiter.acquire()
         response = self._client.get(url, **kwargs)
         if self._rate_limiter is not None:

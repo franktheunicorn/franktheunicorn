@@ -737,12 +737,17 @@ def _upsert_pull_request(
     return pr_obj
 
 
-def ingest_single_pr(owner: str, repo: str, pr_number: int) -> PullRequest:
+def ingest_single_pr(
+    owner: str, repo: str, pr_number: int, *, pace_requests: bool = True
+) -> PullRequest:
     """Fetch a single PR from the forge, score it, and store it in the DB.
 
     Creates the Project row if it doesn't exist yet. Safe to call repeatedly —
     uses update_or_create internally so it acts as a refresh when the PR is
     already in the DB.
+
+    ``pace_requests=False`` skips the rate limiter's blocking wait, for callers
+    running inside a web request.
     """
     from franktheunicorn.backends import make_client
     from franktheunicorn.config.loader import get_operator_config, get_project_config
@@ -752,7 +757,7 @@ def ingest_single_pr(owner: str, repo: str, pr_number: int) -> PullRequest:
     project_config = get_project_config(f"{owner}/{repo}")
     forge_name = getattr(project_config, "forge", None) or "github"
     entry = get_forge_entry(operator_config, forge_name)
-    client = make_client(entry)
+    client = make_client(entry, pace_requests=pace_requests)
 
     project, _ = Project.objects.update_or_create(
         owner=owner,
