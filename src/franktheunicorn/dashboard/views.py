@@ -17,6 +17,7 @@ from django.contrib import messages
 from django.db.models import Count, Max, Q, Sum
 from django.http import HttpRequest, HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
+from django.urls import reverse
 from django.views.decorators.http import require_POST
 
 from franktheunicorn.core.models import (
@@ -1059,12 +1060,23 @@ def security_report_detail(request: HttpRequest, report_id: int) -> HttpResponse
 
     sandbox_enabled = _is_sandbox_enabled()
 
+    # Triage runs in the worker now, so its outcome lives on a WorkerCommand
+    # row. Nothing rendered that, which meant a failed run looked exactly like
+    # one that never happened: the operator was told "queued", reloaded, and
+    # found no result and no explanation.
+    triage_command = (
+        WorkerCommand.objects.filter(command="run_security_triage", security_report=report)
+        .order_by("-created_at")
+        .first()
+    )
+
     return render(
         request,
         "dashboard/security_detail.html",
         {
             "report": report,
             "sandbox_enabled": sandbox_enabled,
+            "triage_command": triage_command,
         },
     )
 
@@ -1085,11 +1097,12 @@ def security_report_triage(request: HttpRequest, report_id: int) -> HttpResponse
                 "No LLM backend configured. Add one to operator.yaml.</div>"
             )
 
-        WorkerCommand.objects.create(
-            command="run_security_triage",
-            security_report=report,
+        created = _queue_triage_command(report)
+        logger.info(
+            "%s manual triage for security report #%d",
+            "Queued" if created else "Reused in-flight",
+            report.pk,
         )
-        logger.info("Queued manual triage for security report #%d", report.pk)
     except Exception:
         logger.exception("Failed to queue triage for report %d", report.pk)
         return HttpResponse(
@@ -1097,10 +1110,15 @@ def security_report_triage(request: HttpRequest, report_id: int) -> HttpResponse
             "Failed to queue triage. Check configuration.</div>"
         )
 
+    message = (
+        "Triage queued — the worker will process it within seconds."
+        if created
+        else "Triage is already queued for this report."
+    )
     return HttpResponse(
-        '<div class="triage-result triage-queued">'
-        "Triage queued — the worker will process it within seconds. "
-        '<a href="">Refresh</a> the page to see results.</div>'
+        f'<div class="triage-result triage-queued">{message} '
+        f'<a href="{reverse("dashboard:security_detail", args=[report.pk])}">Reload</a>'
+        " for the result.</div>"
     )
 
 
@@ -1223,6 +1241,27 @@ def security_guidance_list(request: HttpRequest) -> HttpResponse:
     )
 
 
+def _queue_triage_command(report: SecurityReport) -> bool:
+    """Queue triage for *report*, unless a run is already waiting or in flight.
+
+    Returns True if a new command was created. Auto-triage on create and the
+    operator's Triage button are two doors to the same work, and the button is
+    the obvious next move on a report whose auto-triage hasn't landed yet —
+    without this, a click (or a double-click) means two NVD lookups and two
+    pairs of LLM calls, with the second overwriting the first's verdict.
+    """
+    in_flight = WorkerCommand.objects.filter(
+        command="run_security_triage",
+        security_report=report,
+        status__in=("pending", "running"),
+    ).exists()
+    if in_flight:
+        return False
+
+    WorkerCommand.objects.create(command="run_security_triage", security_report=report)
+    return True
+
+
 def _auto_triage_report(report: SecurityReport) -> None:
     """Queue a security report for auto-triage via the worker if configured."""
     from franktheunicorn.config.loader import get_operator_config
@@ -1233,11 +1272,8 @@ def _auto_triage_report(report: SecurityReport) -> None:
     if not operator_config.security_triage.auto_triage:
         return
 
-    WorkerCommand.objects.create(
-        command="run_security_triage",
-        security_report=report,
-    )
-    logger.info("Queued auto-triage for security report #%d", report.pk)
+    if _queue_triage_command(report):
+        logger.info("Queued auto-triage for security report #%d", report.pk)
 
 
 def _is_sandbox_enabled() -> bool:

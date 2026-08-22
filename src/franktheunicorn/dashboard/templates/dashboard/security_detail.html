@@ -54,11 +54,20 @@
     {% if report.triage_summary %}
     {% include "dashboard/_security_triage_result.html" %}
     {% else %}
+    {% if triage_command.status == "failed" %}
+    <div class="triage-result" style="color: #c00; margin-bottom: 0.5rem;">
+        Triage failed in the worker: {{ triage_command.error|default:"no error recorded" }}
+    </div>
+    {% elif triage_command.status == "pending" or triage_command.status == "running" %}
+    <div class="triage-result triage-queued" style="margin-bottom: 0.5rem;">
+        Triage {{ triage_command.status }} — reload for the result.
+    </div>
+    {% endif %}
     <button class="action-btn post"
             hx-post="{% url 'dashboard:security_triage' report.pk %}"
             hx-target="#triage-area"
             hx-swap="innerHTML">
-        Run LLM Triage
+        {% if triage_command.status == "failed" %}Retry LLM Triage{% else %}Run LLM Triage{% endif %}
     </button>
     {% endif %}
 </div>

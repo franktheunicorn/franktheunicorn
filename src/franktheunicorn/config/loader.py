@@ -106,7 +106,16 @@ def get_project_config(name: str) -> ProjectConfig | None:
 
     Returns None if no matching config is found.
     """
-    configs = load_project_configs(getattr(settings, "FRANK_PROJECTS_DIR", ""))
+    # An empty/unset dir must not fall through to load_project_configs(""),
+    # which resolves to Path(".") and scans the current working directory —
+    # feeding whatever YAML happens to be there (compose.yaml, for one) into
+    # ProjectConfig and logging a validation traceback per file.
+    projects_dir = getattr(settings, "FRANK_PROJECTS_DIR", "")
+    if not projects_dir:
+        logger.warning("FRANK_PROJECTS_DIR is not configured; no project configs to look up.")
+        return None
+
+    configs = load_project_configs(projects_dir)
     for config in configs:
         if name in (f"{config.owner}-{config.repo}", config.full_name):
             return config

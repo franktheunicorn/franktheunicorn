@@ -318,12 +318,80 @@ class TestSecurityReportTriage:
             github_username="testuser",
             llm_backends=[LLMBackendConfig(provider="stub")],
         )
+        # Nothing in flight, so the enqueue is attempted — and fails.
+        mock_objects.filter.return_value.exists.return_value = False
         mock_objects.create.side_effect = RuntimeError("db error")
         report = SecurityReportFactory()
 
         response = client.post(f"/security/{report.pk}/triage/")
         assert response.status_code == 200
         assert b"Failed to queue triage" in response.content
+
+    @patch("franktheunicorn.config.loader.get_operator_config")
+    def test_triage_does_not_queue_twice(
+        self, mock_config: MagicMock, client: Client, db: Any
+    ) -> None:
+        """Auto-triage plus a click (or a double-click) is one run, not two.
+
+        Two runs mean two NVD lookups and two pairs of LLM calls, with the
+        second overwriting the first's verdict.
+        """
+        from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig
+        from franktheunicorn.core.models import WorkerCommand
+
+        mock_config.return_value = OperatorConfig(
+            github_username="testuser",
+            llm_backends=[LLMBackendConfig(provider="stub")],
+        )
+        report = SecurityReportFactory()
+
+        first = client.post(f"/security/{report.pk}/triage/")
+        second = client.post(f"/security/{report.pk}/triage/")
+
+        assert b"Triage queued" in first.content
+        assert b"already queued" in second.content
+        assert (
+            WorkerCommand.objects.filter(
+                command="run_security_triage", security_report=report
+            ).count()
+            == 1
+        )
+
+    @patch("franktheunicorn.config.loader.get_operator_config")
+    def test_triage_can_be_requeued_after_a_finished_run(
+        self, mock_config: MagicMock, client: Client, db: Any
+    ) -> None:
+        from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig
+        from franktheunicorn.core.models import WorkerCommand
+
+        mock_config.return_value = OperatorConfig(
+            github_username="testuser",
+            llm_backends=[LLMBackendConfig(provider="stub")],
+        )
+        report = SecurityReportFactory()
+        client.post(f"/security/{report.pk}/triage/")
+        WorkerCommand.objects.filter(security_report=report).update(status="failed")
+
+        response = client.post(f"/security/{report.pk}/triage/")
+
+        assert b"Triage queued" in response.content
+        assert WorkerCommand.objects.filter(security_report=report).count() == 2
+
+    def test_failed_triage_is_visible_on_the_report_page(self, client: Client, db: Any) -> None:
+        """A worker-side failure must not look like a run that never happened."""
+        from franktheunicorn.core.models import WorkerCommand
+
+        report = SecurityReportFactory(triage_summary="")
+        cmd = WorkerCommand.objects.create(command="run_security_triage", security_report=report)
+        WorkerCommand.objects.filter(pk=cmd.pk).update(
+            status="failed", error="RuntimeError: model timed out"
+        )
+
+        response = client.get(f"/security/{report.pk}/")
+
+        assert b"Triage failed in the worker" in response.content
+        assert b"model timed out" in response.content
+        assert b"Retry LLM Triage" in response.content
 
 
 @pytest.mark.django_db

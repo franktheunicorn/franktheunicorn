@@ -109,11 +109,20 @@ def triage_report(
 
 
 def _restore_untriaged_status(report: SecurityReport) -> None:
-    """Return a report still marked ``triaging`` to the ``new`` queue."""
+    """Return a report still marked ``triaging`` to the ``new`` queue.
+
+    Runs from a ``finally``, so it swallows its own errors: raising here would
+    replace whatever exception was already on its way out with a much less
+    informative one.
+    """
     if report.status != "triaging":
         return
-    report.status = "new"
-    report.save(update_fields=["status", "updated_at"])
+    try:
+        report.status = "new"
+        report.save(update_fields=["status", "updated_at"])
+    except Exception:
+        logger.exception("Could not return report #%d to the new queue", report.pk)
+        return
     logger.warning(
         "Triage produced no verdict for report #%d; returned it to the new queue.",
         report.pk,
