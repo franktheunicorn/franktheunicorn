@@ -74,7 +74,18 @@ def load_operator_config(path: str | Path) -> OperatorConfig:
 
 
 def load_project_configs(directory: str | Path) -> list[ProjectConfig]:
-    """Load all project configs from YAML files in a directory."""
+    """Load all project configs from YAML files in a directory.
+
+    An empty *directory* means "not configured", not "here". ``Path("")`` is
+    ``Path(".")`` and passes ``is_dir()``, so without this guard an unset
+    FRANK_PROJECTS_DIR turned into a scan of the working directory — feeding
+    whatever YAML it found (compose.yaml, for one) to ``ProjectConfig`` and
+    logging a validation traceback per file. Six call sites pass this value;
+    the guard belongs here rather than in whichever ones remembered.
+    """
+    if not str(directory).strip():
+        logger.warning("No project config directory configured; no projects loaded.")
+        return []
     d = Path(directory)
     if not d.is_dir():
         return []
@@ -106,16 +117,7 @@ def get_project_config(name: str) -> ProjectConfig | None:
 
     Returns None if no matching config is found.
     """
-    # An empty/unset dir must not fall through to load_project_configs(""),
-    # which resolves to Path(".") and scans the current working directory —
-    # feeding whatever YAML happens to be there (compose.yaml, for one) into
-    # ProjectConfig and logging a validation traceback per file.
-    projects_dir = getattr(settings, "FRANK_PROJECTS_DIR", "")
-    if not projects_dir:
-        logger.warning("FRANK_PROJECTS_DIR is not configured; no project configs to look up.")
-        return None
-
-    configs = load_project_configs(projects_dir)
+    configs = load_project_configs(getattr(settings, "FRANK_PROJECTS_DIR", ""))
     for config in configs:
         if name in (f"{config.owner}-{config.repo}", config.full_name):
             return config

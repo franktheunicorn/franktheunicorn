@@ -1091,3 +1091,54 @@ class TestCheckCopypasta:
         assert llm_called_with  # LLM was called with the unmatched chunks
         assert len(drafts) == 1
         assert "existing.py" in drafts[0].comment_body
+
+
+class TestUbiquityAppliesOnlyToSmallBlocks:
+    """ "In lots of files" means "scaffolding" only for scaffolding-sized blocks."""
+
+    def test_large_block_survives_high_occurrence(self) -> None:
+        # 30 meaningful lines, present in five repo files: the strongest
+        # copy-paste signal there is, not something to stay quiet about.
+        block = tuple(f"    result[{i}] = transform_{i}(payload, config)" for i in range(30))
+        repo = {f"mod_{i}.py": "\n".join(block) for i in range(5)}
+        match = _match(block)
+
+        kept = _suppress_noise([match], repo, min_lines=5, max_repo_occurrences=2)
+
+        assert kept == [match]
+
+    def test_small_block_still_suppressed(self) -> None:
+        repo = {f"t{i}.py": "\n".join(_HARNESS_BLOCK) for i in range(5)}
+        kept = _suppress_noise([_match(_HARNESS_BLOCK)], repo, min_lines=4, max_repo_occurrences=2)
+        assert kept == []
+
+
+@pytest.mark.django_db
+class TestWinnowingDraftDedup:
+    """One added block is one finding, however many files it resembles."""
+
+    def test_matches_against_several_files_collapse_to_one_draft(self, db_pr: PullRequest) -> None:
+        lines = tuple(f"    step_{i}()" for i in range(8))
+        matches = [
+            CopyPastaMatch(
+                source_file=f"repo_{i}.py",
+                source_start_line=1,
+                source_end_line=8,
+                new_file="new.py",
+                new_start_line=100,
+                num_lines=len(lines),
+                tier="winnowing",
+                matched_lines=lines,
+            )
+            for i in range(3)
+        ]
+
+        drafts = _create_drafts(db_pr, matches)
+
+        assert len(drafts) == 1
+
+
+class TestScanExtensionsValidation:
+    def test_empty_extensions_rejected(self) -> None:
+        with pytest.raises(ValueError, match="at least one extension"):
+            ProjectConfig(owner="test", repo="test", copypasta_scan_extensions=[])

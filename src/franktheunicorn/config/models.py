@@ -1605,6 +1605,20 @@ class ProjectConfig(BaseModel):
             raise ValueError(msg)
         return v
 
+    @field_validator("copypasta_scan_extensions")
+    @classmethod
+    def copypasta_scan_extensions_valid(cls, v: list[str]) -> list[str]:
+        # An empty list reads like "scan everything" and silently means the
+        # opposite: no chunk matches any extension, so detection is off while
+        # copypasta_enabled still says it's on.
+        if not v:
+            msg = (
+                "copypasta_scan_extensions must list at least one extension "
+                "(set copypasta_enabled: false to turn the check off)"
+            )
+            raise ValueError(msg)
+        return v
+
     @field_validator("copypasta_max_repo_occurrences")
     @classmethod
     def copypasta_max_repo_occurrences_valid(cls, v: int) -> int:

@@ -71,6 +71,12 @@ _BOILERPLATE_PATTERNS: tuple[re.Pattern[str], ...] = (
 # Safe to combine: each alternative is independently anchored.
 _BOILERPLATE_RE = re.compile("|".join(f"(?:{p.pattern})" for p in _BOILERPLATE_PATTERNS))
 
+# The ubiquity rule ("already in more than N files, so it's an idiom") only
+# holds for scaffolding-sized blocks. Above this many meaningful lines —
+# expressed as a multiple of copypasta_min_lines — being duplicated widely is
+# the finding, not a reason to stay quiet.
+_UBIQUITY_MAX_BLOCK_FACTOR = 2
+
 
 @dataclass(frozen=True)
 class CodeChunk:
@@ -260,7 +266,11 @@ def _suppress_noise(
             )
             continue
 
-        if max_repo_occurrences <= 0:
+        # "Lives in lots of files" only implies "is scaffolding" for small
+        # blocks. A 200-line block copy-pasted into a fourth file is the
+        # strongest copy-paste signal there is, and suppressing it would be
+        # backwards — so the ubiquity rule only applies below a size ceiling.
+        if max_repo_occurrences <= 0 or len(meaningful) > _UBIQUITY_MAX_BLOCK_FACTOR * min_lines:
             kept.append((match, None))
             continue
 
@@ -421,9 +431,14 @@ def _check_symilar(
     # NOTE: deliberately *not* calling sym.run(). run() compares every pair of
     # appended linesets — quadratic in file count, and all but a handful of
     # those pairs are repo-vs-repo, which has nothing to do with this PR — then
-    # prints the whole report to stdout. Measured on 400 files of Spark's
-    # python/ tree: run() took 68s and printed 262KB, while the chunk-vs-repo
-    # pass below took 0.12s (80,200 pairs versus 400).
+    # prints the whole report to stdout. Measured over 400 files of Spark's
+    # python/ tree: run() took 68s and printed 262KB of report, against 0.42s
+    # for one chunk / 3.7s for twenty in the loop below.
+    #
+    # That loop is linear in chunks x repo files rather than constant, because
+    # _find_common re-hashes both linesets on every call and there's no public
+    # way to hand it a precomputed hash. Worth revisiting if PRs with many
+    # separate added blocks start dominating cycle time.
 
     # Find commonalities between PR chunks and repo files.
     # NOTE: _find_common is a private API on Symilar. There is no public
@@ -523,15 +538,11 @@ def _check_winnowing(
                 # means the ubiquity check looks for a block that exists
                 # nowhere verbatim and therefore never fires.
                 new_range = _slice_line_range(getattr(chunk_fp, "raw_code", ""), _chunk_slices)
-                if new_range is None:
-                    matched_lines = chunk.lines
-                    new_start_line = chunk.start_line
-                else:
-                    matched_lines = chunk.lines[new_range[0] - 1 : new_range[1]]
-                    new_start_line = chunk.start_line + new_range[0] - 1
-                    if not matched_lines:  # slices outside the chunk: fall back
-                        matched_lines = chunk.lines
-                        new_start_line = chunk.start_line
+                matched_lines = chunk.lines
+                if new_range is not None:
+                    narrowed = chunk.lines[new_range[0] - 1 : new_range[1]]
+                    if narrowed:  # slices outside the chunk: keep the whole one
+                        matched_lines = narrowed
 
                 matches.append(
                     CopyPastaMatch(
@@ -539,7 +550,11 @@ def _check_winnowing(
                         source_start_line=source_range[0],
                         source_end_line=source_range[1],
                         new_file=chunk.file_path,
-                        new_start_line=new_start_line,
+                        # Anchored at the chunk, deliberately: _create_drafts
+                        # dedups on (new_file, new_start_line), so varying this
+                        # per matched repo file turns one duplicated block into
+                        # one draft per file it resembles.
+                        new_start_line=chunk.start_line,
                         num_lines=len(matched_lines),
                         tier="winnowing",
                         matched_lines=matched_lines,
