@@ -170,7 +170,16 @@ command_for_service() {
     local service="$1" py="$2"
     case "${service}" in
         web)
-            printf 'cd %q && export DJANGO_SETTINGS_MODULE=%q DJANGO_DEBUG=false && exec %q -m gunicorn franktheunicorn.wsgi:application --bind %q --workers 2 --access-logfile -' \
+            # Worker class and timeouts mirror compose.yaml / k8s/deploy.yaml on
+            # purpose. Left at gunicorn's defaults this ran the *sync* worker with
+            # a 30s timeout, and the sync worker blocks in recv() on an accepted
+            # connection without heartbeating the arbiter — so a browser's
+            # speculative preconnect (Chrome opens sockets and sends nothing) got
+            # the idle worker SIGABRT'd every 30s: "WORKER TIMEOUT ... no URI
+            # read". Harmless churn on its own, but it also meant local runs
+            # reaped long requests at 30s while production allowed 90, so the one
+            # environment that would surface a slow request behaved unlike prod.
+            printf 'cd %q && export DJANGO_SETTINGS_MODULE=%q DJANGO_DEBUG=false && exec %q -m gunicorn franktheunicorn.wsgi:application --bind %q --workers 2 --worker-class gthread --threads 4 --timeout 90 --graceful-timeout 30 --access-logfile -' \
                 "${REPO_ROOT}" "${DJANGO_SETTINGS_MODULE}" "${py}" "${WEB_BIND}"
             ;;
         worker)
