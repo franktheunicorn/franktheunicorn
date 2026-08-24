@@ -1138,6 +1138,52 @@ class TestWinnowingDraftDedup:
         assert len(drafts) == 1
 
 
+@pytest.mark.django_db
+class TestReportedExtent:
+    """The comment must not claim more than the matchers can actually support.
+
+    num_lines measures the matched part while the draft is anchored on the head
+    of the added block, so a bare "N lines" read as "the N lines starting here".
+    Naming an explicit range instead is worse: for the winnowing tier the range
+    comes from _slice_line_range, which spans first-region-start to
+    last-region-end across disjoint matches.
+    """
+
+    def test_extent_is_described_not_located(self, db_pr: PullRequest) -> None:
+        match = CopyPastaMatch(
+            source_file="existing.py",
+            source_start_line=1,
+            source_end_line=6,
+            new_file="new.py",
+            new_start_line=100,
+            num_lines=6,
+            tier="winnowing",
+            matched_lines=tuple(f"    step_{i}()" for i in range(6)),
+        )
+
+        draft = _create_drafts(db_pr, [match])[0]
+
+        assert "spanning 6 lines" in draft.comment_body
+        # No file:start-end claim, because neither tier can justify one.
+        assert "new.py:" not in draft.comment_body
+        # Still anchored at the chunk head, which is the dedup key.
+        assert draft.line_number == 100
+
+    def test_slice_line_range_spans_disjoint_regions(self) -> None:
+        """Why there is no range in the comment: this returns the convex hull."""
+        from franktheunicorn.review.copypasta import _slice_line_range
+
+        code = "\n".join(f"line{i}" for i in range(1, 21))
+        # Two disjoint matched regions: lines 1-3 and lines 15-17.
+        first_start = 0
+        first_end = code.index("line3") + len("line3")
+        second_start = code.index("line15")
+        second_end = code.index("line17") + len("line17")
+        slices = [[first_start, second_start], [first_end, second_end]]
+
+        assert _slice_line_range(code, slices) == (1, 17)
+
+
 class TestScanExtensionsValidation:
     def test_empty_extensions_rejected(self) -> None:
         with pytest.raises(ValueError, match="at least one extension"):

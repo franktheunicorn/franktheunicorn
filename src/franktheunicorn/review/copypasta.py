@@ -95,12 +95,22 @@ class CopyPastaMatch:
     source_start_line: int
     source_end_line: int
     new_file: str
+    # Where the finding is *anchored* — the line the review comment lands on,
+    # and the dedup key in _create_drafts. The head of the added block, not
+    # necessarily the first duplicated line within it.
     new_start_line: int
     num_lines: int
     tier: str  # "symilar", "winnowing", or "llm"
     # The duplicated lines as they appear in the PR. Used by the noise filter
     # to tell a real copy-paste from scaffolding every file already has.
     matched_lines: tuple[str, ...] = field(default_factory=tuple)
+    # NOTE: there is deliberately no per-match line range here. ReviewDraft has a
+    # line_end field (five posters consume it, nothing produces it) and wiring it
+    # up would be the natural home for one — but neither tier can supply an
+    # honest range: _slice_line_range returns the hull across disjoint matched
+    # regions, and symilar's count is of stripped common lines, not a span.
+    # Anchoring on new_start_line and describing the extent in prose is the
+    # strongest claim the data supports.
 
 
 def check_copypasta(
@@ -679,8 +689,19 @@ def _create_drafts(
         else:
             location = f"`{match.source_file}`"
 
+        # "spanning N lines", not "N lines" and not an explicit A\u2013B range.
+        #
+        # The comment is anchored on the head of the added block (that's the
+        # dedup key) while num_lines measures only the matched part, so a bare
+        # count read as "the N lines starting here" and pointed at the wrong
+        # place. Naming the range instead is worse: for the winnowing tier it
+        # comes from _slice_line_range, which spans first-region-start to
+        # last-region-end across *disjoint* matches, so a block matching lines
+        # 1-3 and 15-17 reports 1-17 and accuses the author of duplicating the
+        # eleven lines in between. "Spanning" is the strongest claim both tiers
+        # actually support.
         comment_body = (
-            f"Possible copy-paste ({tier_label} match, {match.num_lines} lines): "
+            f"Possible copy-paste ({tier_label} match spanning {match.num_lines} lines): "
             f"this code appears to duplicate existing code in {location}. "
             f"Consider extracting a shared function or reusing the existing implementation."
         )
