@@ -1,0 +1,54 @@
+{% comment %}
+The whole triage panel: worker state, result, and the run button.
+
+Its own partial so the htmx POST can re-render it instead of replacing
+#triage-area with a bare error div. The endpoint used to return hand-written
+HttpResponse strings, and with hx-swap="innerHTML" on this container that
+swapped the button away too — so "no LLM backend configured" left the operator
+an error message and no way to retry once they'd fixed it.
+
+Multi-line {% templatetag openvariable %}#...#{% templatetag closevariable %}
+comments do NOT work: Django's tag_re has no re.DOTALL, so they render as
+literal text. Use this tag instead.
+{% endcomment %}
+
+{% if notice %}
+<div class="triage-result triage-{{ notice_level|default:"queued" }}">{{ notice }}{% if notice_link %}
+    <a href="{{ notice_link }}">Reload</a> for the result.{% endif %}</div>
+{% endif %}
+
+{# Worker state first, and outside the result branch: a re-triage that failed #}
+{# must be visible even when an earlier run left a verdict behind, otherwise #}
+{# the stale verdict reads as current. #}
+{% if triage_command.status == "failed" %}
+<div class="triage-result triage-failed">
+    Triage failed in the worker: {{ triage_command.error|default:"no error recorded" }}
+</div>
+{% elif triage_in_flight %}
+<div class="triage-result triage-queued">
+    Triage {{ triage_command.status }} — reload for the result.
+</div>
+{% elif triage_command and not has_triage_result %}
+{# Completed, but the model returned nothing usable. Saying so beats the blank #}
+{# panel this used to render, which offered no way to re-run. #}
+<div class="triage-result triage-failed">
+    Triage ran but produced no assessment — the model's answer had nothing usable in it.
+    Re-running is worth a try.
+</div>
+{% endif %}
+
+{% if has_triage_result %}
+{% include "dashboard/_security_triage_result.html" %}
+{% endif %}
+
+{# Offer the button in every state except a run that's still in flight. #}
+{# triage_in_flight comes from the view so security.queue._IN_FLIGHT_STATUSES #}
+{# stays the single owner of which statuses those are. #}
+{% if not triage_in_flight %}
+<button class="action-btn post"
+        hx-post="{% url 'dashboard:security_triage' report.pk %}"
+        hx-target="#triage-area"
+        hx-swap="innerHTML">
+    {% if triage_command %}Re-run LLM Triage{% else %}Run LLM Triage{% endif %}
+</button>
+{% endif %}

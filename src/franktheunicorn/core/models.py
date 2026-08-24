@@ -569,6 +569,7 @@ class SecurityReport(models.Model):
     SOURCE_CHOICES = [
         ("paste", "Pasted"),
         ("email", "Email"),
+        ("zip", "Zip import"),
     ]
 
     SEVERITY_CHOICES = [

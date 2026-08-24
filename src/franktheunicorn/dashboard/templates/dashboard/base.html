@@ -52,7 +52,10 @@
         </nav>
     </header>
     <main>
-        {% if messages %}{% for msg in messages %}<p class="flash">{{ msg }}</p>{% endfor %}{% endif %}
+        {# msg.tags carries the level. Without it every flash rendered in the #}
+        {# .flash red, which was invisibly fine while messages were error-only #}
+        {# and started calling successful imports failures the moment they weren't. #}
+        {% if messages %}{% for msg in messages %}<p class="flash flash-{{ msg.tags|default:"info" }}">{{ msg }}</p>{% endfor %}{% endif %}
         {% block content %}{% endblock %}
     </main>
     <div id="shortcut-help">

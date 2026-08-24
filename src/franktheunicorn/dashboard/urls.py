@@ -42,6 +42,8 @@ urlpatterns = [
     # Security report triage
     path("security/", views.security_report_list, name="security_list"),
     path("security/new/", views.security_report_create, name="security_create"),
+    # Bulk import: a zip of report files, same importer as import_security_zip.
+    path("security/upload/", views.security_report_upload, name="security_upload"),
     # Read-only transparency: everything the email scanner has looked at.
     path("security/email-activity/", views.email_activity, name="email_activity"),
     # Learned triage guidance overview (iterative learning loop).

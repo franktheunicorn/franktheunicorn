@@ -35,6 +35,16 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class TriageIncompleteError(RuntimeError):
+    """Triage ran to completion but the model produced no usable verdict.
+
+    Raised rather than returned so the ``WorkerCommand`` lands in ``failed``
+    instead of ``completed``. The report itself is left in the ``new`` queue by
+    ``_restore_untriaged_status``, so nothing is lost — but the operator is told
+    the run came back empty rather than being shown whatever the last run said.
+    """
+
+
 def triage_report(
     report: SecurityReport,
     project_config: ProjectConfig | None,
@@ -55,8 +65,14 @@ def triage_report(
     # strands every report in "triaging" and it drops out of the "new" queue.
     backend = _get_triage_backend(operator_config)
     if backend is None:
+        # Raised, not returned. Returning normally left the WorkerCommand
+        # "completed", which the report page reads as "a run finished and the
+        # model's answer had nothing usable in it — re-running is worth a try".
+        # No model was ever called, so re-running is worth nothing, forever. Only
+        # the dashboard button checks llm_backends; the email poller and the zip
+        # import queue commands without looking.
         logger.warning("No LLM backend configured; skipping triage for report #%d.", report.pk)
-        return report
+        raise TriageIncompleteError(f"No LLM backend configured; cannot triage report #{report.pk}")
 
     # Only claim the status when it's ours to claim. A report the operator
     # already ruled on (valid / invalid / duplicate) keeps that verdict through
@@ -91,7 +107,7 @@ def triage_report(
 
         learned_guidance = resolve_triage_guidance(report.project)
         logger.info("Analyzing report #%d via LLM", report.pk)
-        _analyze_report(
+        produced_verdict = _analyze_report(
             report,
             backend,
             project_context,
@@ -101,6 +117,14 @@ def triage_report(
         )
     finally:
         _restore_untriaged_status(report)
+
+    if not produced_verdict:
+        # Has to reach the caller. The worker marks a command that returns
+        # normally as "completed", and on a *re-triage* the report still carries
+        # the previous run's fields — so a silent return presented a stale
+        # verdict as this run's answer, on the one page where being wrong about
+        # a vulnerability matters most.
+        raise TriageIncompleteError(f"Triage produced no verdict for report #{report.pk}")
 
     logger.info(
         "Triage complete for report #%d: severity=%r status=%r poc_plausible=%s",
@@ -248,8 +272,15 @@ def _analyze_report(
     security_model: str = "",
     cve_candidates: list[object] | None = None,
     learned_guidance: str = "",
-) -> None:
-    """Run triage analysis on parsed report."""
+) -> bool:
+    """Run triage analysis on parsed report.
+
+    Returns True if a verdict was written. Deliberately does not raise on an LLM
+    failure (callers rely on that), so the return value is the only way the
+    caller can tell "assessed" from "the model was unreachable" — and the
+    dashboard needs that distinction to avoid presenting a previous run's
+    verdict as this one's.
+    """
     system_prompt, user_message = build_triage_prompt(
         parsed_component=report.parsed_component,
         parsed_poc=report.parsed_poc,
@@ -272,10 +303,15 @@ def _analyze_report(
         )
     except Exception:
         logger.exception("Failed to analyze security report %d", report.pk)
-        return
+        return False
 
     if analysis:
-        report.poc_plausible = _coerce_bool(analysis.get("poc_plausible", False))
+        # Absent key means "the model didn't assess this", which is what the
+        # field's null=True is for — NOT "not plausible". Defaulting to False
+        # here published an affirmative green "POC: Not Plausible" verdict on a
+        # live vulnerability report the model had said nothing about.
+        raw_poc = analysis.get("poc_plausible")
+        report.poc_plausible = None if raw_poc is None else _coerce_bool(raw_poc)
         report.poc_assessment = str(analysis.get("poc_assessment", ""))
         report.is_expected_behavior = _coerce_bool(analysis.get("is_expected_behavior", False))
         report.expected_behavior_explanation = str(
@@ -312,6 +348,8 @@ def _analyze_report(
                 "updated_at",
             ]
         )
+        return True
+    return False
 
 
 def _check_cves(report: SecurityReport, operator_config: OperatorConfig) -> None:

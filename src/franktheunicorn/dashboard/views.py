@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from franktheunicorn.config.models import OperatorConfig, ProjectConfig
+    from franktheunicorn.security.zip_import import ZipImportResult
 
 from django.contrib import messages
 from django.db.models import Count, Max, Q, Sum
@@ -963,8 +964,59 @@ def security_report_list(request: HttpRequest) -> HttpResponse:
             "reports": reports[:100],
             "status_tabs": tabs_with_counts,
             "active_status": status_filter,
+            "projects": Project.objects.filter(enabled=True).order_by("owner", "repo"),
+            "zip_import_command": _zip_import_command(),
         },
     )
+
+
+def _zip_import_command() -> str:
+    """The shell command for importing a report archive on *this* install.
+
+    Printed on the security page beside the upload button, for an archive too
+    big to push through a browser or a box where the dashboard isn't reachable.
+
+    Has to branch on containerisation, and getting this wrong is worse than
+    printing nothing: under ``docker compose`` this process is
+    ``/usr/local/bin/python`` at ``/app``, and an operator reading that off the
+    dashboard would paste it into a *host* shell that has neither the
+    interpreter, the code, nor the archive path. The compose form also routes
+    the archive through ``./data``, which is the bind mount both containers
+    share — so the file the operator drops next to the DB is the file the
+    command can actually open.
+    """
+    import sys
+    from pathlib import Path
+
+    from django.conf import settings
+
+    if _running_in_container():
+        return "docker compose exec web python manage.py import_security_zip data/reports.zip"
+
+    base = Path(settings.BASE_DIR)
+    interpreter = "python"
+    if sys.executable:
+        exe = Path(sys.executable)
+        # Repo-relative when it's the venv make setup leaves behind, so the line
+        # can be pasted from the repo root as-is.
+        interpreter = str(exe.relative_to(base)) if exe.is_relative_to(base) else str(exe)
+
+    return f"{interpreter} manage.py import_security_zip reports.zip"
+
+
+def _running_in_container() -> bool:
+    """Whether this process is inside the shipped Docker image.
+
+    ``/.dockerenv`` is what the daemon drops into every container it creates;
+    compose sets no env var worth trusting. Falling back to "not a container" is
+    the safe default — the venv form at least names a real interpreter.
+    """
+    from pathlib import Path
+
+    try:
+        return Path("/.dockerenv").exists()
+    except OSError:  # pragma: no cover - unreadable root
+        return False
 
 
 def email_activity(request: HttpRequest) -> HttpResponse:
@@ -1005,6 +1057,153 @@ def email_activity(request: HttpRequest) -> HttpResponse:
             "email_configured": email_configured,
         },
     )
+
+
+#: Cap on an uploaded archive, checked before the importer touches it.
+#:
+#: Not an ingress limit, and there is no other one: Django has already received
+#: the whole body by the time a view runs, ``DATA_UPLOAD_MAX_MEMORY_SIZE``
+#: deliberately excludes file fields, and the shipped compose file publishes
+#: gunicorn directly with no proxy in front of it — so a multi-GB POST is spooled
+#: into the container's temp dir, next to the SQLite file both services share,
+#: before this check ever runs. Fixing that properly needs a body limit at the
+#: server or a proxy; what this does is keep the number small enough that the
+#: spool is survivable. 2000 text reports is a few MB, so a tight cap costs
+#: nothing real — the earlier 64 MB bounded nothing that mattered while leaving
+#: room for a 650k-entry central directory that costs ~380 MB just to reject.
+MAX_SECURITY_ZIP_UPLOAD_BYTES = 8 * 1024 * 1024
+
+#: Entry cap for the *web* path, well below the importer's own MAX_ENTRIES.
+#:
+#: The whole import — parse, insert and triage-enqueue per entry — runs inside
+#: this HTTP request, against the SQLite file the worker is also writing. That
+#: makes this endpoint a third violation of the "no long work in the web
+#: container" rule CLAUDE.md sets out, alongside run_dual_tests and
+#: security_report_sandbox; the real fix is an ``import_security_zip``
+#: WorkerCommand (migration 0030 added run_security_triage the same way, and
+#: compose already mounts ./data on both services so the worker can read a staged
+#: file). Until that lands, this bounds a request to a couple of hundred inserts
+#: and points anything larger at the CLI, which has no such problem.
+#:
+#: Sizing note: don't reason from compose's ``--timeout 90 --worker-class
+#: gthread``. That is the *deployed* config; ``make up`` (scripts/run_local_all.sh)
+#: is what an operator actually runs locally, and gunicorn's own defaults there
+#: mean a **sync** worker on a **30s** timeout — which, unlike gthread, does get
+#: reaped mid-request. So the budget to stay inside is 30 seconds and two workers
+#: with no threads, not 90 seconds and eight slots.
+MAX_SYNCHRONOUS_ZIP_ENTRIES = 200
+
+
+@require_POST
+def security_report_upload(request: HttpRequest) -> HttpResponse:
+    """Import a zip of security reports uploaded through the dashboard.
+
+    The same importer the ``import_security_zip`` command uses, so a backlog can
+    be dragged into the browser instead of scp'd to wherever the worker runs.
+    Reports land as drafts for triage exactly like a pasted one — nothing is
+    posted or sent as a result of an upload.
+    """
+    from franktheunicorn.security.zip_import import import_reports_from_zip
+
+    upload = request.FILES.get("zip_file")
+    if upload is None:
+        messages.error(request, "Choose a .zip file to import.")
+        return redirect("dashboard:security_list")
+
+    if upload.size and upload.size > MAX_SECURITY_ZIP_UPLOAD_BYTES:
+        limit_mb = MAX_SECURITY_ZIP_UPLOAD_BYTES // (1024 * 1024)
+        messages.error(request, f"That archive is larger than the {limit_mb} MB upload limit.")
+        return redirect("dashboard:security_list")
+
+    project = None
+    project_id = request.POST.get("project_id")
+    if project_id:
+        # filter(pk=...) on a non-numeric value raises ValueError, which is an
+        # unhandled 500 on an endpoint anyone on the Tailscale net can POST to.
+        # security_report_create guards the same field this way.
+        try:
+            project = Project.objects.filter(pk=int(project_id)).first()
+        except (TypeError, ValueError):
+            messages.error(request, "That project selection wasn't valid.")
+            return redirect("dashboard:security_list")
+
+    # Off unless the operator ticked the box. A backlog import fans out to an
+    # NVD lookup and two LLM calls per report, which is not a thing to start by
+    # accident from a file picker.
+    auto_triage = request.POST.get("auto_triage") == "on"
+
+    # Not gated on the file name: the importer decides by content and reports a
+    # non-zip as an error, so a ".ZIP" or an extensionless export still works.
+    result = import_reports_from_zip(
+        upload,
+        project=project,
+        auto_triage=auto_triage,
+        max_entries=MAX_SYNCHRONOUS_ZIP_ENTRIES,
+    )
+
+    if result.error and not result.imported:
+        messages.error(request, f"Import failed: {result.error}")
+        if "over the" in result.error:
+            messages.info(
+                request,
+                "Archives that big are better done from a shell — the browser path "
+                "runs the whole import inside one request. See the command on this page.",
+            )
+    elif result.imported:
+        # summary() names result.error too when a cap tripped part-way, so a
+        # partial import reads as "N imported, then stopped: …" rather than
+        # either a clean success or a bare failure.
+        level = messages.warning if result.error else messages.success
+        level(request, f"Imported from {upload.name}: {result.summary()}")
+        if not result.queued_triage:
+            # The reason comes from the importer, not from inferring it. Deducing
+            # "disabled in operator.yaml" from queued_triage == 0 sent operators
+            # to check a setting that was already correct when the real cause was
+            # an unreadable config or an already-in-flight run.
+            if result.config_error:
+                reason = f"could not read the operator config ({result.config_error})."
+            elif auto_triage:
+                reason = "no triage runs were queued — check the worker log."
+            else:
+                reason = "open one and hit Run LLM Triage, or re-upload with triage ticked."
+            messages.info(request, f"{result.imported} report(s) imported untriaged — {reason}")
+    elif result.duplicates and not result.failed:
+        # The hint above the button advertises re-import as safe, so the case it
+        # invites must not come back as a warning-coloured "nothing imported".
+        messages.success(
+            request,
+            f"{upload.name}: already imported — "
+            f"all {result.duplicates} report(s) were already present.",
+        )
+    else:
+        messages.warning(request, f"Nothing imported from {upload.name}: {result.summary()}")
+
+    _report_failed_entries(request, result)
+    return redirect("dashboard:security_list")
+
+
+#: How many individual entry failures to name before summarising the rest.
+#: FallbackStorage spills past the cookie into the session rather than dropping
+#: them, so this is about legibility, not loss: one message per bad entry in a
+#: thousand-entry archive is a page of identical paragraphs the operator has to
+#: scroll past to find the part that worked.
+MAX_UPLOAD_ENTRY_MESSAGES = 8
+
+
+def _report_failed_entries(request: HttpRequest, result: ZipImportResult) -> None:
+    """Name the first few entries that failed, then say how many more there were.
+
+    Failures only. The CLI door lists every skipped entry, which is right for a
+    terminal and wrong for a flash queue; the counts in ``summary()`` already
+    tell the operator how many were skipped, and the page they land on has the
+    imported reports themselves.
+    """
+    failures = [entry for entry in result.entries if entry.outcome in ("error", "too-large")]
+    for entry in failures[:MAX_UPLOAD_ENTRY_MESSAGES]:
+        messages.warning(request, f"{entry.name}: {entry.outcome} — {entry.detail}")
+    remaining = len(failures) - MAX_UPLOAD_ENTRY_MESSAGES
+    if remaining > 0:
+        messages.warning(request, f"…and {remaining} more entr(ies) failed; see the worker log.")
 
 
 def security_report_create(request: HttpRequest) -> HttpResponse:
@@ -1077,8 +1276,91 @@ def security_report_detail(request: HttpRequest, report_id: int) -> HttpResponse
         {
             "report": report,
             "sandbox_enabled": sandbox_enabled,
-            "triage_command": triage_command,
+            **_triage_area_context(report, triage_command),
         },
+    )
+
+
+def _triage_area_context(
+    report: SecurityReport, triage_command: WorkerCommand | None
+) -> dict[str, object]:
+    """Context for _security_triage_area.html, shared by the page and the htmx POST.
+
+    Both have to build the same panel or the POST's swap drops parts of it.
+    """
+    from franktheunicorn.security.queue import in_flight_statuses
+
+    return {
+        "report": report,
+        "triage_command": triage_command,
+        "has_triage_result": _has_triage_result(report),
+        "triage_in_flight": (
+            triage_command is not None and triage_command.status in in_flight_statuses()
+        ),
+    }
+
+
+def _render_triage_area(
+    request: HttpRequest,
+    report: SecurityReport,
+    *,
+    notice: str = "",
+    notice_level: str = "queued",
+    notice_link: str = "",
+) -> HttpResponse:
+    """Re-render the triage panel for an htmx swap.
+
+    Every exit from the triage endpoint goes through here. Returning a bare error
+    div instead replaced #triage-area wholesale and took the run button with it,
+    so "No LLM backend configured" left nothing to click after fixing the config.
+    """
+    # Best-effort: this is also the handler for "the database just failed", and
+    # re-querying the same table there raised from inside the except block for a
+    # 500 that htmx does not swap on — so the click produced no visible change at
+    # all, strictly worse than the static error div this replaced.
+    triage_command = None
+    try:
+        triage_command = (
+            WorkerCommand.objects.filter(command="run_security_triage", security_report=report)
+            .order_by("-created_at")
+            .first()
+        )
+    except Exception:
+        logger.debug("Could not re-read triage command for report %d", report.pk, exc_info=True)
+
+    return render(
+        request,
+        "dashboard/_security_triage_area.html",
+        {
+            **_triage_area_context(report, triage_command),
+            "notice": notice,
+            "notice_level": notice_level,
+            "notice_link": notice_link,
+        },
+    )
+
+
+def _has_triage_result(report: SecurityReport) -> bool:
+    """Whether triage left anything worth rendering on *report*.
+
+    Not the same question as "is triage_summary set". The model asks for a
+    summary but doesn't require one — it's ``analysis.get("triage_summary", "")``
+    — so a run that answered with a POC assessment and no summary used to
+    render as a blank panel: the result partial was gated on the summary, the
+    status strip only covered pending/running/failed, and a *completed* command
+    matched neither. The page came back empty with no way to re-run.
+    """
+    return bool(
+        report.triage_summary
+        or report.poc_assessment
+        or report.expected_behavior_explanation
+        or report.is_expected_behavior
+        or report.poc_plausible is not None
+        # A severity is a result too. Omitting it put the "High" badge this very
+        # run wrote directly above "produced no assessment", inviting the
+        # operator to spend another NVD lookup and two LLM calls re-deriving a
+        # verdict the page was already showing.
+        or (report.assessed_severity and report.assessed_severity != "unknown")
     )
 
 
@@ -1093,14 +1375,20 @@ def security_report_triage(request: HttpRequest, report_id: int) -> HttpResponse
         operator_config = get_operator_config()
 
         if not operator_config.llm_backends:
-            return HttpResponse(
-                '<div class="triage-result triage-failed">'
-                "No LLM backend configured. Add one to operator.yaml.</div>"
+            return _render_triage_area(
+                request,
+                report,
+                notice="No LLM backend configured. Add one to operator.yaml.",
+                notice_level="failed",
             )
 
-        from franktheunicorn.security.queue import queue_triage
+        # _on_request: an explicit click is not "automatic triage", so it is not
+        # subject to auto_triage — nor to security_triage.enabled, which defaults
+        # off and is commented out in the shipped example config, and would make
+        # this button a no-op on a default install.
+        from franktheunicorn.security.queue import queue_triage_on_request
 
-        created = queue_triage(report)
+        created = queue_triage_on_request(report, operator_config)
         logger.info(
             "%s manual triage for security report #%d",
             "Queued" if created else "Reused in-flight",
@@ -1108,9 +1396,11 @@ def security_report_triage(request: HttpRequest, report_id: int) -> HttpResponse
         )
     except Exception:
         logger.exception("Failed to queue triage for report %d", report.pk)
-        return HttpResponse(
-            '<div class="triage-result triage-failed">'
-            "Failed to queue triage. Check configuration.</div>"
+        return _render_triage_area(
+            request,
+            report,
+            notice="Failed to queue triage. Check configuration.",
+            notice_level="failed",
         )
 
     message = (
@@ -1118,10 +1408,11 @@ def security_report_triage(request: HttpRequest, report_id: int) -> HttpResponse
         if created
         else "Triage is already queued for this report."
     )
-    return HttpResponse(
-        f'<div class="triage-result triage-queued">{message} '
-        f'<a href="{reverse("dashboard:security_detail", args=[report.pk])}">Reload</a>'
-        " for the result.</div>"
+    return _render_triage_area(
+        request,
+        report,
+        notice=message,
+        notice_link=reverse("dashboard:security_detail", args=[report.pk]),
     )
 
 
@@ -1249,14 +1540,10 @@ def _auto_triage_report(report: SecurityReport) -> None:
     from franktheunicorn.config.loader import get_operator_config
 
     operator_config = get_operator_config()
-    if not operator_config.security_triage.enabled:
-        return
-    if not operator_config.security_triage.auto_triage:
-        return
 
-    from franktheunicorn.security.queue import queue_triage
+    from franktheunicorn.security.queue import queue_triage_if_enabled
 
-    if queue_triage(report):
+    if queue_triage_if_enabled(report, operator_config):
         logger.info("Queued auto-triage for security report #%d", report.pk)
 
 

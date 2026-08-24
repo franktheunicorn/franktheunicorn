@@ -36,7 +36,14 @@ src/franktheunicorn/
   backends/          # Forge clients (GitHub, Gitea, GitLab) + posters
   personalities/     # Reviewer voice loader (markdown personalities)
   security/          # Security-report triage pipeline (CVE lookup,
-                     #   malicious-prompt detection, sandboxed POC runs)
+                     #   malicious-prompt detection, sandboxed POC runs).
+                     #   queue.py is the only door onto triage queueing —
+                     #   every ingest path goes through it, never straight to
+                     #   WorkerCommand. zip_import.py bulk-imports an archive
+                     #   of reports (management command + dashboard upload);
+                     #   triage is opt-in there regardless of auto_triage,
+                     #   since a backlog is one NVD lookup + two LLM calls
+                     #   per report.
   curator/           # Textual TUI for curating voice datasets from
                      #   historical comments (used to seed fine-tuning;
                      #   not part of the live review path)

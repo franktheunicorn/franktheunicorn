@@ -13,6 +13,43 @@
     <a href="{% url 'dashboard:security_guidance' %}" class="action-btn" style="font-size: 0.85rem; padding: 0.4rem 0.8rem; text-decoration: none;" title="Learned guidance distilled from operator agree/disagree feedback">🎓 Learned Guidance</a>
 </div>
 
+{# Bulk import. Reports land as untriaged drafts exactly like a pasted one, and #}
+{# nothing is ever posted to a forge. Never triages unless asked — a backlog is #}
+{# an NVD lookup plus two LLM calls per report. NOTE: with alerts.enabled on, #}
+{# imported reports do feed the ordinary alert sweep, same as any other ingest #}
+{# path, so a large import means a large alert digest. #}
+<section class="zip-import" aria-label="Import a zip of security reports">
+    <form method="post" action="{% url 'dashboard:security_upload' %}" enctype="multipart/form-data" class="zip-import-form">
+        {% csrf_token %}
+        <input type="file" name="zip_file" accept=".zip,application/zip" required
+               aria-label="Zip archive of security reports">
+        <select name="project_id" aria-label="Attach imported reports to project">
+            <option value="">No project</option>
+            {% for project in projects %}
+            <option value="{{ project.pk }}">{{ project.full_name }}</option>
+            {% endfor %}
+        </select>
+        <label class="zip-import-triage"
+               title="Off by default: one NVD lookup and two LLM calls per report">
+            <input type="checkbox" name="auto_triage"> Triage on import
+        </label>
+        <button type="submit" class="action-btn post">📦 Upload &amp; Import</button>
+    </form>
+
+    <p class="zip-import-hint">
+        One report per file (<code>.eml</code>, <code>.txt</code>, <code>.md</code>,
+        <code>.json</code>). Re-importing the same archive <em>with the same project
+        selected</em> is safe — entries already present are skipped. Changing the
+        project re-imports them, because "already present" is per-project.
+        Or, for a large archive, from a shell:
+    </p>
+    <pre class="zip-import-cmd"><code>{{ zip_import_command }}</code></pre>
+    <p class="zip-import-hint">
+        Add <code>--project owner/repo</code> to attach a project,
+        <code>--triage</code> to queue triage runs.
+    </p>
+</section>
+
 <div class="tab-bar">
     {% for tab in status_tabs %}
     <a href="{% url 'dashboard:security_list' %}{% if tab.key != 'all' %}?status={{ tab.key }}{% endif %}"

@@ -1947,11 +1947,15 @@ def _poll_security_emails(operator_config: OperatorConfig) -> None:
             # again), and hardcoded project_config=None — the command handler
             # resolves the report's project config, including its security
             # model.
-            if report is not None and operator_config.security_triage.auto_triage:
+            if report is not None:
                 try:
-                    from franktheunicorn.security.queue import queue_triage
+                    from franktheunicorn.security.queue import queue_triage_if_enabled
 
-                    if queue_triage(report):
+                    # Shared gate rather than an inline auto_triage check, so
+                    # every ingest door reads the same two settings the same way.
+                    # (security_triage.enabled is already guaranteed here by the
+                    # early return at the top of this function.)
+                    if queue_triage_if_enabled(report, operator_config):
                         logger.info("[email-scan] queued auto-triage for report #%d", report.pk)
                 except Exception:
                     logger.exception("Could not queue auto-triage for email report %d", report.pk)

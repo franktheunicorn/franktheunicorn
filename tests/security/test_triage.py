@@ -85,9 +85,17 @@ class TestTriageReport:
         self,
         db: Any,
     ) -> None:
-        """No LLM backend → skip gracefully. The report must stay in "new";
-        flipping it to "triaging" before the backend check stranded reports
-        out of the queue forever (worker email auto-triage has no guard)."""
+        """No LLM backend → the report stays in "new" and the run is a failure.
+
+        Status first: flipping it to "triaging" before the backend check stranded
+        reports out of the queue forever (worker email auto-triage has no guard).
+
+        And it raises rather than returning, so the WorkerCommand lands "failed".
+        Returning normally marked it "completed", which the report page renders as
+        "the model's answer had nothing usable in it — re-running is worth a try"
+        when in fact no model exists to call and re-running is worth nothing.
+        """
+        from franktheunicorn.security.triage import TriageIncompleteError
         from tests.factories import SecurityReportFactory
 
         report = SecurityReportFactory(
@@ -97,7 +105,8 @@ class TestTriageReport:
 
         config = OperatorConfig(github_username="testuser")
 
-        triage_report(report, None, config)
+        with pytest.raises(TriageIncompleteError, match="No LLM backend"):
+            triage_report(report, None, config)
         report.refresh_from_db()
         assert report.status == "new"
 
@@ -122,10 +131,15 @@ class TestTriageReport:
         )
 
         # The stub backend returns predefined findings, not JSON for triage.
-        # The pipeline should handle non-JSON gracefully.
-        triage_report(report, None, config)
+        # Non-JSON means no verdict, which is now raised rather than returned:
+        # the worker has to mark the command failed, or a re-triage would show
+        # the previous run's verdict as this one's. The report still lands back
+        # in a queue rather than being stranded in "triaging".
+        from franktheunicorn.security.triage import TriageIncompleteError
+
+        with pytest.raises(TriageIncompleteError):
+            triage_report(report, None, config)
         report.refresh_from_db()
-        # Status should be updated even if parsing fails.
         assert report.status in ("triaging", "new", "expected-behavior")
 
     @patch("franktheunicorn.security.triage.search_cves")
@@ -599,8 +613,9 @@ class TestSecurityModelThreading:
         # When _analyze_report is called, cve_candidates must already be filled.
         captured: dict[str, Any] = {}
 
-        def _capture(*args: Any, **kwargs: Any) -> None:
+        def _capture(*args: Any, **kwargs: Any) -> bool:
             captured["cve_candidates"] = kwargs.get("cve_candidates")
+            return True  # _analyze_report reports whether it wrote a verdict
 
         mock_analyze.side_effect = _capture
 

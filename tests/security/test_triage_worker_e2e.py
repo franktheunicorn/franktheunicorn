@@ -131,9 +131,17 @@ class TestPasteToTriaged:
         SecurityReport.objects.filter(pk=report.pk).update(status="valid")
         report.refresh_from_db()
 
-        with patch(
-            "franktheunicorn.security.triage._call_llm",
-            side_effect=RuntimeError("model timed out"),
+        from franktheunicorn.security.triage import TriageIncompleteError
+
+        # A dead model produces no verdict, which now surfaces as TriageIncompleteError
+        # so the WorkerCommand is marked failed instead of completed. The
+        # operator's verdict must survive that untouched.
+        with (
+            patch(
+                "franktheunicorn.security.triage._call_llm",
+                side_effect=RuntimeError("model timed out"),
+            ),
+            pytest.raises(TriageIncompleteError),
         ):
             triage_report(report, None, config)
 

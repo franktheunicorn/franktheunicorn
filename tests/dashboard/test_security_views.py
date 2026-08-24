@@ -277,12 +277,19 @@ class TestSecurityReportTriage:
     def test_triage_endpoint_queues_worker_command(
         self, mock_config: MagicMock, client: Client, db: Any
     ) -> None:
-        from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig
+        from franktheunicorn.config.models import (
+            LLMBackendConfig,
+            OperatorConfig,
+            SecurityTriageConfig,
+        )
         from franktheunicorn.core.models import WorkerCommand
 
+        # security_triage.enabled is required now: the manual button used to be
+        # the one door that queued triage with the whole feature switched off.
         mock_config.return_value = OperatorConfig(
             github_username="testuser",
             llm_backends=[LLMBackendConfig(provider="stub")],
+            security_triage=SecurityTriageConfig(enabled=True),
         )
         report = SecurityReportFactory(title="Test triage")
 
@@ -312,11 +319,18 @@ class TestSecurityReportTriage:
     def test_triage_queue_failure_returns_error_html(
         self, mock_config: MagicMock, mock_objects: MagicMock, client: Client, db: Any
     ) -> None:
-        from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig
+        from franktheunicorn.config.models import (
+            LLMBackendConfig,
+            OperatorConfig,
+            SecurityTriageConfig,
+        )
 
+        # security_triage.enabled is required now: the manual button used to be
+        # the one door that queued triage with the whole feature switched off.
         mock_config.return_value = OperatorConfig(
             github_username="testuser",
             llm_backends=[LLMBackendConfig(provider="stub")],
+            security_triage=SecurityTriageConfig(enabled=True),
         )
         # Nothing in flight, so the enqueue is attempted — and fails.
         mock_objects.filter.return_value.exists.return_value = False
@@ -336,12 +350,19 @@ class TestSecurityReportTriage:
         Two runs mean two NVD lookups and two pairs of LLM calls, with the
         second overwriting the first's verdict.
         """
-        from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig
+        from franktheunicorn.config.models import (
+            LLMBackendConfig,
+            OperatorConfig,
+            SecurityTriageConfig,
+        )
         from franktheunicorn.core.models import WorkerCommand
 
+        # security_triage.enabled is required now: the manual button used to be
+        # the one door that queued triage with the whole feature switched off.
         mock_config.return_value = OperatorConfig(
             github_username="testuser",
             llm_backends=[LLMBackendConfig(provider="stub")],
+            security_triage=SecurityTriageConfig(enabled=True),
         )
         report = SecurityReportFactory()
 
@@ -361,12 +382,19 @@ class TestSecurityReportTriage:
     def test_triage_can_be_requeued_after_a_finished_run(
         self, mock_config: MagicMock, client: Client, db: Any
     ) -> None:
-        from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig
+        from franktheunicorn.config.models import (
+            LLMBackendConfig,
+            OperatorConfig,
+            SecurityTriageConfig,
+        )
         from franktheunicorn.core.models import WorkerCommand
 
+        # security_triage.enabled is required now: the manual button used to be
+        # the one door that queued triage with the whole feature switched off.
         mock_config.return_value = OperatorConfig(
             github_username="testuser",
             llm_backends=[LLMBackendConfig(provider="stub")],
+            security_triage=SecurityTriageConfig(enabled=True),
         )
         report = SecurityReportFactory()
         client.post(f"/security/{report.pk}/triage/")
@@ -392,6 +420,132 @@ class TestSecurityReportTriage:
         assert b"Triage failed in the worker" in response.content
         assert b"model timed out" in response.content
         assert b"Re-run LLM Triage" in response.content
+
+    def test_completed_run_with_no_assessment_still_offers_a_retry(
+        self, client: Client, db: Any
+    ) -> None:
+        """The blank-panel dead end: triage_summary is optional in the model's answer.
+
+        A completed command with an empty summary matched no status strip and no
+        result panel, so the page came back empty with no button to re-run.
+        """
+        from franktheunicorn.core.models import WorkerCommand
+
+        report = SecurityReportFactory(triage_summary="", poc_assessment="", poc_plausible=None)
+        cmd = WorkerCommand.objects.create(command="run_security_triage", security_report=report)
+        WorkerCommand.objects.filter(pk=cmd.pk).update(status="completed")
+
+        response = client.get(f"/security/{report.pk}/")
+
+        assert b"produced no assessment" in response.content
+        assert b"Re-run LLM Triage" in response.content
+
+    def test_a_poc_verdict_without_a_summary_still_renders(self, client: Client, db: Any) -> None:
+        """The result panel shows POC fields, so gating it on the summary hid them."""
+        from franktheunicorn.core.models import WorkerCommand
+
+        report = SecurityReportFactory(
+            triage_summary="", poc_plausible=True, poc_assessment="The traversal reproduces."
+        )
+        cmd = WorkerCommand.objects.create(command="run_security_triage", security_report=report)
+        WorkerCommand.objects.filter(pk=cmd.pk).update(status="completed")
+
+        response = client.get(f"/security/{report.pk}/")
+
+        assert b"Triage Analysis" in response.content
+        assert b"The traversal reproduces." in response.content
+        assert b"produced no assessment" not in response.content
+
+    def test_an_in_flight_run_hides_the_button(self, client: Client, db: Any) -> None:
+        """Nothing to click while the worker is mid-run; the constraint would reject it."""
+        from franktheunicorn.core.models import WorkerCommand
+
+        report = SecurityReportFactory(triage_summary="")
+        WorkerCommand.objects.create(command="run_security_triage", security_report=report)
+
+        response = client.get(f"/security/{report.pk}/")
+
+        assert b"Triage pending" in response.content
+        # Asserted on the hx-post attribute, not on "LLM Triage</button>": the
+        # rendered bytes are "LLM Triage\n    </button>", so the old spelling
+        # could never match and the test could not fail.
+        assert b"security/%d/triage/" % report.pk not in response.content
+
+    def test_a_severity_only_run_is_not_called_empty(self, client: Client, db: Any) -> None:
+        """The badge the run wrote sat directly above "produced no assessment"."""
+        from franktheunicorn.core.models import WorkerCommand
+
+        report = SecurityReportFactory(
+            triage_summary="", poc_assessment="", poc_plausible=None, assessed_severity="high"
+        )
+        cmd = WorkerCommand.objects.create(command="run_security_triage", security_report=report)
+        WorkerCommand.objects.filter(pk=cmd.pk).update(status="completed")
+
+        response = client.get(f"/security/{report.pk}/")
+
+        assert b"produced no assessment" not in response.content
+
+    @patch("franktheunicorn.config.loader.get_operator_config")
+    def test_the_triage_button_works_without_the_feature_flag(
+        self, mock_config: MagicMock, client: Client, db: Any
+    ) -> None:
+        """security_triage.enabled defaults False and ships commented out.
+
+        Gating an explicit click on it made the button a permanent no-op on the
+        install the documented setup produces.
+        """
+        from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig
+        from franktheunicorn.core.models import WorkerCommand
+
+        mock_config.return_value = OperatorConfig(
+            github_username="testuser",
+            llm_backends=[LLMBackendConfig(provider="stub")],
+        )
+        report = SecurityReportFactory()
+
+        response = client.post(f"/security/{report.pk}/triage/")
+
+        assert b"Triage queued" in response.content
+        assert WorkerCommand.objects.filter(security_report=report).count() == 1
+
+    @patch("franktheunicorn.config.loader.get_operator_config")
+    def test_a_queue_failure_still_renders_the_panel_not_a_500(
+        self, mock_config: MagicMock, client: Client, db: Any
+    ) -> None:
+        """The recovery path re-queries the table whose failure got us here."""
+        from django.db import OperationalError
+
+        from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig
+
+        mock_config.return_value = OperatorConfig(
+            github_username="testuser",
+            llm_backends=[LLMBackendConfig(provider="stub")],
+        )
+        report = SecurityReportFactory()
+
+        with (
+            patch(
+                "franktheunicorn.security.queue.queue_triage_on_request",
+                side_effect=OperationalError("database is locked"),
+            ),
+            patch(
+                "franktheunicorn.core.models.WorkerCommand.objects.filter",
+                side_effect=OperationalError("database is locked"),
+            ),
+        ):
+            response = client.post(f"/security/{report.pk}/triage/")
+
+        # htmx does not swap on 5xx, so a 500 here means the click does nothing.
+        assert response.status_code == 200
+        assert b"Failed to queue triage" in response.content
+
+    def test_an_untriaged_report_offers_the_first_run(self, client: Client, db: Any) -> None:
+        report = SecurityReportFactory(triage_summary="")
+
+        response = client.get(f"/security/{report.pk}/")
+
+        assert b"Run LLM Triage" in response.content
+        assert b"Re-run LLM Triage" not in response.content
 
 
 @pytest.mark.django_db
