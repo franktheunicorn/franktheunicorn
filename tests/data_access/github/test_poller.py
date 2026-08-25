@@ -1188,3 +1188,76 @@ class TestReapRequiresCompleteListing:
         # These stop at one page today; flipping the flag requires pagination.
         assert GiteaClient.lists_all_open_pull_requests is False
         assert GitLabClient.lists_all_open_pull_requests is False
+
+
+@pytest.mark.django_db
+class TestFailureCounterAndRewindScope:
+    """Two regressions in the per-PR isolation guard itself."""
+
+    def _config(self, **overrides: Any) -> ProjectConfig:
+        return ProjectConfig(owner="apache", repo="spark", poll_refresh_hours=24, **overrides)
+
+    def test_skips_reset_the_failure_counter(self, tmp_path: Path) -> None:
+        """In steady state almost every PR is skipped, so counting across skips
+        meant a handful of bad rows anywhere in a long listing abandoned the rest.
+
+        Six failures, each separated by skipped PRs, against a cap of 5. Without
+        the reset the counter climbs across the skips, trips on the fifth and
+        abandons the rest of the listing, so PR 40 is never reached.
+        """
+        listed = [_listed_pr(n) for n in range(1, 41)]
+        client = _CountingMockClient(tmp_path, listed)
+        config = self._config()
+        # "holdenk" is the fixture's requested reviewer, so scoring produces a
+        # non-empty breakdown — without one every row reads as degraded and is
+        # refreshed every cycle, which would defeat the point of this test.
+        poll_project(client, config, operator_username="holdenk")
+
+        # A PR whose scoring produced an empty breakdown reads as degraded and is
+        # refreshed forever, so give every row one — this test is about the
+        # failure counter, not about what the scorer found.
+        PullRequest.objects.filter(project__repo="spark").update(score_breakdown={"stub": 1})
+
+        # Only 1, 3 and 40 look changed; the rest take the unchanged skip.
+        doomed = (1, 5, 9, 13, 17, 21)
+        client.pr_list = [
+            _listed_pr(n, updated_at="2026-04-09T11:00:00Z")
+            if n in (*doomed, 40)
+            else _listed_pr(n)
+            for n in range(1, 41)
+        ]
+
+        def explode_on_1_and_3(pr: PullRequest, **kwargs: Any) -> tuple[float, dict[str, Any]]:
+            if pr.number in doomed:
+                msg = "boom"
+                raise RuntimeError(msg)
+            return 0.5, {"stub": 1}
+
+        client.detail_calls.clear()
+        with patch(
+            "franktheunicorn.backends.poller.score_pull_request_from_model",
+            side_effect=explode_on_1_and_3,
+        ):
+            got = poll_project(client, config, operator_username="holdenk")
+
+        assert 40 in client.detail_calls, "gave up before reaching the end of the listing"
+        assert [pr.number for pr in got] == [40]
+
+    def test_the_rewind_does_not_write_back_a_stale_closed_state(self, tmp_path: Path) -> None:
+        """The open listing just said this PR is open; restoring "closed" is a lie.
+
+        A row marked closed hides from the backfill and the dashboard queues, and
+        _close_missing_pull_requests only ever closes, so nothing corrects it.
+        """
+        client = _CountingMockClient(tmp_path, [_listed_pr()])
+        config = self._config()
+        poll_project(client, config, operator_username="nobody")
+        PullRequest.objects.filter(number=99).update(state="closed")
+
+        with patch(
+            "franktheunicorn.backends.poller.score_pull_request_from_model",
+            side_effect=RuntimeError("boom"),
+        ):
+            poll_project(client, config, operator_username="nobody")
+
+        assert PullRequest.objects.get(number=99).state == "open"

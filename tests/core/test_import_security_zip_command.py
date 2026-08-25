@@ -35,12 +35,19 @@ def archive(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def triage_on() -> Any:
-    from franktheunicorn.config.models import OperatorConfig, SecurityTriageConfig
+    from franktheunicorn.config.models import (
+        LLMBackendConfig,
+        OperatorConfig,
+        SecurityTriageConfig,
+    )
 
     with patch("franktheunicorn.config.loader.get_operator_config") as mock:
         mock.return_value = OperatorConfig(
             github_username="testuser",
             security_triage=SecurityTriageConfig(enabled=True, auto_triage=True),
+            # Bulk queueing refuses without a backend, so this has to name one or
+            # --triage correctly declines to queue anything.
+            llm_backends=[LLMBackendConfig(provider="stub")],
         )
         yield mock
 

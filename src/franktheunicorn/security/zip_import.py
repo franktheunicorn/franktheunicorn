@@ -29,6 +29,7 @@ an entry is free and the aggregate cap bounds nothing.
 
 from __future__ import annotations
 
+import codecs
 import hashlib
 import logging
 import zipfile
@@ -281,6 +282,15 @@ def import_reports_from_zip(
             if not operator_config.security_triage.enabled:
                 logger.info("security_triage.enabled is false; importing untriaged")
                 result.triage_skipped_reason = "security_triage.enabled is false in operator.yaml"
+                auto_triage = False
+            elif not operator_config.llm_backends:
+                # The dashboard button checks this; neither bulk door did. Queueing
+                # anyway created one command per report that failed the moment the
+                # worker picked it up, while summary() reported "N queued for
+                # triage" as though it were success — 2000 of them for a big
+                # archive.
+                logger.info("No LLM backend configured; importing untriaged")
+                result.triage_skipped_reason = "no LLM backend is configured in operator.yaml"
                 auto_triage = False
     try:
         with zipfile.ZipFile(source) as archive:
@@ -725,6 +735,16 @@ def _import_entry(
     existing = seen.get(mid_key) if mid_key else None
     if existing is None:
         existing = seen.get(text_key)
+    if existing is None and project_id is not None:
+        # Fall back to the project-less keys. The email door creates every report
+        # with project=None (worker.runner never passes one), so scoping strictly
+        # to the import target meant `--project owner/repo` on an inbox export
+        # duplicated every message the poller had already ingested — with
+        # --triage, a second NVD lookup and second pair of LLM calls each. Which
+        # is the exact workflow this importer exists to serve.
+        existing = seen.get(_mid_key(parsed.message_id, None)) if parsed.message_id else None
+        if existing is None:
+            existing = seen.get(_text_key(body, None))
     if existing is not None:
         return EntryOutcome(name=name, outcome="duplicate", report_id=existing)
 
@@ -850,10 +870,15 @@ def _looks_binary(raw: bytes) -> bool:
     if marker is None:
         return b"\x00" in raw[:8192]
     bom, encoding = marker
+    # An *incremental* decoder with final=False, not bytes.decode(). The slice
+    # boundary lands wherever 8192 bytes land, which is not a character boundary:
+    # a UTF-8 BOM is 3 bytes, so any multi-byte character straddling the cut made
+    # a strict decode raise and a perfectly good BOM-marked report — Notepad's
+    # default save — was dropped as "not a text file". final=False buffers the
+    # incomplete tail instead of calling it an error, while a genuinely malformed
+    # sequence earlier in the slice still raises, which is the signal we want.
     try:
-        # Strict: binary read as UTF-16 trips on unpaired surrogates, which is
-        # the signal. The slice is BOM-aligned, so no partial trailing character.
-        head = raw[len(bom) : 8192].decode(encoding)
+        head = codecs.getincrementaldecoder(encoding)().decode(raw[len(bom) : 8192], final=False)
     except UnicodeDecodeError:
         return True
     return "\x00" in head
@@ -871,16 +896,40 @@ def _parse_entry(raw: bytes, kind: str) -> InboxMessage:
         parse_pasted_report,
     )
 
-    text = _decode_text(raw)
     if kind == "eml":
-        # Decoded and re-encoded, never handed the raw bytes. UTF-16 headers are
-        # unreadable to email.message_from_bytes, so the whole report came back
-        # is_security_report=False and vanished as "not-a-report"; a UTF-8 BOM
-        # sits where the first header name should be, so the parser treats the
-        # entire message as a body and loses subject, From, Date and Message-ID
-        # while still importing.
-        return parse_email_message(text.encode("utf-8"))
-    return parse_pasted_report(text)
+        # Only the BOM is dealt with here; everything else goes to the MIME parser
+        # as raw bytes. Blanket-decoding as UTF-8 with errors="replace" and
+        # re-encoding fixed the two BOM cases and broke a third thing: a part
+        # declaring charset=iso-8859-1 with 8-bit encoding had every 0x80-0xFF
+        # byte turned into U+FFFD *before* email could apply that charset, so
+        # "café" reached the operator and the triage prompt as "caf<?>". RFC2047
+        # headers survived, which made the corruption silent and partial —
+        # precisely the common case for non-English mail.
+        return parse_email_message(_strip_bom_bytes(raw))
+    return parse_pasted_report(_decode_text(raw))
+
+
+def _strip_bom_bytes(raw: bytes) -> bytes:
+    """Byte-level BOM handling for a MIME message, preserving its own encodings.
+
+    * No BOM: untouched, so per-part charsets still work.
+    * UTF-8 BOM: the three marker bytes removed. They sit where the first header
+      name goes, so the parser treated the whole message as a body and lost
+      subject, From, Date and Message-ID — while still importing, which is why
+      nothing flagged it.
+    * UTF-16/32 BOM: transcoded to UTF-8, because the entire message really is in
+      that encoding and ``email.message_from_bytes`` cannot read a header out of
+      it — the report came back ``is_security_report=False`` and vanished as
+      "not-a-report" with its keywords intact but unfindable.
+    """
+    marker = _bom(raw)
+    if marker is None:
+        return raw
+    bom, encoding = marker
+    body = raw[len(bom) :]
+    if encoding == "utf-8":
+        return body
+    return body.decode(encoding, errors="replace").encode("utf-8")
 
 
 def _decode_text(raw: bytes) -> str:

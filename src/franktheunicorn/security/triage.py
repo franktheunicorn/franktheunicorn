@@ -72,6 +72,13 @@ def triage_report(
         # the dashboard button checks llm_backends; the email poller and the zip
         # import queue commands without looking.
         logger.warning("No LLM backend configured; skipping triage for report #%d.", report.pk)
+        # Before raising, not after: this returns *early*, so the try/finally
+        # below — the thing whose whole job is "never leave a report in
+        # triaging" — is never entered. A report stranded there by an earlier
+        # killed run would stay stranded, invisible in the "new" queue, with its
+        # command now "failed" so nothing requeues it. The only door out was a
+        # dashboard button that refuses on llm_backends first.
+        _restore_untriaged_status(report)
         raise TriageIncompleteError(f"No LLM backend configured; cannot triage report #{report.pk}")
 
     # Only claim the status when it's ours to claim. A report the operator
@@ -100,7 +107,20 @@ def triage_report(
         project_context = _load_project_context(report, project_config)
         # CVE lookup runs before analysis so the matches are available as
         # context for the expected-behavior / duplicate call.
-        _check_cves(report, operator_config)
+        #
+        # Guarded, unlike every other step here, because it was the one that
+        # wasn't. It is *optional context* sitting between the two calls that
+        # matter, and search_cves only catches httpx.HTTPError and
+        # TimeoutException — NVD answers 200 with an HTML maintenance page under
+        # load, so .json() raises JSONDecodeError, which is a ValueError and
+        # escapes both. That aborted the run after the parse call was already
+        # billed and before the call that produces the verdict.
+        try:
+            _check_cves(report, operator_config)
+        except Exception:
+            logger.warning(
+                "CVE lookup failed for report #%d; triaging without it", report.pk, exc_info=True
+            )
         security_model = _resolve_security_model(project_config)
 
         from franktheunicorn.security.learning import resolve_triage_guidance
@@ -212,13 +232,49 @@ def _call_llm(
     return _safe_json_parse(raw_response)
 
 
-def _coerce_bool(value: object) -> bool:
-    """Coerce an LLM JSON value to bool, handling string 'true'/'false'."""
+#: Spellings a model actually uses for yes and no. Anything outside both sets is
+#: not an answer, and guessing which way it leans is how a hedge becomes a verdict.
+_TRUE_WORDS = frozenset({"true", "yes", "y", "1", "plausible", "confirmed", "likely"})
+_FALSE_WORDS = frozenset({"false", "no", "n", "0", "implausible", "not plausible", "unlikely"})
+
+
+def _coerce_tristate(value: object) -> bool | None:
+    """Coerce an LLM JSON value to True, False, or None for "didn't say".
+
+    ``value.lower() == "true"`` mapped everything else to False, which is not a
+    missing answer but an affirmative negative one — and this feeds a green
+    "POC: Not Plausible" badge on a live vulnerability report. Measured against
+    the old helper: 'unknown', 'unclear', 'maybe', 'n/a' and '' all returned
+    False, and so did **'yes'**, so a model that said the POC works was displayed
+    as saying it doesn't.
+
+    None here is a real state: ``poc_plausible`` is nullable and the dashboard
+    renders nothing for it rather than picking a side.
+    """
     if isinstance(value, bool):
         return value
+    if value is None:
+        return None
+    if isinstance(value, int | float):
+        return bool(value)
     if isinstance(value, str):
-        return value.lower() == "true"
-    return bool(value)
+        word = value.strip().lower()
+        if word in _TRUE_WORDS:
+            return True
+        if word in _FALSE_WORDS:
+            return False
+        return None
+    return None
+
+
+def _coerce_bool(value: object) -> bool:
+    """Tri-state collapsed to a bool, for fields that aren't nullable.
+
+    ``is_expected_behavior`` has no null, and "the model didn't say" is not a
+    reason to claim behaviour is expected — so an unrecognised value is False
+    here, which is the conservative direction for that field specifically.
+    """
+    return _coerce_tristate(value) is True
 
 
 def _parse_report(report: SecurityReport, backend: BaseLLMBackend) -> None:
@@ -305,13 +361,24 @@ def _analyze_report(
         logger.exception("Failed to analyze security report %d", report.pk)
         return False
 
-    if analysis:
+    # "Did the model answer?", not "is the dict non-empty". A reply with none of
+    # these keys — a wrong key name is entirely ordinary — used to count as a
+    # verdict: the command landed "completed" instead of "failed", and since all
+    # five fields are overwritten unconditionally and listed in update_fields, a
+    # re-triage *destroyed* the previous run's verdict and stored blanks.
+    if analysis and any(
+        key in analysis
+        for key in (
+            "poc_plausible",
+            "poc_assessment",
+            "is_expected_behavior",
+            "expected_behavior_explanation",
+            "triage_summary",
+        )
+    ):
         # Absent key means "the model didn't assess this", which is what the
-        # field's null=True is for — NOT "not plausible". Defaulting to False
-        # here published an affirmative green "POC: Not Plausible" verdict on a
-        # live vulnerability report the model had said nothing about.
-        raw_poc = analysis.get("poc_plausible")
-        report.poc_plausible = None if raw_poc is None else _coerce_bool(raw_poc)
+        # field's null=True is for — NOT "not plausible".
+        report.poc_plausible = _coerce_tristate(analysis.get("poc_plausible"))
         report.poc_assessment = str(analysis.get("poc_assessment", ""))
         report.is_expected_behavior = _coerce_bool(analysis.get("is_expected_behavior", False))
         report.expected_behavior_explanation = str(

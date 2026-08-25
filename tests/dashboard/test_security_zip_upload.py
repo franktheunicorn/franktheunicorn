@@ -36,12 +36,17 @@ def upload(entries: dict[str, bytes | str], name: str = "reports.zip") -> Simple
 @pytest.fixture
 def triage_off() -> Any:
     """Auto-triage off, so these tests are about the view, not the worker queue."""
-    from franktheunicorn.config.models import OperatorConfig, SecurityTriageConfig
+    from franktheunicorn.config.models import (
+        LLMBackendConfig,
+        OperatorConfig,
+        SecurityTriageConfig,
+    )
 
     with patch("franktheunicorn.config.loader.get_operator_config") as mock:
         mock.return_value = OperatorConfig(
             github_username="testuser",
             security_triage=SecurityTriageConfig(enabled=True, auto_triage=False),
+            llm_backends=[LLMBackendConfig(provider="stub")],
         )
         yield mock
 
@@ -341,12 +346,19 @@ class TestSecurityReportUpload:
     def test_upload_does_not_triage_unless_the_box_is_ticked(
         self, mock_config: MagicMock, client: Client
     ) -> None:
-        from franktheunicorn.config.models import OperatorConfig, SecurityTriageConfig
+        from franktheunicorn.config.models import (
+            LLMBackendConfig,
+            OperatorConfig,
+            SecurityTriageConfig,
+        )
         from franktheunicorn.core.models import WorkerCommand
 
         mock_config.return_value = OperatorConfig(
             github_username="testuser",
             security_triage=SecurityTriageConfig(enabled=True, auto_triage=True),
+            # Bulk queueing refuses without a backend, so a command that would
+            # fail the instant the worker picked it up isn't reported as queued.
+            llm_backends=[LLMBackendConfig(provider="stub")],
         )
 
         response = client.post(
@@ -358,12 +370,19 @@ class TestSecurityReportUpload:
 
     @patch("franktheunicorn.config.loader.get_operator_config")
     def test_ticking_the_box_queues_triage(self, mock_config: MagicMock, client: Client) -> None:
-        from franktheunicorn.config.models import OperatorConfig, SecurityTriageConfig
+        from franktheunicorn.config.models import (
+            LLMBackendConfig,
+            OperatorConfig,
+            SecurityTriageConfig,
+        )
         from franktheunicorn.core.models import WorkerCommand
 
         mock_config.return_value = OperatorConfig(
             github_username="testuser",
             security_triage=SecurityTriageConfig(enabled=True, auto_triage=True),
+            # Bulk queueing refuses without a backend, so a command that would
+            # fail the instant the worker picked it up isn't reported as queued.
+            llm_backends=[LLMBackendConfig(provider="stub")],
         )
 
         client.post(

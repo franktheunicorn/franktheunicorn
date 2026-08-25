@@ -736,3 +736,142 @@ class TestSecurityDocContext:
 
         assert "Authentication is off by default" in result
         assert "docs/security.md" in result
+
+
+class TestTriStateCoercion:
+    """A hedge must not become a verdict, and 'yes' must not become 'no'."""
+
+    def test_affirmative_words_are_true(self) -> None:
+        from franktheunicorn.security.triage import _coerce_tristate
+
+        for word in ("true", "TRUE", "yes", " Yes ", "plausible", "confirmed", "likely", "1"):
+            assert _coerce_tristate(word) is True, word
+
+    def test_negative_words_are_false(self) -> None:
+        from franktheunicorn.security.triage import _coerce_tristate
+
+        for word in ("false", "no", "not plausible", "implausible", "unlikely", "0"):
+            assert _coerce_tristate(word) is False, word
+
+    def test_a_hedge_is_none_not_false(self) -> None:
+        """'unknown' -> False published a green "POC: Not Plausible"."""
+        from franktheunicorn.security.triage import _coerce_tristate
+
+        for word in ("unknown", "unclear", "maybe", "n/a", "", "who knows"):
+            assert _coerce_tristate(word) is None, word
+
+    def test_yes_used_to_read_as_not_plausible(self) -> None:
+        """The regression that mattered most: an affirmative shown as a negative."""
+        from franktheunicorn.security.triage import _coerce_tristate
+
+        assert _coerce_tristate("yes") is True
+
+    def test_booleans_and_none_pass_through(self) -> None:
+        from franktheunicorn.security.triage import _coerce_tristate
+
+        assert _coerce_tristate(True) is True
+        assert _coerce_tristate(False) is False
+        assert _coerce_tristate(None) is None
+
+    def test_the_non_nullable_helper_stays_conservative(self) -> None:
+        """is_expected_behavior has no null; "didn't say" must not mean "expected"."""
+        from franktheunicorn.security.triage import _coerce_bool
+
+        assert _coerce_bool("unknown") is False
+        assert _coerce_bool("yes") is True
+
+
+@pytest.mark.django_db
+class TestPartialFailureIsolation:
+    """Optional context and unrecognised answers must not destroy a good verdict."""
+
+    def _config(self) -> OperatorConfig:
+        return OperatorConfig(
+            github_username="testuser", llm_backends=[LLMBackendConfig(provider="stub")]
+        )
+
+    @patch("franktheunicorn.security.triage._get_triage_backend")
+    def test_a_wrong_key_answer_does_not_blank_a_previous_verdict(
+        self, mock_get_backend: MagicMock, db: Any
+    ) -> None:
+        """`if analysis:` only asked whether the dict was non-empty.
+
+        So {"assessment": "..."} — a wrong key name, entirely ordinary — counted
+        as a verdict, the command landed "completed", and the five fields were
+        overwritten with blanks. On a re-triage that destroys the run before it.
+        """
+        import json
+
+        from franktheunicorn.security.triage import TriageIncompleteError
+        from tests.factories import SecurityReportFactory
+
+        report = SecurityReportFactory(
+            raw_text="A path traversal vulnerability with an exploit.",
+            triage_summary="Previously judged real by a good run.",
+            poc_plausible=True,
+            poc_assessment="Worked when I tried it.",
+            status="new",
+        )
+        parse_json = json.dumps({"title": "t", "component": "c", "severity": "high"})
+        mock_get_backend.return_value = _MockLLMBackend(
+            responses=[parse_json, json.dumps({"assessment": "looks real to me"})]
+        )
+
+        with (
+            patch("franktheunicorn.security.triage._check_cves"),
+            pytest.raises(TriageIncompleteError),
+        ):
+            triage_report(report, None, self._config())
+
+        report.refresh_from_db()
+        assert report.triage_summary == "Previously judged real by a good run."
+        assert report.poc_plausible is True
+
+    @patch("franktheunicorn.security.triage._get_triage_backend")
+    def test_a_failed_cve_lookup_does_not_abort_the_run(
+        self, mock_get_backend: MagicMock, db: Any
+    ) -> None:
+        """NVD answers 200 with an HTML maintenance page; .json() raises ValueError.
+
+        search_cves catches only httpx errors, so that escaped and took the run
+        down after the parse call was billed and before the verdict call.
+        """
+        import json
+
+        from tests.factories import SecurityReportFactory
+
+        report = SecurityReportFactory(raw_text="A vulnerability with an exploit.", status="new")
+        parse_json = json.dumps({"title": "t", "component": "c", "severity": "high"})
+        analyze_json = json.dumps(
+            {"poc_plausible": True, "poc_assessment": "yes", "triage_summary": "Real."}
+        )
+        mock_get_backend.return_value = _MockLLMBackend(responses=[parse_json, analyze_json])
+
+        with patch(
+            "franktheunicorn.security.triage._check_cves",
+            side_effect=ValueError("Expecting value: line 1 column 1"),
+        ):
+            triage_report(report, None, self._config())
+
+        report.refresh_from_db()
+        assert report.triage_summary == "Real."
+
+    @patch("franktheunicorn.security.triage._get_triage_backend", return_value=None)
+    def test_no_backend_unsticks_a_report_left_in_triaging(
+        self, _mock_backend: MagicMock, db: Any
+    ) -> None:
+        """The raise returns early, so the try/finally never ran.
+
+        A report stranded in "triaging" by an earlier killed run stayed there,
+        invisible in the new queue, with its command now failed.
+        """
+        from franktheunicorn.security.triage import TriageIncompleteError
+        from tests.factories import SecurityReportFactory
+
+        report = SecurityReportFactory(raw_text="A vulnerability.", status="triaging")
+
+        with pytest.raises(TriageIncompleteError):
+            triage_report(report, None, OperatorConfig(github_username="testuser"))
+
+        report.refresh_from_db()
+        assert report.status == "new"

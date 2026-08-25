@@ -217,7 +217,9 @@ digest_enabled: false
 # defaults, so you can override just one and leave the others auto. Set
 # `enabled: true`/`false` to force a reviewer on/off regardless of PATH.
 # The legacy top-level `claude_cli:` block is still accepted and is promoted
-# into this registry as the `claude` entry.
+# into this registry as the `claude` entry. It picks up the same
+# `model: "sonnet"` default, so if your `cli_path` is a wrapper that rejects
+# unknown flags, set `model: ""` there to go back to passing no --model at all.
 # agent_cli_reviewers:
 #   - name: "claude"
 #     enabled: "auto"                # "auto" (default) | true | false

@@ -1233,6 +1233,22 @@ class OperatorConfig(BaseModel):
             if seed.name not in by_name:
                 self.agent_cli_reviewers.append(seed)
                 by_name[seed.name] = seed
+                continue
+            # Field-level merge, not just entry-level. operator.yaml says "Entries
+            # merge by name with the built-in defaults, so you can override just
+            # one" — and this only ever appended *missing names*, so
+            # `- name: codex` plus one field replaced the seed outright and lost
+            # prompt_mode="subcommand": the reviewer was invoked as `codex -p
+            # <prompt>` instead of `codex exec <prompt>` and produced nothing.
+            #
+            # model_fields_set is what makes this safe: only fields the operator
+            # didn't write are filled, so an explicit `model: ""` still means
+            # "pass no flag".
+            supplied = by_name[seed.name]
+            for field_name in type(seed).model_fields:
+                if field_name == "name" or field_name in supplied.model_fields_set:
+                    continue
+                setattr(supplied, field_name, getattr(seed, field_name))
 
         # Promote iff the operator actually provided a ``claude_cli:`` block.
         # ``model_fields_set`` distinguishes "explicitly configured" (even

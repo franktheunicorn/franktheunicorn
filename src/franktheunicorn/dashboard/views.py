@@ -1122,6 +1122,16 @@ def security_report_upload(request: HttpRequest) -> HttpResponse:
         except (TypeError, ValueError):
             messages.error(request, "That project selection wasn't valid.")
             return redirect("dashboard:security_list")
+        if project is None:
+            # Parses but doesn't resolve — a stale <option> for a project disabled
+            # between render and submit, or a re-posted form. Importing the whole
+            # archive with project=None silently defeated the per-project dedup
+            # the page advertises as safe: the operator re-uploads with the project
+            # selected and every report imports a second time.
+            messages.error(
+                request, "That project no longer exists — nothing was imported. Pick another."
+            )
+            return redirect("dashboard:security_list")
 
     # Off unless the operator ticked the box. A backlog import fans out to an
     # NVD lookup and two LLM calls per report, which is not a thing to start by
@@ -1372,7 +1382,13 @@ def _has_triage_assessment(report: SecurityReport) -> bool:
     return bool(
         report.triage_summary
         or report.poc_assessment
-        or report.expected_behavior_explanation
+        # Only with the flag. The partial renders this text inside
+        # {% if report.is_expected_behavior %}, so a run that wrote *only* the
+        # explanation — which _analyze_report can do — counted as a result the
+        # partial then declined to show: an empty "Triage Analysis" heading with
+        # the "produced no assessment" notice suppressed. Exactly the blank panel
+        # this predicate exists to prevent.
+        or (report.is_expected_behavior and report.expected_behavior_explanation)
         or report.is_expected_behavior
         or report.poc_plausible is not None
     )
@@ -1502,16 +1518,21 @@ def security_report_sandbox(request: HttpRequest, report_id: int) -> HttpRespons
             "Sandbox execution is not enabled.</div>"
         )
 
-    # The web container does not have Docker access; enqueue a
-    # WorkerCommand for the worker container to pick up and execute.
-    WorkerCommand.objects.create(
-        command="run_security_sandbox",
-        security_report=report,
+    # The web container does not have Docker access; enqueue a WorkerCommand for
+    # the worker to pick up. Through security.queue, not objects.create: the
+    # in-flight constraint covers every command type, and the worker only sets
+    # sandbox_requested when the run *finishes*, so any reload re-offers the
+    # button and the second click was an uncaught IntegrityError — a 500 that htmx
+    # doesn't swap, so it looked like the click did nothing.
+    from franktheunicorn.security.queue import queue_command
+
+    created = queue_command("run_security_sandbox", report)
+    message = (
+        "Sandbox run queued. Reload this page in a few minutes to see the verdict."
+        if created
+        else "A sandbox run is already queued for this report."
     )
-    return HttpResponse(
-        '<div class="sandbox-result" style="color: #1565c0;">'
-        "Sandbox run queued. Reload this page in a few minutes to see the verdict.</div>"
-    )
+    return HttpResponse(f'<div class="sandbox-result" style="color: #1565c0;">{message}</div>')
 
 
 @require_POST

@@ -58,6 +58,37 @@ def queue_triage(report: SecurityReport) -> bool:
     return True
 
 
+def queue_command(command: str, report: SecurityReport) -> bool:
+    """Queue *command* for *report* unless one is already waiting or running.
+
+    The generic form of :func:`queue_triage`. The partial unique constraint
+    ``unique_inflight_command_per_report`` covers ``(command, security_report)``
+    for *every* command type, not just triage — so ``security_report_sandbox``
+    creating a WorkerCommand directly was an uncaught IntegrityError, and a 500 on
+    the second click. htmx doesn't swap on a 5xx, so the operator saw the button
+    do nothing and clicked again. This is the door CLAUDE.md's "never straight to
+    WorkerCommand" rule wants to be structural rather than conventional.
+    """
+    if (
+        WorkerCommand.objects.filter(
+            command=command, security_report=report, status__in=_IN_FLIGHT_STATUSES
+        )
+        .only("id")
+        .exists()
+    ):
+        logger.info("%s already queued for report #%d", command, report.pk)
+        return False
+    try:
+        with transaction.atomic():
+            WorkerCommand.objects.create(command=command, security_report=report)
+    except IntegrityError:
+        # Lost the race against the constraint. Someone else queued it, which is
+        # the outcome the caller wanted.
+        logger.info("%s was queued concurrently for report #%d", command, report.pk)
+        return False
+    return True
+
+
 def queue_triage_if_enabled(
     report: SecurityReport, operator_config: OperatorConfig | None = None
 ) -> bool:

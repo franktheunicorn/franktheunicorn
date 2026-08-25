@@ -592,7 +592,13 @@ def _slice_covered_line_count(raw_code: str, slices: object) -> int | None:
         covered: set[int] = set()
         for start_off, end_off in zip(starts, ends, strict=False):
             first = raw_code[: int(start_off)].count("\n") + 1
-            last = raw_code[: int(end_off)].count("\n") + 1
+            # end_off is *exclusive*, and copydetect's ends routinely land on or
+            # just past a newline, so counting to it billed the following line
+            # too: a region covering exactly line 1 measured 2, and two regions
+            # covering lines 1 and 3 measured 4. Step back one byte, floored at
+            # start so a zero-width region still counts its own line.
+            last_off = max(int(end_off) - 1, int(start_off))
+            last = raw_code[:last_off].count("\n") + 1
             covered.update(range(first, max(last, first) + 1))
     except (IndexError, KeyError, TypeError, ValueError):
         return None
@@ -708,11 +714,30 @@ def _create_drafts(
             "llm": "semantic",
         }.get(match.tier, match.tier)
 
-        # "from line A", not "lines A-B". source_start/end_line come from
-        # _slice_line_range, which is the hull across disjoint matched regions \u2014
-        # so the end is not a line anything matched at, and the range accuses the
-        # author of everything in between. The start is a real pointer; keep it.
-        location = f"`{match.source_file}` (from line {match.source_start_line})"
+        # Three cases, because the two tiers have genuinely different data and the
+        # previous unconditional "(from line A)" got two of them wrong.
+        #
+        # symilar's span is real: pylint's _find_common yields successive matched
+        # lines, so start..end is contiguous and naming it saves the reviewer
+        # guessing where the block ends.
+        #
+        # winnowing's comes from _slice_line_range, the hull across *disjoint*
+        # regions \u2014 the end is not a line anything matched at, so only the start
+        # is honest.
+        #
+        # And start == end == 1 is _check_winnowing's `or (1, 1)` sentinel for
+        # "couldn't decode the slices at all". Pointing at line 1 of a file
+        # nothing matched in is a fabricated citation in a comment posted to
+        # someone's PR, so that case names the file and stops.
+        if match.source_start_line == match.source_end_line == 1:
+            location = f"`{match.source_file}`"
+        elif match.tier == "symilar" and match.source_end_line > match.source_start_line:
+            location = (
+                f"`{match.source_file}` "
+                f"(lines {match.source_start_line}\u2013{match.source_end_line})"
+            )
+        else:
+            location = f"`{match.source_file}` (from line {match.source_start_line})"
 
         # A count of duplicated lines, and no span claim. num_lines means the
         # same thing in both tiers now \u2014 symilar's cmn_lines_nb is a count of

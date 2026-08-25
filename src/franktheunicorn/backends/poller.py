@@ -138,6 +138,15 @@ def poll_project(
         if not _needs_refresh(known_row, pr_data, project_config.poll_refresh_hours):
             skipped_numbers.append(pr_number)
             logger.debug("PR #%d unchanged since last poll; skipping", pr_number)
+            # Reset here too. The counter is meant to catch "everything is
+            # failing", and in the steady state almost every PR takes this branch
+            # — so counting only across failures meant five bad rows scattered
+            # anywhere in a 900-PR listing tripped the bail-out and abandoned
+            # every PR after the fifth, deterministically and for good, since the
+            # listing order is stable and the same rows fail next cycle. Those PRs
+            # reached neither results nor skipped_prs, so the worker dropped them
+            # from the whole cycle: no review, no shepherding, no dependency pass.
+            consecutive_failures = 0
             continue
 
         try:
@@ -435,7 +444,13 @@ def _rewind_refresh_marker(
     if known is None:
         return
     prior = {"github_updated_at": known.get("github_updated_at")}
-    prior.update({field: known.get(field) for field in _LISTING_FIELDS})
+    # Everything except state. The open listing just told us this PR is open, so
+    # restoring a stored "closed" writes a value we know to be false: the row then
+    # hides from _backfill_unreviewed_prs and the dashboard queues, and
+    # _close_missing_pull_requests only ever closes, so nothing corrects it until
+    # a refresh succeeds. The github_updated_at rewind alone already forces the
+    # re-poll, which is the point of this function.
+    prior.update({f: known.get(f) for f in _LISTING_FIELDS if f != "state"})
     try:
         PullRequest.objects.filter(project=project, number=pr_number).update(**prior)
     except Exception:

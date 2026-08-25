@@ -219,13 +219,23 @@ class TestImportReportsFromZip:
         assert result.duplicates == 1
         assert SecurityReport.objects.count() == 1
 
-    def test_message_id_dedup_is_scoped_to_the_target_project(self, no_auto_triage: Any) -> None:
-        """Both key shapes are per-project, so a re-import doesn't split an archive.
+    def test_both_key_shapes_agree_about_a_project_less_row(self, no_auto_triage: Any) -> None:
+        """A report already present unscoped blocks a scoped import — consistently.
 
-        Keying Message-IDs globally while keying text per-project meant
-        re-importing with --project refused the .eml entries as "already present"
-        and duplicated the .txt ones — half the archive honouring the operator's
-        intent and half not.
+        The bug this replaces was *inconsistency*: Message-IDs were keyed globally
+        while text was keyed per-project, so re-importing with --project refused
+        the .eml entries and duplicated the .txt ones. Half the archive one way,
+        half the other.
+
+        Both now fall back to the project-less key, which is the behaviour the
+        email door forces: worker.runner creates every email report with
+        project=None, so strict scoping meant `--project owner/repo` on an inbox
+        export duplicated every message the poller had already ingested — and with
+        --triage, paid for each twice.
+
+        The cost is that re-filing an archive under a project is not a move: the
+        rows stay where they were. Making it one is a separate job; silently
+        keeping two copies of the same report is the worse of the two.
         """
         project = ProjectFactory()
         archive_entries: dict[str, bytes | str] = {"r.eml": FORWARDED_EML, "r.txt": REPORT_TEXT}
@@ -234,10 +244,9 @@ class TestImportReportsFromZip:
         second = import_reports_from_zip(make_zip(dict(archive_entries)), project=project)
 
         assert first.imported == 2
-        # Both entries agree: neither is "already present" under the new project.
-        assert second.imported == 2
-        assert second.duplicates == 0
-        assert SecurityReport.objects.filter(project=project).count() == 2
+        assert second.imported == 0
+        assert second.duplicates == 2, "both entry types must agree"
+        assert SecurityReport.objects.count() == 2
 
     def test_same_text_under_different_projects_is_not_a_duplicate(
         self, no_auto_triage: Any
@@ -827,11 +836,16 @@ class TestImportAutoTriage:
 
     @patch("franktheunicorn.config.loader.get_operator_config")
     def test_queues_triage_when_the_caller_opts_in(self, mock_config: MagicMock) -> None:
-        from franktheunicorn.config.models import OperatorConfig, SecurityTriageConfig
+        from franktheunicorn.config.models import (
+            LLMBackendConfig,
+            OperatorConfig,
+            SecurityTriageConfig,
+        )
 
         mock_config.return_value = OperatorConfig(
             github_username="testuser",
             security_triage=SecurityTriageConfig(enabled=True, auto_triage=True),
+            llm_backends=[LLMBackendConfig(provider="stub")],
         )
 
         result = import_reports_from_zip(make_zip({"a.txt": REPORT_TEXT}), auto_triage=True)
@@ -847,11 +861,16 @@ class TestImportAutoTriage:
         Applying it to an explicit --triage / ticked box made both a silent
         no-op on exactly the installs most likely to be asking by hand.
         """
-        from franktheunicorn.config.models import OperatorConfig, SecurityTriageConfig
+        from franktheunicorn.config.models import (
+            LLMBackendConfig,
+            OperatorConfig,
+            SecurityTriageConfig,
+        )
 
         mock_config.return_value = OperatorConfig(
             github_username="testuser",
             security_triage=SecurityTriageConfig(enabled=True, auto_triage=False),
+            llm_backends=[LLMBackendConfig(provider="stub")],
         )
 
         result = import_reports_from_zip(make_zip({"a.txt": REPORT_TEXT}), auto_triage=True)
