@@ -620,6 +620,14 @@ class SecurityReport(models.Model):
     # Operator verdict
     operator_notes = models.TextField(blank=True, default="")
 
+    # Which archive a source="zip" report came from. Two scans of the same repo
+    # contain the same entry paths with different contents, so the path alone
+    # doesn't identify a report: importing three real scanner archives produced
+    # 23 pairs of identically-titled rows with no way to tell which scan each came
+    # from. Provenance, not decoration — a finding is only actionable if you know
+    # what was scanned.
+    source_archive = models.CharField(max_length=255, blank=True, default="")
+
     # Email metadata (populated when source=email)
     email_message_id = models.CharField(max_length=500, blank=True, default="")
     email_received_at = models.DateTimeField(null=True, blank=True)

@@ -160,3 +160,48 @@ class TestBuildTriagePrompt:
             project_context="",
         )
         assert "OPERATOR-LEARNED TRIAGE GUIDANCE" not in system
+
+
+class TestParsePromptTruncation:
+    """A bulk import doesn't self-limit the way a pasted report does."""
+
+    def test_a_short_report_is_untouched(self) -> None:
+        from franktheunicorn.security.prompt import build_parse_prompt
+
+        _system, user = build_parse_prompt("short vulnerability report")
+
+        assert "short vulnerability report" in user
+        assert "truncated" not in user
+
+    def test_a_rollup_sized_report_is_cut_and_says_so(self) -> None:
+        """A real scanner archive produced a 380,591-character "report"."""
+        from franktheunicorn.security.prompt import MAX_PARSE_CHARS, build_parse_prompt
+
+        huge = "\n".join(f"line {i} of a rollup document" for i in range(40_000))
+        assert len(huge) > MAX_PARSE_CHARS
+
+        _system, user = build_parse_prompt(huge)
+
+        assert len(user) < MAX_PARSE_CHARS + 500
+        assert "[report truncated for length]" in user
+        # The head is what carries title/component/POC/impact.
+        assert "line 0 of a rollup document" in user
+
+    def test_it_cuts_on_a_line_boundary(self) -> None:
+        from franktheunicorn.security.prompt import truncate_for_prompt
+
+        text = "\n".join(f"line{i}" for i in range(100))
+
+        out = truncate_for_prompt(text, limit=50)
+
+        body = out.split("\n\n[report")[0]
+        assert not body.endswith("lin")
+        assert body.split("\n")[-1].startswith("line")
+
+    def test_a_single_enormous_line_still_gets_cut(self) -> None:
+        from franktheunicorn.security.prompt import truncate_for_prompt
+
+        out = truncate_for_prompt("x" * 1000, limit=100)
+
+        assert out.startswith("x" * 100)
+        assert "truncated" in out

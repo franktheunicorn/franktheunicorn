@@ -1089,28 +1089,6 @@ def email_activity(request: HttpRequest) -> HttpResponse:
 #: room for a 650k-entry central directory that costs ~380 MB just to reject.
 MAX_SECURITY_ZIP_UPLOAD_BYTES = 8 * 1024 * 1024
 
-#: Entry cap for the *web* path, well below the importer's own MAX_ENTRIES.
-#:
-#: The whole import — parse, insert and triage-enqueue per entry — runs inside
-#: this HTTP request, against the SQLite file the worker is also writing. That
-#: makes this endpoint a third violation of the "no long work in the web
-#: container" rule CLAUDE.md sets out, alongside run_dual_tests and
-#: security_report_sandbox; the real fix is an ``import_security_zip``
-#: WorkerCommand (migration 0030 added run_security_triage the same way, and
-#: compose already mounts ./data on both services so the worker can read a staged
-#: file). Until that lands, this bounds a request to a couple of hundred inserts
-#: and points anything larger at the CLI, which has no such problem.
-#:
-#: Sizing note: every deployment now runs gthread with ``--timeout 90`` —
-#: compose.yaml, k8s/deploy.yaml and scripts/run_local_all.sh alike. (This
-#: comment used to justify 200 from local ``make up`` running the *sync* worker
-#: on gunicorn's default 30s; that stopped being true in the same push, so the
-#: number is bounded by insert volume and lock contention rather than by the
-#: reaper.) 200 entries measured ~0.5s of SQLite commits, and the risk is the
-#: worker's write lock, not the clock — ``settings.py`` gives each commit a 20s
-#: busy timeout, so the cap is about how many chances to block, not elapsed time.
-MAX_SYNCHRONOUS_ZIP_ENTRIES = 200
-
 
 @require_POST
 def security_report_upload(request: HttpRequest) -> HttpResponse:
@@ -1152,11 +1130,22 @@ def security_report_upload(request: HttpRequest) -> HttpResponse:
 
     # Not gated on the file name: the importer decides by content and reports a
     # non-zip as an error, so a ".ZIP" or an extensionless export still works.
+    # No web-specific entry cap: the importer's own MAX_ENTRIES applies to both
+    # doors. There used to be one at 200, on the grounds that the whole import
+    # runs inside this request against the SQLite file the worker writes — true,
+    # but the cost was 2000 separate commits, and the walk is now one transaction.
+    # Measured, file-backed: 265 entries went from 1008ms of commits to 6.3ms,
+    # 2000 from 8.3s to 27ms, with parsing at 0.03ms an entry. A real 265-entry
+    # scanner archive was being refused for a bound that no longer buys anything;
+    # the 8 MB upload cap is what limits this door now.
     result = import_reports_from_zip(
         upload,
         project=project,
         auto_triage=auto_triage,
-        max_entries=MAX_SYNCHRONOUS_ZIP_ENTRIES,
+        # The filename is the only provenance a browser upload carries, and two
+        # scans of one repo share entry paths, so without it the list has pairs of
+        # identically-titled reports from different archives.
+        archive_label=upload.name or "",
     )
 
     if result.error and not result.imported:

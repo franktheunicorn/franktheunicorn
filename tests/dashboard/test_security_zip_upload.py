@@ -252,19 +252,42 @@ class TestSecurityReportUpload:
         importer.assert_not_called()
         assert SecurityReport.objects.count() == 0
 
-    def test_web_path_refuses_an_archive_too_big_for_one_request(
+    def test_the_web_door_has_no_entry_cap_of_its_own(
         self, client: Client, triage_off: Any
     ) -> None:
-        """The import runs inside the request, so the web door caps entries well below MAX_ENTRIES."""
-        from franktheunicorn.dashboard import views
+        """It used to cap at 200, which refused a real 265-entry scanner archive.
 
-        entries = {f"r{i}.txt": f"{REPORT_TEXT} variant {i}" for i in range(5)}
-        with patch.object(views, "MAX_SYNCHRONOUS_ZIP_ENTRIES", 3):
-            response = client.post("/security/upload/", {"zip_file": upload(entries)}, follow=True)
+        The justification was per-entry commit cost, and the walk is one
+        transaction now. MAX_ENTRIES still applies to both doors.
+        """
+        entries = {f"r{i}.txt": f"{REPORT_TEXT} variant {i}" for i in range(265)}
 
-        assert b"over the 3 limit" in response.content
+        response = client.post("/security/upload/", {"zip_file": upload(entries)}, follow=True)
+
+        assert b"265 imported" in response.content
+        assert SecurityReport.objects.count() == 265
+
+    def test_an_archive_over_the_cap_still_points_at_the_shell(
+        self, client: Client, triage_off: Any
+    ) -> None:
+        """The cap itself is the importer's (tested there); this is the hint.
+
+        Driven off result.over_entry_cap rather than the wording of result.error.
+        """
+        from franktheunicorn.security.zip_import import ZipImportResult
+
+        stub = ZipImportResult(
+            error="archive has 5000 entries, over the 2000 limit", over_entry_cap=True
+        )
+        with patch(
+            "franktheunicorn.security.zip_import.import_reports_from_zip", return_value=stub
+        ):
+            response = client.post(
+                "/security/upload/", {"zip_file": upload({"a.txt": REPORT_TEXT})}, follow=True
+            )
+
+        assert b"over the 2000 limit" in response.content
         assert b"better done from a shell" in response.content
-        assert SecurityReport.objects.count() == 0
 
     def test_a_bad_operator_config_is_not_blamed_on_the_triage_setting(
         self, client: Client

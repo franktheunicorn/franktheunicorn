@@ -33,7 +33,10 @@ import hashlib
 import logging
 import zipfile
 from dataclasses import dataclass, field
+from pathlib import PurePath
 from typing import IO, TYPE_CHECKING
+
+from django.db import transaction
 
 from franktheunicorn.core.models import SecurityReport
 
@@ -61,6 +64,14 @@ MAX_TOTAL_BYTES = 128 * 1024 * 1024
 # Handling those means splitting/decoding them properly, which this doesn't do,
 # so it doesn't claim to. Everything textual goes to the paste parser instead.
 _EML_SUFFIXES = frozenset({".eml"})
+
+#: How many distinct security keywords an entry needs to count as a report.
+#:
+#: One, where the email door wants two. See the gate in ``_import_entry``: an
+#: inbox is mostly not security reports and a false positive is cheap to ignore,
+#: while an archive is hand-picked and a false *negative* silently loses a
+#: finding.
+_MIN_ZIP_KEYWORDS = 1
 
 # Extensions never worth reading as a report. Anything not listed here is tried
 # as text and vetoed by content sniffing if it turns out to be binary, so this
@@ -110,6 +121,13 @@ _BINARY_SUFFIXES = frozenset(
         ".wasm",
         ".mbox",
         ".msg",  # multi-message / OLE — see _EML_SUFFIXES above
+        # A patch is a proposed *fix*, not a report, and scanner archives are
+        # full of them — 124 of the 265 entries in the one that prompted this.
+        # They're also prone to importing by accident: a diff carries its
+        # surrounding context, so a hunk near the word "vulnerability" cleared the
+        # keyword gate and became a "report" whose body is a patch.
+        ".diff",
+        ".patch",
     }
 )
 
@@ -190,6 +208,7 @@ def import_reports_from_zip(
     auto_triage: bool = False,
     require_security_content: bool = True,
     max_entries: int = MAX_ENTRIES,
+    archive_label: str = "",
 ) -> ZipImportResult:
     """Create a :class:`SecurityReport` for each report file in *source*.
 
@@ -221,14 +240,21 @@ def import_reports_from_zip(
     textual regardless.
 
     ``max_entries`` lets a caller ask for a tighter bound than ``MAX_ENTRIES``.
-    The dashboard does, because the whole import runs inside the HTTP request:
-    see ``MAX_SYNCHRONOUS_ZIP_ENTRIES`` in the view.
+    Neither door does any more — the dashboard used to, on the grounds that the
+    whole import runs inside one HTTP request, which the single-transaction walk
+    made cheap enough not to matter.
 
     Never raises for a bad archive: a corrupt or non-zip file comes back as
     ``result.error`` so the caller can show it. Per-entry problems are recorded
     against the entry and the rest of the archive still imports.
     """
     result = ZipImportResult()
+    # Recorded on every row for provenance. Derived from a path when the caller
+    # didn't name it; the dashboard passes the upload's filename, which is the
+    # only name a browser upload has.
+    if not archive_label and isinstance(source, str | PurePath):
+        archive_label = PurePath(source).name
+    archive_label = archive_label[:255]
     # Loaded once here rather than per entry: get_operator_config re-reads and
     # re-validates the YAML on every call, and a config edited mid-import would
     # otherwise apply to some entries and not others.
@@ -261,6 +287,7 @@ def import_reports_from_zip(
                 operator_config,
                 require_security_content,
                 max_entries,
+                archive_label,
             )
     except zipfile.BadZipFile:
         result.error = "not a valid zip archive"
@@ -278,6 +305,7 @@ def _import_entries(
     operator_config: OperatorConfig | None,
     require_security_content: bool,
     max_entries: int,
+    archive_label: str,
 ) -> None:
     """Walk the archive in name order, recording an outcome for every entry."""
     candidates = [info for info in archive.infolist() if not _is_ignorable(info)]
@@ -293,6 +321,42 @@ def _import_entries(
     # archive for free as newly created rows land in the same index.
     seen = _build_dedup_index()
 
+    # One transaction for the whole walk. Measured on this box, file-backed
+    # SQLite: 265 entries cost 1008ms as individual commits and 6.3ms inside one
+    # (160x); 2000 entries, 8.3s against 27ms. Parsing is 0.03ms an entry, so the
+    # write lock the worker contends for is held ~0.1s rather than acquired and
+    # released 2000 times. This is what made the web door's separate entry cap
+    # unnecessary.
+    #
+    # The savepoint inside _import_entry is not an optimisation: a caught
+    # database error inside an atomic block leaves the transaction unusable, and
+    # that except clause is load-bearing (keep-what-imported on a locked DB).
+    with transaction.atomic():
+        _walk_entries(
+            archive,
+            candidates,
+            project,
+            auto_triage,
+            result,
+            seen,
+            operator_config,
+            require_security_content,
+            archive_label,
+        )
+
+
+def _walk_entries(
+    archive: zipfile.ZipFile,
+    candidates: list[zipfile.ZipInfo],
+    project: Project | None,
+    auto_triage: bool,
+    result: ZipImportResult,
+    seen: dict[str, int],
+    operator_config: OperatorConfig | None,
+    require_security_content: bool,
+    archive_label: str,
+) -> None:
+    """Record an outcome for every entry, in name order."""
     read_bytes = 0
     for info in sorted(candidates, key=lambda i: i.filename):
         # Name-based rejections FIRST, before a single byte is decompressed.
@@ -391,6 +455,7 @@ def _import_entries(
                 seen,
                 operator_config,
                 require_security_content,
+                archive_label,
             ),
         )
 
@@ -530,6 +595,7 @@ def _import_entry(
     seen: dict[str, int],
     operator_config: OperatorConfig | None,
     require_security_content: bool,
+    archive_label: str,
 ) -> EntryOutcome:
     name = info.filename
     kind = _classify(name, raw)
@@ -551,10 +617,17 @@ def _import_entry(
     if not body:
         return EntryOutcome(name=name, outcome="empty", detail="no report text")
 
-    if require_security_content and not parsed.is_security_report:
-        # Same gate the email door applies before creating a report. Without it a
-        # PEM private key — text, so the binary sniffer passes it — lands in the
-        # reports table as a security report.
+    if require_security_content and len(parsed.matched_keywords) < _MIN_ZIP_KEYWORDS:
+        # Deliberately NOT parsed.is_security_report, which is the email door's
+        # verdict and wants two distinct keywords. That threshold is right for an
+        # inbox, where most mail isn't a security report and a false positive
+        # costs an LLM call on someone's lunch order. An archive the operator
+        # hand-picked and pointed at this importer inverts the base rate, and the
+        # cost of being strict there is losing a real finding: measured against a
+        # real scanner archive, PATCHES/bug_03/notes.md says "vulnerability" once
+        # and was dropped, while two patch.diffs got in on incidental keywords in
+        # their context lines. One keyword still catches what this gate exists
+        # for — a Makefile or a PEM private key, which match nothing.
         return EntryOutcome(name=name, outcome="not-a-report", detail="no security keywords found")
 
     project_id = project.pk if project is not None else None
@@ -583,23 +656,28 @@ def _import_entry(
     # same fields: a 600-char display name in a .eml is silently over-long on
     # SQLite and a hard DataError on the Postgres path DATABASE_URL enables.
     try:
-        report = SecurityReport.objects.create(
-            raw_text=body,
-            title=(str(parsed.subject) or _title_from_name(name))[:500],
-            project=project,
-            # str() before slicing, on all of them. Python's compat32 email
-            # policy wraps any header carrying a raw non-ASCII byte in an
-            # email.header.Header, which is truthy, stringifies fine, and is not
-            # subscriptable — so slicing it raised TypeError and turned a
-            # legitimate .eml report into a silent per-entry error.
-            reporter_name=str(parsed.from_name)[:255],
-            reporter_email=str(parsed.from_email)[:255],
-            source="zip",
-            # Same bound _mid_key uses, or the stored value and the dedup key
-            # disagree and the message-id door stops working.
-            email_message_id=str(parsed.message_id)[:_MESSAGE_ID_MAX_LEN],
-            email_received_at=parsed.received_at,
-        )
+        # A savepoint, not decoration: the caller holds one transaction for the
+        # whole archive, and catching a database error inside it without one
+        # leaves the transaction unusable for every later entry.
+        with transaction.atomic():
+            report = SecurityReport.objects.create(
+                raw_text=body,
+                title=(str(parsed.subject) or _title_from_name(name))[:500],
+                project=project,
+                # str() before slicing, on all of them. Python's compat32 email
+                # policy wraps any header carrying a raw non-ASCII byte in an
+                # email.header.Header, which is truthy, stringifies fine, and is
+                # not subscriptable — so slicing it raised TypeError and turned a
+                # legitimate .eml report into a silent per-entry error.
+                reporter_name=str(parsed.from_name)[:255],
+                reporter_email=str(parsed.from_email)[:255],
+                source="zip",
+                source_archive=archive_label,
+                # Same bound _mid_key uses, or the stored value and the dedup key
+                # disagree and the message-id door stops working.
+                email_message_id=str(parsed.message_id)[:_MESSAGE_ID_MAX_LEN],
+                email_received_at=parsed.received_at,
+            )
     except Exception as exc:
         # The only unguarded call in the loop was this one, so a DataError or a
         # "database is locked" (web and worker share one SQLite file) escaped to
@@ -773,4 +851,12 @@ def _suffix(name: str) -> str:
 
 
 def _title_from_name(name: str) -> str:
-    return name.rsplit("/", 1)[-1] or name
+    """The entry's path, not its basename.
+
+    Scanner archives put the distinguishing part in the directory:
+    ``PATCHES/bug_57/meta.json``. Titling from the basename gave a real archive
+    four reports called "notes.md" and 124 called "meta.json", which is a list
+    the operator can't navigate. Trailing separator stripped so a stray one
+    doesn't produce an empty title.
+    """
+    return name.replace("\\", "/").strip("/") or name

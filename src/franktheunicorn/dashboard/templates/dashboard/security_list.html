@@ -79,6 +79,9 @@
         </div>
         <div class="pr-meta">
             {{ report.get_source_display }}
+            {# Which archive, for a zip import. Two scans of one repo carry the same #}
+            {# entry paths, so the title alone doesn't say which scan found this. #}
+            {% if report.source_archive %} &middot; {{ report.source_archive }}{% endif %}
             {% if report.project %} &middot; {{ report.project.full_name }}{% endif %}
             {% if report.reporter_name %} &middot; from {{ report.reporter_name }}{% endif %}
             &middot; {{ report.created_at|timesince }} ago

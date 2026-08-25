@@ -36,10 +36,16 @@ FORWARDED_EML = (
 
 
 def _stub_message(body: str) -> Any:
-    """A minimal InboxMessage, for asserting on the parse-failure path."""
+    """A minimal InboxMessage, for asserting on the parse-failure path.
+
+    matched_keywords, not just is_security_report: the zip door applies its own
+    (lower) keyword threshold rather than trusting the email door's verdict.
+    """
     from franktheunicorn.data_access.email_inbox.types import InboxMessage
 
-    return InboxMessage(body=body, is_security_report=True)
+    return InboxMessage(
+        body=body, is_security_report=True, matched_keywords=("vulnerability", "exploit")
+    )
 
 
 def zip_bytes_with_forged_sizes(entries: dict[str, bytes]) -> bytes:
@@ -104,13 +110,35 @@ class TestImportReportsFromZip:
         assert SecurityReport.objects.count() == 2
         assert set(SecurityReport.objects.values_list("source", flat=True)) == {"zip"}
 
-    def test_falls_back_to_the_file_name_for_a_title(self, no_auto_triage: Any) -> None:
-        """Beats "Untitled Report" when the text carries no recoverable subject."""
+    def test_falls_back_to_the_entry_path_for_a_title(self, no_auto_triage: Any) -> None:
+        """The path, not the basename — the directory is often the only distinguishing part.
+
+        A real scanner archive is PATCHES/bug_N/meta.json, so basenames gave 124
+        reports called "meta.json".
+        """
         result = import_reports_from_zip(make_zip({"reports/2024-03-traversal.txt": REPORT_TEXT}))
 
         assert result.imported == 1
         report = SecurityReport.objects.get()
-        assert report.title == "2024-03-traversal.txt"
+        assert report.title == "reports/2024-03-traversal.txt"
+
+    def test_sibling_files_in_different_dirs_get_distinguishable_titles(
+        self, no_auto_triage: Any
+    ) -> None:
+        archive = make_zip(
+            {
+                "PATCHES/bug_01/notes.md": REPORT_TEXT,
+                "PATCHES/bug_02/notes.md": REPORT_TEXT + " A second distinct exploit path.",
+            }
+        )
+
+        result = import_reports_from_zip(archive)
+
+        assert result.imported == 2
+        assert set(SecurityReport.objects.values_list("title", flat=True)) == {
+            "PATCHES/bug_01/notes.md",
+            "PATCHES/bug_02/notes.md",
+        }
 
     def test_eml_entry_keeps_the_message_id_and_sender(self, no_auto_triage: Any) -> None:
         result = import_reports_from_zip(make_zip({"inbox/report.eml": FORWARDED_EML}))
@@ -169,8 +197,16 @@ class TestImportReportsFromZip:
             import_reports_from_zip(large)
         ten_entries = len(ctx.captured_queries)
 
-        # Ten entries cost ten inserts more, not ten inserts *and* ten lookups.
-        assert ten_entries - one_entry <= 10
+        # Ten entries cost per-entry writes, not per-entry *lookups*. The bound is
+        # per-entry-constant rather than exactly ten because the walk runs in one
+        # transaction and each insert takes a savepoint (SAVEPOINT + INSERT +
+        # RELEASE); what must not appear is a SELECT against SecurityReport per
+        # entry, which is what the up-front dedup index exists to avoid.
+        assert ten_entries - one_entry <= 10 * 4
+        selects = [
+            q for q in ctx.captured_queries if "SELECT" in q["sql"] and "securityreport" in q["sql"]
+        ]
+        assert len(selects) <= 2, f"per-entry table lookups crept back in: {len(selects)}"
 
     def test_dedups_an_eml_on_message_id(self, no_auto_triage: Any) -> None:
         """A Message-ID beats the text comparison — different body, same message."""
@@ -574,6 +610,68 @@ class TestImportReportsFromZip:
 
         assert result.over_entry_cap is True
         assert result.imported == 0
+
+    def test_one_keyword_is_enough_for_a_hand_picked_archive(self, no_auto_triage: Any) -> None:
+        """The email door wants two; an archive inverts the base rate.
+
+        Measured against a real scanner archive: a genuine finding saying
+        "vulnerability" once was being dropped.
+        """
+        single = "The extractor has a path traversal vulnerability when handling members.\n"
+
+        result = import_reports_from_zip(make_zip({"bug_03/notes.md": single}))
+
+        assert result.imported == 1, [e.detail for e in result.entries]
+
+    def test_no_keywords_at_all_is_still_refused(self, no_auto_triage: Any) -> None:
+        """One keyword, not zero — the gate still has to stop a Makefile or a key."""
+        archive = make_zip(
+            {
+                "Makefile": "all:\n\tgcc -o thing thing.c\n",
+                "id_rsa": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaA\n",
+            }
+        )
+
+        result = import_reports_from_zip(archive)
+
+        assert result.imported == 0
+        assert {e.outcome for e in result.entries} == {"not-a-report"}
+
+    def test_patches_are_not_reports(self, no_auto_triage: Any) -> None:
+        """124 of 265 entries in the real archive were patch.diff.
+
+        A diff carries its context lines, so one near the word "vulnerability"
+        cleared the keyword gate and imported as a report whose body is a patch.
+        """
+        archive = make_zip(
+            {
+                "PATCHES/bug_01/notes.md": REPORT_TEXT,
+                "PATCHES/bug_01/patch.diff": "--- a/x.c\n+++ b/x.c\n@@ -1 +1 @@\n-// vulnerability\n+// fixed exploit\n",
+            }
+        )
+
+        result = import_reports_from_zip(archive)
+
+        outcomes = {e.name: e.outcome for e in result.entries}
+        assert outcomes["PATCHES/bug_01/notes.md"] == "imported"
+        assert outcomes["PATCHES/bug_01/patch.diff"] == "unsupported"
+
+    def test_the_archive_name_is_recorded(self, no_auto_triage: Any, tmp_path: Any) -> None:
+        """Provenance: two scans of one repo share entry paths."""
+        archive = tmp_path / "scan-spark-20260811.zip"
+        archive.write_bytes(make_zip({"VULN-FINDINGS.md": REPORT_TEXT}).getvalue())
+
+        import_reports_from_zip(archive)
+
+        assert SecurityReport.objects.get().source_archive == "scan-spark-20260811.zip"
+
+    def test_an_explicit_archive_label_wins(self, no_auto_triage: Any) -> None:
+        """A file object has no path, so the dashboard names it."""
+        import_reports_from_zip(
+            make_zip({"a.txt": REPORT_TEXT}), archive_label="uploaded-by-hand.zip"
+        )
+
+        assert SecurityReport.objects.get().source_archive == "uploaded-by-hand.zip"
 
     def test_a_binary_starting_with_a_bom_is_still_refused(self, no_auto_triage: Any) -> None:
         """Accepting on the BOM alone was two bytes and no scan."""

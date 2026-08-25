@@ -2,11 +2,38 @@
 
 from __future__ import annotations
 
+#: Cap on the report text handed to the parse call, in characters.
+#:
+#: There was no cap, which was survivable while every report arrived by paste or
+#: email and self-limited. A bulk import doesn't: a real scanner archive produced
+#: a 380,591-character report, roughly 95k tokens for a call whose entire job is
+#: to pull seven short fields out of the top of it. Times 257 reports in one
+#: import. Anything this long is a rollup document rather than a single report,
+#: and the fields being extracted — title, component, POC, impact — are near the
+#: start in every format we've seen. ~30k characters is about 8k tokens, which
+#: fits every backend's window with room for the response.
+MAX_PARSE_CHARS = 30_000
+
+#: Marker appended when the text is cut, so the model is told rather than left to
+#: infer that a report stops mid-sentence.
+_TRUNCATION_MARKER = "\n\n[report truncated for length]"
+
+
+def truncate_for_prompt(raw_text: str, limit: int = MAX_PARSE_CHARS) -> str:
+    """Cut *raw_text* to *limit* characters at a line boundary where possible."""
+    if len(raw_text) <= limit:
+        return raw_text
+    cut = raw_text.rfind("\n", 0, limit)
+    if cut <= 0:
+        cut = limit
+    return raw_text[:cut] + _TRUNCATION_MARKER
+
 
 def build_parse_prompt(raw_text: str) -> tuple[str, str]:
     """Build system + user prompts to parse a raw security report.
 
-    Returns (system_prompt, user_message).
+    Returns (system_prompt, user_message). The report text is capped — see
+    ``MAX_PARSE_CHARS``.
     """
     system_prompt = (
         "You are a security report parser. Extract structured fields from the "
@@ -22,7 +49,7 @@ def build_parse_prompt(raw_text: str) -> tuple[str, str]:
         "Return ONLY the JSON object, no markdown fences or extra text."
     )
 
-    user_message = f"Parse this security report:\n\n{raw_text}"
+    user_message = f"Parse this security report:\n\n{truncate_for_prompt(raw_text)}"
     return system_prompt, user_message
 
 

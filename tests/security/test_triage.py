@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+from django.test import override_settings
 
 from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig, SecurityTriageConfig
 from franktheunicorn.review.backends.base import BaseLLMBackend
@@ -400,11 +401,7 @@ class TestTriageReport:
         )
         pc = ProjectConfig(owner="testorg", repo="testrepo")
 
-        with patch(
-            "django.conf.settings.FRANK_REPOS_DIR",
-            str(tmp_path),
-            create=True,
-        ):
+        with override_settings(FRANK_REPOS_DIR=str(tmp_path)):
             result = _load_project_context(report, pc)
 
         assert "# Test Project" in result
@@ -426,11 +423,7 @@ class TestTriageReport:
         report = SecurityReportFactory(raw_text="test")
         pc = ProjectConfig(owner="testorg", repo="testrepo")
 
-        with patch(
-            "django.conf.settings.FRANK_REPOS_DIR",
-            str(tmp_path),
-            create=True,
-        ):
+        with override_settings(FRANK_REPOS_DIR=str(tmp_path)):
             result = _load_project_context(report, pc)
 
         # Should not crash, returns whatever it could read.
@@ -580,7 +573,7 @@ class TestSecurityModelThreading:
             security_triage=SecurityTriageConfig(enabled=True),
         )
 
-        with patch("django.conf.settings.FRANK_REPOS_DIR", str(tmp_path), create=True):
+        with override_settings(FRANK_REPOS_DIR=str(tmp_path)):
             triage_report(report, project_config, config)
 
         _system, analyze_user = backend.calls[-1]
@@ -659,7 +652,7 @@ class TestResolveSecurityModel:
         repo = tmp_path / "acme" / "widget"
         (repo / ".frank").mkdir(parents=True)
         (repo / ".frank" / "security-model.md").write_text("Data files are untrusted input.")
-        with patch("django.conf.settings.FRANK_REPOS_DIR", str(tmp_path), create=True):
+        with override_settings(FRANK_REPOS_DIR=str(tmp_path)):
             assert _resolve_security_model(self._pc()) == "Data files are untrusted input."
 
     def test_autodiscovers_generic_threat_model_name(self, tmp_path: Path) -> None:
@@ -668,7 +661,7 @@ class TestResolveSecurityModel:
         repo = tmp_path / "acme" / "widget"
         repo.mkdir(parents=True)
         (repo / "THREAT_MODEL.md").write_text("Only authenticated clients are trusted.")
-        with patch("django.conf.settings.FRANK_REPOS_DIR", str(tmp_path), create=True):
+        with override_settings(FRANK_REPOS_DIR=str(tmp_path)):
             assert _resolve_security_model(self._pc()) == "Only authenticated clients are trusted."
 
     def test_explicit_file_path_loads(self, tmp_path: Path) -> None:
@@ -678,7 +671,7 @@ class TestResolveSecurityModel:
         (repo / "docs").mkdir(parents=True)
         (repo / "docs" / "trust.md").write_text("Models are trusted artifacts.")
         pc = self._pc(security_model_file="docs/trust.md")
-        with patch("django.conf.settings.FRANK_REPOS_DIR", str(tmp_path), create=True):
+        with override_settings(FRANK_REPOS_DIR=str(tmp_path)):
             assert _resolve_security_model(pc) == "Models are trusted artifacts."
 
     def test_inline_wins_over_repo_file(self, tmp_path: Path) -> None:
@@ -688,7 +681,7 @@ class TestResolveSecurityModel:
         (repo / ".frank").mkdir(parents=True)
         (repo / ".frank" / "security-model.md").write_text("FROM FILE")
         pc = self._pc(security_model="FROM INLINE")
-        with patch("django.conf.settings.FRANK_REPOS_DIR", str(tmp_path), create=True):
+        with override_settings(FRANK_REPOS_DIR=str(tmp_path)):
             assert _resolve_security_model(pc) == "FROM INLINE"
 
     def test_explicit_path_cannot_escape_repo(self, tmp_path: Path) -> None:
@@ -699,14 +692,14 @@ class TestResolveSecurityModel:
         repo.mkdir(parents=True)
         (tmp_path / "secret.md").write_text("SECRET")
         pc = self._pc(security_model_file="../../secret.md")
-        with patch("django.conf.settings.FRANK_REPOS_DIR", str(tmp_path), create=True):
+        with override_settings(FRANK_REPOS_DIR=str(tmp_path)):
             assert _resolve_security_model(pc) == ""
 
     def test_no_file_present_returns_empty(self, tmp_path: Path) -> None:
         from franktheunicorn.security.triage import _resolve_security_model
 
         (tmp_path / "acme" / "widget").mkdir(parents=True)
-        with patch("django.conf.settings.FRANK_REPOS_DIR", str(tmp_path), create=True):
+        with override_settings(FRANK_REPOS_DIR=str(tmp_path)):
             assert _resolve_security_model(self._pc()) == ""
 
     def test_works_for_an_arbitrary_non_spark_repo(self, tmp_path: Path) -> None:
@@ -717,7 +710,7 @@ class TestResolveSecurityModel:
         repo.mkdir(parents=True)
         (repo / "SECURITY_MODEL.md").write_text("Trust boundaries for an arbitrary project.")
         pc = self._pc(owner="someorg", repo="someproject")
-        with patch("django.conf.settings.FRANK_REPOS_DIR", str(tmp_path), create=True):
+        with override_settings(FRANK_REPOS_DIR=str(tmp_path)):
             assert "arbitrary project" in _resolve_security_model(pc)
 
 
@@ -738,7 +731,7 @@ class TestSecurityDocContext:
         report = SecurityReportFactory(raw_text="test")
         pc = ProjectConfig(owner="testorg", repo="testrepo")
 
-        with patch("django.conf.settings.FRANK_REPOS_DIR", str(tmp_path), create=True):
+        with override_settings(FRANK_REPOS_DIR=str(tmp_path)):
             result = _load_project_context(report, pc)
 
         assert "Authentication is off by default" in result
