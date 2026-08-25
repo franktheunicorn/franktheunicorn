@@ -8,7 +8,11 @@ import pytest
 
 from franktheunicorn.config.models import OperatorConfig, SecurityTriageConfig
 from franktheunicorn.core.models import WorkerCommand
-from franktheunicorn.security.queue import queue_triage, queue_triage_if_enabled
+from franktheunicorn.security.queue import (
+    queue_triage,
+    queue_triage_if_enabled,
+    queue_triage_on_request,
+)
 from tests.factories import SecurityReportFactory
 
 
@@ -83,3 +87,36 @@ class TestQueueTriageIfEnabled:
             assert queue_triage_if_enabled(report) is True
 
         assert WorkerCommand.objects.filter(security_report=report).exists()
+
+
+@pytest.mark.django_db
+class TestQueueTriageOnRequest:
+    """The explicit-ask door. Ungated on purpose, which is worth pinning down.
+
+    Nothing downstream re-checks security_triage — not the worker dispatcher, not
+    triage_report — so these assertions are the whole contract.
+    """
+
+    def test_neither_setting_vetoes_an_explicit_request(self) -> None:
+        report = SecurityReportFactory()
+
+        assert queue_triage_on_request(report, _config(enabled=False, auto_triage=False)) is True
+        assert WorkerCommand.objects.filter(security_report=report).count() == 1
+
+    def test_it_works_without_a_config_at_all(self) -> None:
+        """No config is read, so a broken operator.yaml can't break the button."""
+        report = SecurityReportFactory()
+
+        with patch(
+            "franktheunicorn.config.loader.get_operator_config",
+            side_effect=AssertionError("must not be loaded"),
+        ):
+            assert queue_triage_on_request(report) is True
+
+    def test_it_still_goes_through_the_one_door(self) -> None:
+        """Ungated, not unguarded — the in-flight check still applies."""
+        report = SecurityReportFactory()
+
+        assert queue_triage_on_request(report) is True
+        assert queue_triage_on_request(report) is False
+        assert WorkerCommand.objects.filter(security_report=report).count() == 1

@@ -514,6 +514,67 @@ class TestImportReportsFromZip:
         assert result.duplicates == 1
         assert SecurityReport.objects.count() == 1
 
+    def test_a_nul_below_the_sniff_window_does_not_reach_the_database(
+        self, no_auto_triage: Any
+    ) -> None:
+        """_looks_binary only scans 8 KiB, and a NUL is valid UTF-8.
+
+        A report with a core-dump or log paste past that mark kept them. SQLite
+        stores a NUL, psycopg refuses one, so the two backends disagreed about
+        whether the entry imports — and it rode into the triage prompt either way.
+        """
+        raw = REPORT_TEXT.encode() + b"log line padding\n" * 700 + b"\x00tail of a core dump"
+
+        result = import_reports_from_zip(make_zip({"crash.txt": raw}))
+
+        assert result.imported == 1
+        assert "\x00" not in SecurityReport.objects.get().raw_text
+
+    def test_an_encrypted_archive_says_it_is_encrypted(self, no_auto_triage: Any) -> None:
+        """Every entry failed CRC, so this read as N copies of "corrupt"."""
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("a.txt", REPORT_TEXT)
+        raw = bytearray(buf.getvalue())
+        # Set bit 0 of the general-purpose flags in both the local header and the
+        # central directory, which is what a password-protected entry carries.
+        for sig in (b"PK\x03\x04", b"PK\x01\x02"):
+            at = raw.find(sig)
+            offset = 6 if sig == b"PK\x03\x04" else 8
+            raw[at + offset] |= 0x1
+
+        result = import_reports_from_zip(io.BytesIO(bytes(raw)))
+
+        assert result.imported == 0
+        assert [e.outcome for e in result.entries] == ["unsupported"]
+        assert "encrypted" in result.entries[0].detail
+
+    def test_backslash_paths_do_not_smuggle_junk_past_the_filters(
+        self, no_auto_triage: Any
+    ) -> None:
+        """Both checks in _is_ignorable are per-segment, and it split on "/" only."""
+        archive = make_zip(
+            {
+                "__MACOSX\\._report.txt": REPORT_TEXT,
+                "notes\\.DS_Store": REPORT_TEXT,
+                "real.txt": REPORT_TEXT,
+            }
+        )
+
+        result = import_reports_from_zip(archive)
+
+        assert [e.name for e in result.entries] == ["real.txt"]
+        assert result.imported == 1
+
+    def test_over_the_entry_cap_is_flagged_not_just_worded(self, no_auto_triage: Any) -> None:
+        """The dashboard used to sniff a substring of result.error for this."""
+        archive = make_zip({f"r{i}.txt": f"{REPORT_TEXT} variant {i}" for i in range(5)})
+
+        result = import_reports_from_zip(archive, max_entries=2)
+
+        assert result.over_entry_cap is True
+        assert result.imported == 0
+
     def test_a_binary_starting_with_a_bom_is_still_refused(self, no_auto_triage: Any) -> None:
         """Accepting on the BOM alone was two bytes and no scan."""
         archive = make_zip({"trap": b"\xff\xfe" + bytes(range(256)) * 40})

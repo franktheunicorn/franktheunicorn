@@ -1161,7 +1161,7 @@ def security_report_upload(request: HttpRequest) -> HttpResponse:
 
     if result.error and not result.imported:
         messages.error(request, f"Import failed: {result.error}")
-        if "over the" in result.error:
+        if result.over_entry_cap:
             messages.info(
                 request,
                 "Archives that big are better done from a shell — the browser path "
@@ -1535,12 +1535,14 @@ def security_report_cve_check(request: HttpRequest, report_id: int) -> HttpRespo
 
         operator_config = get_operator_config()
 
-        if not operator_config.security_triage.enabled:
-            return HttpResponse(
-                '<div class="cve-result" style="color: #c00;">'
-                "Security triage is not enabled in operator config.</div>"
-            )
-
+        # Not gated on security_triage.enabled, for the reason spelled out in
+        # security.queue.queue_triage_on_request: it defaults False and the
+        # example operator.yaml ships the whole block commented out, so on the
+        # install our own docs produce this button became a permanent no-op
+        # pointing at a key that isn't in the operator's file — while the page it
+        # sits on, the paste form and Run LLM Triage all worked. One NVD lookup
+        # for the report you're looking at is the click, not automatic behaviour.
+        # nvd_api_key_env is optional and search_cves works without it.
         keyword = report.parsed_component or report.title
         if not keyword:
             return HttpResponse('<div class="cve-result">No component or title to search.</div>')

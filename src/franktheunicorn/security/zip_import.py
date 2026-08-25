@@ -137,6 +137,11 @@ class ZipImportResult:
     #: callers don't have to guess a cause from ``queued_triage == 0`` and blame
     #: the operator's config for a bad parse.
     triage_skipped_reason: str = ""
+    #: The archive had more entries than the caller allowed. A flag, not a
+    #: substring of ``error``: the dashboard used ``"over the" in result.error`` to
+    #: decide whether to suggest the CLI, which breaks the moment anyone rewords
+    #: either message.
+    over_entry_cap: bool = False
 
     def _count(self, outcome: str) -> int:
         return sum(1 for e in self.entries if e.outcome == outcome)
@@ -278,6 +283,7 @@ def _import_entries(
     candidates = [info for info in archive.infolist() if not _is_ignorable(info)]
     if len(candidates) > max_entries:
         result.error = f"archive has {len(candidates)} entries, over the {max_entries} limit"
+        result.over_entry_cap = True
         return
 
     # Built once, up front. The obvious spelling — a filter() per entry against
@@ -300,6 +306,21 @@ def _import_entries(
                 result,
                 EntryOutcome(
                     name=info.filename, outcome="unsupported", detail="unhandled file type"
+                ),
+            )
+            continue
+
+        # Encryption before the codec test: a password-protected archive fails
+        # every entry's CRC and came back as N copies of "could not read entry",
+        # which reads like a corrupt file. Bit 0 of the general-purpose flags says
+        # so up front, and no password is ever going to be supplied here.
+        if info.flag_bits & 0x1:
+            _record(
+                result,
+                EntryOutcome(
+                    name=info.filename,
+                    outcome="unsupported",
+                    detail="encrypted entry — unzip it first, this importer takes no password",
                 ),
             )
             continue
@@ -705,24 +726,43 @@ def _decode_text(raw: bytes) -> str:
 
     ``errors="replace"`` rather than failing: a report is worth importing with a
     mangled byte in it, and mail exports carry all sorts of encodings.
+
+    NULs are dropped. ``_looks_binary`` only scans the first 8 KiB, so a report
+    with a core-dump or log paste below that mark keeps its NULs — valid UTF-8,
+    so ``errors="replace"`` doesn't touch them, and they carry no meaning in a
+    text report. They also make the two database backends disagree: SQLite stores
+    them, psycopg refuses a text parameter containing one outright, so the
+    Postgres path ``DATABASE_URL`` enables would fail an entry the default path
+    imports. (Unmeasured — psycopg isn't installed here — but the divergence is
+    documented and stripping costs nothing either way.) And they'd otherwise ride
+    into the triage prompt.
     """
     marker = _bom(raw)
     if marker is not None:
         bom, encoding = marker
-        return raw[len(bom) :].decode(encoding, errors="replace")
-    return raw.decode("utf-8", errors="replace")
+        text = raw[len(bom) :].decode(encoding, errors="replace")
+    else:
+        text = raw.decode("utf-8", errors="replace")
+    return text.replace("\x00", "")
 
 
 def _is_ignorable(info: zipfile.ZipInfo) -> bool:
-    """Directory entries and archiver bookkeeping, not reports."""
+    """Directory entries and archiver bookkeeping, not reports.
+
+    Splits on backslash as well as forward slash. The spec says forward, but
+    plenty of Windows tooling writes ``__MACOSX\\._x`` style names anyway, and
+    both checks here are on path segments — so a backslash archive skipped the
+    dotfile test *and* the resource-fork test and imported the junk as reports.
+    """
     if info.is_dir():
         return True
-    name = info.filename
-    parts = name.split("/")
+    parts = info.filename.replace("\\", "/").split("/")
     base = parts[-1]
     if not base or base.startswith("."):  # .DS_Store, ._resource forks
         return True
-    return any(p in ("__MACOSX", "__MACOSX/") for p in parts)
+    # Bare "__MACOSX" only: splitting on "/" can't yield a segment containing one,
+    # so the old "__MACOSX/" arm of this test was unreachable.
+    return "__MACOSX" in parts
 
 
 def _suffix(name: str) -> str:

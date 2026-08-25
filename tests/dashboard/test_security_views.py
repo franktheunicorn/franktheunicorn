@@ -529,6 +529,29 @@ class TestSecurityReportTriage:
         assert WorkerCommand.objects.filter(security_report=report).count() == 1
 
     @patch("franktheunicorn.config.loader.get_operator_config")
+    def test_the_cve_button_works_without_the_feature_flag_too(
+        self, mock_config: MagicMock, client: Client, db: Any
+    ) -> None:
+        """Same argument as the triage button, and this one was still gated.
+
+        One NVD lookup for the report you're looking at. The gate left "Check CVE
+        Database" a permanent no-op on a default install, pointing at a key the
+        operator's file doesn't contain.
+        """
+        from franktheunicorn.config.models import OperatorConfig
+
+        mock_config.return_value = OperatorConfig(github_username="testuser")
+        report = SecurityReportFactory(parsed_component="libarchive")
+
+        with patch(
+            "franktheunicorn.security.cve_lookup.search_cves", return_value=[]
+        ) as mock_search:
+            response = client.post(f"/security/{report.pk}/cve-check/")
+
+        assert b"not enabled" not in response.content
+        assert mock_search.called
+
+    @patch("franktheunicorn.config.loader.get_operator_config")
     def test_a_queue_failure_still_renders_the_panel_not_a_500(
         self, mock_config: MagicMock, client: Client, db: Any
     ) -> None:
