@@ -40,8 +40,10 @@ def _executor_returning(*results: ExecResult | None) -> MagicMock:
 
 
 class TestBuildInvocation:
+    # These two use "pi", not "claude": the claude entry carries a default model
+    # (default_claude_model), and the subject here is argv assembly with none.
     def test_flag_mode_prompt_follows_flag(self) -> None:
-        cfg = AgentCLIReviewerConfig(name="claude", prompt_mode="flag", prompt_arg="-p")
+        cfg = AgentCLIReviewerConfig(name="pi", prompt_mode="flag", prompt_arg="-p")
         assert cfg.build_invocation("HELLO") == ["-p", "HELLO"]
 
     def test_flag_mode_with_model(self) -> None:
@@ -75,8 +77,8 @@ class TestBuildInvocation:
         assert cfg.cli_argv == ["codex"]
 
     def test_full_argv_flag(self) -> None:
-        cfg = AgentCLIReviewerConfig(name="claude", cli_path="claude", prompt_arg="-p")
-        assert cfg.cli_argv + cfg.build_invocation("PROMPT") == ["claude", "-p", "PROMPT"]
+        cfg = AgentCLIReviewerConfig(name="pi", cli_path="pi", prompt_arg="-p")
+        assert cfg.cli_argv + cfg.build_invocation("PROMPT") == ["pi", "-p", "PROMPT"]
 
     def test_full_argv_subcommand(self) -> None:
         cfg = AgentCLIReviewerConfig(
@@ -373,6 +375,45 @@ class TestLegacyClaudeCLIPromotion:
         oc = OperatorConfig()
         assert [r.name for r in oc.agent_cli_reviewers] == ["claude", "codex", "pi"]
         assert all(r.enabled == "auto" for r in oc.agent_cli_reviewers)
+
+    def test_claude_defaults_to_sonnet_and_the_others_to_the_cli_default(self) -> None:
+        """Argv too, not just the field — an empty model emits no flag at all."""
+        oc = OperatorConfig()
+        by_name = {r.name: r for r in oc.agent_cli_reviewers}
+        assert by_name["claude"].model == "sonnet"
+        assert by_name["claude"].build_invocation("p") == ["--model", "sonnet", "-p", "p"]
+        # Left alone deliberately — this default is about the claude CLI.
+        assert by_name["codex"].model == ""
+        assert by_name["pi"].model == ""
+
+    def test_a_legacy_block_without_a_model_also_gets_sonnet(self) -> None:
+        """Both doors onto the same CLI agree."""
+        oc = OperatorConfig(claude_cli=ClaudeCLIConfig(enabled=True))
+        claude = next(r for r in oc.agent_cli_reviewers if r.name == "claude")
+        assert claude.model == "sonnet"
+
+    def test_an_explicit_model_still_wins(self) -> None:
+        oc = OperatorConfig(
+            agent_cli_reviewers=[AgentCLIReviewerConfig(name="claude", model="opus")]
+        )
+        claude = next(r for r in oc.agent_cli_reviewers if r.name == "claude")
+        assert claude.model == "opus"
+
+    def test_overriding_one_field_keeps_the_model_default(self) -> None:
+        """operator.yaml advertises this shape; it used to land on the CLI default."""
+        oc = OperatorConfig(
+            agent_cli_reviewers=[AgentCLIReviewerConfig(name="claude", cli_path="uv run claude")]
+        )
+        claude = next(r for r in oc.agent_cli_reviewers if r.name == "claude")
+        assert claude.model == "sonnet"
+        assert claude.build_invocation("p")[:2] == ["--model", "sonnet"]
+
+    def test_an_explicit_empty_model_passes_no_flag(self) -> None:
+        """The escape hatch for a wrapper that rejects unknown args."""
+        oc = OperatorConfig(agent_cli_reviewers=[AgentCLIReviewerConfig(name="claude", model="")])
+        claude = next(r for r in oc.agent_cli_reviewers if r.name == "claude")
+        assert claude.model == ""
+        assert claude.build_invocation("p") == ["-p", "p"]
 
     def test_legacy_claude_cli_promoted_and_deduped(self) -> None:
         oc = OperatorConfig(

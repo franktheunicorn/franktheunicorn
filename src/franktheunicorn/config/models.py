@@ -24,6 +24,11 @@ logger = logging.getLogger(__name__)
 
 _KNOWN_REMOTE_MODES: frozenset[str] = frozenset({"local", "ssh"})
 
+#: Model for the claude agent-CLI reviewer. Every PR gets a full-diff pass whose
+#: output is parsed, not read, then filtered through anti-patterns and dedup —
+#: not work for the reasoning tier. An alias, not a pinned ID, so it doesn't rot.
+CLAUDE_CLI_DEFAULT_MODEL = "sonnet"
+
 
 class RemoteExecutionConfig(BaseModel):
     """Where to execute a CLI review tool — locally or on a remote SSH host.
@@ -172,7 +177,8 @@ class ClaudeCLIConfig(BaseModel):
 
     enabled: bool = False
     cli_path: str = "claude"
-    model: str = ""
+    # Matches the registry default; see CLAUDE_CLI_DEFAULT_MODEL.
+    model: str = CLAUDE_CLI_DEFAULT_MODEL
     extra_args: list[str] = Field(default_factory=list)
     timeout_seconds: int = 300
     max_diff_chars: int = 60_000
@@ -244,6 +250,19 @@ class AgentCLIReviewerConfig(BaseModel):
         _validate_cli_path(self.cli_path)
         return self
 
+    @model_validator(mode="after")
+    def default_claude_model(self) -> AgentCLIReviewerConfig:
+        """Default the claude entry's model wherever the entry was built.
+
+        Here, not in the seed: ``assemble_agent_cli_registry`` merges by name and
+        never by field, so an operator overriding one field replaces the seed
+        outright and would drop back to the CLI's default. ``model_fields_set``
+        keeps an explicit ``model: ""`` meaning "pass no flag".
+        """
+        if self.name == "claude" and "model" not in self.model_fields_set:
+            self.model = CLAUDE_CLI_DEFAULT_MODEL
+        return self
+
     @property
     def cli_argv(self) -> list[str]:
         """``cli_path`` split into argv -- supports ``"cmd arg1 arg2"``."""
@@ -271,6 +290,7 @@ def _default_agent_cli_reviewers() -> list[AgentCLIReviewerConfig]:
     in ``operator.yaml`` or add their own agents to the list.
     """
     return [
+        # model comes from default_claude_model, not from here.
         AgentCLIReviewerConfig(
             name="claude", cli_path="claude", prompt_mode="flag", prompt_arg="-p"
         ),

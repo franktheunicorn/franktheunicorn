@@ -210,6 +210,9 @@ digest_enabled: false
 # its binary is on PATH (in local mode). Overlapping findings across agents
 # are deduped so the PR isn't commented on three times for the same spot.
 #
+# The `claude` entry defaults to `model: "sonnet"` — a full-diff pass per PR
+# isn't reasoning-tier work. Override with `model: "opus"` if you'd rather pay.
+#
 # Add a block only to customize. Entries merge by `name` with the built-in
 # defaults, so you can override just one and leave the others auto. Set
 # `enabled: true`/`false` to force a reviewer on/off regardless of PATH.
@@ -219,7 +222,7 @@ digest_enabled: false
 #   - name: "claude"
 #     enabled: "auto"                # "auto" (default) | true | false
 #     cli_path: "claude"             # or "uv run claude", "corp-wrap claude", ...
-#     model: ""                      # empty = CLI default
+#     model: "sonnet"                # frank's default; "" = whatever the CLI defaults to
 #     model_flag: "--model"
 #     prompt_mode: "flag"            # claude/pi are flag-style: <cli> -p <prompt>
 #     prompt_arg: "-p"
