@@ -8,6 +8,7 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+from django.db.models import QuerySet
 from django.utils import timezone
 
 from franktheunicorn.backends.base import MAX_LISTED_PULL_REQUESTS
@@ -967,6 +968,120 @@ class TestUnchangedPRSkip:
         skipped: list[PullRequest] = []
         assert poll_project(client, config, "holdenk", skipped_prs=skipped) == []
         assert [pr.number for pr in skipped] == [99]
+
+
+@pytest.mark.django_db
+class TestRefreshFailureIsolation:
+    """A PR that blows up mid-refresh must not cost the cycle or the change.
+
+    The upsert commits at the top of a refresh, ``last_polled_at`` at the bottom;
+    without a guard, anything raising in between left the row claiming to have
+    seen a version it never processed.
+    """
+
+    def _config(self, **overrides: Any) -> ProjectConfig:
+        return ProjectConfig(owner="apache", repo="spark", poll_refresh_hours=24, **overrides)
+
+    @staticmethod
+    def _boom() -> Any:
+        return patch(
+            "franktheunicorn.backends.poller.score_pull_request_from_model",
+            side_effect=RuntimeError("boom"),
+        )
+
+    def test_a_failing_pr_does_not_end_the_cycle(self, tmp_path: Path) -> None:
+        """It used to raise out of poll_project, losing every PR after this one."""
+        client = _CountingMockClient(tmp_path, [_listed_pr(99), _listed_pr(100)])
+        config = self._config()
+
+        def only_99_explodes(pr: PullRequest, **kwargs: Any) -> tuple[float, dict[str, Any]]:
+            if pr.number == 99:
+                msg = "boom"
+                raise RuntimeError(msg)
+            return 0.5, {"stub": 1}
+
+        with patch(
+            "franktheunicorn.backends.poller.score_pull_request_from_model",
+            side_effect=only_99_explodes,
+        ):
+            got = poll_project(client, config, operator_username="nobody")
+
+        assert [pr.number for pr in got] == [100], "the healthy PR after the bad one was dropped"
+
+    def test_a_failed_refresh_is_retried_next_cycle(self, tmp_path: Path) -> None:
+        """The marker is rewound, so the change is seen again rather than timing out."""
+        client = _CountingMockClient(tmp_path, [_listed_pr()])
+        config = self._config()
+        poll_project(client, config, operator_username="nobody")
+        before = PullRequest.objects.get(number=99).github_updated_at
+
+        # Upstream moves — a new commit, a review — and the refresh dies partway.
+        client.pr_list = [_listed_pr(updated_at="2026-04-09T11:00:00Z")]
+        with self._boom():
+            poll_project(client, config, operator_username="nobody")
+
+        stranded = PullRequest.objects.get(number=99)
+        assert stranded.github_updated_at == before, "marker advanced without the work"
+
+        # Healthy again: the PR must come back, not wait out poll_refresh_hours.
+        client.detail_calls.clear()
+        assert len(poll_project(client, config, operator_username="nobody")) == 1
+        assert client.detail_calls == [99]
+        assert PullRequest.objects.get(number=99).github_updated_at != before
+
+    def test_a_reviewer_add_survives_a_failed_refresh(self, tmp_path: Path) -> None:
+        """No updated_at bump, so rewinding the timestamp alone was a no-op here."""
+        client = _CountingMockClient(tmp_path, [_listed_pr()])
+        config = self._config()
+        poll_project(client, config, operator_username="holdenk")
+
+        client.pr_list = [_listed_pr(requested_reviewers=[{"login": "holdenk"}])]
+        with self._boom():
+            poll_project(client, config, operator_username="holdenk")
+
+        client.detail_calls.clear()
+        assert len(poll_project(client, config, operator_username="holdenk")) == 1
+        assert client.detail_calls == [99]
+        assert PullRequest.objects.get(number=99).requested_reviewers == ["holdenk"]
+
+    def test_a_project_wide_failure_stops_burning_api_calls(self, tmp_path: Path) -> None:
+        """Isolating per PR must not mean 1000 doomed refreshes every cycle."""
+        client = _CountingMockClient(tmp_path, [_listed_pr(n) for n in range(1, 41)])
+        config = self._config()
+        with self._boom():
+            assert poll_project(client, config, operator_username="nobody") == []
+        assert len(client.detail_calls) == 5, "should give up, not grind through all 40"
+
+    def test_a_brand_new_pr_that_fails_is_still_retried(self, tmp_path: Path) -> None:
+        """No prior marker to rewind, so this leans on the degraded-row check."""
+        client = _CountingMockClient(tmp_path, [_listed_pr()])
+        config = self._config()
+        with self._boom():
+            assert poll_project(client, config, operator_username="nobody") == []
+
+        client.detail_calls.clear()
+        assert len(poll_project(client, config, operator_username="nobody")) == 1
+        assert client.detail_calls == [99]
+
+    def test_a_rewind_failure_does_not_take_the_cycle_with_it(self, tmp_path: Path) -> None:
+        """The rewind runs on the failure path; a DB refusing both must not raise."""
+        client = _CountingMockClient(tmp_path, [_listed_pr()])
+        config = self._config()
+        poll_project(client, config, operator_username="nobody")
+
+        # Scoped to the rewind's own write — patching .update() wholesale breaks
+        # the closed-PR reap that runs before the loop.
+        real_update = QuerySet.update
+
+        def fail_only_the_rewind(self: QuerySet[Any], **kwargs: Any) -> int:
+            if "github_updated_at" in kwargs:
+                msg = "database is locked"
+                raise RuntimeError(msg)
+            return int(real_update(self, **kwargs))
+
+        client.pr_list = [_listed_pr(updated_at="2026-04-09T11:00:00Z")]
+        with self._boom(), patch.object(QuerySet, "update", fail_only_the_rewind):
+            assert poll_project(client, config, operator_username="nobody") == []
 
 
 @pytest.mark.django_db

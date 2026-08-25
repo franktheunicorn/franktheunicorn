@@ -44,6 +44,12 @@ _LISTING_FIELDS = (
 # pr.mergeable, which only the per-PR detail call updates.
 _OPERATOR_PR_REFRESH_HOURS = 1
 
+# Consecutive per-PR refresh failures before abandoning the project this cycle.
+# The three network calls are caught individually, so what reaches the guard is
+# the DB or the scorer — usually project-wide, and 1000 PRs of doomed API calls
+# per cycle is a worse failure than stopping early.
+_MAX_CONSECUTIVE_REFRESH_FAILURES = 5
+
 _CONTRIBUTORS_CACHE_FETCHED = "fetched"
 _CONTRIBUTORS_CACHE_EMPTY = "empty"
 _CONTRIBUTORS_CACHE_FAILED = "failed"
@@ -123,6 +129,7 @@ def poll_project(
 
     results: list[PullRequest] = []
     skipped_numbers: list[int] = []
+    consecutive_failures = 0
 
     for pr_data in raw_prs:
         pr_number: int = pr_data["number"]
@@ -133,222 +140,30 @@ def poll_project(
             logger.debug("PR #%d unchanged since last poll; skipping", pr_number)
             continue
 
-        logger.debug("Fetching changed files for PR #%d ...", pr_number)
-
-        # Fetch changed files for scoring. On failure pass None (not []) so
-        # the upsert preserves any previously-ingested file list instead of
-        # wiping it during a rate-limit window.
-        changed_files: list[str] | None
         try:
-            files_data = client.get_pull_request_files(
-                project_config.owner, project_config.repo, pr_number
+            pr_obj = _refresh_pull_request(
+                client, project, project_config, pr_data, operator_username, repo_path
             )
-            changed_files = [f["filename"] for f in files_data]
-            logger.debug("PR #%d touches %d file(s)", pr_number, len(changed_files))
         except Exception:
-            logger.warning("Could not fetch files for PR #%d; preserving existing list", pr_number)
-            changed_files = None
-
-        pr_obj = _upsert_pull_request(project, pr_data, changed_files)
-
-        # Fetch PR detail (includes mergeable status + base/head refs).
-        pr_detail: dict[str, Any] = {}
-        try:
-            pr_detail = client.get_pull_request(
-                project_config.owner, project_config.repo, pr_number
-            )
-            raw_mergeable = pr_detail.get("mergeable")
-            if isinstance(raw_mergeable, bool):
-                pr_obj.mergeable = raw_mergeable
-            # The list endpoint doesn't carry diff stats, so every
-            # list-ingested PR showed up on the dashboard as "0+ / 0-". The
-            # detail response has them — keep them.
-            raw_additions = pr_detail.get("additions")
-            raw_deletions = pr_detail.get("deletions")
-            if isinstance(raw_additions, int):
-                pr_obj.additions = raw_additions
-            if isinstance(raw_deletions, int):
-                pr_obj.deletions = raw_deletions
-        except Exception:
-            logger.debug("Could not fetch PR detail for #%d", pr_number)
-
-        # Extract base/head SHAs and branch refs for blame (v1.25).
-        base_sha = ""
-        head_sha = ""
-        base_branch = ""
-        head_branch = ""
-        fork_clone_url = ""
-        base_data = pr_detail.get("base")
-        head_data = pr_detail.get("head")
-        if isinstance(base_data, dict):
-            base_sha = base_data.get("sha", "")
-            base_branch = base_data.get("ref", "")
-        if isinstance(head_data, dict):
-            head_sha = head_data.get("sha", "")
-            head_branch = head_data.get("ref", "")
-            head_repo_data = head_data.get("repo") or {}
-            fork_clone_url_raw = head_repo_data.get("clone_url", "")
-            head_full_name = head_repo_data.get("full_name", "")
-            is_fork = head_repo_data.get("fork", False) or (
-                bool(head_full_name)
-                and head_full_name != f"{project_config.owner}/{project_config.repo}"
-            )
-            fork_clone_url = fork_clone_url_raw if is_fork else ""
-
-        # Persist SHAs on the PR so downstream consumers (differential test
-        # runner, blame, etc.) don't need to re-hit the GitHub API.
-        if base_sha and pr_obj.base_sha != base_sha:
-            pr_obj.base_sha = base_sha
-        if head_sha and pr_obj.head_sha != head_sha:
-            pr_obj.head_sha = head_sha
-        if head_branch and pr_obj.head_branch != head_branch:
-            pr_obj.head_branch = head_branch
-
-        # Fetch blame data if repo clone is available (v1.25).
-        blame_data: list[dict[str, object]] | None = None
-        if repo_path is not None and repo_path.is_dir() and changed_files and base_sha:
-            try:
-                from franktheunicorn.scoring.blame_fetcher import fetch_blame_for_files
-                from franktheunicorn.worker.repo_manager import ensure_sha_fetched
-
-                # Fetch refs if not available locally, then run blame.
-                base_ok = ensure_sha_fetched(
-                    repo_path,
-                    base_sha,
-                    branch=base_branch,
-                    pr_number=pr_number,
-                )
-                head_ok = (
-                    ensure_sha_fetched(
-                        repo_path,
-                        head_sha,
-                        branch=head_branch,
-                        pr_number=pr_number,
-                        fork_clone_url=fork_clone_url,
-                    )
-                    if head_sha
-                    else False
-                )
-
-                if base_ok and head_ok:
-                    blame_data = fetch_blame_for_files(
-                        repo_path, changed_files, base_ref=base_sha, head_ref=head_sha
-                    )
-                elif base_ok:
-                    # Head not available but base is — diff will be against
-                    # working tree. Only useful if repo happens to be on the
-                    # right branch, so log a warning.
-                    logger.debug(
-                        "Head SHA %s not available locally for PR #%d; "
-                        "blame diff may be inaccurate",
-                        head_sha[:12],
-                        pr_number,
-                    )
-                    blame_data = fetch_blame_for_files(repo_path, changed_files, base_ref=base_sha)
-                else:
-                    logger.debug(
-                        "Base SHA %s not available locally for PR #%d; skipping blame",
-                        base_sha[:12],
-                        pr_number,
-                    )
-            except Exception:
-                logger.debug("Blame fetch failed for PR #%d", pr_number, exc_info=True)
-
-        # Fetch CVE-affected files from git history.
-        cve_affected_files: list[str] | None = None
-        if repo_path is not None and repo_path.is_dir():
-            try:
-                from franktheunicorn.scoring.cve_history import fetch_cve_affected_files
-
-                cve_affected_files = fetch_cve_affected_files(
-                    repo_path,
-                    governance=project_config.governance,
-                    extra_cve_files=project_config.cve_files,
-                )
-            except Exception:
-                logger.debug("CVE history fetch failed for PR #%d", pr_number, exc_info=True)
-
-        # Fetch all PR comments once: used for both mention scoring and
-        # pending-response detection. The since filter is applied below only
-        # for the author-reply subset.
-        operator_review_posted_at: str | None = None
-        author_replies: list[str] | None = None
-        comment_bodies: list[str] | None = None
-
-        try:
-            all_comments = client.get_issue_comments(
-                project_config.owner,
-                project_config.repo,
+            # Per-PR, not per-project: this used to raise out of poll_project, and
+            # every PR after the bad one went unpolled.
+            logger.exception(
+                "Could not refresh PR #%d for %s; skipping it this cycle",
                 pr_number,
+                project.full_name,
             )
-            comment_bodies = [str(c.get("body", "")) for c in all_comments if c.get("body")]
-
-            latest_posted_at = (
-                ReviewDraft.objects.filter(
-                    pull_request=pr_obj, status="posted", posted_at__isnull=False
+            _rewind_refresh_marker(project, pr_number, known_row)
+            consecutive_failures += 1
+            if consecutive_failures >= _MAX_CONSECUTIVE_REFRESH_FAILURES:
+                logger.error(
+                    "Giving up on %s after %d consecutive refresh failures",
+                    project.full_name,
+                    consecutive_failures,
                 )
-                .order_by("-posted_at")
-                .values_list("posted_at", flat=True)
-                .first()
-            )
-            if latest_posted_at is not None:
-                operator_review_posted_at = latest_posted_at.isoformat()
-                pr_author = pr_obj.author.lower()
-                author_replies = [
-                    c["created_at"]
-                    for c in all_comments
-                    if c.get("user", {}).get("login", "").lower() == pr_author
-                    and c.get("created_at", "") >= operator_review_posted_at
-                ]
-        except Exception:
-            logger.debug("Could not fetch comments for PR #%d", pr_number)
+                break
+            continue
 
-        # Score the PR
-        score, breakdown = score_pull_request_from_model(
-            pr=pr_obj,
-            project_config=project_config,
-            operator_username=operator_username,
-            blame_data=blame_data,
-            cve_affected_files=cve_affected_files,
-            operator_review_posted_at=operator_review_posted_at,
-            author_replies_after_review=author_replies,
-            comment_bodies=comment_bodies,
-        )
-        pr_obj.interest_score = score
-        pr_obj.score_breakdown = breakdown
-        # Marks a completed full refresh — this, not the auto_now updated_at,
-        # is what the unchanged-PR skip times against.
-        pr_obj.last_polled_at = timezone.now()
-
-        # Compute moderation flags and route to queue (§2.2).
-        _route_pr_to_queue(
-            pr_obj,
-            operator_username,
-            list(project.contributors_cache or []),
-            _has_contributor_evidence(project),
-            project_config,
-        )
-
-        pr_obj.save(
-            update_fields=[
-                "interest_score",
-                "score_breakdown",
-                "queue",
-                "is_operator_pr",
-                "is_new_contributor",
-                "is_mentioned",
-                "is_low_context",
-                "is_likely_unowned",
-                "mergeable",
-                "additions",
-                "deletions",
-                "base_sha",
-                "head_sha",
-                "head_branch",
-                "last_polled_at",
-            ]
-        )
-
+        consecutive_failures = 0
         results.append(pr_obj)
 
     _reroute_pull_requests(results, operator_username, project_config)
@@ -370,6 +185,268 @@ def poll_project(
         queue_str or "none",
     )
     return results
+
+
+def _refresh_pull_request(
+    client: ForgeClient,
+    project: Project,
+    project_config: ProjectConfig,
+    pr_data: dict[str, Any],
+    operator_username: str,
+    repo_path: Path | None,
+) -> PullRequest:
+    """Spend the per-PR API calls on one PR: upsert, enrich, score, route.
+
+    Was inline in ``poll_project``'s loop; extracted so it fits in one
+    try/except. See the guard at the call site.
+    """
+    pr_number: int = pr_data["number"]
+    logger.debug("Fetching changed files for PR #%d ...", pr_number)
+
+    # Fetch changed files for scoring. On failure pass None (not []) so
+    # the upsert preserves any previously-ingested file list instead of
+    # wiping it during a rate-limit window.
+    changed_files: list[str] | None
+    try:
+        files_data = client.get_pull_request_files(
+            project_config.owner, project_config.repo, pr_number
+        )
+        changed_files = [f["filename"] for f in files_data]
+        logger.debug("PR #%d touches %d file(s)", pr_number, len(changed_files))
+    except Exception:
+        logger.warning("Could not fetch files for PR #%d; preserving existing list", pr_number)
+        changed_files = None
+
+    pr_obj = _upsert_pull_request(project, pr_data, changed_files)
+
+    # Fetch PR detail (includes mergeable status + base/head refs).
+    pr_detail: dict[str, Any] = {}
+    try:
+        pr_detail = client.get_pull_request(project_config.owner, project_config.repo, pr_number)
+        raw_mergeable = pr_detail.get("mergeable")
+        if isinstance(raw_mergeable, bool):
+            pr_obj.mergeable = raw_mergeable
+        # The list endpoint doesn't carry diff stats, so every
+        # list-ingested PR showed up on the dashboard as "0+ / 0-". The
+        # detail response has them — keep them.
+        raw_additions = pr_detail.get("additions")
+        raw_deletions = pr_detail.get("deletions")
+        if isinstance(raw_additions, int):
+            pr_obj.additions = raw_additions
+        if isinstance(raw_deletions, int):
+            pr_obj.deletions = raw_deletions
+    except Exception:
+        logger.debug("Could not fetch PR detail for #%d", pr_number)
+
+    # Extract base/head SHAs and branch refs for blame (v1.25).
+    base_sha = ""
+    head_sha = ""
+    base_branch = ""
+    head_branch = ""
+    fork_clone_url = ""
+    base_data = pr_detail.get("base")
+    head_data = pr_detail.get("head")
+    if isinstance(base_data, dict):
+        base_sha = base_data.get("sha", "")
+        base_branch = base_data.get("ref", "")
+    if isinstance(head_data, dict):
+        head_sha = head_data.get("sha", "")
+        head_branch = head_data.get("ref", "")
+        head_repo_data = head_data.get("repo") or {}
+        fork_clone_url_raw = head_repo_data.get("clone_url", "")
+        head_full_name = head_repo_data.get("full_name", "")
+        is_fork = head_repo_data.get("fork", False) or (
+            bool(head_full_name)
+            and head_full_name != f"{project_config.owner}/{project_config.repo}"
+        )
+        fork_clone_url = fork_clone_url_raw if is_fork else ""
+
+    # Persist SHAs on the PR so downstream consumers (differential test
+    # runner, blame, etc.) don't need to re-hit the GitHub API.
+    if base_sha and pr_obj.base_sha != base_sha:
+        pr_obj.base_sha = base_sha
+    if head_sha and pr_obj.head_sha != head_sha:
+        pr_obj.head_sha = head_sha
+    if head_branch and pr_obj.head_branch != head_branch:
+        pr_obj.head_branch = head_branch
+
+    # Fetch blame data if repo clone is available (v1.25).
+    blame_data: list[dict[str, object]] | None = None
+    if repo_path is not None and repo_path.is_dir() and changed_files and base_sha:
+        try:
+            from franktheunicorn.scoring.blame_fetcher import fetch_blame_for_files
+            from franktheunicorn.worker.repo_manager import ensure_sha_fetched
+
+            # Fetch refs if not available locally, then run blame.
+            base_ok = ensure_sha_fetched(
+                repo_path,
+                base_sha,
+                branch=base_branch,
+                pr_number=pr_number,
+            )
+            head_ok = (
+                ensure_sha_fetched(
+                    repo_path,
+                    head_sha,
+                    branch=head_branch,
+                    pr_number=pr_number,
+                    fork_clone_url=fork_clone_url,
+                )
+                if head_sha
+                else False
+            )
+
+            if base_ok and head_ok:
+                blame_data = fetch_blame_for_files(
+                    repo_path, changed_files, base_ref=base_sha, head_ref=head_sha
+                )
+            elif base_ok:
+                # Head not available but base is — diff will be against
+                # working tree. Only useful if repo happens to be on the
+                # right branch, so log a warning.
+                logger.debug(
+                    "Head SHA %s not available locally for PR #%d; blame diff may be inaccurate",
+                    head_sha[:12],
+                    pr_number,
+                )
+                blame_data = fetch_blame_for_files(repo_path, changed_files, base_ref=base_sha)
+            else:
+                logger.debug(
+                    "Base SHA %s not available locally for PR #%d; skipping blame",
+                    base_sha[:12],
+                    pr_number,
+                )
+        except Exception:
+            logger.debug("Blame fetch failed for PR #%d", pr_number, exc_info=True)
+
+    # Fetch CVE-affected files from git history.
+    cve_affected_files: list[str] | None = None
+    if repo_path is not None and repo_path.is_dir():
+        try:
+            from franktheunicorn.scoring.cve_history import fetch_cve_affected_files
+
+            cve_affected_files = fetch_cve_affected_files(
+                repo_path,
+                governance=project_config.governance,
+                extra_cve_files=project_config.cve_files,
+            )
+        except Exception:
+            logger.debug("CVE history fetch failed for PR #%d", pr_number, exc_info=True)
+
+    # Fetch all PR comments once: used for both mention scoring and
+    # pending-response detection. The since filter is applied below only
+    # for the author-reply subset.
+    operator_review_posted_at: str | None = None
+    author_replies: list[str] | None = None
+    comment_bodies: list[str] | None = None
+
+    try:
+        all_comments = client.get_issue_comments(
+            project_config.owner,
+            project_config.repo,
+            pr_number,
+        )
+        comment_bodies = [str(c.get("body", "")) for c in all_comments if c.get("body")]
+
+        latest_posted_at = (
+            ReviewDraft.objects.filter(
+                pull_request=pr_obj, status="posted", posted_at__isnull=False
+            )
+            .order_by("-posted_at")
+            .values_list("posted_at", flat=True)
+            .first()
+        )
+        if latest_posted_at is not None:
+            operator_review_posted_at = latest_posted_at.isoformat()
+            pr_author = pr_obj.author.lower()
+            author_replies = [
+                c["created_at"]
+                for c in all_comments
+                if c.get("user", {}).get("login", "").lower() == pr_author
+                and c.get("created_at", "") >= operator_review_posted_at
+            ]
+    except Exception:
+        logger.debug("Could not fetch comments for PR #%d", pr_number)
+
+    # Score the PR
+    score, breakdown = score_pull_request_from_model(
+        pr=pr_obj,
+        project_config=project_config,
+        operator_username=operator_username,
+        blame_data=blame_data,
+        cve_affected_files=cve_affected_files,
+        operator_review_posted_at=operator_review_posted_at,
+        author_replies_after_review=author_replies,
+        comment_bodies=comment_bodies,
+    )
+    pr_obj.interest_score = score
+    pr_obj.score_breakdown = breakdown
+    # Marks a completed full refresh — this, not the auto_now updated_at,
+    # is what the unchanged-PR skip times against.
+    pr_obj.last_polled_at = timezone.now()
+
+    # Compute moderation flags and route to queue (§2.2).
+    _route_pr_to_queue(
+        pr_obj,
+        operator_username,
+        list(project.contributors_cache or []),
+        _has_contributor_evidence(project),
+        project_config,
+    )
+
+    pr_obj.save(
+        update_fields=[
+            "interest_score",
+            "score_breakdown",
+            "queue",
+            "is_operator_pr",
+            "is_new_contributor",
+            "is_mentioned",
+            "is_low_context",
+            "is_likely_unowned",
+            "mergeable",
+            "additions",
+            "deletions",
+            "base_sha",
+            "head_sha",
+            "head_branch",
+            "last_polled_at",
+        ]
+    )
+    return pr_obj
+
+
+def _rewind_refresh_marker(
+    project: Project,
+    pr_number: int,
+    known: Mapping[str, object] | None,
+) -> None:
+    """Undo everything the failed refresh told ``_needs_refresh`` it had handled.
+
+    ``_upsert_pull_request`` commits at the top of a refresh, ``last_polled_at``
+    and the scores at the bottom. In between, the row claims to have seen the new
+    version with none of the work done, so the next cycle reads "unchanged" and
+    the change waits out ``poll_refresh_hours``.
+
+    Every field the skip reads, not just the timestamp — a reviewer-add doesn't
+    bump ``updated_at``. New rows need nothing: no ``base_sha`` or
+    ``score_breakdown`` yet already counts as degraded.
+    """
+    if known is None:
+        return
+    prior = {"github_updated_at": known.get("github_updated_at")}
+    prior.update({field: known.get(field) for field in _LISTING_FIELDS})
+    try:
+        PullRequest.objects.filter(project=project, number=pr_number).update(**prior)
+    except Exception:
+        # A DB that just refused the refresh may refuse this too. Losing the
+        # rewind delays a re-poll; raising would cost the rest of the project.
+        logger.warning(
+            "Could not rewind the refresh marker for PR #%d; it may not re-poll "
+            "until poll_refresh_hours lapses",
+            pr_number,
+            exc_info=True,
+        )
 
 
 def _needs_refresh(
