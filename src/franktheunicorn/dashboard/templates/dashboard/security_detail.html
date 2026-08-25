@@ -32,6 +32,23 @@
     <pre style="background: var(--card); border: 1px solid var(--border); border-radius: 4px; padding: 0.75rem; font-size: 0.8rem; white-space: pre-wrap; word-wrap: break-word; max-height: 400px; overflow-y: auto; margin-top: 0.5rem;">{{ report.raw_text }}</pre>
 </details>
 
+{# Proposed fix, when the archive shipped one for this finding. Open by default #}
+{# and NOT wrapped: a diff whose lines are re-flowed doesn't apply, and the #}
+{# point of keeping it is that the operator can copy it straight into git apply. #}
+{% if report.proposed_patch %}
+<details open class="proposed-patch" style="margin-bottom: 1rem;">
+    <summary style="font-weight: 600; font-size: 0.9rem; cursor: pointer;">
+        Proposed Patch
+        {% if report.proposed_patch_path %}<span class="pr-meta" style="font-weight: 400;">— {{ report.proposed_patch_path }}</span>{% endif %}
+    </summary>
+    <p class="pr-meta" style="margin: 0.4rem 0;">
+        Shipped with the finding, not verified. Save it and apply with
+        <code>git apply</code> after reading it.
+    </p>
+    <pre class="patch-body">{{ report.proposed_patch }}</pre>
+</details>
+{% endif %}
+
 <!-- Parsed Fields -->
 {% if report.parsed_component or report.parsed_poc or report.parsed_impact %}
 <div style="background: var(--card); border: 1px solid var(--border); border-radius: 4px; padding: 0.75rem; margin-bottom: 1rem;">

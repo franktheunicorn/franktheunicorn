@@ -39,6 +39,11 @@ from typing import IO, TYPE_CHECKING
 from django.db import transaction
 
 from franktheunicorn.core.models import SecurityReport
+from franktheunicorn.security.scan_archive import (
+    MAX_FINDINGS,
+    ScanArchive,
+    expand_scan_archive,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -331,10 +336,28 @@ def _import_entries(
     # The savepoint inside _import_entry is not an optimisation: a caught
     # database error inside an atomic block leaves the transaction unusable, and
     # that except clause is load-bearing (keep-what-imported on a locked DB).
+    # A scanner archive says what its findings are; take its word over the file
+    # layout. Detection is all-or-nothing per archive and yields nothing for an
+    # ordinary folder of reports, so the generic walk below is unchanged for
+    # everything that isn't a scan bundle.
+    expanded = expand_scan_archive(archive, lambda info: _read_entry(archive, info)[0])
     with transaction.atomic():
+        if expanded.recognised:
+            _import_findings(
+                expanded,
+                project,
+                auto_triage,
+                result,
+                seen,
+                operator_config,
+                archive_label,
+            )
+        # Whatever the expander consumed is skipped here: importing the manifest
+        # as well would store the same 129 findings twice, once split and once as
+        # a single unreadable blob.
         _walk_entries(
             archive,
-            candidates,
+            [i for i in candidates if i.filename not in expanded.consumed],
             project,
             auto_triage,
             result,
@@ -343,6 +366,67 @@ def _import_entries(
             require_security_content,
             archive_label,
         )
+
+
+def _import_findings(
+    expanded: ScanArchive,
+    project: Project | None,
+    auto_triage: bool,
+    result: ZipImportResult,
+    seen: dict[str, int],
+    operator_config: OperatorConfig | None,
+    archive_label: str,
+) -> None:
+    """Create one report per expanded finding, patch attached.
+
+    Dedup runs on the rendered text exactly as it does for a file, so a re-import
+    of the same archive is still a no-op — the rendering is deterministic.
+    """
+    project_id = project.pk if project is not None else None
+    for record in expanded.findings:
+        text_key = _text_key(record.body, project_id)
+        existing = seen.get(text_key)
+        if existing is not None:
+            _record(
+                result,
+                EntryOutcome(name=record.origin_label, outcome="duplicate", report_id=existing),
+            )
+            continue
+        try:
+            with transaction.atomic():
+                report = SecurityReport.objects.create(
+                    raw_text=record.body,
+                    title=record.title[:500],
+                    project=project,
+                    source="zip",
+                    source_archive=archive_label,
+                    finding_id=record.finding_id,
+                    proposed_patch=record.patch,
+                    proposed_patch_path=record.patch_path[:500],
+                )
+        except Exception as exc:
+            logger.warning("Could not store finding %s", record.finding_id, exc_info=True)
+            _record(
+                result, EntryOutcome(name=record.origin_label, outcome="error", detail=str(exc))
+            )
+            continue
+
+        seen[text_key] = report.pk
+        _record(
+            result,
+            EntryOutcome(name=record.origin_label, outcome="imported", report_id=report.pk),
+        )
+        if auto_triage:
+            from franktheunicorn.security.queue import queue_triage_on_request
+
+            try:
+                if queue_triage_on_request(report, operator_config):
+                    result.queued_triage += 1
+            except Exception:
+                logger.warning("Could not queue triage for finding %s", record.finding_id)
+
+    if expanded.truncated:
+        result.error = f"manifest claimed more than {MAX_FINDINGS} findings; expanded the first"
 
 
 def _walk_entries(

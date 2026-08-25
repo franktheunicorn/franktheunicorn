@@ -620,6 +620,18 @@ class SecurityReport(models.Model):
     # Operator verdict
     operator_notes = models.TextField(blank=True, default="")
 
+    # A scanner's own id for this finding (e.g. "f001"), when the report came out
+    # of a findings manifest rather than a standalone file. Kept because it's the
+    # join key the archive itself uses: PATCHES/bug_N/meta.json names the finding
+    # its patch fixes, which is how proposed_patch below gets attached.
+    finding_id = models.CharField(max_length=100, blank=True, default="")
+
+    # A proposed fix shipped alongside the finding. Scanner archives carry one
+    # patch per finding and they're the most directly actionable thing in the
+    # bundle, so they're kept and shown rather than skipped as "not a report".
+    proposed_patch = models.TextField(blank=True, default="")
+    proposed_patch_path = models.CharField(max_length=500, blank=True, default="")
+
     # Which archive a source="zip" report came from. Two scans of the same repo
     # contain the same entry paths with different contents, so the path alone
     # doesn't identify a report: importing three real scanner archives produced

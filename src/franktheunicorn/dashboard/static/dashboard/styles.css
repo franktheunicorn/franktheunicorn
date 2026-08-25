@@ -297,6 +297,20 @@ thead th { border-bottom: 2px solid var(--border); }
 }
 .zip-import-cmd code { white-space: pre; }
 
+/* A diff has to keep its own line breaks — re-flowed hunks don't apply — so this
+   scrolls sideways rather than wrapping like the report body above it. */
+.patch-body {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.75rem;
+    margin-top: 0.5rem;
+    font-size: 0.78rem;
+    white-space: pre;
+    overflow: auto;
+    max-height: 480px;
+}
+
 @media (max-width: 600px) {
     body { padding: 0.5rem; }
     .tab-bar a { padding: 0.4rem 0.6rem; font-size: 0.75rem; }
