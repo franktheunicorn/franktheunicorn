@@ -12,13 +12,19 @@ DB. That is deliberate, and it's what makes the classic zip attacks moot here �
 there is no extraction step for a ``../../`` entry name or a symlink to escape
 into.
 
-What *is* still reachable is resource exhaustion. The sizes in the central
-directory are written by whoever built the archive, so they are treated as a
-cheap first filter rather than as the limit: ``_read_entry`` reads in capped
-chunks, refuses codecs whose decompression CPython won't bound for us, and
-reports what it actually produced so the archive-wide budget is charged for
-rejected entries too — otherwise refusing an entry is free and the aggregate cap
-bounds nothing.
+What *is* still reachable is resource exhaustion, and three things bound it —
+none of which trust the archive's own numbers:
+
+* A codec allowlist. ZIP_DEFLATED honours the length argument to ``read``;
+  bzip2 and lzma take CPython's unbounded ``decompress(data)`` branch, where a
+  524-byte entry over a 512 MiB payload moved peak RSS by ~1 GB in 1.5s.
+* Chunked reads, so each ``read`` call bounds its own decompression.
+* The declared size, as a cheap *first* filter — a header that lies low doesn't
+  buy anything, because CPython truncates every read to it and the CRC then
+  fails.
+
+The archive-wide budget is charged for rejected entries too; otherwise refusing
+an entry is free and the aggregate cap bounds nothing.
 """
 
 from __future__ import annotations
@@ -127,10 +133,10 @@ class ZipImportResult:
     entries: list[EntryOutcome] = field(default_factory=list)
     queued_triage: int = 0
     error: str = ""
-    #: Why triage couldn't be attempted, when that's the reason nothing was
-    #: queued. Carried explicitly so callers don't have to guess a cause from
-    #: ``queued_triage == 0`` and blame the operator's config for a bad parse.
-    config_error: str = ""
+    #: Why an explicitly requested triage didn't happen. Carried explicitly so
+    #: callers don't have to guess a cause from ``queued_triage == 0`` and blame
+    #: the operator's config for a bad parse.
+    triage_skipped_reason: str = ""
 
     def _count(self, outcome: str) -> int:
         return sum(1 for e in self.entries if e.outcome == outcome)
@@ -191,10 +197,15 @@ def import_reports_from_zip(
     and two LLM calls, which is what ``security_triage.auto_triage`` was turned
     on for. A thousand-report backlog through the same switch is a thousand
     lookups and two thousand calls, charged the moment someone picks a file —
-    the kind of bill you find out about afterwards. Bulk asks first; the caller
-    passes ``auto_triage=True`` when the operator has explicitly said so, which
-    routes through ``queue_triage_on_request`` — honoured unless the whole
-    security-triage feature is switched off.
+    the kind of bill you find out about afterwards. Bulk asks first.
+
+    Even then it honours ``security_triage.enabled``, which the single-report
+    door deliberately doesn't: a click is one report and the button is the
+    consent, whereas this fans out over the whole archive, and CLAUDE.md wants a
+    v1.5 path off unless config says otherwise. Refusing has to be *loud* — the
+    setting defaults False and ships commented out, so a silent gate would make
+    ``--triage`` a no-op on a default install. The reason lands in
+    ``triage_skipped_reason`` for the caller to show.
 
     ``require_security_content`` applies the same filter the email door uses —
     the parser's own ``is_security_report`` verdict — and it matters more here
@@ -223,9 +234,18 @@ def import_reports_from_zip(
 
             operator_config = get_operator_config()
         except Exception as exc:
+            # Fail closed: without the config we can't tell whether the operator
+            # switched triage off, and guessing wrong costs two LLM calls a report.
             logger.warning("Could not load operator config; importing untriaged", exc_info=True)
-            result.config_error = str(exc) or exc.__class__.__name__
+            result.triage_skipped_reason = (
+                f"could not read the operator config ({str(exc) or exc.__class__.__name__})"
+            )
             auto_triage = False
+        else:
+            if not operator_config.security_triage.enabled:
+                logger.info("security_triage.enabled is false; importing untriaged")
+                result.triage_skipped_reason = "security_triage.enabled is false in operator.yaml"
+                auto_triage = False
     try:
         with zipfile.ZipFile(source) as archive:
             _import_entries(
@@ -276,21 +296,23 @@ def _import_entries(
         # tripped it and every entry after it got no EntryOutcome at all, so the
         # counts didn't add up to the archive.
         if _suffix(info.filename) in _BINARY_SUFFIXES:
-            result.entries.append(
+            _record(
+                result,
                 EntryOutcome(
                     name=info.filename, outcome="unsupported", detail="unhandled file type"
-                )
+                ),
             )
             continue
 
         # Codec first: an entry we will never read shouldn't be reported by size.
         if info.compress_type not in _SAFE_COMPRESS_TYPES:
-            result.entries.append(
+            _record(
+                result,
                 EntryOutcome(
                     name=info.filename,
                     outcome="unsupported",
                     detail=f"unsupported compression (type {info.compress_type})",
-                )
+                ),
             )
             continue
 
@@ -301,12 +323,13 @@ def _import_entries(
         # then fails the CRC check. _read_entry adds the bound that does not
         # depend on the header at all.
         if info.file_size > MAX_ENTRY_BYTES:
-            result.entries.append(
+            _record(
+                result,
                 EntryOutcome(
                     name=info.filename,
                     outcome="too-large",
                     detail=f"{info.file_size} bytes exceeds the {MAX_ENTRY_BYTES} byte limit",
-                )
+                ),
             )
             continue
 
@@ -318,24 +341,26 @@ def _import_entries(
         # while the aggregate cap read zero.
         read_bytes += produced
         if raw is None:
-            result.entries.append(EntryOutcome(name=info.filename, outcome=outcome, detail=detail))
+            _record(result, EntryOutcome(name=info.filename, outcome=outcome, detail=detail))
             if read_bytes > MAX_TOTAL_BYTES:
                 result.error = f"archive expands past the {MAX_TOTAL_BYTES} byte total limit"
                 return
             continue
 
         if read_bytes > MAX_TOTAL_BYTES:
-            result.entries.append(
+            _record(
+                result,
                 EntryOutcome(
                     name=info.filename,
                     outcome="too-large",
                     detail="archive total-size budget exhausted",
-                )
+                ),
             )
             result.error = f"archive expands past the {MAX_TOTAL_BYTES} byte total limit"
             return
 
-        result.entries.append(
+        _record(
+            result,
             _import_entry(
                 info,
                 raw,
@@ -345,7 +370,7 @@ def _import_entries(
                 seen,
                 operator_config,
                 require_security_content,
-            )
+            ),
         )
 
 
@@ -376,11 +401,16 @@ def _read_entry(
     ``archive.read(info)`` is the obvious call and it does not bound anything:
     CPython decompresses in ~1 GiB slices and truncates to the declared
     ``file_size`` only afterwards. Reading in capped chunks bounds the work for
-    the codecs that honour a length argument, and codecs that don't are refused
-    outright above — between them the limit no longer depends on a number the
-    archive's author chose.
+    the codecs that honour a length argument, and codecs that don't are refused.
+
+    Both guards below are *invariant checks, not the live defence* — the caller
+    screens compress_type and file_size before calling, so neither can fire
+    today, and coverage says so. They stay because this function's contract is
+    "bounded", and a future caller that skips the pre-screen shouldn't silently
+    get an unbounded read. Don't read them as the thing standing between you and
+    a zip bomb; that's the codec allowlist and the chunk size.
     """
-    if info.compress_type not in _SAFE_COMPRESS_TYPES:
+    if info.compress_type not in _SAFE_COMPRESS_TYPES:  # pragma: no cover - caller screens
         return None, "unsupported", f"unsupported compression (type {info.compress_type})", 0
 
     produced = 0
@@ -392,7 +422,7 @@ def _read_entry(
                 if not chunk:
                     break
                 produced += len(chunk)
-                if produced > MAX_ENTRY_BYTES:
+                if produced > MAX_ENTRY_BYTES:  # pragma: no cover - caller screens
                     return (
                         None,
                         "too-large",
@@ -432,8 +462,37 @@ def _build_dedup_index() -> dict[str, int]:
     return index
 
 
-def _mid_key(message_id: str, project_id: int | None) -> str:
-    return f"mid:{project_id if project_id is not None else 'none'}:{message_id}"
+#: Width of ``SecurityReport.email_message_id``. Keys are built from the
+#: truncated value because that's what the column holds — computing the key from
+#: the full one made message-id dedup a guaranteed miss for any id longer than
+#: this, so every re-import added another copy and another triage bill.
+_MESSAGE_ID_MAX_LEN = 500
+
+
+def _record(result: ZipImportResult, outcome: EntryOutcome) -> None:
+    """Record an entry's outcome, and log it when the entry didn't become a report.
+
+    The one place that happens, so "see the worker log" is true for every outcome
+    the dashboard summarises rather than names. Nothing logged for an import or a
+    duplicate — those are visible in the list itself.
+    """
+    result.entries.append(outcome)
+    if outcome.outcome in ("imported", "duplicate"):
+        return
+    logger.info(
+        "Zip import skipped %s: %s%s",
+        outcome.name,
+        outcome.outcome,
+        f" ({outcome.detail})" if outcome.detail else "",
+    )
+
+
+def _mid_key(message_id: object, project_id: int | None) -> str:
+    # str() before slicing: compat32 wraps a header carrying a raw non-ASCII byte
+    # in an email.header.Header, which is truthy and stringifies but isn't
+    # subscriptable.
+    scope = project_id if project_id is not None else "none"
+    return f"mid:{scope}:{str(message_id)[:_MESSAGE_ID_MAX_LEN]}"
 
 
 def _text_key(body: str, project_id: int | None) -> str:
@@ -515,7 +574,9 @@ def _import_entry(
             reporter_name=str(parsed.from_name)[:255],
             reporter_email=str(parsed.from_email)[:255],
             source="zip",
-            email_message_id=str(parsed.message_id)[:500],
+            # Same bound _mid_key uses, or the stored value and the dedup key
+            # disagree and the message-id door stops working.
+            email_message_id=str(parsed.message_id)[:_MESSAGE_ID_MAX_LEN],
             email_received_at=parsed.received_at,
         )
     except Exception as exc:
@@ -574,27 +635,45 @@ def _classify(name: str, raw: bytes) -> str:
     return "text"
 
 
-#: UTF-16/32 byte-order marks. Text in these encodings has a NUL for every
-#: ASCII character, so the NUL heuristic below would call a perfectly good
-#: report — a Windows-originated mail export, say — a binary file and drop it.
-_TEXT_BOMS = (
-    b"\xff\xfe\x00\x00",
-    b"\x00\x00\xfe\xff",
-    b"\xff\xfe",
-    b"\xfe\xff",
+#: Byte-order marks and what they mean. Longest first — the UTF-32-LE mark
+#: starts with the UTF-16-LE one, so testing short-first misreads every UTF-32
+#: file as UTF-16.
+_BOMS: tuple[tuple[bytes, str], ...] = (
+    (b"\xff\xfe\x00\x00", "utf-32-le"),
+    (b"\x00\x00\xfe\xff", "utf-32-be"),
+    (b"\xff\xfe", "utf-16-le"),
+    (b"\xfe\xff", "utf-16-be"),
+    (b"\xef\xbb\xbf", "utf-8"),
 )
 
 
-def _looks_binary(raw: bytes) -> bool:
-    """Whether *raw* is binary, by the heuristic git and file(1) both use.
+def _bom(raw: bytes) -> tuple[bytes, str] | None:
+    """The BOM at the head of *raw* and its encoding, if there is one."""
+    for bom, encoding in _BOMS:
+        if raw.startswith(bom):
+            return bom, encoding
+    return None
 
-    A NUL byte in the first few KB is the signal, with one exception that matters
-    here: UTF-16/32 is full of them by construction, so a byte-order mark wins
-    over the NUL test.
+
+def _looks_binary(raw: bytes) -> bool:
+    """Whether *raw* is binary, by the NUL heuristic git and file(1) both use.
+
+    UTF-16/32 holds a NUL for every ASCII character, so BOM-marked bytes are
+    decoded first and the check runs on the result. Accepting them on the BOM
+    alone waved through any binary that happened to start ``\\xff\\xfe`` — two
+    bytes, no scan — which git wouldn't and file(1) wouldn't.
     """
-    if raw.startswith(_TEXT_BOMS):
-        return False
-    return b"\x00" in raw[:8192]
+    marker = _bom(raw)
+    if marker is None:
+        return b"\x00" in raw[:8192]
+    bom, encoding = marker
+    try:
+        # Strict: binary read as UTF-16 trips on unpaired surrogates, which is
+        # the signal. The slice is BOM-aligned, so no partial trailing character.
+        head = raw[len(bom) : 8192].decode(encoding)
+    except UnicodeDecodeError:
+        return True
+    return "\x00" in head
 
 
 def _parse_entry(raw: bytes, kind: str) -> InboxMessage:
@@ -609,25 +688,28 @@ def _parse_entry(raw: bytes, kind: str) -> InboxMessage:
         parse_pasted_report,
     )
 
+    text = _decode_text(raw)
     if kind == "eml":
-        return parse_email_message(raw)
-    # errors="replace" rather than a hard failure: a report is worth importing
-    # with a mangled byte in it, and mail exports carry all sorts of encodings.
-    # The BOM check comes first because utf-8 would turn a UTF-16 report into a
-    # field of replacement characters.
-    return parse_pasted_report(_decode_text(raw))
+        # Decoded and re-encoded, never handed the raw bytes. UTF-16 headers are
+        # unreadable to email.message_from_bytes, so the whole report came back
+        # is_security_report=False and vanished as "not-a-report"; a UTF-8 BOM
+        # sits where the first header name should be, so the parser treats the
+        # entire message as a body and loses subject, From, Date and Message-ID
+        # while still importing.
+        return parse_email_message(text.encode("utf-8"))
+    return parse_pasted_report(text)
 
 
 def _decode_text(raw: bytes) -> str:
-    """Decode entry bytes to text, honouring a UTF-16/32 byte-order mark."""
-    for bom, encoding in (
-        (b"\xff\xfe\x00\x00", "utf-32-le"),
-        (b"\x00\x00\xfe\xff", "utf-32-be"),
-        (b"\xff\xfe", "utf-16-le"),
-        (b"\xfe\xff", "utf-16-be"),
-    ):
-        if raw.startswith(bom):
-            return raw[len(bom) :].decode(encoding, errors="replace")
+    """Decode entry bytes to text, honouring and stripping a BOM.
+
+    ``errors="replace"`` rather than failing: a report is worth importing with a
+    mangled byte in it, and mail exports carry all sorts of encodings.
+    """
+    marker = _bom(raw)
+    if marker is not None:
+        bom, encoding = marker
+        return raw[len(bom) :].decode(encoding, errors="replace")
     return raw.decode("utf-8", errors="replace")
 
 

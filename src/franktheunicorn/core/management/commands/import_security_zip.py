@@ -84,12 +84,9 @@ class Command(BaseCommand):
 
         self.stdout.write(self.style.SUCCESS(summary))
         if result.imported and not result.queued_triage:
-            if result.config_error:
+            if result.triage_skipped_reason:
                 self.stdout.write(
-                    self.style.WARNING(
-                        f"  Imported untriaged: could not read the operator config "
-                        f"({result.config_error})."
-                    )
+                    self.style.WARNING(f"  Imported untriaged: {result.triage_skipped_reason}.")
                 )
             elif options.get("triage"):
                 self.stdout.write("  Imported untriaged: nothing queued — check the worker log.")

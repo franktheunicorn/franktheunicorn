@@ -495,6 +495,70 @@ class TestImportReportsFromZip:
         assert outcomes["bom.txt"] == "imported", [e.detail for e in result.entries]
         assert "path traversal vulnerability" in SecurityReport.objects.get().raw_text
 
+    def test_a_long_message_id_still_dedups(self, no_auto_triage: Any) -> None:
+        """The key was built from the full id, the column stores 500 chars."""
+        long_id = "<" + "x" * 620 + "@example.com>"
+        eml = (
+            b"From: Sec <security@apache.org>\r\n"
+            b"Subject: [SECURITY] traversal\r\n"
+            b"Message-ID: " + long_id.encode() + b"\r\n\r\n"
+            b"A vulnerability: path traversal allows arbitrary file write.\r\n"
+        )
+        # Bodies differ, so only the message-id door can catch this.
+        other = eml.replace(b"arbitrary file write", b"arbitrary file read")
+
+        import_reports_from_zip(make_zip({"a.eml": eml}))
+        result = import_reports_from_zip(make_zip({"b.eml": other}))
+
+        assert result.imported == 0
+        assert result.duplicates == 1
+        assert SecurityReport.objects.count() == 1
+
+    def test_a_binary_starting_with_a_bom_is_still_refused(self, no_auto_triage: Any) -> None:
+        """Accepting on the BOM alone was two bytes and no scan."""
+        archive = make_zip({"trap": b"\xff\xfe" + bytes(range(256)) * 40})
+
+        result = import_reports_from_zip(archive)
+
+        assert result.imported == 0
+        assert [e.outcome for e in result.entries] == ["unsupported"]
+
+    def test_a_utf16_eml_keeps_its_headers(self, no_auto_triage: Any) -> None:
+        """Raw UTF-16 is unreadable to the MIME parser, so this used to vanish."""
+        raw = b"\xff\xfe" + FORWARDED_EML.decode().encode("utf-16-le")
+
+        result = import_reports_from_zip(make_zip({"export.eml": raw}))
+
+        assert result.imported == 1, [e.outcome for e in result.entries]
+        report = SecurityReport.objects.get()
+        assert report.email_message_id == "<report-1@example.com>"
+        assert "Path traversal in extractor" in report.title
+
+    def test_a_utf8_bom_eml_keeps_its_headers(self, no_auto_triage: Any) -> None:
+        """The BOM sat where the first header name goes, so the parser saw only a body.
+
+        It still imported, which is why nothing flagged it: no reporter, no date,
+        no message-id to dedup on. Notepad writes this by default.
+        """
+        result = import_reports_from_zip(make_zip({"export.eml": b"\xef\xbb\xbf" + FORWARDED_EML}))
+
+        assert result.imported == 1
+        report = SecurityReport.objects.get()
+        assert report.email_message_id == "<report-1@example.com>"
+        assert report.reporter_email == "security@apache.org"
+
+    def test_a_bom_does_not_defeat_text_dedup(self, no_auto_triage: Any) -> None:
+        """U+FEFF is category Cf, not whitespace, so strip() left it in the sha256."""
+        archive = make_zip(
+            {"plain.txt": REPORT_TEXT.encode(), "bom.txt": b"\xef\xbb\xbf" + REPORT_TEXT.encode()}
+        )
+
+        result = import_reports_from_zip(archive)
+
+        assert result.imported == 1
+        assert result.duplicates == 1
+        assert not SecurityReport.objects.get().raw_text.startswith("﻿")
+
     def test_too_many_entries_is_refused_up_front(self, no_auto_triage: Any) -> None:
         archive = make_zip({f"r{i}.txt": "x" for i in range(MAX_ENTRIES + 1)})
 
@@ -638,13 +702,14 @@ class TestImportAutoTriage:
         assert WorkerCommand.objects.filter(command="run_security_triage").count() == 1
 
     @patch("franktheunicorn.config.loader.get_operator_config")
-    def test_opting_in_works_even_with_the_feature_flag_off(self, mock_config: MagicMock) -> None:
-        """An explicit ask isn't gated on either automatic-behaviour setting.
+    def test_the_feature_flag_stops_bulk_triage_but_says_so(self, mock_config: MagicMock) -> None:
+        """enabled:false has to mean something for a 2000x fan-out.
 
-        security_triage.enabled defaults False and the example operator.yaml ships
-        the block commented out, so gating explicit requests on it made --triage,
-        the upload checkbox and the dashboard's Triage button no-ops on exactly
-        the install the documented setup produces.
+        Unlike the single-report button, where the click is the consent. Nothing
+        downstream re-checks — neither the worker dispatcher nor triage_report —
+        so if this doesn't hold the line, nothing does. Loudly, though: the
+        setting defaults False and ships commented out, so a silent gate would
+        make --triage a no-op on a default install.
         """
         from franktheunicorn.config.models import OperatorConfig, SecurityTriageConfig
 
@@ -656,8 +721,21 @@ class TestImportAutoTriage:
         result = import_reports_from_zip(make_zip({"a.txt": REPORT_TEXT}), auto_triage=True)
 
         assert result.imported == 1
-        assert result.queued_triage == 1
-        assert WorkerCommand.objects.filter(command="run_security_triage").count() == 1
+        assert result.queued_triage == 0
+        assert WorkerCommand.objects.count() == 0
+        assert "security_triage.enabled is false" in result.triage_skipped_reason
+
+    @patch("franktheunicorn.config.loader.get_operator_config")
+    def test_a_bad_config_fails_closed_with_a_reason(self, mock_config: MagicMock) -> None:
+        """Can't read the config, can't know whether triage was switched off."""
+        mock_config.side_effect = ValueError("operator.yaml: bad indent on line 12")
+
+        result = import_reports_from_zip(make_zip({"a.txt": REPORT_TEXT}), auto_triage=True)
+
+        assert result.imported == 1
+        assert result.queued_triage == 0
+        assert "could not read the operator config" in result.triage_skipped_reason
+        assert "bad indent on line 12" in result.triage_skipped_reason
 
     @patch("franktheunicorn.config.loader.get_operator_config")
     def test_a_queueing_failure_still_leaves_the_report_imported(
