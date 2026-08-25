@@ -99,18 +99,17 @@ class CopyPastaMatch:
     # and the dedup key in _create_drafts. The head of the added block, not
     # necessarily the first duplicated line within it.
     new_start_line: int
+    # Count of duplicated lines, not a span: the winnowing tier's matched regions
+    # are disjoint, so this excludes the gaps between them.
     num_lines: int
     tier: str  # "symilar", "winnowing", or "llm"
     # The duplicated lines as they appear in the PR. Used by the noise filter
     # to tell a real copy-paste from scaffolding every file already has.
     matched_lines: tuple[str, ...] = field(default_factory=tuple)
-    # NOTE: there is deliberately no per-match line range here. ReviewDraft has a
-    # line_end field (five posters consume it, nothing produces it) and wiring it
-    # up would be the natural home for one — but neither tier can supply an
-    # honest range: _slice_line_range returns the hull across disjoint matched
-    # regions, and symilar's count is of stripped common lines, not a span.
-    # Anchoring on new_start_line and describing the extent in prose is the
-    # strongest claim the data supports.
+    # NOTE: no per-match line range here, deliberately. ReviewDraft has a
+    # line_end (five posters consume it, nothing produces it) and this would be
+    # its natural home — but neither tier can supply an honest range. The
+    # winnowing slices are disjoint and symilar reports a count, not a span.
 
 
 def check_copypasta(
@@ -563,13 +562,41 @@ def _check_winnowing(
                         # per matched repo file turns one duplicated block into
                         # one draft per file it resembles.
                         new_start_line=chunk.start_line,
-                        num_lines=len(matched_lines),
+                        # The covered count, not len(matched_lines): that's a
+                        # contiguous slice of the hull, so it bills the author
+                        # for the gaps between disjoint matched regions.
+                        num_lines=(
+                            _slice_covered_line_count(
+                                getattr(chunk_fp, "raw_code", ""), _chunk_slices
+                            )
+                            or len(matched_lines)
+                        ),
                         tier="winnowing",
                         matched_lines=matched_lines,
                     )
                 )
 
     return matches
+
+
+def _slice_covered_line_count(raw_code: str, slices: object) -> int | None:
+    """Count the lines the slices actually cover, skipping the gaps between them.
+
+    ``_slice_line_range`` gives the hull; this gives the truth. Regions at lines
+    1-3 and 15-17 are 6 duplicated lines, not 17.
+    """
+    if not raw_code or not hasattr(slices, "__len__") or len(slices) == 0:
+        return None
+    try:
+        starts, ends = slices[0], slices[1]  # type: ignore[index]
+        covered: set[int] = set()
+        for start_off, end_off in zip(starts, ends, strict=False):
+            first = raw_code[: int(start_off)].count("\n") + 1
+            last = raw_code[: int(end_off)].count("\n") + 1
+            covered.update(range(first, max(last, first) + 1))
+    except (IndexError, KeyError, TypeError, ValueError):
+        return None
+    return len(covered) or None
 
 
 def _slice_line_range(raw_code: str, slices: object) -> tuple[int, int] | None:
@@ -681,27 +708,21 @@ def _create_drafts(
             "llm": "semantic",
         }.get(match.tier, match.tier)
 
-        if match.source_start_line != match.source_end_line:
-            location = (
-                f"`{match.source_file}` "
-                f"(lines {match.source_start_line}\u2013{match.source_end_line})"
-            )
-        else:
-            location = f"`{match.source_file}`"
+        # "from line A", not "lines A-B". source_start/end_line come from
+        # _slice_line_range, which is the hull across disjoint matched regions \u2014
+        # so the end is not a line anything matched at, and the range accuses the
+        # author of everything in between. The start is a real pointer; keep it.
+        location = f"`{match.source_file}` (from line {match.source_start_line})"
 
-        # "spanning N lines", not "N lines" and not an explicit A\u2013B range.
-        #
-        # The comment is anchored on the head of the added block (that's the
-        # dedup key) while num_lines measures only the matched part, so a bare
-        # count read as "the N lines starting here" and pointed at the wrong
-        # place. Naming the range instead is worse: for the winnowing tier it
-        # comes from _slice_line_range, which spans first-region-start to
-        # last-region-end across *disjoint* matches, so a block matching lines
-        # 1-3 and 15-17 reports 1-17 and accuses the author of duplicating the
-        # eleven lines in between. "Spanning" is the strongest claim both tiers
-        # actually support.
+        # A count of duplicated lines, and no span claim. num_lines means the
+        # same thing in both tiers now \u2014 symilar's cmn_lines_nb is a count of
+        # common lines, and the winnowing tier counts the lines its slices
+        # actually cover. "Spanning N lines" read as a span, which for winnowing
+        # was the hull again: regions at 1-3 and 15-17 are 6 duplicated lines,
+        # not 17. The draft is anchored at the head of the added block (the dedup
+        # key), so the count deliberately doesn't try to locate anything.
         comment_body = (
-            f"Possible copy-paste ({tier_label} match spanning {match.num_lines} lines): "
+            f"Possible copy-paste ({tier_label} match, {match.num_lines} duplicated lines): "
             f"this code appears to duplicate existing code in {location}. "
             f"Consider extracting a shared function or reusing the existing implementation."
         )

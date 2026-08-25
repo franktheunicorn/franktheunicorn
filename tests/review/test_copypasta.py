@@ -1142,14 +1142,11 @@ class TestWinnowingDraftDedup:
 class TestReportedExtent:
     """The comment must not claim more than the matchers can actually support.
 
-    num_lines measures the matched part while the draft is anchored on the head
-    of the added block, so a bare "N lines" read as "the N lines starting here".
-    Naming an explicit range instead is worse: for the winnowing tier the range
-    comes from _slice_line_range, which spans first-region-start to
-    last-region-end across disjoint matches.
+    Both line ranges in play are hulls across disjoint matched regions, so
+    neither the extent nor the source range can be stated as a span.
     """
 
-    def test_extent_is_described_not_located(self, db_pr: PullRequest) -> None:
+    def test_extent_is_a_count_not_a_span(self, db_pr: PullRequest) -> None:
         match = CopyPastaMatch(
             source_file="existing.py",
             source_start_line=1,
@@ -1163,25 +1160,52 @@ class TestReportedExtent:
 
         draft = _create_drafts(db_pr, [match])[0]
 
-        assert "spanning 6 lines" in draft.comment_body
+        assert "6 duplicated lines" in draft.comment_body
+        assert "spanning" not in draft.comment_body
         # No file:start-end claim, because neither tier can justify one.
         assert "new.py:" not in draft.comment_body
         # Still anchored at the chunk head, which is the dedup key.
         assert draft.line_number == 100
 
-    def test_slice_line_range_spans_disjoint_regions(self) -> None:
-        """Why there is no range in the comment: this returns the convex hull."""
-        from franktheunicorn.review.copypasta import _slice_line_range
+    def test_source_side_is_a_pointer_not_a_range(self, db_pr: PullRequest) -> None:
+        """source_end_line is the hull end, so no line matched there."""
+        match = CopyPastaMatch(
+            source_file="existing.py",
+            source_start_line=1,
+            source_end_line=17,
+            new_file="new.py",
+            new_start_line=100,
+            num_lines=6,
+            tier="winnowing",
+            matched_lines=tuple(f"    step_{i}()" for i in range(6)),
+        )
+
+        draft = _create_drafts(db_pr, [match])[0]
+
+        assert "from line 1" in draft.comment_body
+        assert "17" not in draft.comment_body, "the hull end must not appear"
+
+    def test_covered_count_skips_the_gaps_the_hull_includes(self) -> None:
+        """The two numbers side by side: 6 duplicated lines inside a hull of 17."""
+        from franktheunicorn.review.copypasta import (
+            _slice_covered_line_count,
+            _slice_line_range,
+        )
 
         code = "\n".join(f"line{i}" for i in range(1, 21))
         # Two disjoint matched regions: lines 1-3 and lines 15-17.
-        first_start = 0
-        first_end = code.index("line3") + len("line3")
-        second_start = code.index("line15")
-        second_end = code.index("line17") + len("line17")
-        slices = [[first_start, second_start], [first_end, second_end]]
+        starts = [0, code.index("line15")]
+        ends = [code.index("line3") + len("line3"), code.index("line17") + len("line17")]
+        slices = [starts, ends]
 
+        assert _slice_covered_line_count(code, slices) == 6
         assert _slice_line_range(code, slices) == (1, 17)
+
+    def test_covered_count_falls_back_on_unusable_slices(self) -> None:
+        from franktheunicorn.review.copypasta import _slice_covered_line_count
+
+        assert _slice_covered_line_count("", [[0], [1]]) is None
+        assert _slice_covered_line_count("code", []) is None
 
 
 class TestScanExtensionsValidation:
