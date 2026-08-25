@@ -28,16 +28,23 @@ literal text. Use this tag instead.
 <div class="triage-result triage-queued">
     Triage {{ triage_command.status }} — reload for the result.
 </div>
-{% elif triage_command and not has_triage_result %}
-{# Completed, but the model returned nothing usable. Saying so beats the blank #}
-{# panel this used to render, which offered no way to re-run. #}
+{% elif triage_command and not has_triage_assessment %}
+{# Completed, but nothing the result partial can render. Saying so beats the #}
+{# blank panel this used to be, which offered no way to re-run. Severity is #}
+{# called out separately: the parse step writes it two LLM calls before the #}
+{# assessment, so "nothing came back" would contradict the badge on this page. #}
 <div class="triage-result triage-failed">
+    {% if has_triage_severity %}
+    Triage rated this <strong>{{ report.get_assessed_severity_display }}</strong> but returned no
+    assessment — the analysis step came back empty. Re-running may fill it in.
+    {% else %}
     Triage ran but produced no assessment — the model's answer had nothing usable in it.
     Re-running is worth a try.
+    {% endif %}
 </div>
 {% endif %}
 
-{% if has_triage_result %}
+{% if has_triage_assessment %}
 {% include "dashboard/_security_triage_result.html" %}
 {% endif %}
 

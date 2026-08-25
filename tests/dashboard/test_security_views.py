@@ -471,19 +471,39 @@ class TestSecurityReportTriage:
         # could never match and the test could not fail.
         assert b"security/%d/triage/" % report.pk not in response.content
 
-    def test_a_severity_only_run_is_not_called_empty(self, client: Client, db: Any) -> None:
-        """The badge the run wrote sat directly above "produced no assessment"."""
+    def test_a_severity_only_run_says_what_it_got_and_what_it_didnt(
+        self, client: Client, db: Any
+    ) -> None:
+        """_parse_report writes the severity two LLM calls before any verdict.
+
+        So this is the commonest partial failure, and both halves have to show:
+        blanket "produced no assessment" contradicts the badge on the page, while
+        counting severity as a result rendered the result partial — which gates
+        every block on the other fields — as an empty heading.
+        """
         from franktheunicorn.core.models import WorkerCommand
 
         report = SecurityReportFactory(
-            triage_summary="", poc_assessment="", poc_plausible=None, assessed_severity="high"
+            triage_summary="",
+            poc_assessment="",
+            expected_behavior_explanation="",
+            is_expected_behavior=False,
+            poc_plausible=None,
+            assessed_severity="high",
         )
         cmd = WorkerCommand.objects.create(command="run_security_triage", security_report=report)
         WorkerCommand.objects.filter(pk=cmd.pk).update(status="completed")
 
-        response = client.get(f"/security/{report.pk}/")
+        body = client.get(f"/security/{report.pk}/").content.decode()
 
-        assert b"produced no assessment" not in response.content
+        # Contiguous phrases only — the template wraps mid-sentence.
+        assert "came back empty" in body
+        assert "rated this" in body
+        assert "High" in body
+        # The empty-card path: the result partial must not be rendered at all.
+        assert "Triage Analysis" not in body
+        # And the re-run button is still there.
+        assert "Re-run LLM Triage" in body
 
     @patch("franktheunicorn.config.loader.get_operator_config")
     def test_the_triage_button_works_without_the_feature_flag(

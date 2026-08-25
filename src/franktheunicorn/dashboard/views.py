@@ -991,7 +991,14 @@ def _zip_import_command() -> str:
     from django.conf import settings
 
     if _running_in_container():
-        return "docker compose exec web python manage.py import_security_zip data/reports.zip"
+        # Both forms: the image can tell us it's a container, not which
+        # orchestrator, and the same image ships in compose.yaml and k8s/deploy.yaml.
+        # Renders on two lines inside the <pre>.
+        return (
+            "docker compose exec web python manage.py import_security_zip data/reports.zip\n"
+            "kubectl exec deploy/franktheunicorn-web -- "
+            "python manage.py import_security_zip data/reports.zip"
+        )
 
     base = Path(settings.BASE_DIR)
     interpreter = "python"
@@ -1005,14 +1012,23 @@ def _zip_import_command() -> str:
 
 
 def _running_in_container() -> bool:
-    """Whether this process is inside the shipped Docker image.
+    """Whether this process is inside the shipped image.
 
-    ``/.dockerenv`` is what the daemon drops into every container it creates;
-    compose sets no env var worth trusting. Falling back to "not a container" is
-    the safe default — the venv form at least names a real interpreter.
+    ``FRANK_IN_CONTAINER`` comes from the Dockerfile, which is the only party
+    that actually knows. Sniffing the runtime instead got k8s wrong: the manifest
+    runs this same image under containerd, which creates no ``/.dockerenv``, so
+    the dashboard printed the host-shell command its own caller calls worse than
+    printing nothing.
+
+    ``/.dockerenv`` stays as a fallback for an image built before the env var, and
+    "not a container" is the safe default — the venv form at least names a real
+    interpreter.
     """
+    import os
     from pathlib import Path
 
+    if os.environ.get("FRANK_IN_CONTAINER", "").strip().lower() in ("1", "true", "yes"):
+        return True
     try:
         return Path("/.dockerenv").exists()
     except OSError:  # pragma: no cover - unreadable root
@@ -1085,12 +1101,14 @@ MAX_SECURITY_ZIP_UPLOAD_BYTES = 8 * 1024 * 1024
 #: file). Until that lands, this bounds a request to a couple of hundred inserts
 #: and points anything larger at the CLI, which has no such problem.
 #:
-#: Sizing note: don't reason from compose's ``--timeout 90 --worker-class
-#: gthread``. That is the *deployed* config; ``make up`` (scripts/run_local_all.sh)
-#: is what an operator actually runs locally, and gunicorn's own defaults there
-#: mean a **sync** worker on a **30s** timeout — which, unlike gthread, does get
-#: reaped mid-request. So the budget to stay inside is 30 seconds and two workers
-#: with no threads, not 90 seconds and eight slots.
+#: Sizing note: every deployment now runs gthread with ``--timeout 90`` —
+#: compose.yaml, k8s/deploy.yaml and scripts/run_local_all.sh alike. (This
+#: comment used to justify 200 from local ``make up`` running the *sync* worker
+#: on gunicorn's default 30s; that stopped being true in the same push, so the
+#: number is bounded by insert volume and lock contention rather than by the
+#: reaper.) 200 entries measured ~0.5s of SQLite commits, and the risk is the
+#: worker's write lock, not the clock — ``settings.py`` gives each commit a 20s
+#: busy timeout, so the cap is about how many chances to block, not elapsed time.
 MAX_SYNCHRONOUS_ZIP_ENTRIES = 200
 
 
@@ -1156,12 +1174,12 @@ def security_report_upload(request: HttpRequest) -> HttpResponse:
         level = messages.warning if result.error else messages.success
         level(request, f"Imported from {upload.name}: {result.summary()}")
         if not result.queued_triage:
-            # The reason comes from the importer, not from inferring it. Deducing
-            # "disabled in operator.yaml" from queued_triage == 0 sent operators
-            # to check a setting that was already correct when the real cause was
-            # an unreadable config or an already-in-flight run.
-            if result.config_error:
-                reason = f"could not read the operator config ({result.config_error})."
+            # The reason comes from the importer, never inferred from
+            # queued_triage == 0 — that sent operators to check a setting that was
+            # already correct when the real cause was a bad config or an
+            # already-in-flight run.
+            if result.triage_skipped_reason:
+                reason = f"{result.triage_skipped_reason}."
             elif auto_triage:
                 reason = "no triage runs were queued — check the worker log."
             else:
@@ -1190,20 +1208,33 @@ def security_report_upload(request: HttpRequest) -> HttpResponse:
 MAX_UPLOAD_ENTRY_MESSAGES = 8
 
 
-def _report_failed_entries(request: HttpRequest, result: ZipImportResult) -> None:
-    """Name the first few entries that failed, then say how many more there were.
+#: Outcomes worth naming: everything that isn't a report the operator now has.
+#:
+#: "error" and "too-large" alone wasn't enough. A dropped entry is dropped
+#: whether the importer calls it a failure or a decision, and the ones it calls
+#: decisions are the ones most likely to be wrong — a real report that trips only
+#: one security keyword reads as "not-a-report", and a 7-Zip archive is
+#: "unsupported" for every entry, so an operator saw "0 imported, 47 skipped"
+#: with no filename and no reason. There is no --no-filter or --verbose-entries
+#: on this door to go looking with.
+_REPORTED_ENTRY_OUTCOMES = ("error", "too-large", "not-a-report", "unsupported", "empty")
 
-    Failures only. The CLI door lists every skipped entry, which is right for a
-    terminal and wrong for a flash queue; the counts in ``summary()`` already
-    tell the operator how many were skipped, and the page they land on has the
-    imported reports themselves.
+
+def _report_failed_entries(request: HttpRequest, result: ZipImportResult) -> None:
+    """Name the first few entries that didn't import, then count the rest.
+
+    Not "duplicate" — that one the operator already has, and the re-import hint
+    advertises it as the expected case.
     """
-    failures = [entry for entry in result.entries if entry.outcome in ("error", "too-large")]
-    for entry in failures[:MAX_UPLOAD_ENTRY_MESSAGES]:
-        messages.warning(request, f"{entry.name}: {entry.outcome} — {entry.detail}")
-    remaining = len(failures) - MAX_UPLOAD_ENTRY_MESSAGES
+    missed = [entry for entry in result.entries if entry.outcome in _REPORTED_ENTRY_OUTCOMES]
+    for entry in missed[:MAX_UPLOAD_ENTRY_MESSAGES]:
+        detail = f" — {entry.detail}" if entry.detail else ""
+        messages.warning(request, f"{entry.name}: {entry.outcome}{detail}")
+    remaining = len(missed) - MAX_UPLOAD_ENTRY_MESSAGES
     if remaining > 0:
-        messages.warning(request, f"…and {remaining} more entr(ies) failed; see the worker log.")
+        messages.warning(
+            request, f"…and {remaining} more entr(ies) didn't import; see the worker log."
+        )
 
 
 def security_report_create(request: HttpRequest) -> HttpResponse:
@@ -1293,7 +1324,8 @@ def _triage_area_context(
     return {
         "report": report,
         "triage_command": triage_command,
-        "has_triage_result": _has_triage_result(report),
+        "has_triage_assessment": _has_triage_assessment(report),
+        "has_triage_severity": _has_triage_severity(report),
         "triage_in_flight": (
             triage_command is not None and triage_command.status in in_flight_statuses()
         ),
@@ -1340,15 +1372,13 @@ def _render_triage_area(
     )
 
 
-def _has_triage_result(report: SecurityReport) -> bool:
-    """Whether triage left anything worth rendering on *report*.
+def _has_triage_assessment(report: SecurityReport) -> bool:
+    """Whether triage left anything ``_security_triage_result.html`` can render.
 
-    Not the same question as "is triage_summary set". The model asks for a
-    summary but doesn't require one — it's ``analysis.get("triage_summary", "")``
-    — so a run that answered with a POC assessment and no summary used to
-    render as a blank panel: the result partial was gated on the summary, the
-    status strip only covered pending/running/failed, and a *completed* command
-    matched neither. The page came back empty with no way to re-run.
+    Every field that partial gates a block on, and nothing else. Not the same
+    question as "is triage_summary set": the model asks for a summary but doesn't
+    require one, so a run that answered with only a POC assessment used to render
+    a blank panel with no way to re-run.
     """
     return bool(
         report.triage_summary
@@ -1356,12 +1386,20 @@ def _has_triage_result(report: SecurityReport) -> bool:
         or report.expected_behavior_explanation
         or report.is_expected_behavior
         or report.poc_plausible is not None
-        # A severity is a result too. Omitting it put the "High" badge this very
-        # run wrote directly above "produced no assessment", inviting the
-        # operator to spend another NVD lookup and two LLM calls re-deriving a
-        # verdict the page was already showing.
-        or (report.assessed_severity and report.assessed_severity != "unknown")
     )
+
+
+def _has_triage_severity(report: SecurityReport) -> bool:
+    """Whether the parse step rated the report, which happens two LLM calls earlier.
+
+    Kept apart from the assessment because it can be true on its own — that's the
+    commonest partial failure, parse fine and the analysis model unreachable — and
+    the two want different words. Folding it into one flag rendered the result
+    partial for a report none of whose blocks it can show: an empty "Triage
+    Analysis" heading, with the "produced no assessment" explanation suppressed
+    because something counted as a result.
+    """
+    return bool(report.assessed_severity and report.assessed_severity != "unknown")
 
 
 @require_POST

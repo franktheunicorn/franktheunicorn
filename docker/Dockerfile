@@ -2,6 +2,12 @@ FROM python:3.12-slim AS base
 
 WORKDIR /app
 
+# The image says so, rather than the code guessing. /.dockerenv only exists under
+# the Docker daemon, so containerd (k8s, which runs this same image) looked like a
+# bare host and the dashboard printed a venv-style command into a shell with
+# neither the interpreter nor the code. See views._running_in_container.
+ENV FRANK_IN_CONTAINER=1
+
 # Install system deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \

@@ -87,30 +87,52 @@ class TestSecurityListZipAffordances:
         # Either repo-relative (a venv under BASE_DIR) or the absolute path.
         assert sys.executable.endswith(command.split(" manage.py")[0].split("/")[-1])
 
-    def test_under_docker_it_prints_a_command_the_host_shell_can_run(self) -> None:
-        """The venv form is unrunnable in the shipped compose deployment.
+    def test_in_a_container_it_prints_a_command_the_host_shell_can_run(self) -> None:
+        """The venv form is unrunnable in the shipped deployments.
 
         In the container this process is /usr/local/bin/python at /app, so the
         naive answer sends the operator to a host shell that has neither the
-        interpreter nor the code nor the archive path.
+        interpreter nor the code nor the archive path. Both orchestrators are
+        offered, because the image knows it's containerised and not which one.
         """
         from franktheunicorn.dashboard import views
 
         with patch.object(views, "_running_in_container", return_value=True):
             command = views._zip_import_command()
 
-        assert command.startswith("docker compose exec")
+        assert "docker compose exec" in command
+        assert "kubectl exec" in command
         # data/ is the bind mount both containers share, so a file dropped there
         # from the host is a file this command can actually open.
         assert "data/reports.zip" in command
 
-    def test_container_detection_uses_dockerenv(self) -> None:
+    def test_the_image_declares_it_is_a_container(self) -> None:
+        """/.dockerenv is Docker-only, so containerd (k8s) read as a bare host."""
         from franktheunicorn.dashboard.views import _running_in_container
 
-        with patch("pathlib.Path.exists", return_value=True):
+        with (
+            patch.dict("os.environ", {"FRANK_IN_CONTAINER": "1"}, clear=False),
+            patch("pathlib.Path.exists", return_value=False),
+        ):
             assert _running_in_container() is True
-        with patch("pathlib.Path.exists", return_value=False):
-            assert _running_in_container() is False
+
+    def test_dockerenv_still_works_for_an_older_image(self) -> None:
+        from franktheunicorn.dashboard.views import _running_in_container
+
+        with patch.dict("os.environ", {"FRANK_IN_CONTAINER": ""}, clear=False):
+            with patch("pathlib.Path.exists", return_value=True):
+                assert _running_in_container() is True
+            with patch("pathlib.Path.exists", return_value=False):
+                assert _running_in_container() is False
+
+    def test_the_shipped_image_sets_the_marker(self) -> None:
+        """The env var is only useful if the Dockerfile actually exports it."""
+        from pathlib import Path
+
+        from django.conf import settings
+
+        dockerfile = Path(settings.BASE_DIR) / "docker" / "Dockerfile"
+        assert "FRANK_IN_CONTAINER=1" in dockerfile.read_text()
 
 
 @pytest.mark.django_db
@@ -168,6 +190,47 @@ class TestSecurityReportUpload:
 
         assert b"Nothing imported" in response.content
         assert SecurityReport.objects.count() == 0
+
+    def test_a_dropped_report_is_named_not_just_counted(
+        self, client: Client, triage_off: Any
+    ) -> None:
+        """ "1 skipped" with no filename gave the operator nothing to go on.
+
+        And no way to go looking: this door has no --no-filter or
+        --verbose-entries. The keyword filter is the likeliest thing to be wrong
+        about a genuine report, so it has to say which one and why.
+        """
+        response = client.post(
+            "/security/upload/",
+            {
+                "zip_file": upload(
+                    {"real.txt": REPORT_TEXT, "notes.txt": "Reminder: buy milk on the way home."}
+                )
+            },
+            follow=True,
+        )
+
+        body = response.content.decode()
+        assert "notes.txt: not-a-report" in body
+        # real.txt appears as the imported report's title, so match the flash
+        # shape rather than the bare name.
+        assert "real.txt:" not in body, "an imported entry needs no flash"
+
+    def test_an_unsupported_archive_says_why(self, client: Client, triage_off: Any) -> None:
+        """A 7-Zip/LZMA zip read as "0 imported, 47 skipped" with no reason."""
+        import io
+        import zipfile
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_LZMA) as zf:
+            zf.writestr("a.txt", REPORT_TEXT)
+        payload = SimpleUploadedFile("reports.zip", buf.getvalue(), "application/zip")
+
+        response = client.post("/security/upload/", {"zip_file": payload}, follow=True)
+
+        body = response.content.decode()
+        assert "a.txt" in body
+        assert "unsupported compression" in body
 
     def test_oversized_upload_is_refused_before_reading(
         self, client: Client, triage_off: Any
