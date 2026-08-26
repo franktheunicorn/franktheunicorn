@@ -579,53 +579,81 @@ def _check_agent_cli_reviewers(operator_config: OperatorConfig) -> None:
             _probe_remote_agent_cli(rc)
 
 
+#: Echoed through the remote command path to prove a command actually ran there.
+_REMOTE_PROBE_SENTINEL = "frank-remote-ok"
+
+
 def _probe_remote_agent_cli(rc: AgentCLIReviewerConfig) -> None:
-    """Check that an ssh-mode reviewer's binary exists on the remote host.
+    """Prove an ssh-mode reviewer can actually run something on the remote.
 
     Never raises and never disables anything — the reviewer stays enabled either
-    way, because a probe that fails for its own reasons (a slow bastion, a
-    wrapper that needs a TTY) shouldn't switch off a working reviewer. It only
-    says so.
+    way, because a probe that fails for its own reasons (a slow bastion, a wrapper
+    wanting a TTY) shouldn't switch off a working reviewer. It only says so.
+
+    Two steps, in this order, because the first is the one nothing else can see.
     """
     from franktheunicorn.review.tool_executor import RemoteSSHExecutor
 
     binary = rc.cli_argv[0]
+    workspace = rc.remote.remote_workspace_dir or "."
     try:
         executor = RemoteSSHExecutor(config=rc.remote)
-        # `command -v` rather than `which`: POSIX, and present in the shells that
-        # a workspace wrapper might drop us into. cwd is the workspace dir, which
-        # is also a cheap check that it exists.
-        result = executor.run(
-            ["sh", "-lc", f"command -v {binary}"],
-            cwd=rc.remote.remote_workspace_dir or ".",
-            timeout=60,
-        )
+        # Step one is not "is the binary installed", it is "does a command sent
+        # this way run at all". A wrapper that takes no remote-command argument
+        # discards ours, opens a shell, exits on EOF, and returns 0 with empty
+        # stdout — which every caller downstream reads as "the repo has no diff",
+        # i.e. a clean review. Round-tripping a sentinel is the only way to tell
+        # those apart, and it goes through the same executor.run() the review
+        # uses, so it proves that path rather than a similar-looking one.
+        echo = executor.run(["echo", _REMOTE_PROBE_SENTINEL], cwd=workspace, timeout=60)
     except Exception:
         logger.warning(
-            "Agent CLI %r: could not probe the remote for %r (see DEBUG); leaving it enabled.",
+            "Agent CLI %r: could not probe the remote (see DEBUG); leaving it enabled.",
             rc.name,
-            binary,
             exc_info=True,
         )
         return
-    if result is None:
+
+    if echo is None:
         logger.warning(
-            "Agent CLI %r: the remote probe did not come back. Check that "
-            "`%s` works from this host. Reviews will produce nothing until it does.",
+            "Agent CLI %r: the remote probe never came back — `%s` failed or timed out "
+            "from this host. Reviews will produce nothing until it works.",
             rc.name,
             " ".join(rc.remote.ssh_command),
         )
         return
-    if not result.ok or not result.stdout.strip():
+    if _REMOTE_PROBE_SENTINEL not in (echo.stdout or ""):
         logger.warning(
-            "Agent CLI %r: %r is NOT on the remote PATH (%s). Every review will come "
-            "back empty until it is installed there or cli_path is corrected.",
+            "Agent CLI %r: `%s` returned exit %d but did not run our command "
+            "(stdout %r, stderr %r). Reviews will silently produce nothing, because an "
+            "unrun `git diff` is indistinguishable from a repo with no changes. Check how "
+            "that command takes a remote command to run.",
             rc.name,
-            binary,
-            (result.stderr or result.stdout or "no output").strip()[:200],
+            " ".join(rc.remote.ssh_command),
+            echo.returncode,
+            (echo.stdout or "")[:200],
+            (echo.stderr or "")[:200],
         )
         return
-    logger.info("Agent CLI %r: remote %r found at %s", rc.name, binary, result.stdout.strip()[:200])
+
+    # Only now is "is the CLI installed" a meaningful question — and it is asked
+    # through the same invocation shape as the review. An earlier version wrapped
+    # this in `sh -lc`, which the real call never gets, so the probe could pass on
+    # a login-shell PATH while every review failed with command-not-found.
+    found = executor.run(["command", "-v", binary], cwd=workspace, timeout=60)
+    if found is None or not found.ok or not found.stdout.strip():
+        detail = "no result" if found is None else (found.stderr or found.stdout or "").strip()
+        logger.warning(
+            "Agent CLI %r: %r is not on the remote PATH for a non-interactive session (%s). "
+            "Every review will come back empty. Set cli_path to an absolute path, or make the "
+            "binary visible from the shell `%s` starts.",
+            rc.name,
+            binary,
+            detail[:200] or "no output",
+            " ".join(rc.remote.ssh_command),
+        )
+        return
+    logger.info("Agent CLI %r: remote %r found at %s", rc.name, binary, found.stdout.strip()[:200])
 
 
 def _check_ssh_configs(operator_config: OperatorConfig) -> frozenset[str]:
@@ -784,6 +812,66 @@ class ReviewSkip:
     explanation: str
 
 
+#: Source key for the built-in LLM drafter, which has no config entry of its own.
+LLM_REVIEW_SOURCE = "llm"
+
+
+def expected_review_sources(operator_config: OperatorConfig | None) -> set[str]:
+    """Every reviewer that should get a turn on a PR, by source key.
+
+    The set the rescan compares against. Built from config rather than from what
+    happens to be on the PR, so enabling a new reviewer makes every already-seen
+    PR eligible for it instead of only the ones opened afterwards.
+    """
+    sources = {LLM_REVIEW_SOURCE}
+    if operator_config is None:
+        return sources
+    sources |= {rc.name for rc in resolve_agent_cli_reviewers(operator_config)}
+    if operator_config.coderabbit.enabled:
+        sources.add("coderabbit")
+    if operator_config.snowflake_review.enabled:
+        sources.add("snowflake")
+    return sources
+
+
+def record_agent_run(pr: PullRequest, source: str, *, status: str, findings: int = 0) -> None:
+    """Note that *source* had a turn on *pr*, whatever came of it.
+
+    Never raises: losing this bookkeeping is worth a log line, not a failed
+    review. Written with a targeted ``update`` on the JSON column so it can't
+    clobber whatever else the poll cycle has changed on the row.
+    """
+    from django.utils import timezone
+
+    from franktheunicorn.core.models import PullRequest as PullRequestModel
+
+    try:
+        runs = dict(pr.agent_runs or {})
+        runs[source] = {
+            "at": timezone.now().isoformat(),
+            "status": status,
+            "findings": findings,
+        }
+        PullRequestModel.objects.filter(pk=pr.pk).update(agent_runs=runs)
+        pr.agent_runs = runs
+    except Exception:
+        logger.debug("Could not record the %s run for PR #%d", source, pr.number, exc_info=True)
+
+
+def missing_review_sources(pr: PullRequest, operator_config: OperatorConfig | None) -> set[str]:
+    """Reviewers that have never had a turn on *pr*.
+
+    A PR carrying drafts but no ``agent_runs`` at all predates this bookkeeping,
+    and is treated as fully reviewed. That exemption is deliberate and it is about
+    money: without it, deploying this would re-review every open PR in the
+    database once, at LLM cost, to discover something the operator already knows.
+    """
+    runs = pr.agent_runs or {}
+    if not runs and pr.review_drafts.exists():
+        return set()
+    return expected_review_sources(operator_config) - set(runs)
+
+
 def review_skip_reason(
     pr: PullRequest,
     pc: ProjectConfig,
@@ -801,10 +889,20 @@ def review_skip_reason(
     """
     if force:
         return None
-    if pr.review_drafts.exists():
+    missing = missing_review_sources(pr, operator_config)
+    if not missing and pr.review_drafts.exists():
         return ReviewSkip(
             "already-reviewed",
-            "It already has review drafts; use Force Run Agents to review it again.",
+            "Every configured reviewer has had a turn; use Force Run Agents to redo it.",
+        )
+    if not missing and pr.agent_runs:
+        # Ran, found nothing, and left no drafts to prove it. Before agent_runs
+        # existed this was indistinguishable from never having run, so the backfill
+        # picked it up again every single cycle — a clean PR was re-reviewed
+        # forever at full LLM cost.
+        return ReviewSkip(
+            "reviewed-clean",
+            "Every configured reviewer has had a turn and none found anything.",
         )
     if pr.queue == "wip":
         return ReviewSkip(
@@ -1020,6 +1118,8 @@ def process_pr(
             pr.interest_score,
             len(drafts),
         )
+
+        record_agent_run(pr, LLM_REVIEW_SOURCE, status="ok", findings=len(drafts))
 
         clone_url = _clone_url_for_project(pc, operator_config)
 
@@ -1526,13 +1626,22 @@ def _backfill_unreviewed_prs(
     from franktheunicorn.config.models import ProjectConfig
     from franktheunicorn.core.models import PullRequest as PullRequestModel
 
+    # Candidates are every open non-wip PR this cycle didn't already poll. The
+    # per-PR decision is review_skip_reason's, via process_pr — the old query
+    # filtered to draft_count=0 and made that decision itself, wrongly in both
+    # directions: a PR whose LLM review produced findings while its agent CLI
+    # failed counted as reviewed and was never retried, and a PR every reviewer
+    # had passed cleanly counted as unreviewed and was re-reviewed every cycle.
+    #
+    # draft_count is still annotated and still orders the queue: PRs nothing has
+    # said anything about go first, so a bounded cycle spends its budget there.
     backfill_qs = (
         PullRequestModel.objects.filter(state="open")
         .exclude(pk__in={pk for pk in already_polled_pks if pk is not None})
         .exclude(queue="wip")
         .annotate(draft_count=Count("review_drafts"))
-        .filter(draft_count=0)
         .select_related("project")
+        .order_by("draft_count", "-interest_score")
     )
 
     # Build a quick lookup: full_name → ProjectConfig, from the configs that
@@ -1953,8 +2062,10 @@ def _run_review_tool_for_pr(
     from franktheunicorn.review.tool_executor import make_executor
 
     mode = getattr(remote_config, "mode", "local")
+    source = getattr(tool_config, "name", "") or tool_name.split()[0].lower()
     resolved = _resolve_cwd_for_tool(pr, remote_config, repo_path, tool_name, clone_url=clone_url)
     if resolved is None:
+        record_agent_run(pr, source, status="no-checkout")
         # Was a bare `return`. Every reason _resolve_cwd_for_tool declines is
         # logged at DEBUG in there, so a configured reviewer that never got a
         # checkout produced no INFO output at all — which is what "claude_cli
@@ -1998,8 +2109,13 @@ def _run_review_tool_for_pr(
             len(findings),
             len(drafts),
         )
+        # Recorded on the success path *and* the failure path below, because "it
+        # had a turn and found nothing" and "it never got a turn" are exactly the
+        # two states the rescan has to tell apart.
+        record_agent_run(pr, source, status="ok", findings=len(findings))
     except Exception:
         logger.exception("%s failed for PR #%d; continuing.", tool_name, pr.number)
+        record_agent_run(pr, source, status="failed")
     finally:
         if real_branch is not None:
             _cleanup_review_branch(executor, cwd, real_branch)

@@ -23,6 +23,9 @@ logger = logging.getLogger(__name__)
 
 
 _KNOWN_REMOTE_MODES: frozenset[str] = frozenset({"local", "ssh"})
+#: How a remote command is handed to ``ssh_command``. See
+#: ``RemoteExecutionConfig.command_mode``.
+_KNOWN_COMMAND_MODES: frozenset[str] = frozenset({"auto", "argv", "stdin"})
 
 #: Model for the claude agent-CLI reviewer. Every PR gets a full-diff pass whose
 #: output is parsed, not read, then filtered through anti-patterns and dedup —
@@ -53,9 +56,30 @@ class RemoteExecutionConfig(BaseModel):
     # place of bare ``ssh`` -- everything else (BatchMode, key path,
     # extra args, target) is appended unchanged.
     ssh_command: list[str] = Field(default_factory=lambda: ["ssh"])
+    # How a command reaches the far side.
+    #
+    # ``ssh host 'cmd'`` takes it as a trailing argument, and that was assumed
+    # unconditionally. Some wrappers use that positional slot for something else
+    # entirely: ``sf workspace ssh 'cd /x && claude …'`` answers "Workspace not
+    # found: cd /x && claude …" — it wants a *workspace name* there and has no
+    # remote-command form at all. Others simply ignore extra arguments and open an
+    # interactive shell, which is worse, because the session then exits on EOF
+    # with status 0 and empty output and every caller downstream reads that as
+    # "the repo has no diff" — a silent clean review.
+    #
+    # ``stdin`` drives such a wrapper by piping the command into the shell it
+    # opens. ``auto`` (the default) settles it by experiment once per config:
+    # round-trip a sentinel through each shape and keep whichever comes back.
+    # Nothing is inferred from the wrapper's name.
+    command_mode: str = "auto"
     remote_workspace_dir: str = "~/.frank-remote"
     clone_url_template: str = "https://github.com/{owner}/{repo}.git"
     prepare_timeout_seconds: int = 600
+
+    #: Settled delivery shape, filled in by the executor's first probe. Cached on
+    #: the config rather than the executor because ``make_executor`` builds a fresh
+    #: executor per call — without this the probe would run on every command.
+    _resolved_command_mode: str | None = PrivateAttr(default=None)
 
     @field_validator("mode")
     @classmethod
@@ -63,6 +87,15 @@ class RemoteExecutionConfig(BaseModel):
         v = v.strip().lower()
         if v not in _KNOWN_REMOTE_MODES:
             msg = f"remote.mode must be one of {sorted(_KNOWN_REMOTE_MODES)}, got {v!r}"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("command_mode")
+    @classmethod
+    def command_mode_must_be_known(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in _KNOWN_COMMAND_MODES:
+            msg = f"remote.command_mode must be one of {sorted(_KNOWN_COMMAND_MODES)}, got {v!r}"
             raise ValueError(msg)
         return v
 

@@ -11,6 +11,7 @@ import pytest
 
 from franktheunicorn.config.models import RemoteExecutionConfig
 from franktheunicorn.review.tool_executor import (
+    _DELIVERY_SENTINEL,
     ExecResult,
     LocalExecutor,
     RemoteSSHExecutor,
@@ -190,7 +191,9 @@ class TestRemoteSSHExecutorCustomCommand:
         argv = mock_run.call_args.args[0]
         assert argv[0] == "corp-ssh-helper"
         assert "ssh" not in argv[:1]  # not "ssh" anymore
-        assert "-o" in argv and "BatchMode=yes" in argv
+        # No BatchMode: that is OpenSSH grammar and this is a wrapper. The target
+        # and the command still go through, because those are the wrapper's job.
+        assert "-o" not in argv
         assert "frank@review.example.com" in argv
 
     @patch("franktheunicorn.review.tool_executor.subprocess.run")
@@ -204,8 +207,10 @@ class TestRemoteSSHExecutorCustomCommand:
         executor.run(["true"], cwd="/srv/frank")
         argv = mock_run.call_args.args[0]
         assert argv[:3] == ["tsh", "ssh", "--cluster=prod"]
-        # BatchMode etc. comes after the wrapper prefix.
-        assert argv[3:5] == ["-o", "BatchMode=yes"]
+        # The wrapper prefix is passed through untouched — no spliced-in OpenSSH
+        # options, which `tsh ssh` would read as its own flags.
+        assert "-o" not in argv
+        assert "BatchMode=yes" not in argv
 
     @patch("franktheunicorn.review.tool_executor.subprocess.run")
     def test_custom_ssh_command_accepts_string(self, mock_run: Any) -> None:
@@ -266,8 +271,34 @@ class TestRemoteSSHExecutorCustomCommand:
         executor = RemoteSSHExecutor(config=cfg)
         argv = executor._ssh_command()
         assert "" not in argv
-        # Command should be: sf workspace ssh -o BatchMode=yes (5 elements, no empty)
-        assert argv == ["sf", "workspace", "ssh", "-o", "BatchMode=yes"]
+        # And no OpenSSH options either: `-o BatchMode=yes` is ssh's grammar, not
+        # a wrapper's. `sf workspace ssh` swallows it, `gcloud compute ssh` would
+        # reject it, and either way it is not ours to add to someone else's CLI.
+        assert argv == ["sf", "workspace", "ssh"]
+
+    def test_openssh_still_gets_its_options(self) -> None:
+        cfg = RemoteExecutionConfig(mode="ssh", host="build01", port=2222)
+        argv = RemoteSSHExecutor(config=cfg)._ssh_command()
+
+        assert argv == ["ssh", "-o", "BatchMode=yes", "-p", "2222", "build01"]
+
+    def test_a_wrapper_still_gets_ssh_extra_args(self) -> None:
+        """The operator's explicit escape hatch for flags their wrapper does take."""
+        cfg = RemoteExecutionConfig(
+            mode="ssh",
+            ssh_command=["sf", "workspace", "ssh"],
+            ssh_extra_args=["--workspace", "ws-1"],
+        )
+        argv = RemoteSSHExecutor(config=cfg)._ssh_command()
+
+        assert argv == ["sf", "workspace", "ssh", "--workspace", "ws-1"]
+
+    def test_ignored_openssh_options_are_reported(self, caplog: pytest.LogCaptureFixture) -> None:
+        cfg = RemoteExecutionConfig(mode="ssh", ssh_command=["sf", "workspace", "ssh"], port=2222)
+        with caplog.at_level("WARNING"):
+            RemoteSSHExecutor(config=cfg)._ssh_command()
+
+        assert "ignoring them" in caplog.text
 
 
 class TestRemoteSSHExecutorPort:
@@ -761,3 +792,160 @@ class TestExecResult:
     def test_ok_property(self) -> None:
         assert ExecResult(returncode=0, stdout="", stderr="").ok
         assert not ExecResult(returncode=1, stdout="", stderr="").ok
+
+
+#: Captured before any patching so the fake wrapper below can really run a shell.
+_REAL_RUN = subprocess.run
+
+
+class TestRemoteCommandDelivery:
+    """How the command reaches the far side, decided by experiment.
+
+    ``ssh host 'cmd'`` puts it in a trailing argument. Some wrappers use that
+    positional slot for something else: ``sf workspace ssh 'cd /x && claude …'``
+    answers ``Error: Workspace not found: cd /x && claude …``. Others ignore extra
+    arguments and open an interactive shell, which is worse — the session exits on
+    EOF with status 0 and no output, and a ``git diff`` that produced no output is
+    indistinguishable from a repo with no changes, so the review comes back clean
+    and silent.
+    """
+
+    @staticmethod
+    def _wrapper_config() -> RemoteExecutionConfig:
+        return RemoteExecutionConfig(mode="ssh", ssh_command=["sf", "workspace", "ssh"])
+
+    @staticmethod
+    def _shell(script: str | None) -> subprocess.CompletedProcess[str]:
+        """Stand in for a wrapper that only reads commands from stdin.
+
+        Runs the piped script with ``sh`` and prepends banner noise, the way the
+        real thing prints its own line and then ssh prints a login banner.
+        """
+        if script is None:
+            return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        # _REAL_RUN, not subprocess.run — the latter is patched in these tests,
+        # so calling it here recurses into the fake wrapper forever.
+        done = _REAL_RUN(["sh"], input=script, capture_output=True, text=True, check=False)
+        banner = "Running: ssh 10.66.76.234\nLast login: Wed Aug 26 17:42:39 2026\n"
+        return subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=banner + done.stdout, stderr=done.stderr
+        )
+
+    def _fake_sf(self, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        """argv form is rejected as a workspace name; stdin form works."""
+        positional = [a for a in argv[3:] if not a.startswith("-")]
+        if positional:
+            return subprocess.CompletedProcess(
+                args=argv,
+                returncode=1,
+                stdout="",
+                stderr=f"Error: Workspace not found: {positional[0]}\n",
+            )
+        return self._shell(kwargs.get("input"))
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_a_wrapper_that_rejects_argv_is_driven_over_stdin(self, mock_run: Any) -> None:
+        mock_run.side_effect = self._fake_sf
+        executor = RemoteSSHExecutor(config=self._wrapper_config())
+
+        result = executor.run(["echo", "hello-from-remote"], cwd="/tmp")
+
+        assert result is not None
+        assert result.ok
+        assert result.stdout.strip() == "hello-from-remote"
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_the_wrappers_banner_is_stripped_from_the_output(self, mock_run: Any) -> None:
+        """A caller parsing `git diff` must not get "Last login:" prepended."""
+        mock_run.side_effect = self._fake_sf
+        executor = RemoteSSHExecutor(config=self._wrapper_config())
+
+        result = executor.run(["echo", "diff --git a/x b/x"], cwd="/tmp")
+
+        assert result is not None
+        assert "Last login" not in result.stdout
+        assert "Running: ssh" not in result.stdout
+        assert result.stdout.strip() == "diff --git a/x b/x"
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_the_commands_exit_code_survives_not_the_wrappers(self, mock_run: Any) -> None:
+        """The wrapper exits 0 for a session it hosted successfully; the command
+        inside it failed, and that is the status callers check."""
+        mock_run.side_effect = self._fake_sf
+        executor = RemoteSSHExecutor(config=self._wrapper_config())
+
+        result = executor.run(["sh", "-c", "exit 42"], cwd="/tmp")
+
+        assert result is not None
+        assert result.returncode == 42
+        assert not result.ok
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_the_probe_runs_once_per_config(self, mock_run: Any) -> None:
+        """Two extra round trips per command would be unaffordable."""
+        mock_run.side_effect = self._fake_sf
+        config = self._wrapper_config()
+
+        for _ in range(3):
+            RemoteSSHExecutor(config=config).run(["echo", "x"], cwd="/tmp")
+
+        # 2 probes (argv rejected, stdin accepted) + 3 real commands.
+        assert mock_run.call_count == 5
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_plain_ssh_keeps_the_argv_form(self, mock_run: Any) -> None:
+        """No behaviour change where the argv form already worked."""
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=f"{_DELIVERY_SENTINEL}\n", stderr=""
+        )
+        executor = RemoteSSHExecutor(config=_ssh_config())
+
+        executor.run(["true"], cwd="/tmp")
+
+        argv = mock_run.call_args.args[0]
+        assert argv[-1] == "cd /tmp && true"
+        assert mock_run.call_args.kwargs.get("input") is None
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_an_explicit_command_mode_skips_the_probe(self, mock_run: Any) -> None:
+        mock_run.side_effect = self._fake_sf
+        config = RemoteExecutionConfig(
+            mode="ssh", ssh_command=["sf", "workspace", "ssh"], command_mode="stdin"
+        )
+
+        result = RemoteSSHExecutor(config=config).run(["echo", "hi"], cwd="/tmp")
+
+        assert result is not None
+        assert result.stdout.strip() == "hi"
+        assert mock_run.call_count == 1, "no probing when the operator already said"
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_neither_shape_working_is_reported(
+        self, mock_run: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        executor = RemoteSSHExecutor(config=self._wrapper_config())
+
+        with caplog.at_level("WARNING"):
+            executor.run(["true"], cwd="/tmp")
+
+        assert "Neither delivery shape ran a command" in caplog.text
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_a_failed_probe_is_not_cached(self, mock_run: Any) -> None:
+        """The host may just be down; a later cycle should retry rather than be
+        stuck on a guess made while it was unreachable."""
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=255, stdout="", stderr="connection refused"
+        )
+        config = self._wrapper_config()
+
+        RemoteSSHExecutor(config=config).run(["true"], cwd="/tmp")
+
+        assert config._resolved_command_mode is None
+
+    def test_an_unknown_command_mode_is_rejected_at_load(self) -> None:
+        with pytest.raises(ValueError, match="command_mode"):
+            RemoteExecutionConfig(mode="ssh", host="h", command_mode="telepathy")

@@ -308,6 +308,25 @@ class TestStartupProbe:
     """An ssh reviewer is enabled optimistically, so startup is the only place
     the remote binary gets checked at all."""
 
+    def test_a_wrapper_that_ignores_the_command_is_caught(self, caplog: Any) -> None:
+        """The failure nothing else can see: exit 0, empty stdout, command never
+        run. Downstream that is indistinguishable from a repo with no diff, so
+        the review comes back clean and silent."""
+        oc = OperatorConfig(agent_cli_reviewers=[_ssh_reviewer()])
+
+        with (
+            patch.object(
+                RemoteSSHExecutor,
+                "run",
+                return_value=ExecResult(returncode=0, stdout="", stderr=""),
+            ),
+            caplog.at_level(logging.INFO),
+        ):
+            _check_agent_cli_reviewers(oc)
+
+        assert "did not run our command" in caplog.text
+        assert any(r.levelno >= logging.WARNING for r in caplog.records)
+
     def test_a_missing_remote_binary_warns_at_startup(self, caplog: Any) -> None:
         oc = OperatorConfig(agent_cli_reviewers=[_ssh_reviewer()])
 
@@ -315,13 +334,18 @@ class TestStartupProbe:
             patch.object(
                 RemoteSSHExecutor,
                 "run",
-                return_value=ExecResult(returncode=1, stdout="", stderr="not found"),
+                side_effect=[
+                    # The sentinel round-trips, so the command path is fine...
+                    ExecResult(returncode=0, stdout="frank-remote-ok\n", stderr=""),
+                    # ...but the binary is not there.
+                    ExecResult(returncode=1, stdout="", stderr="not found"),
+                ],
             ),
             caplog.at_level(logging.INFO),
         ):
             _check_agent_cli_reviewers(oc)
 
-        assert "NOT on the remote PATH" in caplog.text
+        assert "not on the remote PATH" in caplog.text
         assert any(r.levelno >= logging.WARNING for r in caplog.records)
 
     def test_an_unreachable_remote_warns_at_startup(self, caplog: Any) -> None:
@@ -343,7 +367,10 @@ class TestStartupProbe:
             patch.object(
                 RemoteSSHExecutor,
                 "run",
-                return_value=ExecResult(returncode=0, stdout="/usr/local/bin/claude\n", stderr=""),
+                side_effect=[
+                    ExecResult(returncode=0, stdout="frank-remote-ok\n", stderr=""),
+                    ExecResult(returncode=0, stdout="/usr/local/bin/claude\n", stderr=""),
+                ],
             ),
             caplog.at_level(logging.INFO),
         ):
@@ -367,7 +394,10 @@ class TestStartupProbe:
             patch.object(
                 RemoteSSHExecutor,
                 "run",
-                return_value=ExecResult(returncode=0, stdout="/bin/claude\n", stderr=""),
+                side_effect=[
+                    ExecResult(returncode=0, stdout="frank-remote-ok\n", stderr=""),
+                    ExecResult(returncode=0, stdout="/bin/claude\n", stderr=""),
+                ],
             ),
             caplog.at_level(logging.INFO),
         ):

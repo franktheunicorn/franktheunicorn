@@ -149,6 +149,21 @@ class PullRequest(models.Model):
     # "it's been a day, re-check the time-dependent signals" escape hatch.
     last_polled_at = models.DateTimeField(null=True, blank=True)
 
+    # Which reviewers have actually had a go at this PR: source key ->
+    # ``{"at": iso8601, "status": "ok"|"failed"|"no-checkout", "findings": int}``.
+    #
+    # Recorded rather than inferred, because inferring it from drafts cannot work:
+    # a reviewer that ran and found nothing leaves exactly what a reviewer that
+    # never ran leaves. That made the backfill unable to do its job — it selected
+    # PRs with *no* drafts, so a PR where the LLM produced findings and the agent
+    # CLI failed looked fully reviewed and was never retried, while a PR that every
+    # reviewer had passed cleanly looked unreviewed forever.
+    #
+    # A JSONField per CLAUDE.md's "flexible structured data" convention rather than
+    # a row per attempt: the read is always "which sources is this PR missing",
+    # always for one PR, and the write is once per reviewer per run.
+    agent_runs = models.JSONField(default=dict, blank=True)
+
     class Meta:
         constraints = [
             models.UniqueConstraint(fields=["project", "number"], name="unique_pr_project_number"),

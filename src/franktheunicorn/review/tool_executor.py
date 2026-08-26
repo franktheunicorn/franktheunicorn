@@ -17,10 +17,23 @@ import shlex
 import subprocess
 import time
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Protocol
 
 from franktheunicorn.config.models import RemoteExecutionConfig
+
+_DELIVERY_AUTO = "auto"
+_DELIVERY_ARGV = "argv"
+_DELIVERY_STDIN = "stdin"
+
+#: Round-tripped to find out whether a command sent a given way actually ran.
+_DELIVERY_SENTINEL = "__frank_delivery_ok__"
+_DELIVERY_PROBE_TIMEOUT_SECONDS = 60
+
+#: Markers bracketing the command in a stdin-driven session, so the wrapper's and
+#: the login shell's own chatter can be cut back off the output.
+_FRAME_BEGIN = "__frank_out_begin__"
+_FRAME_END = "__frank_out_end__"
 
 logger = logging.getLogger(__name__)
 
@@ -158,12 +171,44 @@ class RemoteSSHExecutor:
             return f"{self.config.user}@{self.config.host}"
         return self.config.host
 
+    def wraps_openssh(self) -> bool:
+        """Whether ``ssh_command`` is an actual OpenSSH client.
+
+        ``ssh_command`` is documented as "however you reach the host", and people
+        use that: ``["sf", "workspace", "ssh"]``, ``["gcloud", "compute", "ssh"]``,
+        ``["tailscale", "ssh"]``, a shell wrapper of their own. Those are
+        subcommands with their own flag grammar, and we were splicing OpenSSH
+        options into them regardless — ``sf workspace ssh -o BatchMode=yes 'cd …'``,
+        which ``sf`` has no reason to accept. Every remote call then failed at the
+        wrapper, before SSH was even attempted.
+
+        Decided on argv[0]'s basename so ``/usr/bin/ssh`` and a bare ``ssh``
+        both count and nothing else does.
+        """
+        first = self.config.ssh_command[0] if self.config.ssh_command else ""
+        return PurePath(first).name in ("ssh", "ssh.exe")
+
     def _ssh_command(self) -> list[str]:
-        cmd = [*self.config.ssh_command, "-o", "BatchMode=yes"]
-        if self.config.port:
-            cmd += ["-p", str(self.config.port)]
-        if self.config.ssh_key_path:
-            cmd += ["-i", self.config.ssh_key_path]
+        cmd = list(self.config.ssh_command)
+        if self.wraps_openssh():
+            # BatchMode stops ssh sitting on a password prompt forever. A wrapper
+            # gets no equivalent — it may well prompt — so the subprocess timeout
+            # in run()/_probe_ssh is what bounds those.
+            cmd += ["-o", "BatchMode=yes"]
+            if self.config.port:
+                cmd += ["-p", str(self.config.port)]
+            if self.config.ssh_key_path:
+                cmd += ["-i", self.config.ssh_key_path]
+        elif self.config.port or self.config.ssh_key_path:
+            # Say so rather than dropping them silently: the operator wrote them
+            # down and they are not being sent.
+            logger.warning(
+                "remote.port/ssh_key_path are OpenSSH options and %r is not ssh; "
+                "ignoring them. Put wrapper-specific flags in ssh_extra_args.",
+                " ".join(self.config.ssh_command),
+            )
+        # Always appended — this is the operator's explicit escape hatch for
+        # whatever flags their wrapper does take.
         cmd += list(self.config.ssh_extra_args)
         target = self._ssh_target()
         if target:
@@ -171,20 +216,31 @@ class RemoteSSHExecutor:
         return cmd
 
     def _probe_ssh(self) -> bool:
-        """Run ``ssh … true`` to test bare SSH connectivity, independent of git.
+        """Run ``<ssh_command> true`` to test connectivity, independent of git.
 
         Returns True when the connection succeeds, False on any failure.
-        A short connect-timeout (10 s) keeps this non-blocking.
+        The 15 s subprocess timeout is the bound that always applies;
+        ``ConnectTimeout`` is only added when we are really talking to ssh.
         """
+        extra = ["-o", "ConnectTimeout=10"] if self.wraps_openssh() else []
         try:
             probe = subprocess.run(
-                [*self._ssh_command(), "-o", "ConnectTimeout=10", "true"],
+                [*self._ssh_command(), *extra, "true"],
                 capture_output=True,
                 text=True,
                 timeout=15,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return False
+        if probe.returncode != 0:
+            # The stderr is the whole diagnosis for a wrapper that rejected our
+            # argv, and it used to be thrown away.
+            logger.warning(
+                "Remote probe failed (exit %d) for %s: %s",
+                probe.returncode,
+                " ".join(self.config.ssh_command),
+                (probe.stderr or probe.stdout or "no output").strip()[:300],
+            )
         return probe.returncode == 0
 
     def _remote_repo_path(self, owner: str, repo: str) -> str:
@@ -442,10 +498,82 @@ class RemoteSSHExecutor:
         # the same expansion-aware quoting as ``prepare_repo``.
         quoted_cmd = " ".join(shlex.quote(part) for part in cmd)
         remote_invocation = f"cd {self._quote_remote_path(cwd)} && {quoted_cmd}"
+        mode = self._delivery_mode(timeout=timeout)
+        if mode == _DELIVERY_STDIN:
+            return self._run_via_stdin(remote_invocation, cmd, timeout)
+        return self._run_via_argv(remote_invocation, cmd, timeout, stdin)
 
+    def _run_via_argv(
+        self,
+        remote_invocation: str,
+        cmd: list[str],
+        timeout: int,
+        stdin: str | None,
+    ) -> ExecResult | None:
+        """``ssh host 'cd … && cmd'`` — the command as a trailing argument."""
+        return self._spawn([*self._ssh_command(), remote_invocation], cmd, timeout, stdin)
+
+    def _run_via_stdin(
+        self, remote_invocation: str, cmd: list[str], timeout: int
+    ) -> ExecResult | None:
+        """Pipe the command into the shell the wrapper opens.
+
+        For a wrapper with no remote-command form. Two things make this usable
+        rather than merely possible:
+
+        * **Framing.** The wrapper and the login shell both talk on the way in
+          (a "Running: ssh <ip>" line, a "Last login:" banner), and that lands in
+          stdout ahead of the output. Sentinel markers around the command let us
+          return exactly the command's own output, so a caller parsing ``git
+          diff`` doesn't get a banner prepended to the diff.
+        * **Exit status.** The wrapper's exit code is its own, not the command's,
+          so the real one is echoed after the end marker and read back out.
+        """
+        script = (
+            f"echo {_FRAME_BEGIN}\n"
+            f"{remote_invocation}\n"
+            f"__frank_rc=$?\n"
+            f'echo "{_FRAME_END}:$__frank_rc"\n'
+            "exit\n"
+        )
+        result = self._spawn(self._ssh_command(), cmd, timeout, script)
+        if result is None:
+            return None
+        return self._unframe(result, cmd)
+
+    @staticmethod
+    def _unframe(result: ExecResult, cmd: list[str]) -> ExecResult:
+        """Cut the command's own output and exit code out of a framed session."""
+        stdout = result.stdout
+        begin = stdout.find(_FRAME_BEGIN)
+        end = stdout.find(_FRAME_END, begin + 1 if begin >= 0 else 0)
+        if begin < 0 or end < 0:
+            # The markers are the proof the command ran. Without them, report the
+            # session verbatim and let the caller's ok-check fail rather than
+            # inventing a success out of banner text.
+            logger.warning(
+                "Remote stdin session did not echo its framing for %s; "
+                "returning the raw session output.",
+                cmd[0] if cmd else "(empty)",
+            )
+            return result
+        body = stdout[stdout.index("\n", begin) + 1 : end] if "\n" in stdout[begin:] else ""
+        # "END:<rc>" — anything unparseable means we cannot claim to know the exit
+        # status, and 0 would be the dangerous guess.
+        tail = stdout[end + len(_FRAME_END) :].lstrip(":").split("\n", 1)[0].strip()
+        try:
+            returncode = int(tail)
+        except ValueError:
+            logger.warning("Remote stdin session gave no exit status (%r); treating as 1.", tail)
+            returncode = 1
+        return ExecResult(returncode=returncode, stdout=body, stderr=result.stderr)
+
+    def _spawn(
+        self, argv: list[str], cmd: list[str], timeout: int, stdin: str | None
+    ) -> ExecResult | None:
         try:
             result = subprocess.run(
-                [*self._ssh_command(), remote_invocation],
+                argv,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
@@ -469,6 +597,59 @@ class RemoteSSHExecutor:
             stdout=result.stdout or "",
             stderr=result.stderr or "",
         )
+
+    def _delivery_mode(self, *, timeout: int) -> str:
+        """Which delivery shape this wrapper actually honours.
+
+        Decided once per config by round-tripping a sentinel, because the naming
+        gives nothing away and getting it wrong fails silently. ``sf workspace
+        ssh 'cd /x && claude …'`` reads that argument as a *workspace name* and
+        answers "Workspace not found"; other wrappers ignore it and open an
+        interactive shell, which exits on EOF with status 0 and no output — and a
+        ``git diff`` that produced no output is indistinguishable from a clean
+        repo, so the review came back empty and content.
+        """
+        configured = self.config.command_mode
+        if configured != _DELIVERY_AUTO:
+            return configured
+        cached = self.config._resolved_command_mode
+        if cached is not None:
+            return cached
+
+        probe_timeout = min(timeout, _DELIVERY_PROBE_TIMEOUT_SECONDS)
+        invocation = f"echo {_DELIVERY_SENTINEL}"
+        attempts = {
+            _DELIVERY_ARGV: self._run_via_argv(invocation, ["echo"], probe_timeout, None),
+            _DELIVERY_STDIN: self._run_via_stdin(invocation, ["echo"], probe_timeout),
+        }
+        for candidate, probe in attempts.items():
+            if probe is not None and _DELIVERY_SENTINEL in probe.stdout:
+                if candidate == _DELIVERY_STDIN:
+                    logger.info(
+                        "Remote %r takes no remote-command argument; driving it over stdin.",
+                        " ".join(self.config.ssh_command),
+                    )
+                self.config._resolved_command_mode = candidate
+                return candidate
+            logger.debug(
+                "Remote delivery probe %s failed for %s: %s",
+                candidate,
+                " ".join(self.config.ssh_command),
+                "no result"
+                if probe is None
+                else f"rc={probe.returncode} out={probe.stdout[:120]!r}",
+            )
+
+        # Neither worked. Fall back to argv so the failure surfaces as the
+        # wrapper's own error message rather than as framing noise, and don't
+        # cache it — the host may just be down, and a later cycle should retry.
+        logger.warning(
+            "Neither delivery shape ran a command through %r. Remote reviews will "
+            "produce nothing; check how that command runs a remote command, or set "
+            "remote.command_mode explicitly.",
+            " ".join(self.config.ssh_command),
+        )
+        return _DELIVERY_ARGV
 
 
 def make_executor(remote: RemoteExecutionConfig | None) -> ToolExecutor:

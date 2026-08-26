@@ -360,3 +360,147 @@ class TestBackendPreflightReporting:
         errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
         assert errors
         assert "produce no findings" in errors[0].getMessage()
+
+
+@pytest.mark.django_db
+class TestRescanningPrsNoAgentCovered:
+    """ "Make sure the worker rescans the PRs where none of the agents ran."
+
+    It couldn't, and the reason was that "an agent ran" was inferred from drafts
+    existing. A reviewer that ran and found nothing leaves exactly what a reviewer
+    that never ran leaves, so the backfill's ``draft_count=0`` filter was wrong in
+    both directions at once.
+    """
+
+    def _oc(self, *extra: str) -> OperatorConfig:
+        """One enabled agent CLI, plus any named in *extra*.
+
+        codex and pi are pinned off explicitly: OperatorConfig seeds all three
+        built-ins, and whether the seeded ones resolve otherwise depends on
+        what happens to be on this machine's PATH.
+        """
+        from franktheunicorn.config.models import AgentCLIReviewerConfig
+
+        enabled = {"claude", *extra}
+        return OperatorConfig(
+            github_username="holdenk",
+            agent_cli_reviewers=[
+                AgentCLIReviewerConfig(name=name, enabled=name in enabled)
+                for name in ("claude", "codex", "pi")
+            ],
+        )
+
+    def test_a_reviewer_that_never_ran_is_still_missing(self, db_pr: PullRequest) -> None:
+        """The case the whole thing is for: the LLM produced findings, the agent
+        CLI failed, and the PR looked fully reviewed."""
+        from tests.factories import ReviewDraftFactory
+
+        ReviewDraftFactory(pull_request=db_pr)
+        runner.record_agent_run(db_pr, runner.LLM_REVIEW_SOURCE, status="ok", findings=1)
+
+        assert runner.missing_review_sources(db_pr, self._oc()) == {"claude"}
+
+    def test_a_pr_missing_a_reviewer_is_not_skipped_despite_its_drafts(
+        self, db_pr: PullRequest
+    ) -> None:
+        from tests.factories import ReviewDraftFactory
+
+        ReviewDraftFactory(pull_request=db_pr)
+        runner.record_agent_run(db_pr, runner.LLM_REVIEW_SOURCE, status="ok", findings=1)
+        pc = ProjectConfig(owner="apache", repo="spark", auto_review_policy="all")
+
+        assert runner.review_skip_reason(db_pr, pc, self._oc(), force=False) is None
+
+    def test_a_failed_run_counts_as_having_had_a_turn(self, db_pr: PullRequest) -> None:
+        """Otherwise a reviewer that errors on this PR is retried every cycle
+        forever — the same runaway the clean-review case had."""
+        for source in ("llm", "claude"):
+            runner.record_agent_run(db_pr, source, status="failed")
+
+        assert runner.missing_review_sources(db_pr, self._oc()) == set()
+
+    def test_a_clean_review_is_not_rescanned_every_cycle(self, db_pr: PullRequest) -> None:
+        """Zero findings and zero drafts used to read as "never reviewed", so the
+        backfill re-reviewed a clean PR on every single cycle at full LLM cost."""
+        for source in ("llm", "claude"):
+            runner.record_agent_run(db_pr, source, status="ok", findings=0)
+        pc = ProjectConfig(owner="apache", repo="spark", auto_review_policy="all")
+
+        skip = runner.review_skip_reason(db_pr, pc, self._oc(), force=False)
+
+        assert skip is not None
+        assert skip.reason == "reviewed-clean"
+
+    def test_enabling_a_new_reviewer_makes_old_prs_eligible(self, db_pr: PullRequest) -> None:
+        """Expected sources come from config, not from what is on the PR."""
+        from franktheunicorn.config.models import AgentCLIReviewerConfig
+
+        for source in ("llm", "claude"):
+            runner.record_agent_run(db_pr, source, status="ok", findings=0)
+        del AgentCLIReviewerConfig  # the helper builds the config
+
+        assert "codex" in runner.missing_review_sources(db_pr, self._oc("codex"))
+
+    def test_a_legacy_pr_with_drafts_is_left_alone(self, db_pr: PullRequest) -> None:
+        """Deploying this must not re-review the whole existing database once, at
+        LLM cost, to learn what the operator already knows."""
+        from tests.factories import ReviewDraftFactory
+
+        ReviewDraftFactory(pull_request=db_pr)
+
+        assert db_pr.agent_runs == {}
+        assert runner.missing_review_sources(db_pr, self._oc()) == set()
+
+    def test_a_legacy_pr_with_no_drafts_is_rescanned(self, db_pr: PullRequest) -> None:
+        """No drafts and no record is genuinely unreviewed."""
+        assert runner.missing_review_sources(db_pr, self._oc()) == {"llm", "claude"}
+
+    def test_the_record_survives_a_concurrent_save(self, db_pr: PullRequest) -> None:
+        """The poll cycle writes to this row too; a full save() here would clobber
+        whatever it changed."""
+        from franktheunicorn.core.models import PullRequest as PullRequestModel
+
+        runner.record_agent_run(db_pr, "claude", status="ok", findings=2)
+        PullRequestModel.objects.filter(pk=db_pr.pk).update(title="renamed upstream")
+
+        runner.record_agent_run(db_pr, "llm", status="ok", findings=0)
+
+        fresh = PullRequestModel.objects.get(pk=db_pr.pk)
+        assert fresh.title == "renamed upstream"
+        assert set(fresh.agent_runs) == {"claude", "llm"}
+        assert fresh.agent_runs["claude"]["findings"] == 2
+
+    def test_recording_never_raises(self, db_pr: PullRequest) -> None:
+        """Losing bookkeeping is worth a log line, not a failed review."""
+        with patch(
+            "franktheunicorn.core.models.PullRequest.objects",
+            side_effect=RuntimeError("db gone"),
+        ):
+            runner.record_agent_run(db_pr, "claude", status="ok")  # must not raise
+
+    def test_the_backfill_no_longer_filters_on_draft_count(self, db_pr: PullRequest) -> None:
+        """The per-PR decision belongs to review_skip_reason, which can see the
+        run records; the query filtering on drafts pre-empted it wrongly."""
+        from tests.factories import ReviewDraftFactory
+
+        ReviewDraftFactory(pull_request=db_pr)
+        runner.record_agent_run(db_pr, runner.LLM_REVIEW_SOURCE, status="ok", findings=1)
+        pc = ProjectConfig(owner="apache", repo="spark", auto_review_policy="all")
+        seen: list[int] = []
+
+        with (
+            patch("franktheunicorn.config.loader.get_project_config", return_value=pc),
+            patch(
+                "franktheunicorn.worker.runner.process_pr",
+                side_effect=lambda pr, *a, **k: seen.append(pr.pk) or [],
+            ),
+        ):
+            runner._backfill_unreviewed_prs(
+                already_polled_pks=set(),
+                project_configs=[pc],
+                operator_config=self._oc(),
+                disabled_backends=frozenset(),
+                diff_http=MagicMock(),
+            )
+
+        assert seen == [db_pr.pk], "a PR missing one reviewer must reach the backfill"
