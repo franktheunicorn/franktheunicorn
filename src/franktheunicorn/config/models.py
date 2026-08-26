@@ -316,10 +316,10 @@ class AgentCLIReviewerConfig(BaseModel):
 
 
 def _default_agent_cli_reviewers() -> list[AgentCLIReviewerConfig]:
-    """Seed the registry with the three auto-detected agent reviewers.
+    """Seed the registry with the auto-detected agent reviewers.
 
-    Each defaults to ``enabled="auto"`` so it runs only when its binary is
-    present on PATH (local mode). Operators can override any entry by name
+    Each is named after its binary and defaults to ``enabled="auto"``, so it runs
+    only when that binary is present on PATH (local mode). Operators can override any entry by name
     in ``operator.yaml`` or add their own agents to the list.
     """
     return [
@@ -334,6 +334,28 @@ def _default_agent_cli_reviewers() -> list[AgentCLIReviewerConfig]:
             name="codex", cli_path="codex", prompt_mode="subcommand", prompt_arg="exec"
         ),
         AgentCLIReviewerConfig(name="pi", cli_path="pi", prompt_mode="flag", prompt_arg="-p"),
+        # Cursor's headless agent. The binary is ``cursor-agent``, not ``cursor``.
+        #
+        # ``--mode ask`` is not a preference, it is the safety property: ``-p`` on
+        # its own is documented as having "access to all tools, including write and
+        # shell", and this is a reviewer pointed at a checkout of someone else's
+        # PR. ``ask`` is the read-only Q&A mode, which is all a reviewer needs.
+        #
+        # The argv shape works out the same as claude's even though the two differ:
+        # for claude ``-p`` carries the prompt, for cursor-agent ``-p``/``--print``
+        # is a boolean and the prompt is positional. Either way the suffix is
+        # ``[-p, <prompt>]``. Verified against ``cursor-agent --help`` and by
+        # invoking it (it parsed the arguments and stopped at authentication).
+        # Named after the binary, like every other seed, because ``cli_path``
+        # defaults to ``name``: a config entry of ``- name: cursor`` would
+        # otherwise look for a binary called ``cursor`` (the editor) and quietly
+        # never run.
+        AgentCLIReviewerConfig(
+            name="cursor-agent",
+            prompt_mode="flag",
+            prompt_arg="-p",
+            extra_args=["--mode", "ask"],
+        ),
     ]
 
 

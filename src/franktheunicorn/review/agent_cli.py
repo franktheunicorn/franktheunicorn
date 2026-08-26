@@ -163,11 +163,16 @@ def run_agent_cli_review(
     # `prompt_mode` and `model_flag` came out the way the YAML meant them to —
     # and a wrong prompt_mode (`codex -p …` instead of `codex exec …`) fails by
     # producing no findings, which looks identical to not running.
+    # The prompt is replaced by name, not sliced off by index. Slicing was wrong
+    # for every reviewer whose model is unset: codex and pi ship with model="",
+    # so build_invocation returns just [prompt_arg, prompt] and the window landed
+    # on the prompt itself — logging the entire 60,000-char diff, private-repo
+    # source and all, at INFO on every PR.
+    shown = " ".join(f"<prompt: {len(prompt)} chars>" if part == prompt else part for part in cmd)
     logger.info(
         "%s review: running %s in %s (timeout %ds, %d diff chars)",
         config.name,
-        " ".join(cmd[: len(config.cli_argv) + 3])
-        + (" …" if len(cmd) > len(config.cli_argv) + 3 else ""),
+        shown,
         cwd,
         timeout,
         len(diff),

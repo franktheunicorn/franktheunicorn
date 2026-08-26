@@ -106,11 +106,42 @@ def queue_command(
                 pull_request=pull_request,
                 priority=priority,
             )
-    except IntegrityError:
+    except IntegrityError as exc:
         target = f"report #{report.pk}" if report is not None else f"PR #{pull_request.pk}"  # type: ignore[union-attr]
+        if not _is_inflight_conflict(exc):
+            # Not a duplicate — a foreign key to a row deleted between page render
+            # and POST, a NOT NULL violation, anything else. Reporting those as
+            # "already queued" sent the operator off to reload forever waiting for
+            # a run that was never created, with the real error discarded.
+            logger.exception("Could not queue %s for %s", command, target)
+            raise
         logger.info("%s already queued for %s", command, target)
         return False
     return True
+
+
+#: The two partial unique constraints whose violation genuinely means
+#: "already in flight". Matched by name where the driver gives us one, and by the
+#: column pair where it doesn't — SQLite reports
+#: ``UNIQUE constraint failed: core_workercommand.command,
+#: core_workercommand.pull_request_id`` with no constraint name at all.
+_INFLIGHT_CONSTRAINTS = (
+    "unique_inflight_command_per_report",
+    "unique_inflight_command_per_pr",
+)
+
+
+def _is_inflight_conflict(exc: IntegrityError) -> bool:
+    """Whether *exc* is one of our in-flight constraints rather than any old clash."""
+    message = str(exc)
+    if any(name in message for name in _INFLIGHT_CONSTRAINTS):
+        return True
+    # SQLite's nameless form: a UNIQUE failure naming both columns of the pair.
+    return (
+        "UNIQUE constraint failed" in message
+        and "command" in message
+        and ("pull_request_id" in message or "security_report_id" in message)
+    )
 
 
 def queue_triage_if_enabled(

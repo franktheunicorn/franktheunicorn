@@ -332,10 +332,23 @@ def build_agent_run_summary(
     # Build one summary entry per agent.
     _status_keys = ("pending", "accepted", "edited", "rejected", "posted", "recalled")
 
+    # The recorded truth, where there is one. `bool(drafts)` cannot answer this —
+    # a reviewer that ran and found nothing leaves exactly what a reviewer that
+    # never ran leaves, which is the whole reason PullRequest.agent_runs exists,
+    # and until now no view or template read it. So the Agents table showed
+    # "not run" in italic grey for a reviewer that had run cleanly, which is the
+    # operator-facing symptom ("claude_cli doesn't seem to be getting fired")
+    # that started all of this.
+    runs = pr.agent_runs or {}
+
     summary = []
     for source_key, display_name in configured:
         drafts = source_drafts.get(source_key, [])
-        did_run = bool(drafts)
+        run = runs.get(source_key)
+        # Falls back to the draft inference for rows that predate the records, so
+        # an existing install's history does not all read as "not run".
+        did_run = run is not None if runs else bool(drafts)
+        run_status = str(run.get("status", "")) if isinstance(run, dict) else ""
 
         status_counts: dict[str, int] = dict.fromkeys(_status_keys, 0)
         suppressed_count = 0
@@ -367,6 +380,9 @@ def build_agent_run_summary(
                 "source": source_key,
                 "display_name": display_name,
                 "did_run": did_run,
+                # So the table can say "ran, found nothing" and "failed" rather
+                # than collapsing both into the absence of findings.
+                "run_status": run_status,
                 "total": len(drafts),
                 "active": len(drafts) - suppressed_count,
                 "suppressed": suppressed_count,
@@ -634,7 +650,7 @@ def post_review(request: HttpRequest, pr_id: int) -> HttpResponse:
         client = _make_posting_client(pr)
         if client is None:
             return HttpResponse(
-                '<div class="post-result" class="error-note">'
+                '<div class="post-result error-note">'
                 "Cannot post: no forge client/token configured.</div>"
             )
 
@@ -645,14 +661,11 @@ def post_review(request: HttpRequest, pr_id: int) -> HttpResponse:
             client.close()  # type: ignore[attr-defined]
 
         return HttpResponse(
-            f'<div class="post-result" class="ok-note">'
-            f"Posted {len(approved)} findings to GitHub.</div>"
+            f'<div class="post-result ok-note">Posted {len(approved)} findings to GitHub.</div>'
         )
     except Exception:
         logger.exception("Failed to post review for PR #%d", pr.number)
-        return HttpResponse(
-            '<div class="post-result" class="error-note">Failed to post review.</div>'
-        )
+        return HttpResponse('<div class="post-result error-note">Failed to post review.</div>')
 
 
 def _is_agent_feedback_enabled() -> bool:
@@ -701,12 +714,12 @@ def send_feedback(request: HttpRequest, pr_id: int) -> HttpResponse:
     valid_assessments = {choice[0] for choice in AgentFeedback.ASSESSMENT_CHOICES}
     if assessment not in valid_assessments:
         return HttpResponse(
-            '<div class="feedback-result" class="error-note">Invalid assessment value.</div>'
+            '<div class="feedback-result error-note">Invalid assessment value.</div>'
         )
 
     if not feedback_body.strip():
         return HttpResponse(
-            '<div class="feedback-result" class="error-note">Feedback body cannot be empty.</div>'
+            '<div class="feedback-result error-note">Feedback body cannot be empty.</div>'
         )
 
     feedback_method = "session-url" if pr.agent_session_url else "github-comment"
@@ -898,23 +911,21 @@ def merge_pr(request: HttpRequest, pr_id: int) -> HttpResponse:
     )
     if not pc or not pc.merge_queue.enabled:
         return HttpResponse(
-            '<div class="merge-result" class="error-note">'
-            "Merge queue not enabled for this project.</div>"
+            '<div class="merge-result error-note">Merge queue not enabled for this project.</div>'
         )
 
     # Re-verify merge eligibility server-side before executing.
     eligibility = evaluate_merge_eligibility(pr, pc.merge_queue)
     if not eligibility.eligible:
         return HttpResponse(
-            f'<div class="merge-result" class="error-note">'
+            f'<div class="merge-result error-note">'
             f"PR is no longer eligible for merge: {eligibility.details}</div>"
         )
 
     token = getattr(settings, "FRANK_GITHUB_TOKEN", "")
     if not token:
         return HttpResponse(
-            '<div class="merge-result" class="error-note">'
-            "Cannot merge: GITHUB_TOKEN not configured.</div>"
+            '<div class="merge-result error-note">Cannot merge: GITHUB_TOKEN not configured.</div>'
         )
 
     github_client = GitHubClient(token=token)
@@ -925,12 +936,9 @@ def merge_pr(request: HttpRequest, pr_id: int) -> HttpResponse:
 
     if result.success:
         return HttpResponse(
-            f'<div class="merge-result" class="ok-note">'
-            f"Merged PR #{pr.number} via {result.method}.</div>"
+            f'<div class="merge-result ok-note">Merged PR #{pr.number} via {result.method}.</div>'
         )
-    return HttpResponse(
-        f'<div class="merge-result" class="error-note">Merge failed: {result.error}</div>'
-    )
+    return HttpResponse(f'<div class="merge-result error-note">Merge failed: {result.error}</div>')
 
 
 # --- Security Report Triage ---
@@ -1623,7 +1631,7 @@ def security_report_sandbox(request: HttpRequest, report_id: int) -> HttpRespons
 
     if not _is_sandbox_enabled():
         return HttpResponse(
-            '<div class="sandbox-result" class="error-note">Sandbox execution is not enabled.</div>'
+            '<div class="sandbox-result error-note">Sandbox execution is not enabled.</div>'
         )
 
     # The web container does not have Docker access; enqueue a WorkerCommand for
@@ -1640,7 +1648,7 @@ def security_report_sandbox(request: HttpRequest, report_id: int) -> HttpRespons
         if created
         else "A sandbox run is already queued for this report."
     )
-    return HttpResponse(f'<div class="sandbox-result" class="queued-note">{message}</div>')
+    return HttpResponse(f'<div class="sandbox-result queued-note">{message}</div>')
 
 
 @require_POST
@@ -1673,7 +1681,7 @@ def security_report_cve_check(request: HttpRequest, report_id: int) -> HttpRespo
         report.save(update_fields=["cve_matches", "updated_at"])
     except Exception:
         logger.exception("CVE check failed for report %d", report.pk)
-        return HttpResponse('<div class="cve-result" class="error-note">CVE lookup failed.</div>')
+        return HttpResponse('<div class="cve-result error-note">CVE lookup failed.</div>')
 
     return render(request, "dashboard/_security_cve_matches.html", {"report": report})
 

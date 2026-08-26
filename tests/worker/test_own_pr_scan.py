@@ -400,14 +400,19 @@ class TestRescanningPrsNoAgentCovered:
         built-ins, and whether the seeded ones resolve otherwise depends on
         what happens to be on this machine's PATH.
         """
-        from franktheunicorn.config.models import AgentCLIReviewerConfig
+        from franktheunicorn.config.models import (
+            AgentCLIReviewerConfig,
+            _default_agent_cli_reviewers,
+        )
 
         enabled = {"claude", *extra}
+        # Names come from the seed list, so adding a built-in reviewer cannot
+        # silently widen expected_review_sources underneath these assertions.
         return OperatorConfig(
             github_username="holdenk",
             agent_cli_reviewers=[
-                AgentCLIReviewerConfig(name=name, enabled=name in enabled)
-                for name in ("claude", "codex", "pi")
+                AgentCLIReviewerConfig(name=seed.name, enabled=seed.name in enabled)
+                for seed in _default_agent_cli_reviewers()
             ],
         )
 

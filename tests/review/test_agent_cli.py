@@ -318,11 +318,23 @@ class TestCreateDraftsFromAgentCLI:
 
 class TestResolveAgentCLIReviewers:
     def _only_codex(self, **codex_overrides: Any) -> OperatorConfig:
-        """Config where claude/pi are force-disabled so only codex is exercised."""
+        """Config where every other seeded reviewer is force-disabled.
+
+        Derived from the seed list rather than naming claude/pi literally:
+        OperatorConfig appends any built-in the operator didn't list, so a newly
+        seeded reviewer whose binary happens to be installed on the test machine
+        would otherwise leak into every assertion here.
+        """
+        from franktheunicorn.config.models import _default_agent_cli_reviewers
+
+        others = [
+            AgentCLIReviewerConfig(name=seed.name, enabled=False)
+            for seed in _default_agent_cli_reviewers()
+            if seed.name != "codex"
+        ]
         return OperatorConfig(
             agent_cli_reviewers=[
-                AgentCLIReviewerConfig(name="claude", enabled=False),
-                AgentCLIReviewerConfig(name="pi", enabled=False),
+                *others,
                 AgentCLIReviewerConfig(name="codex", cli_path="codex", **codex_overrides),
             ]
         )
@@ -371,10 +383,22 @@ class TestResolveAgentCLIReviewers:
 
 
 class TestLegacyClaudeCLIPromotion:
-    def test_seeds_default_three_reviewers(self) -> None:
+    def test_seeds_the_default_reviewers(self) -> None:
         oc = OperatorConfig()
-        assert [r.name for r in oc.agent_cli_reviewers] == ["claude", "codex", "pi"]
+        assert [r.name for r in oc.agent_cli_reviewers] == [
+            "claude",
+            "codex",
+            "pi",
+            "cursor-agent",
+        ]
         assert all(r.enabled == "auto" for r in oc.agent_cli_reviewers)
+
+    def test_every_seed_is_named_after_its_binary(self) -> None:
+        """``cli_path`` defaults to ``name``, so a seed named anything else sends
+        the reviewer looking for an executable that does not exist — which is how
+        a ``- name: cursor`` entry would have quietly never run."""
+        for rc in OperatorConfig().agent_cli_reviewers:
+            assert rc.cli_argv[0] == rc.name
 
     def test_claude_defaults_to_sonnet_and_the_others_to_the_cli_default(self) -> None:
         """Argv too, not just the field — an empty model emits no flag at all."""
@@ -432,7 +456,7 @@ class TestLegacyClaudeCLIPromotion:
             agent_cli_reviewers=[AgentCLIReviewerConfig(name="mycorp-agent", cli_path="mc")]
         )
         names = {r.name for r in oc.agent_cli_reviewers}
-        assert names == {"mycorp-agent", "claude", "codex", "pi"}
+        assert names == {"mycorp-agent", "claude", "codex", "pi", "cursor-agent"}
 
     def test_disabled_builtin_respected_not_reseeded(self) -> None:
         oc = OperatorConfig(

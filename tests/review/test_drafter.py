@@ -212,8 +212,12 @@ class TestCreateDraftsFromFindings:
             ("moderation: tone issue", "moderation"),
             ("something else entirely", "other"),
         ]
-        for title, expected_category in cases:
-            finding = self._make_finding(title=title)
+        # Each case needs a distinct finding, not just a distinct title: the
+        # already-filed gate keys on (file, line, body) exactly as the agent-CLI
+        # path does, so nine findings sharing one body and line legitimately
+        # collapse to one after the first iteration files it.
+        for index, (title, expected_category) in enumerate(cases):
+            finding = self._make_finding(title=title, line_number=10 + index, body=f"Body {index}.")
             drafts = create_drafts_from_findings(
                 db_pr,
                 [finding],

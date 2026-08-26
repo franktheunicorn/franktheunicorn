@@ -996,11 +996,14 @@ def process_pr(
             # run, and if not, which gate stopped them".
             if decisions is not None:
                 decisions[skip.reason] += 1
+            # DEBUG only, and deliberately no log_lines branch: the dashboard's
+            # force-run is the only caller that passes log_lines and it always
+            # passes force=True, which review_skip_reason short-circuits — so a
+            # "put the reason in front of the operator" branch here could never
+            # execute, while its comment claimed otherwise. Everything that
+            # reaches this point is the poll cycle, whose audience is the
+            # aggregate line _log_cycle_summary prints.
             logger.debug("PR #%d: no agent run — %s. %s", pr.number, skip.reason, skip.explanation)
-            if log_lines is not None:
-                # The dashboard's force-run log is a different audience: one PR,
-                # on purpose, and the operator needs the reason in front of them.
-                log_lines.append(f"No agent run — {skip.reason}. {skip.explanation}")
             return []
 
         if decisions is not None:
@@ -1099,27 +1102,40 @@ def process_pr(
                 exc_info=True,
             )
 
-        _log("Running LLM review pipeline...")
-        drafts = draft_review(
-            pr,
-            pc,
-            operator_config=effective_config,
-            diff=pr_diff,
-            repo_health_context=health_ctx,
-            community_context=community_ctx,
-            jira_context=jira_ctx,
-            sentry_context=sentry_ctx,
-            repo_path=repo_path,
-        )
-        _log(f"LLM review complete: {len(drafts)} finding(s) generated")
-        logger.info(
-            "  PR #%d: score=%.2f, %d drafts generated",
-            pr.number,
-            pr.interest_score,
-            len(drafts),
-        )
-
-        record_agent_run(pr, LLM_REVIEW_SOURCE, status="ok", findings=len(drafts))
+        # Skipped when the LLM has already had its turn and we are only here for a
+        # reviewer that hasn't. The gate above lets a PR through if *any* expected
+        # source is missing, and without this that re-ran the entire LLM pipeline —
+        # every backend, full token cost — to chase one absent agent CLI. Worse,
+        # create_drafts_from_findings inserts unconditionally, so each pass added a
+        # fresh copy of every finding it had already filed. Combined with a
+        # conflicted PR (whose CLI source could never be recorded until this
+        # commit) that was unbounded duplicate growth, every cycle, forever.
+        #
+        # force bypasses it: "Force Run Agents" means redo the lot.
+        drafts: list[Any] = []
+        if force or LLM_REVIEW_SOURCE in missing_review_sources(pr, operator_config):
+            _log("Running LLM review pipeline...")
+            drafts = draft_review(
+                pr,
+                pc,
+                operator_config=effective_config,
+                diff=pr_diff,
+                repo_health_context=health_ctx,
+                community_context=community_ctx,
+                jira_context=jira_ctx,
+                sentry_context=sentry_ctx,
+                repo_path=repo_path,
+            )
+            _log(f"LLM review complete: {len(drafts)} finding(s) generated")
+            logger.info(
+                "  PR #%d: score=%.2f, %d drafts generated",
+                pr.number,
+                pr.interest_score,
+                len(drafts),
+            )
+            record_agent_run(pr, LLM_REVIEW_SOURCE, status="ok", findings=len(drafts))
+        else:
+            _log("LLM review already done for this PR; running only the missing reviewers.")
 
         clone_url = _clone_url_for_project(pc, operator_config)
 
@@ -1610,6 +1626,18 @@ def _scan_operator_prs(
         )
 
 
+#: Reviews the backfill will start in one cycle.
+#:
+#: The candidate set is now every open PR the poll didn't refresh, because the
+#: per-PR decision moved to review_skip_reason where the run records are visible.
+#: That is correct and unbounded, so it needs a ceiling: without one, the first
+#: cycle after enabling a new reviewer would try to review every open PR in the
+#: database back to back, at LLM cost, with the poll cycle stalled behind it.
+#: Ordered by draft_count then score, so the cap spends itself on the PRs nothing
+#: has said anything about yet.
+MAX_BACKFILL_REVIEWS_PER_CYCLE = 25
+
+
 def _backfill_unreviewed_prs(
     already_polled_pks: set[int | None],
     project_configs: Sequence[object],
@@ -1659,7 +1687,14 @@ def _backfill_unreviewed_prs(
         if isinstance(pc, ProjectConfig) and pc.enabled:
             config_by_name[f"{pc.owner}/{pc.repo}"] = pc
 
-    for pr in backfill_qs:
+    considered = reviewed = 0
+    for pr in backfill_qs.iterator(chunk_size=100):
+        if reviewed >= MAX_BACKFILL_REVIEWS_PER_CYCLE:
+            logger.info(
+                "Backfill stopped at its %d-review cap; the rest are next cycle.",
+                MAX_BACKFILL_REVIEWS_PER_CYCLE,
+            )
+            break
         full_name = pr.project.full_name if hasattr(pr.project, "full_name") else str(pr.project)
         pc = config_by_name.get(full_name) or get_project_config(full_name)
         if not isinstance(pc, ProjectConfig):
@@ -1668,6 +1703,16 @@ def _backfill_unreviewed_prs(
             )
             continue
 
+        # Asked here rather than left to process_pr, so a PR that needs nothing
+        # costs one query and no log line. Dropping the query's draft_count filter
+        # made the candidate set every open PR in the database, and an INFO line
+        # each would be ~900 a cycle on Spark — breaking the same "per-PR detail
+        # stays at DEBUG" rule this work added to CLAUDE.md.
+        considered += 1
+        if review_skip_reason(pr, pc, operator_config, force=False) is not None:
+            continue
+
+        reviewed += 1
         logger.info("Backfilling review for PR #%d (%s)", pr.number, full_name)
         try:
             forge_client = clients.get(pc.forge) if clients else None
@@ -1683,6 +1728,8 @@ def _backfill_unreviewed_prs(
             logger.info("  Backfill PR #%d: %d drafts generated", pr.number, len(drafts))
         except Exception:
             logger.exception("Error backfilling review for PR #%d", pr.number)
+    if considered:
+        logger.info("Backfill: %d PR(s) considered, %d reviewed.", considered, reviewed)
 
 
 def _run_shepherding_pass(

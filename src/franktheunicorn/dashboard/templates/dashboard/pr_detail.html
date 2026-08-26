@@ -138,7 +138,15 @@
             {% endif %}
         </td>
         <td>
-            {% if agent.did_run %}
+            {# run_status comes from the recorded run, so "ran and found nothing" #}
+            {# and "never ran" stop looking identical. #}
+            {% if agent.run_status == "failed" %}
+            <span class="error-note" style="font-weight: 600;">&#10007; failed</span>
+            {% elif agent.run_status == "no-checkout" %}
+            <span class="warn-note" style="font-weight: 600;">no checkout</span>
+            {% elif agent.run_status == "merge-conflict" %}
+            <span class="warn-note" style="font-weight: 600;">merge conflict</span>
+            {% elif agent.did_run %}
             <span style="color: var(--green); font-weight: 600;">&#10003; ran</span>
             {% else %}
             <span class="fainter" style="font-style: italic;">not run</span>

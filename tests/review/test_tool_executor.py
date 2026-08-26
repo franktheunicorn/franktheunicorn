@@ -889,22 +889,39 @@ class TestRemoteCommandDelivery:
         for _ in range(3):
             RemoteSSHExecutor(config=config).run(["echo", "x"], cwd="/tmp")
 
-        # 2 probes (argv rejected, stdin accepted) + 3 real commands.
+        # 2 probes (argv rejected, then stdin accepted) + 3 real commands. The
+        # probe is sequential now, so a wrapper whose argv form works pays one.
         assert mock_run.call_count == 5
 
     @patch("franktheunicorn.review.tool_executor.subprocess.run")
-    def test_plain_ssh_keeps_the_argv_form(self, mock_run: Any) -> None:
-        """No behaviour change where the argv form already worked."""
+    def test_plain_ssh_keeps_the_argv_form_without_probing(self, mock_run: Any) -> None:
+        """`ssh host 'cmd'` is OpenSSH's documented interface, so confirming it by
+        round trip costs a call per config and warns on a healthy host."""
         mock_run.return_value = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=f"{_DELIVERY_SENTINEL}\n", stderr=""
+            args=[], returncode=0, stdout="", stderr=""
         )
         executor = RemoteSSHExecutor(config=_ssh_config())
 
         executor.run(["true"], cwd="/tmp")
 
+        assert mock_run.call_count == 1, "no probing for real ssh"
         argv = mock_run.call_args.args[0]
         assert argv[-1] == "cd /tmp && true"
         assert mock_run.call_args.kwargs.get("input") is None
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_plain_ssh_never_warns_about_framing(
+        self, mock_run: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A warning on a correct config trains the operator to ignore warnings."""
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+
+        with caplog.at_level("WARNING"):
+            RemoteSSHExecutor(config=_ssh_config()).run(["true"], cwd="/tmp")
+
+        assert caplog.text == ""
 
     @patch("franktheunicorn.review.tool_executor.subprocess.run")
     def test_an_explicit_command_mode_skips_the_probe(self, mock_run: Any) -> None:
@@ -949,3 +966,158 @@ class TestRemoteCommandDelivery:
     def test_an_unknown_command_mode_is_rejected_at_load(self) -> None:
         with pytest.raises(ValueError, match="command_mode"):
             RemoteExecutionConfig(mode="ssh", host="h", command_mode="telepathy")
+
+
+class TestDeliveryHardening:
+    """The three ways the first version of this got it wrong."""
+
+    @staticmethod
+    def _wrapper() -> RemoteExecutionConfig:
+        return RemoteExecutionConfig(mode="ssh", ssh_command=["sf", "workspace", "ssh"])
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_a_wrapper_quoting_our_argv_back_is_not_a_success(self, mock_run: Any) -> None:
+        """`Error: Workspace not found: echo <sentinel>` contains the sentinel.
+
+        Caught two ways now: a nonzero exit is checked, and the sentinel is sent
+        in halves the remote shell has to join, so an echo of our literal argv
+        cannot reproduce it.
+        """
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout=f"Error: Workspace not found: echo {_DELIVERY_SENTINEL}\n",
+            stderr="",
+        )
+        config = self._wrapper()
+
+        RemoteSSHExecutor(config=config).run(["true"], cwd="/tmp")
+
+        assert config._resolved_command_mode is None, "a rejection must not be cached"
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_an_echoed_sentinel_with_exit_zero_is_still_rejected(self, mock_run: Any) -> None:
+        """Belt and braces: even at rc=0, the un-joined form must not pass."""
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout='echo __frank_delivery""_ok__\n',
+            stderr="",
+        )
+        config = self._wrapper()
+
+        RemoteSSHExecutor(config=config).run(["true"], cwd="/tmp")
+
+        assert config._resolved_command_mode is None
+
+    def test_a_pty_echo_returns_the_output_not_the_script(self) -> None:
+        """A shell on a PTY echoes the script it is fed, so the markers appear
+        twice — taking the first returned the script as the command's output."""
+        executor = RemoteSSHExecutor(config=self._wrapper())
+        begin, end = "__frank_out_begin__abc", "__frank_out_end__abc"
+        echoed = f'echo {begin}\ncd /x && git diff\n__frank_rc=$?\necho "{end}:$__frank_rc"\nexit\n'
+        session = ExecResult(
+            returncode=0, stdout=f"{echoed}{begin}\nREAL DIFF\n{end}:0\n", stderr=""
+        )
+
+        unframed = executor._unframe(session, "git", begin, end)
+
+        assert unframed.stdout.strip() == "REAL DIFF"
+        assert unframed.returncode == 0
+
+    def test_output_containing_the_end_marker_is_not_truncated(self) -> None:
+        """A `git diff` touching this very file contains the literal marker."""
+        executor = RemoteSSHExecutor(config=self._wrapper())
+        begin, end = "__frank_out_begin__abc", "__frank_out_end__abc"
+        body = f'+_FRAME_END = "{end}"\n+more diff\n'
+        session = ExecResult(returncode=0, stdout=f"{begin}\n{body}{end}:0\n", stderr="")
+
+        unframed = executor._unframe(session, "git", begin, end)
+
+        assert unframed.stdout == body
+        assert unframed.returncode == 0
+
+    def test_the_markers_are_unique_per_invocation(self) -> None:
+        """Which is what makes the collision above survivable at all."""
+        seen = set()
+        with patch("franktheunicorn.review.tool_executor.subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                args=[], returncode=0, stdout="", stderr=""
+            )
+            config = RemoteExecutionConfig(
+                mode="ssh", ssh_command=["sf", "workspace", "ssh"], command_mode="stdin"
+            )
+            for _ in range(3):
+                RemoteSSHExecutor(config=config).run(["true"], cwd="/tmp")
+                seen.add(mock_run.call_args.kwargs["input"].split("\n", 1)[0])
+
+        assert len(seen) == 3
+
+    def test_a_banner_after_the_exit_code_still_parses(self) -> None:
+        """`END:0 Connection to host closed.` used to fail int() and report 1."""
+        executor = RemoteSSHExecutor(config=self._wrapper())
+        begin, end = "__frank_out_begin__abc", "__frank_out_end__abc"
+        session = ExecResult(
+            returncode=0,
+            stdout=f"{begin}\nok\n{end}:0 Connection to host closed.\n",
+            stderr="",
+        )
+
+        unframed = executor._unframe(session, "true", begin, end)
+
+        assert unframed.returncode == 0
+
+    def test_an_unparseable_exit_code_is_a_failure_not_a_success(self) -> None:
+        executor = RemoteSSHExecutor(config=self._wrapper())
+        begin, end = "__frank_out_begin__abc", "__frank_out_end__abc"
+        session = ExecResult(returncode=0, stdout=f"{begin}\nok\n{end}: ???\n", stderr="")
+
+        assert executor._unframe(session, "true", begin, end).returncode == 1
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_prepare_repo_honours_the_delivery_mode(self, mock_run: Any) -> None:
+        """prepare_repo is the FIRST remote call the review path makes. Going
+        straight to argv meant a stdin-only wrapper ignored the clone script,
+        exited 0 with no output, and we returned a path never created."""
+        config = RemoteExecutionConfig(
+            mode="ssh", ssh_command=["sf", "workspace", "ssh"], command_mode="stdin"
+        )
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+
+        RemoteSSHExecutor(config=config).prepare_repo("apache", "spark", clone_url="u")
+
+        assert mock_run.call_args.kwargs.get("input") is not None, "clone went over stdin"
+        assert "git clone" in mock_run.call_args.kwargs["input"]
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_prepare_repo_does_not_claim_a_clone_that_never_ran(self, mock_run: Any) -> None:
+        """No framing back means no proof the script ran, so no success."""
+        config = RemoteExecutionConfig(
+            mode="ssh", ssh_command=["sf", "workspace", "ssh"], command_mode="stdin"
+        )
+        # A wrapper that opened a shell and discarded the script: exit 0, no output.
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+
+        assert RemoteSSHExecutor(config=config).prepare_repo("a", "b", clone_url="u") is None
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_a_dropped_stdin_payload_is_reported(
+        self, mock_run: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """LocalExecutor honours stdin and the protocol declares it, so the two
+        implementations must not disagree in silence."""
+        config = RemoteExecutionConfig(
+            mode="ssh", ssh_command=["sf", "workspace", "ssh"], command_mode="stdin"
+        )
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+
+        with caplog.at_level("WARNING"):
+            RemoteSSHExecutor(config=config).run(["cat"], cwd="/tmp", stdin="payload")
+
+        assert "Ignoring a stdin payload" in caplog.text

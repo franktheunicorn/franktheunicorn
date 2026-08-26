@@ -16,6 +16,7 @@ import re
 import shlex
 import subprocess
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePath
 from typing import Protocol
@@ -27,7 +28,11 @@ _DELIVERY_ARGV = "argv"
 _DELIVERY_STDIN = "stdin"
 
 #: Round-tripped to find out whether a command sent a given way actually ran.
-_DELIVERY_SENTINEL = "__frank_delivery_ok__"
+#: Sent as two halves the remote shell has to join, so an error message quoting
+#: our own argv back cannot masquerade as output. See ``_delivery_mode``.
+_DELIVERY_SENTINEL_HEAD = "__frank_delivery"
+_DELIVERY_SENTINEL_TAIL = "_ok__"
+_DELIVERY_SENTINEL = _DELIVERY_SENTINEL_HEAD + _DELIVERY_SENTINEL_TAIL
 _DELIVERY_PROBE_TIMEOUT_SECONDS = 60
 
 #: Markers bracketing the command in a stdin-driven session, so the wrapper's and
@@ -359,27 +364,24 @@ class RemoteSSHExecutor:
                 f"{clone_cmd}; "
                 f"fi"
             )
-            ssh_argv = [*self._ssh_command(), script]
-            try:
-                result = subprocess.run(
-                    ssh_argv,
-                    capture_output=True,
-                    text=True,
-                    timeout=self.config.prepare_timeout_seconds,
-                )
-            except FileNotFoundError:
+            # Through run_script, not a bare subprocess.run: this is the first
+            # remote call the review path makes, and going straight to argv here
+            # meant a stdin-only wrapper silently ignored the clone script, exited
+            # 0 with no output, and had us return a path to a directory that was
+            # never created — with every later step then running in it.
+            result = self.run_script(
+                script,
+                timeout=self.config.prepare_timeout_seconds,
+                label=f"prepare {owner}/{repo}",
+            )
+            if result is None:
+                # run_script/_spawn has already logged the specific reason
+                # (binary missing, timeout, no framing).
                 logger.warning(
-                    "SSH connection error: binary %r not on PATH; remote execution unavailable",
-                    self.config.ssh_command[0],
-                )
-                return None
-            except subprocess.TimeoutExpired:
-                logger.warning(
-                    "SSH connection to %s timed out after %ds while preparing %s/%s",
-                    self.config.host,
-                    self.config.prepare_timeout_seconds,
+                    "Could not reach the remote to prepare %s/%s (attempt %d)",
                     owner,
                     repo,
+                    attempt + 1,
                 )
                 return None
 
@@ -497,25 +499,61 @@ class RemoteSSHExecutor:
         # ``remote_workspace_dir``, which may start with ``~`` and needs
         # the same expansion-aware quoting as ``prepare_repo``.
         quoted_cmd = " ".join(shlex.quote(part) for part in cmd)
+        # Build a remote shell command: cd + the quoted argv. We quote
+        # every argument so paths with spaces or shell metacharacters in
+        # ``cmd`` survive the trip through ssh's remote shell. ``cwd`` is
+        # whatever ``prepare_repo`` returned — typically a path under
+        # ``remote_workspace_dir``, which may start with ``~`` and needs
+        # the same expansion-aware quoting as ``prepare_repo``.
         remote_invocation = f"cd {self._quote_remote_path(cwd)} && {quoted_cmd}"
-        mode = self._delivery_mode(timeout=timeout)
-        if mode == _DELIVERY_STDIN:
-            return self._run_via_stdin(remote_invocation, cmd, timeout)
-        return self._run_via_argv(remote_invocation, cmd, timeout, stdin)
+        return self.run_script(
+            remote_invocation, timeout=timeout, label=cmd[0] if cmd else "", stdin=stdin
+        )
+
+    def run_script(
+        self,
+        script: str,
+        *,
+        timeout: int = DEFAULT_TIMEOUT_SECONDS,
+        label: str = "",
+        stdin: str | None = None,
+    ) -> ExecResult | None:
+        """Run an arbitrary remote shell script, honouring the delivery mode.
+
+        Split out of :meth:`run` because ``prepare_repo`` also has a script to run
+        and was calling ``subprocess.run`` directly — so it never consulted the
+        delivery mode at all. That made the whole mechanism unreachable for the
+        case it exists for: ``prepare_repo`` is the *first* remote call the review
+        path makes, and on a stdin-only wrapper it sent the clone script as an
+        argv argument, got exit 0 and no output from a wrapper that ignored it, and
+        returned a path to a directory that was never created. Everything after it
+        then ran in a nonexistent directory.
+        """
+        if self._delivery_mode(timeout=timeout) == _DELIVERY_STDIN:
+            if stdin is not None:
+                # The channel is already carrying the framing script, so a payload
+                # would be silently dropped. Say so instead: LocalExecutor honours
+                # ``stdin`` and the protocol declares it, so the two must not
+                # disagree in silence.
+                logger.warning(
+                    "Ignoring a stdin payload for %r: this remote is driven over stdin, "
+                    "which the command script already occupies.",
+                    label or "(script)",
+                )
+            return self._run_via_stdin(script, label, timeout)
+        return self._run_via_argv(script, label, timeout, stdin)
 
     def _run_via_argv(
         self,
         remote_invocation: str,
-        cmd: list[str],
+        label: str,
         timeout: int,
         stdin: str | None,
     ) -> ExecResult | None:
         """``ssh host 'cd … && cmd'`` — the command as a trailing argument."""
-        return self._spawn([*self._ssh_command(), remote_invocation], cmd, timeout, stdin)
+        return self._spawn([*self._ssh_command(), remote_invocation], label, timeout, stdin)
 
-    def _run_via_stdin(
-        self, remote_invocation: str, cmd: list[str], timeout: int
-    ) -> ExecResult | None:
+    def _run_via_stdin(self, remote_invocation: str, label: str, timeout: int) -> ExecResult | None:
         """Pipe the command into the shell the wrapper opens.
 
         For a wrapper with no remote-command form. Two things make this usable
@@ -523,53 +561,74 @@ class RemoteSSHExecutor:
 
         * **Framing.** The wrapper and the login shell both talk on the way in
           (a "Running: ssh <ip>" line, a "Last login:" banner), and that lands in
-          stdout ahead of the output. Sentinel markers around the command let us
-          return exactly the command's own output, so a caller parsing ``git
-          diff`` doesn't get a banner prepended to the diff.
+          stdout ahead of the output. Markers around the command let us return
+          exactly the command's own output, so a caller parsing ``git diff``
+          doesn't get a banner prepended to the diff.
         * **Exit status.** The wrapper's exit code is its own, not the command's,
           so the real one is echoed after the end marker and read back out.
+
+        The markers carry a per-invocation nonce. Without one, a ``git diff`` that
+        happens to touch *this file* contains the literal end marker, and the body
+        got cut at the diff's own text with the exit code misread as a failure.
         """
+        nonce = uuid.uuid4().hex[:12]
+        begin, end = f"{_FRAME_BEGIN}{nonce}", f"{_FRAME_END}{nonce}"
         script = (
-            f"echo {_FRAME_BEGIN}\n"
-            f"{remote_invocation}\n"
-            f"__frank_rc=$?\n"
-            f'echo "{_FRAME_END}:$__frank_rc"\n'
-            "exit\n"
+            f'echo {begin}\n{remote_invocation}\n__frank_rc=$?\necho "{end}:$__frank_rc"\nexit\n'
         )
-        result = self._spawn(self._ssh_command(), cmd, timeout, script)
+        result = self._spawn(self._ssh_command(), label, timeout, script)
         if result is None:
             return None
-        return self._unframe(result, cmd)
+        return self._unframe(result, label, begin, end)
 
     @staticmethod
-    def _unframe(result: ExecResult, cmd: list[str]) -> ExecResult:
-        """Cut the command's own output and exit code out of a framed session."""
+    def _unframe(result: ExecResult, label: str, begin: str, end: str) -> ExecResult | None:
+        """Cut the command's own output and exit code out of a framed session.
+
+        ``rfind`` for the begin marker and the *last* end marker after it, not the
+        first of each. A shell attached to a PTY echoes the script it is fed, so the
+        markers appear twice — once in the echo, once for real — and taking the
+        first occurrence returned the script itself as the command's output.
+        """
         stdout = result.stdout
-        begin = stdout.find(_FRAME_BEGIN)
-        end = stdout.find(_FRAME_END, begin + 1 if begin >= 0 else 0)
-        if begin < 0 or end < 0:
-            # The markers are the proof the command ran. Without them, report the
-            # session verbatim and let the caller's ok-check fail rather than
-            # inventing a success out of banner text.
+        at_begin = stdout.rfind(begin)
+        at_end = stdout.rfind(end)
+        if at_begin < 0 or at_end < at_begin:
+            # The markers are the proof the command ran, so their absence means we
+            # cannot say it did — which is what None means on this interface, and
+            # not what the wrapper's own exit 0 means. Returning `result` verbatim
+            # here is how prepare_repo reported a clone that never happened and
+            # handed back a path to a directory that does not exist.
+            #
+            # None rather than an rc=1 ExecResult specifically because this is
+            # structural, not transient: prepare_repo retries a failed result five
+            # times over 380 seconds of backoff, and a wrapper that does not run
+            # commands this way will not start doing so on the fourth try.
             logger.warning(
-                "Remote stdin session did not echo its framing for %s; "
-                "returning the raw session output.",
-                cmd[0] if cmd else "(empty)",
+                "Remote stdin session did not echo its framing for %s, so the command "
+                "cannot be confirmed to have run at all. Session said: %r",
+                label or "(script)",
+                (result.stdout or result.stderr or "").strip()[:200] or "nothing",
             )
-            return result
-        body = stdout[stdout.index("\n", begin) + 1 : end] if "\n" in stdout[begin:] else ""
-        # "END:<rc>" — anything unparseable means we cannot claim to know the exit
-        # status, and 0 would be the dangerous guess.
-        tail = stdout[end + len(_FRAME_END) :].lstrip(":").split("\n", 1)[0].strip()
-        try:
-            returncode = int(tail)
-        except ValueError:
-            logger.warning("Remote stdin session gave no exit status (%r); treating as 1.", tail)
-            returncode = 1
-        return ExecResult(returncode=returncode, stdout=body, stderr=result.stderr)
+            return None
+        body_start = stdout.find("\n", at_begin)
+        body = stdout[body_start + 1 : at_end] if 0 <= body_start < at_end else ""
+        # "<end>:<rc>", possibly with a closing banner on the same line, so take
+        # the leading integer only. Anything unparseable means we cannot claim to
+        # know the exit status, and 0 would be the dangerous guess.
+        tail = stdout[at_end + len(end) :]
+        match = re.match(r"\s*:\s*(-?\d+)", tail)
+        if match is None:
+            logger.warning(
+                "Remote stdin session gave no exit status for %s (%r); treating as failed.",
+                label or "(script)",
+                tail.split("\n", 1)[0][:80],
+            )
+            return ExecResult(returncode=1, stdout=body, stderr=result.stderr)
+        return ExecResult(returncode=int(match.group(1)), stdout=body, stderr=result.stderr)
 
     def _spawn(
-        self, argv: list[str], cmd: list[str], timeout: int, stdin: str | None
+        self, argv: list[str], label: str, timeout: int, stdin: str | None
     ) -> ExecResult | None:
         try:
             result = subprocess.run(
@@ -589,7 +648,7 @@ class RemoteSSHExecutor:
             logger.warning(
                 "Remote command timed out after %ds: %s",
                 timeout,
-                cmd[0] if cmd else "(empty)",
+                label or "(script)",
             )
             return None
         return ExecResult(
@@ -612,25 +671,29 @@ class RemoteSSHExecutor:
         configured = self.config.command_mode
         if configured != _DELIVERY_AUTO:
             return configured
+        if self.wraps_openssh():
+            # Not a guess about somebody's wrapper: ``ssh host 'cmd'`` is OpenSSH's
+            # documented interface. Probing it would cost a round trip per config
+            # to confirm the manual, and the stdin half of that probe emitted a
+            # "did not echo its framing" warning on a perfectly healthy host.
+            return _DELIVERY_ARGV
         cached = self.config._resolved_command_mode
         if cached is not None:
             return cached
 
         probe_timeout = min(timeout, _DELIVERY_PROBE_TIMEOUT_SECONDS)
-        invocation = f"echo {_DELIVERY_SENTINEL}"
-        attempts = {
-            _DELIVERY_ARGV: self._run_via_argv(invocation, ["echo"], probe_timeout, None),
-            _DELIVERY_STDIN: self._run_via_stdin(invocation, ["echo"], probe_timeout),
-        }
-        for candidate, probe in attempts.items():
-            if probe is not None and _DELIVERY_SENTINEL in probe.stdout:
-                if candidate == _DELIVERY_STDIN:
-                    logger.info(
-                        "Remote %r takes no remote-command argument; driving it over stdin.",
-                        " ".join(self.config.ssh_command),
-                    )
-                self.config._resolved_command_mode = candidate
-                return candidate
+        # The sentinel is sent split by empty quotes and checked for joined. Only a
+        # shell that actually evaluated the line can produce the joined form, so a
+        # wrapper that quotes our command back at us in an error message — "Error:
+        # Workspace not found: echo __frank""_delivery_ok__" — can no longer look
+        # like a success. Combined with the returncode check below, which the first
+        # version of this omitted entirely.
+        invocation = f'echo {_DELIVERY_SENTINEL_HEAD}""{_DELIVERY_SENTINEL_TAIL}'
+
+        def accepted(probe: ExecResult | None) -> bool:
+            return probe is not None and probe.ok and _DELIVERY_SENTINEL in probe.stdout
+
+        def note(candidate: str, probe: ExecResult | None) -> None:
             logger.debug(
                 "Remote delivery probe %s failed for %s: %s",
                 candidate,
@@ -639,6 +702,26 @@ class RemoteSSHExecutor:
                 if probe is None
                 else f"rc={probe.returncode} out={probe.stdout[:120]!r}",
             )
+
+        # Sequentially, with an early return: a dict literal evaluated both
+        # branches every time, so a perfectly healthy OpenSSH host paid an extra
+        # round trip per config *and* got a spurious "did not echo its framing"
+        # warning — training the operator to ignore the warnings this exists to add.
+        argv_probe = self._run_via_argv(invocation, "echo", probe_timeout, None)
+        if accepted(argv_probe):
+            self.config._resolved_command_mode = _DELIVERY_ARGV
+            return _DELIVERY_ARGV
+        note(_DELIVERY_ARGV, argv_probe)
+
+        stdin_probe = self._run_via_stdin(invocation, "echo", probe_timeout)
+        if accepted(stdin_probe):
+            logger.info(
+                "Remote %r takes no remote-command argument; driving it over stdin.",
+                " ".join(self.config.ssh_command),
+            )
+            self.config._resolved_command_mode = _DELIVERY_STDIN
+            return _DELIVERY_STDIN
+        note(_DELIVERY_STDIN, stdin_probe)
 
         # Neither worked. Fall back to argv so the failure surfaces as the
         # wrapper's own error message rather than as framing noise, and don't

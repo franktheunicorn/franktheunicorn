@@ -419,3 +419,70 @@ class TestStartupProbe:
 
         assert "claude" in [rc.name for rc in resolve_agent_cli_reviewers(oc)]
         assert "leaving it enabled" in caplog.text
+
+
+class TestCursorReviewer:
+    """``cursor-agent``, seeded read-only.
+
+    Its interface differs from claude's in a way that happens to converge:
+    ``-p``/``--print`` is a boolean and the prompt is positional, where claude's
+    ``-p`` carries the prompt. Both produce ``[-p, <prompt>]``.
+    """
+
+    @staticmethod
+    def _cursor() -> AgentCLIReviewerConfig:
+        return next(rc for rc in OperatorConfig().agent_cli_reviewers if rc.name == "cursor-agent")
+
+    def test_the_binary_is_cursor_agent_not_cursor(self) -> None:
+        """``cursor`` is the editor; ``cursor-agent`` is the headless CLI. The seed
+        is named after the binary because cli_path defaults to name, so a friendlier
+        name would have sent it looking for the wrong executable."""
+        assert self._cursor().cli_argv == ["cursor-agent"]
+        assert self._cursor().name == "cursor-agent"
+
+    def test_it_runs_read_only(self) -> None:
+        """``-p`` alone is documented as having "access to all tools, including
+        write and shell", and this is a reviewer pointed at someone else's PR."""
+        argv = list(self._cursor().cli_argv) + self._cursor().build_invocation("REVIEW")
+
+        assert "--mode" in argv
+        assert argv[argv.index("--mode") + 1] == "ask"
+
+    def test_the_prompt_is_the_trailing_argument(self) -> None:
+        argv = list(self._cursor().cli_argv) + self._cursor().build_invocation("REVIEW")
+
+        assert argv == ["cursor-agent", "--mode", "ask", "-p", "REVIEW"]
+
+    def test_it_is_auto_detected_not_forced_on(self) -> None:
+        """Same contract as the other seeds: runs only if the binary is present."""
+        assert self._cursor().enabled == "auto"
+
+    def test_a_model_override_uses_cursors_own_flag(self) -> None:
+        """``cursor-agent --model <m>`` matches the default model_flag."""
+        rc = AgentCLIReviewerConfig(
+            name="cursor-agent", model="gpt-5", extra_args=["--mode", "ask"]
+        )
+
+        argv = list(rc.cli_argv) + rc.build_invocation("REVIEW")
+
+        assert argv == ["cursor-agent", "--model", "gpt-5", "--mode", "ask", "-p", "REVIEW"]
+
+    def test_an_operator_can_still_override_the_mode(self) -> None:
+        """Seeds merge field-by-field, so overriding extra_args replaces only that."""
+        import tempfile
+
+        from franktheunicorn.config.loader import load_operator_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "operator.yaml"
+            path.write_text(
+                "github_token: x\n"
+                "agent_cli_reviewers:\n"
+                '  - name: "cursor-agent"\n'
+                "    extra_args: []\n"
+            )
+            oc = load_operator_config(path)
+
+        cursor = next(rc for rc in oc.agent_cli_reviewers if rc.name == "cursor-agent")
+        assert cursor.extra_args == []
+        assert cursor.cli_argv == ["cursor-agent"], "the seeded cli_path survives"

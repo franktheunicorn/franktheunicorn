@@ -319,6 +319,11 @@ def create_drafts_from_findings(
     if project is not None and rejection_predictor_enabled:
         predictor = load_predictor_for_project(project.owner, project.repo)
 
+    # Fetched once, outside the loop: the gate below is O(findings x existing) in
+    # memory rather than a query per finding, which is what the agent-CLI path
+    # does too.
+    existing_drafts = list(ReviewDraft.objects.filter(pull_request=pr))
+
     with transaction.atomic():
         for idx, finding in enumerate(findings):
             # Resolve attribution for this specific finding. When dedup merged
@@ -333,6 +338,21 @@ def create_drafts_from_findings(
             else:
                 finding_sources = [source]
             primary_source = finding_sources[0]
+
+            # Already-filed gate, before any of the expensive work below. The
+            # agent-CLI path has deduped against existing drafts since it was
+            # written; this path was a bare create(), so any second pass over the
+            # same PR — Force Run Agents, or a cycle chasing one missing reviewer —
+            # filed a fresh copy of every finding it had already filed.
+            duplicate = _find_existing_draft(existing_drafts, finding)
+            if duplicate is not None:
+                logger.debug(
+                    "Skipping %s finding '%s' — already filed as draft #%d",
+                    primary_source,
+                    finding.title[:40],
+                    duplicate.pk,
+                )
+                continue
 
             # Anti-pattern gate.
             matches = check_against_anti_patterns(finding.body, project)
@@ -425,6 +445,7 @@ def create_drafts_from_findings(
                 diff_source=diff_source,
             )
             drafts.append(draft)
+            existing_drafts.append(draft)
 
     # Auto-retrain check (v1.75) — only when the project opted in.
     if project is not None and rejection_predictor_enabled:
@@ -645,3 +666,27 @@ def draft_review(
         rejection_predictor_enabled=getattr(project_config, "rejection_predictor_enabled", False),
     )
     return extra_drafts + llm_drafts
+
+
+def _find_existing_draft(existing: list[ReviewDraft], finding: ReviewFinding) -> ReviewDraft | None:
+    """The already-filed draft that *is* this finding, if there is one.
+
+    Exact identity — same file, same line, same body — deliberately, and not
+    ``dedup.is_duplicate_finding``. That predicate exists to merge what two
+    different agents said about one place, so it matches on line *proximity* and
+    unconditionally on an equal line number; its own docstring carries a TODO
+    about over-merging distinct findings. Suppressing a genuinely new finding
+    because something else was filed three lines away would be a worse bug than
+    the duplicates this gate is here to stop.
+
+    So this only ever catches a true re-file: the same source saying the same
+    thing about the same line on a second pass over the same PR.
+    """
+    for draft in existing:
+        if (
+            draft.file_path == finding.file_path
+            and draft.line_number == finding.line_number
+            and draft.comment_body == finding.body
+        ):
+            return draft
+    return None
