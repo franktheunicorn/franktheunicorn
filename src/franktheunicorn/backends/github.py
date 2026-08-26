@@ -309,6 +309,18 @@ class GitHubClient(ForgeClient):
             f"author:{username} type:pr state:open", max_results, what="own-PR scan"
         )
 
+    def search_prs_reviewed_by(self, username: str, max_results: int = 100) -> list[dict[str, Any]]:
+        """Search for open PRs ``username`` has already reviewed.
+
+        The same query as GitHub's own ``is:open is:pr reviewed-by:@me`` filter.
+        ``@me`` is a UI convenience the REST search API doesn't take, so the
+        resolved username goes in — which is why ``ensure_github_username`` runs
+        before the first cycle.
+        """
+        return self._search_prs(
+            f"reviewed-by:{username} type:pr state:open", max_results, what="reviewed-by scan"
+        )
+
     #: Search results per page. GitHub's own ceiling for /search/issues.
     _SEARCH_PAGE = 100
 

@@ -182,6 +182,22 @@ class ForgeClient(ABC):
         """
         return []
 
+    def search_prs_reviewed_by(self, username: str, max_results: int = 100) -> list[dict[str, Any]]:
+        """Search for open PRs ``username`` has already submitted a review on.
+
+        A third distinct set, not a subset of the other two. ``involves:`` covers
+        commenters, and a review submitted *without* a comment body — a plain
+        Approve, a Request-changes with only inline notes — need not make you one;
+        ``author:`` obviously doesn't cover it either. These are the PRs the
+        operator has already spent judgement on and is on the hook to re-check when
+        the author pushes again, which makes them the last set that should go
+        missing.
+
+        Default implementation returns an empty list; forges with a search API
+        should override.
+        """
+        return []
+
 
 def infer_username(client: ForgeClient) -> str:
     """Infer the authenticated user's login from any ForgeClient.

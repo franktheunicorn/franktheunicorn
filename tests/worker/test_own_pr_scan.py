@@ -119,9 +119,15 @@ class TestSearchPrsAuthoredBy:
 class TestScanOperatorPrs:
     """Two searches per forge, deduped, own-PRs first."""
 
-    def _client(self, authored: list[dict[str, Any]], involved: list[dict[str, Any]]) -> MagicMock:
+    def _client(
+        self,
+        authored: list[dict[str, Any]],
+        involved: list[dict[str, Any]],
+        reviewed: list[dict[str, Any]] | None = None,
+    ) -> MagicMock:
         client = MagicMock()
         client.search_prs_authored_by.return_value = authored
+        client.search_prs_reviewed_by.return_value = reviewed or []
         client.search_prs_involving.return_value = involved
         return client
 
@@ -129,21 +135,36 @@ class TestScanOperatorPrs:
         client = self._client([_item("apache", "spark", 1)], [_item("apache", "spark", 2)])
 
         with patch("franktheunicorn.backends.poller.ingest_single_pr") as ingest:
-            runner._scan_mentioned_prs({"github": client}, "holdenk", None)
+            runner._scan_operator_prs({"github": client}, "holdenk", None)
 
         client.search_prs_authored_by.assert_called_once_with("holdenk")
         client.search_prs_involving.assert_called_once_with("holdenk")
         assert {call.args[2] for call in ingest.call_args_list} == {1, 2}
 
-    def test_own_prs_are_ingested_first(self) -> None:
-        """If anything downstream gives up part-way, the operator's own PRs are
-        the part that landed."""
-        client = self._client([_item("apache", "spark", 9)], [_item("apache", "spark", 3)])
+    def test_the_searches_run_in_cost_of_missing_order(self) -> None:
+        """A failure part-way through leaves the earlier sets landed, so: own PRs,
+        then ones already reviewed, then the wide sweep."""
+        client = self._client(
+            [_item("apache", "spark", 9)],
+            [_item("apache", "spark", 3)],
+            reviewed=[_item("apache", "spark", 5)],
+        )
 
         with patch("franktheunicorn.backends.poller.ingest_single_pr") as ingest:
-            runner._scan_mentioned_prs({"github": client}, "holdenk", None)
+            runner._scan_operator_prs({"github": client}, "holdenk", None)
 
-        assert [call.args[2] for call in ingest.call_args_list] == [9, 3]
+        assert [call.args[2] for call in ingest.call_args_list] == [9, 5, 3]
+
+    def test_reviewed_by_is_searched(self) -> None:
+        """GitHub's own `is:open is:pr reviewed-by:@me`. Not covered by
+        `involves:` — an approve-only review need not make you a commenter."""
+        client = self._client([], [], reviewed=[_item("apache", "spark", 5)])
+
+        with patch("franktheunicorn.backends.poller.ingest_single_pr") as ingest:
+            runner._scan_operator_prs({"github": client}, "holdenk", None)
+
+        client.search_prs_reviewed_by.assert_called_once_with("holdenk")
+        assert [call.args[2] for call in ingest.call_args_list] == [5]
 
     def test_a_pr_in_both_results_is_ingested_once(self) -> None:
         """Each ingest is a detail fetch plus a files fetch."""
@@ -151,7 +172,7 @@ class TestScanOperatorPrs:
         client = self._client(both, list(both))
 
         with patch("franktheunicorn.backends.poller.ingest_single_pr") as ingest:
-            runner._scan_mentioned_prs({"github": client}, "holdenk", None)
+            runner._scan_operator_prs({"github": client}, "holdenk", None)
 
         assert ingest.call_count == 1
 
@@ -159,7 +180,7 @@ class TestScanOperatorPrs:
         bare = MagicMock(spec=[])  # no search methods at all
 
         with patch("franktheunicorn.backends.poller.ingest_single_pr") as ingest:
-            runner._scan_mentioned_prs({"gitea": bare}, "holdenk", None)
+            runner._scan_operator_prs({"gitea": bare}, "holdenk", None)
 
         assert ingest.call_count == 0
 
@@ -176,7 +197,7 @@ class TestScanOperatorPrs:
             ) as ingest,
             caplog.at_level(logging.INFO),
         ):
-            runner._scan_mentioned_prs({"github": client}, "holdenk", None)
+            runner._scan_operator_prs({"github": client}, "holdenk", None)
 
         assert ingest.call_count == 2
         # WARNING, not DEBUG: a PR that failed to ingest is a PR the operator
@@ -188,7 +209,7 @@ class TestScanOperatorPrs:
         client = self._client([issue], [])
 
         with patch("franktheunicorn.backends.poller.ingest_single_pr") as ingest:
-            runner._scan_mentioned_prs({"github": client}, "holdenk", None)
+            runner._scan_operator_prs({"github": client}, "holdenk", None)
 
         assert ingest.call_count == 0
 
@@ -198,7 +219,7 @@ class TestScanOperatorPrs:
         client.search_prs_involving.return_value = [_item("apache", "spark", 4)]
 
         with patch("franktheunicorn.backends.poller.ingest_single_pr") as ingest:
-            runner._scan_mentioned_prs({"github": client}, "holdenk", None)
+            runner._scan_operator_prs({"github": client}, "holdenk", None)
 
         assert [call.args[2] for call in ingest.call_args_list] == [4]
 
@@ -504,3 +525,43 @@ class TestRescanningPrsNoAgentCovered:
             )
 
         assert seen == [db_pr.pk], "a PR missing one reviewer must reach the backfill"
+
+
+class TestSearchPrsReviewedBy:
+    """The `reviewed-by:@me` set — PRs the operator has already judged."""
+
+    @pytest.fixture
+    def client(self) -> GitHubClient:
+        c = GitHubClient(token="t", base_url="https://api.github.test")
+        yield c
+        c.close()
+
+    def test_queries_reviewed_by(self, httpx_mock: HTTPXMock, client: GitHubClient) -> None:
+        httpx_mock.add_response(json={"items": [_item("apache", "spark", 11)]})
+
+        items = client.search_prs_reviewed_by("holdenk")
+
+        assert [i["number"] for i in items] == [11]
+        query = httpx_mock.get_requests()[0].url.params["q"]
+        assert "reviewed-by:holdenk" in query
+        assert "type:pr" in query
+        assert "state:open" in query
+
+    def test_the_username_is_resolved_not_left_as_at_me(
+        self, httpx_mock: HTTPXMock, client: GitHubClient
+    ) -> None:
+        """`@me` works in GitHub's UI filter and not in the REST search API."""
+        httpx_mock.add_response(json={"items": []})
+
+        client.search_prs_reviewed_by("holdenk")
+
+        assert "@me" not in httpx_mock.get_requests()[0].url.params["q"]
+
+    def test_other_forges_return_nothing(self) -> None:
+        from franktheunicorn.backends.gitea import GiteaClient
+
+        gitea = GiteaClient(token="t", base_url="https://git.example.test")
+        try:
+            assert gitea.search_prs_reviewed_by("holdenk") == []
+        finally:
+            gitea.close()

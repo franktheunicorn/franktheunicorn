@@ -1427,7 +1427,7 @@ def _run_cycle(
     # Mention scan: ingest open PRs where the operator is involved but that
     # aren't in a configured project (mentioned, assigned, review-requested).
     if operator_username:
-        _scan_mentioned_prs(clients, operator_username, operator_config)
+        _scan_operator_prs(clients, operator_username, operator_config)
 
     # The mention scan can be 100 ingests and the backfill can be many LLM
     # reviews; don't make a queued triage wait behind either.
@@ -1506,15 +1506,18 @@ _SKIP_ADVICE = {
 }
 
 
-def _scan_mentioned_prs(
+def _scan_operator_prs(
     clients: Mapping[str, object],
     operator_username: str,
     operator_config: OperatorConfig | None,
 ) -> None:
-    """Ingest the operator's own open PRs, and the ones they're involved in.
+    """Ingest the operator's own open PRs, the ones they reviewed, and the rest.
 
-    Two searches per forge, not one. ``search_prs_authored_by`` asks for the
-    operator's own PRs by name; ``search_prs_involving`` is the wider
+    Three searches per forge, not one. ``search_prs_authored_by`` asks for the
+    operator's own PRs by name, ``search_prs_reviewed_by`` for the ones they have
+    already put judgement into (GitHub's own ``reviewed-by:@me`` filter — and not a
+    subset of the others, since an approve-only review need not make you a
+    commenter), and ``search_prs_involving`` is the wider
     mentioned/assigned/review-requested sweep. They used to be a single
     ``involves:`` query, and that quietly under-served the more important half:
     ``involves:`` returns every thread the operator has ever commented on, one
@@ -1541,8 +1544,13 @@ def _scan_mentioned_prs(
     seen: set[tuple[str, str, int]] = set()
 
     for forge_name, client in clients.items():
+        # Ordered by how much it costs the operator to miss one, because a failure
+        # part-way through leaves the earlier sets landed: their own PRs first, then
+        # the ones they have already reviewed and are on the hook to re-check, then
+        # the wide mentioned/assigned sweep.
         for label, finder in (
             ("authored", getattr(client, "search_prs_authored_by", None)),
+            ("reviewed", getattr(client, "search_prs_reviewed_by", None)),
             ("involved", getattr(client, "search_prs_involving", None)),
         ):
             if finder is None:

@@ -484,7 +484,7 @@ class TestWorkerCycleIntegration:
             patch.object(runner, "_fetch_dependency_changelogs_for_cycle"),
             patch.object(runner, "_run_shepherding_pass"),
             patch.object(runner, "_poll_security_emails"),
-            patch.object(runner, "_scan_mentioned_prs"),
+            patch.object(runner, "_scan_operator_prs"),
             patch.object(runner, "_backfill_unreviewed_prs"),
         ):
             runner._run_cycle({}, [], "holdenk", operator_config)
@@ -499,7 +499,7 @@ class TestWorkerCycleIntegration:
             patch.object(runner, "_fetch_dependency_changelogs_for_cycle"),
             patch.object(runner, "_run_shepherding_pass"),
             patch.object(runner, "_poll_security_emails"),
-            patch.object(runner, "_scan_mentioned_prs"),
+            patch.object(runner, "_scan_operator_prs"),
             patch.object(runner, "_backfill_unreviewed_prs"),
         ):
             runner._run_cycle({}, [], "holdenk", None)
