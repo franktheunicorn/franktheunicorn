@@ -43,7 +43,14 @@ src/franktheunicorn/
                      #   of reports (management command + dashboard upload);
                      #   triage is opt-in there regardless of auto_triage,
                      #   since a backlog is one NVD lookup + two LLM calls
-                     #   per report.
+                     #   per report. scan_archive.py is the scanner-bundle
+                     #   path inside it: one report per *finding* rather than
+                     #   per file, with the archive's patches, cross-reference
+                     #   manifests and per-finding rollup sections
+                     #   de-normalised onto the matching finding, and
+                     #   SecurityReport.priority read off the archive's own
+                     #   ranking so rows (and triage commands) are created
+                     #   highest-first.
   curator/           # Textual TUI for curating voice datasets from
                      #   historical comments (used to seed fine-tuning;
                      #   not part of the live review path)
@@ -126,7 +133,7 @@ The anti-pattern list is the primary feedback mechanism — not a side feature. 
 - **Draft-only by default.** Posting to GitHub requires the operator clicking approve. The default `posting.mode` is `draft-only`. `review/auto_poster.py` exists for the v1.5 confidence-gated path but is *not wired* into the worker — it only fires when a project explicitly sets `posting.mode = "confidence-gated"` and the triple gate (mode + confidence threshold + tone guard) passes. New review-pipeline features should keep the default draft-only path intact.
 - **Graceful feature gates.** Every optional feature (CodeRabbit, email, tests, JIRA, community search, Sentry) must degrade gracefully when not configured. Check config before using; skip silently, don't error.
 - **SQLite is first-class.** Don't use Postgres-specific features. Test against SQLite. The `DATABASE_URL` env var switches to Postgres but SQLite must always work.
-- **No Docker socket in web container.** Only the worker container accesses Docker for test execution and the security sandbox. The web container never spawns containers. `run_dual_tests` and `security_report_sandbox` both enqueue a `WorkerCommand` and return immediately — the worker-queue refactor that used to be described here as in flight has landed, and `views.py` no longer imports `threading` at all. Two endpoints still do their work in-request rather than in the worker: `security_report_upload` (the whole zip import, one transaction — measured at ~0.1s of parsing plus 27ms of commits for 2000 entries, bounded by the 8 MB upload cap) and `security_report_cve_check` (a synchronous NVD call). Neither spawns a container, so neither needs the Docker socket, but both would be better as `WorkerCommand`s.
+- **No Docker socket in web container.** Only the worker container accesses Docker for test execution and the security sandbox. The web container never spawns containers. `run_dual_tests` and `security_report_sandbox` both enqueue a `WorkerCommand` and return immediately — the worker-queue refactor that used to be described here as in flight has landed, and `views.py` no longer imports `threading` at all. Three endpoints still do their work in-request rather than in the worker: `security_report_upload` (the whole zip import, one transaction — measured at 166ms end to end for a real 265-entry scanner archive, of which 43ms is the scan-archive expansion; bounded by the 8 MB upload cap), `security_archive_drop` (a bulk delete — 44ms for 143 rows), and `security_report_cve_check` (a synchronous NVD call). None spawns a container, so none needs the Docker socket, but the first and last would be better as `WorkerCommand`s.
 - **Blame: run fresh, don't cache.** Run `git blame` on the base branch for changed files each time. No blame cache.
 
 ## Running the Project

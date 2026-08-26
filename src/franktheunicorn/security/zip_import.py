@@ -423,6 +423,11 @@ def _import_entries(
         # Whatever the expander consumed is skipped here: importing the manifest
         # as well would store the same 129 findings twice, once split and once as
         # a single unreadable blob.
+        #
+        # A rollup it only *partly* consumed is a third case, and it stays in the
+        # walk with its text overridden: TRIAGE.md's 126 per-finding sections are
+        # now on the findings, but its summary tables and panel-dispute notes are
+        # about the run and would be lost if the file were dropped whole.
         _walk_entries(
             archive,
             [i for i in candidates if i.filename not in expanded.consumed],
@@ -433,6 +438,7 @@ def _import_entries(
             operator_config,
             require_security_content,
             archive_label,
+            {name: text.encode("utf-8") for name, text in expanded.residuals.items()},
         )
 
 
@@ -489,9 +495,16 @@ def _import_findings(
 
     Dedup runs on the rendered text exactly as it does for a file, so a re-import
     of the same archive is still a no-op — the rendering is deterministic.
+
+    Rows are created in the archive's own priority order, highest first, and that
+    is load-bearing rather than cosmetic: the worker claims WorkerCommands by
+    ``created_at``, so with ``--triage`` the insertion order *is* the order the
+    findings get triaged in. On the archive that prompted this, arrival order put
+    the two HIGHs at positions 3 and 94 of 129.
     """
     project_id = project.pk if project is not None else None
-    for record in expanded.findings:
+    ranked = sorted(expanded.findings, key=lambda r: (-r.priority, r.finding_id))
+    for record in ranked:
         text_key = _text_key(record.body, project_id)
         existing = seen.get(text_key)
         if existing is None and project_id is not None:
@@ -518,6 +531,8 @@ def _import_findings(
                     finding_id=record.finding_id,
                     proposed_patch=record.patch,
                     proposed_patch_path=record.patch_path[:500],
+                    priority=record.priority,
+                    priority_reason=record.priority_reason[:200],
                 )
         except Exception as exc:
             logger.warning("Could not store finding %s", record.finding_id, exc_info=True)
@@ -561,8 +576,16 @@ def _walk_entries(
     operator_config: OperatorConfig | None,
     require_security_content: bool,
     archive_label: str,
+    overrides: dict[str, bytes],
 ) -> None:
-    """Record an outcome for every entry, in name order."""
+    """Record an outcome for every entry, in name order.
+
+    *overrides* replaces an entry's bytes with text the scan expander already
+    produced (a rollup with its per-finding sections lifted out). Those bytes were
+    charged against the archive budget when the expander read them, so they are
+    not charged again here — but every name, codec and size check still runs,
+    because they are checks about the *entry*, not about what we do with it.
+    """
     read_bytes = 0
     for info in sorted(candidates, key=lambda i: i.filename):
         # Name-based rejections FIRST, before a single byte is decompressed.
@@ -624,7 +647,14 @@ def _walk_entries(
             )
             continue
 
-        raw, outcome, detail, produced = _read_entry(archive, info)
+        override = overrides.get(info.filename)
+        # Read branch first, so ``raw`` is inferred as the ``bytes | None`` the
+        # checks below still need to handle rather than being narrowed to bytes by
+        # the override branch.
+        if override is None:
+            raw, outcome, detail, produced = _read_entry(archive, info)
+        else:
+            raw, outcome, detail, produced = override, "imported", "", 0
 
         # Charged even when the entry was rejected. Skipping this on the failure
         # paths meant a rejected entry decompressed for free, so an archive of
@@ -660,7 +690,17 @@ def _walk_entries(
                 result,
                 seen,
                 operator_config,
-                require_security_content,
+                # A residual is exempt from the keyword gate, and not as a
+                # convenience: the gate asks "does this look like a security
+                # report?" because a handover folder also contains a Makefile and
+                # once contained a private key. An entry the scan expander
+                # recognised, split, and handed back the remainder of is already
+                # known to be part of a scan archive, so the question is answered.
+                # Asking it anyway dropped PATCHES/composition.md — its
+                # per-finding sections had moved out and the apply-order narrative
+                # left behind names no vulnerability, so a file that imported
+                # fine before this change came back "not-a-report".
+                require_security_content and override is None,
                 archive_label,
             ),
         )

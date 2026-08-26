@@ -19,6 +19,14 @@
 <div class="breakdown" style="margin-bottom: 1rem;">
     <dl>
         <dt>Source:</dt><dd>{{ report.get_source_display }}</dd>
+        {# Which archive, and which finding within it — the ids the archive's own #}
+        {# other files refer to, so the operator can go back to the bundle. #}
+        {% if report.source_archive %}<dt>Archive:</dt><dd>{{ report.source_archive }}</dd>{% endif %}
+        {% if report.finding_id %}<dt>Finding:</dt><dd>{{ report.finding_id }}</dd>{% endif %}
+        {% if report.priority %}
+        <dt>Priority:</dt>
+        <dd>{{ report.priority|floatformat:0 }}{% if report.priority_reason %} — {{ report.priority_reason }}{% endif %}</dd>
+        {% endif %}
         {% if report.project %}<dt>Project:</dt><dd>{{ report.project.full_name }}</dd>{% endif %}
         {% if report.reporter_name %}<dt>Reporter:</dt><dd>{{ report.reporter_name }}</dd>{% endif %}
         {% if report.reporter_email %}<dt>Email:</dt><dd>{{ report.reporter_email }}</dd>{% endif %}

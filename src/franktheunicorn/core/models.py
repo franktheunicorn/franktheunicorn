@@ -632,6 +632,15 @@ class SecurityReport(models.Model):
     proposed_patch = models.TextField(blank=True, default="")
     proposed_patch_path = models.CharField(max_length=500, blank=True, default="")
 
+    # How far up the queue this report belongs, higher first. Read off a scanner
+    # archive's own ranking at import (severity tier, triage-panel verdict, panel
+    # confidence, CVSS overlay) — see security.scan_archive._priority. Zero for
+    # everything that arrived without a ranking, which is every pasted and emailed
+    # report, so it sorts below anything a scanner actually rated. The reason is
+    # stored alongside because an unaccountable number is a number nobody trusts.
+    priority = models.FloatField(default=0.0, db_index=True)
+    priority_reason = models.CharField(max_length=200, blank=True, default="")
+
     # Which archive a source="zip" report came from. Two scans of the same repo
     # contain the same entry paths with different contents, so the path alone
     # doesn't identify a report: importing three real scanner archives produced

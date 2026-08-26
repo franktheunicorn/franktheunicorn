@@ -44,6 +44,8 @@ urlpatterns = [
     path("security/new/", views.security_report_create, name="security_create"),
     # Bulk import: a zip of report files, same importer as import_security_zip.
     path("security/upload/", views.security_report_upload, name="security_upload"),
+    # The undo for one: delete every report that came from a named archive.
+    path("security/drop-archive/", views.security_archive_drop, name="security_archive_drop"),
     # Read-only transparency: everything the email scanner has looked at.
     path("security/email-activity/", views.email_activity, name="email_activity"),
     # Learned triage guidance overview (iterative learning loop).

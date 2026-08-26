@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from franktheunicorn.security.zip_import import ZipImportResult
 
 from django.contrib import messages
-from django.db.models import Count, Max, Q, Sum
+from django.db.models import Count, Max, Min, Q, Sum
 from django.http import HttpRequest, HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
@@ -942,10 +942,28 @@ SECURITY_STATUS_TABS: list[dict[str, str]] = [
 ]
 
 
+#: Orderings the list offers, and the default.
+#:
+#: Priority leads because that is the whole point of reading a scanner's ranking
+#: at import: 129 findings in arrival order put the run's two HIGHs at positions 3
+#: and 94, and the page only shows the first 100. "Newest" stays available because
+#: a trickle of emailed reports all rank 0.0 and arrival order is the right one
+#: for an inbox.
+_SECURITY_SORTS = {
+    "priority": ("-priority", "-created_at"),
+    "newest": ("-created_at",),
+}
+_SECURITY_SORT_LABELS = (("priority", "Priority"), ("newest", "Newest"))
+_DEFAULT_SECURITY_SORT = "priority"
+
+
 def security_report_list(request: HttpRequest) -> HttpResponse:
-    """List security reports with status tabs."""
+    """List security reports with status tabs, ranked highest-priority first."""
     status_filter = request.GET.get("status", "all")
-    reports = SecurityReport.objects.select_related("project").order_by("-created_at")
+    sort = request.GET.get("sort", _DEFAULT_SECURITY_SORT)
+    if sort not in _SECURITY_SORTS:
+        sort = _DEFAULT_SECURITY_SORT
+    reports = SecurityReport.objects.select_related("project").order_by(*_SECURITY_SORTS[sort])
 
     if status_filter != "all":
         reports = reports.filter(status=status_filter)
@@ -964,10 +982,41 @@ def security_report_list(request: HttpRequest) -> HttpResponse:
             "reports": reports[:100],
             "status_tabs": tabs_with_counts,
             "active_status": status_filter,
+            "active_sort": sort,
+            "sort_options": _SECURITY_SORT_LABELS,
+            "archives": _imported_archives(),
             "projects": Project.objects.filter(enabled=True).order_by("owner", "repo"),
             "zip_import_command": _zip_import_command(),
         },
     )
+
+
+def _imported_archives() -> list[dict[str, object]]:
+    """One row per archive an import came from, newest first.
+
+    Exists for the Drop button. A bad import is a real event — a scan of the wrong
+    branch, an archive a shape ahead of the expander, a project picked wrong — and
+    until now the only way back was ``manage.py shell``. Grouping on the archive
+    label alone (not label-and-project) is deliberate: "drop this archive" should
+    mean the whole archive, including the half of it that went in against a
+    different project on a second attempt.
+
+    ``touched`` counts reports the operator has already worked on, which is what
+    makes dropping unsafe; the confirm text quotes it.
+    """
+    rows = (
+        SecurityReport.objects.exclude(source_archive="")
+        .values("source_archive")
+        .annotate(
+            total=Count("pk"),
+            findings=Count("pk", filter=~Q(finding_id="")),
+            touched=Count("pk", filter=~Q(status="new")),
+            first_seen=Min("created_at"),
+            last_seen=Max("created_at"),
+        )
+        .order_by("-last_seen")
+    )
+    return list(rows)
 
 
 def _zip_import_command() -> str:
@@ -1197,6 +1246,63 @@ def security_report_upload(request: HttpRequest) -> HttpResponse:
 
     _report_failed_entries(request, result)
     return redirect("dashboard:security_list")
+
+
+@require_POST
+def security_archive_drop(request: HttpRequest) -> HttpResponse:
+    """Delete every security report that came from one archive.
+
+    The undo for a bad import. POST-only and matched on the exact
+    ``source_archive`` label, never a prefix or an icontains — a fuzzy match here
+    deletes reports the operator didn't mean, and reports are the one thing in this
+    app with no other copy (the archive on disk has the findings, but not the
+    triage verdicts, the operator notes or the feedback rows).
+
+    Cascades take care of the rest: ``WorkerCommand.security_report`` is
+    ``CASCADE`` so a queued or in-flight triage goes with it, and
+    ``SecurityTriageFeedback.report`` is ``SET_NULL`` so the learning corpus
+    distilled from real operator decisions survives — those rows are about the
+    operator's judgement, not about the report, and re-importing the archive
+    shouldn't have to re-earn them.
+    """
+    archive = request.POST.get("archive", "").strip()
+    if not archive:
+        messages.error(request, "No archive named — nothing was dropped.")
+        return _back_to_security_list(request)
+
+    doomed = SecurityReport.objects.filter(source_archive=archive)
+    # Counted before the delete: the queryset is empty afterwards, and reporting
+    # "0 reports dropped" for a successful drop is how an operator concludes the
+    # button is broken and clicks it again.
+    total = doomed.count()
+    if not total:
+        messages.warning(request, f"No reports left from {archive}.")
+        return _back_to_security_list(request)
+
+    touched = doomed.exclude(status="new").count()
+    doomed.delete()
+    note = f" ({touched} had already been triaged or ruled on)" if touched else ""
+    messages.success(request, f"Dropped {total} report(s) from {archive}{note}.")
+    logger.info("Dropped %d security report(s) from archive %s", total, archive)
+    return _back_to_security_list(request)
+
+
+def _back_to_security_list(request: HttpRequest) -> HttpResponse:
+    """Reload the security list, whether htmx made the request or the form did.
+
+    Every other htmx endpoint here swaps a fragment, and this one can't: dropping
+    an archive changes its own row, the report list and all seven tab counts. A
+    fragment would leave the operator looking at counts that no longer match the
+    list. ``HX-Redirect`` asks htmx to do a full navigation instead, which is also
+    what makes the flash message land — a swapped fragment never renders one.
+
+    The plain ``redirect`` is the no-JS path: the button sits in a real form with a
+    real action, so it works with htmx switched off.
+    """
+    target = reverse("dashboard:security_list")
+    if request.headers.get("HX-Request") == "true":
+        return HttpResponse(status=204, headers={"HX-Redirect": target})
+    return redirect(target)
 
 
 #: How many individual entry failures to name before summarising the rest.

@@ -297,6 +297,54 @@ thead th { border-bottom: 2px solid var(--border); }
 }
 .zip-import-cmd code { white-space: pre; }
 
+/* Imported archives and their Drop button. A table because there are three
+   numbers per row worth lining up, and it stays readable on a phone by letting
+   the whole thing scroll rather than wrapping a filename mid-word. */
+.zip-archives {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0.5rem 0 0.25rem;
+    font-size: 0.8rem;
+    display: block;
+    overflow-x: auto;
+}
+.zip-archives caption {
+    text-align: left;
+    color: var(--muted);
+    padding-bottom: 0.25rem;
+}
+.zip-archives th {
+    text-align: left;
+    font-weight: 600;
+    color: var(--muted);
+    border-bottom: 1px solid var(--border);
+}
+.zip-archives th, .zip-archives td { padding: 0.3rem 0.5rem 0.3rem 0; vertical-align: middle; }
+.zip-archives tbody tr { border-bottom: 1px solid var(--border); }
+.zip-archives form { display: inline; margin: 0; }
+/* Reports the operator has already ruled on — dropping the archive loses that
+   work, so it is called out in the row and not only in the confirm dialog. */
+.zip-archives-touched {
+    color: var(--orange);
+    margin-left: 0.3rem;
+    white-space: nowrap;
+}
+
+.security-sort { font-size: 0.8rem; color: var(--muted); margin: 0.5rem 0; }
+
+/* The archive's own ranking, as read at import. */
+.priority-badge {
+    display: inline-block;
+    background: var(--blue-bg);
+    color: var(--blue);
+    padding: 0 0.35rem;
+    border-radius: 3px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.muted { color: var(--muted); }
+
 /* A diff has to keep its own line breaks — re-flowed hunks don't apply — so this
    scrolls sideways rather than wrapping like the report body above it. */
 .patch-body {

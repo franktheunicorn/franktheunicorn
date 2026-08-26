@@ -88,6 +88,161 @@ class TestSecurityReportList:
 
 
 @pytest.mark.django_db
+class TestSecurityReportListRanking:
+    """A 129-finding archive is unusable in arrival order, and the page shows 100."""
+
+    def test_highest_priority_first_by_default(self, client: Client) -> None:
+        SecurityReportFactory(title="Low ranked", priority=20.0)
+        SecurityReportFactory(title="High ranked", priority=90.0)
+
+        content = client.get("/security/").content
+
+        assert content.index(b"High ranked") < content.index(b"Low ranked")
+
+    def test_newest_is_still_available(self, client: Client) -> None:
+        """A trickle of emailed reports all rank 0.0, so arrival order still matters."""
+        SecurityReportFactory(title="High ranked", priority=90.0)
+        SecurityReportFactory(title="Low ranked", priority=20.0)
+
+        content = client.get("/security/?sort=newest").content
+
+        assert content.index(b"Low ranked") < content.index(b"High ranked")
+
+    def test_an_unknown_sort_falls_back_rather_than_erroring(self, client: Client) -> None:
+        SecurityReportFactory(title="Only one", priority=1.0)
+
+        response = client.get("/security/?sort=; DROP TABLE")
+
+        assert response.status_code == 200
+        assert b"Only one" in response.content
+
+    def test_the_rank_is_accounted_for_in_the_row(self, client: Client) -> None:
+        """A number nobody can account for is a number nobody trusts."""
+        SecurityReportFactory(
+            title="Ranked", priority=112.3, priority_reason="HIGH, true_positive, CVSS 7.5"
+        )
+
+        content = client.get("/security/").content.decode()
+
+        assert "HIGH, true_positive, CVSS 7.5" in content
+
+    def test_the_status_tabs_keep_the_sort(self, client: Client) -> None:
+        SecurityReportFactory(title="Anything", status="valid")
+
+        content = client.get("/security/?sort=newest").content.decode()
+
+        assert "?sort=newest&amp;status=valid" in content
+
+
+@pytest.mark.django_db
+class TestSecurityArchiveDrop:
+    """The undo for a bad import."""
+
+    def test_the_archive_is_listed_with_its_counts(self, client: Client) -> None:
+        SecurityReportFactory(source="zip", source_archive="scan-spark.zip", finding_id="f001")
+        SecurityReportFactory(source="zip", source_archive="scan-spark.zip", finding_id="")
+
+        content = client.get("/security/").content.decode()
+
+        assert "scan-spark.zip" in content
+        assert "Drop" in content
+
+    def test_a_report_with_no_archive_is_not_listed(self, client: Client) -> None:
+        SecurityReportFactory(title="Pasted one", source="paste", source_archive="")
+
+        content = client.get("/security/").content.decode()
+
+        assert "Imported archives" not in content
+
+    def test_dropping_deletes_every_report_from_that_archive(self, client: Client) -> None:
+        SecurityReportFactory(source_archive="bad.zip")
+        SecurityReportFactory(source_archive="bad.zip")
+        keeper = SecurityReportFactory(source_archive="good.zip")
+
+        response = client.post("/security/drop-archive/", {"archive": "bad.zip"}, follow=True)
+
+        assert response.status_code == 200
+        assert list(SecurityReport.objects.values_list("pk", flat=True)) == [keeper.pk]
+
+    def test_a_queued_triage_goes_with_the_report(self, client: Client) -> None:
+        from franktheunicorn.core.models import WorkerCommand
+
+        report = SecurityReportFactory(source_archive="bad.zip")
+        WorkerCommand.objects.create(command="run_security_triage", security_report=report)
+
+        client.post("/security/drop-archive/", {"archive": "bad.zip"})
+
+        assert WorkerCommand.objects.count() == 0
+
+    def test_operator_feedback_outlives_the_report(self, client: Client) -> None:
+        """Those rows are the operator's judgement, and the learning loop distils
+        them. Re-importing an archive shouldn't have to re-earn them."""
+        report = SecurityReportFactory(source_archive="bad.zip")
+        SecurityTriageFeedback.objects.create(report=report, agreed=False)
+
+        client.post("/security/drop-archive/", {"archive": "bad.zip"})
+
+        assert SecurityTriageFeedback.objects.count() == 1
+        assert SecurityTriageFeedback.objects.get().report is None
+
+    def test_the_count_is_reported_including_the_triaged_ones(self, client: Client) -> None:
+        SecurityReportFactory(source_archive="bad.zip", status="new")
+        SecurityReportFactory(source_archive="bad.zip", status="valid")
+
+        response = client.post("/security/drop-archive/", {"archive": "bad.zip"}, follow=True)
+
+        body = response.content.decode()
+        assert "Dropped 2 report(s) from bad.zip" in body
+        assert "1 had already been triaged" in body
+
+    def test_a_partial_label_matches_nothing(self, client: Client) -> None:
+        """Fuzzy matching here deletes reports the operator didn't name."""
+        SecurityReportFactory(source_archive="scan-spark-20260811.zip")
+
+        client.post("/security/drop-archive/", {"archive": "scan-spark"})
+
+        assert SecurityReport.objects.count() == 1
+
+    def test_an_empty_label_drops_nothing(self, client: Client) -> None:
+        """Otherwise it would match every pasted and emailed report at once."""
+        SecurityReportFactory(source_archive="")
+        SecurityReportFactory(source_archive="scan.zip")
+
+        response = client.post("/security/drop-archive/", {"archive": "  "}, follow=True)
+
+        assert SecurityReport.objects.count() == 2
+        assert "No archive named" in response.content.decode()
+
+    def test_an_already_dropped_archive_says_so(self, client: Client) -> None:
+        """Rather than reporting a successful drop of zero reports, which reads as
+        a broken button."""
+        response = client.post("/security/drop-archive/", {"archive": "gone.zip"}, follow=True)
+
+        assert "No reports left from gone.zip" in response.content.decode()
+
+    def test_get_is_refused(self, client: Client) -> None:
+        SecurityReportFactory(source_archive="bad.zip")
+
+        response = client.get("/security/drop-archive/?archive=bad.zip")
+
+        assert response.status_code == 405
+        assert SecurityReport.objects.count() == 1
+
+    def test_htmx_gets_a_full_navigation_not_a_fragment(self, client: Client) -> None:
+        """The drop changes its own row, the list and every tab count, and a
+        swapped fragment never renders the flash message."""
+        SecurityReportFactory(source_archive="bad.zip")
+
+        response = client.post(
+            "/security/drop-archive/", {"archive": "bad.zip"}, headers={"hx-request": "true"}
+        )
+
+        assert response.status_code == 204
+        assert response["HX-Redirect"] == "/security/"
+        assert SecurityReport.objects.count() == 0
+
+
+@pytest.mark.django_db
 class TestSecurityReportCreate:
     def test_create_form_renders(self, client: Client) -> None:
         response = client.get("/security/new/")

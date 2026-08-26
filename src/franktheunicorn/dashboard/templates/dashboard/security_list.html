@@ -48,17 +48,72 @@
         Add <code>--project owner/repo</code> to attach a project,
         <code>--triage</code> to queue triage runs.
     </p>
+
+    {# Imported archives, with the undo. A scanner bundle is one archive's worth #}
+    {# of reports, so dropping it is a single decision — and a scan of the wrong #}
+    {# branch or against the wrong project otherwise needs a shell to unpick. #}
+    {% if archives %}
+    <table class="zip-archives">
+        <caption>Imported archives</caption>
+        <thead>
+            <tr><th>Archive</th><th>Reports</th><th>Imported</th><th></th></tr>
+        </thead>
+        <tbody>
+            {% for archive in archives %}
+            <tr>
+                <td><code>{{ archive.source_archive }}</code></td>
+                <td>
+                    {{ archive.total }}
+                    {% if archive.findings %}<span class="muted">({{ archive.findings }} findings)</span>{% endif %}
+                    {% if archive.touched %}<span class="zip-archives-touched" title="Already triaged or ruled on — dropping loses that work">{{ archive.touched }} triaged</span>{% endif %}
+                </td>
+                <td class="muted">{{ archive.last_seen|timesince }} ago</td>
+                <td>
+                    {# Plain form, htmx-enhanced. hx-confirm is the codebase's way #}
+                    {# of guarding a destructive button (see _anti_pattern_row), and #}
+                    {# without htmx the form still submits and redirects — no inline #}
+                    {# JS either way. The view answers htmx with HX-Redirect rather #}
+                    {# than a fragment because dropping an archive changes the row, #}
+                    {# the list and every tab count. #}
+                    <form method="post" action="{% url 'dashboard:security_archive_drop' %}">
+                        {% csrf_token %}
+                        <input type="hidden" name="archive" value="{{ archive.source_archive }}">
+                        <button type="submit" class="action-btn reject"
+                                hx-post="{% url 'dashboard:security_archive_drop' %}"
+                                hx-include="closest form"
+                                hx-confirm="Delete all {{ archive.total }} report(s) from {{ archive.source_archive }}{% if archive.touched %}, including {{ archive.touched }} already triaged or ruled on{% endif %}? This cannot be undone.">
+                            🗑 Drop
+                        </button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
 </section>
 
 <div class="tab-bar">
     {% for tab in status_tabs %}
-    <a href="{% url 'dashboard:security_list' %}{% if tab.key != 'all' %}?status={{ tab.key }}{% endif %}"
+    <a href="{% url 'dashboard:security_list' %}?sort={{ active_sort }}{% if tab.key != 'all' %}&amp;status={{ tab.key }}{% endif %}"
        {% if active_status == tab.key %}class="active"{% endif %}>
         {{ tab.label }}
         <span class="tab-count">{{ tab.count }}</span>
     </a>
     {% endfor %}
 </div>
+
+{# Ranked by what the scanner already decided (severity, panel verdict, #}
+{# confidence, CVSS overlay), not by arrival: a 129-finding archive put its two #}
+{# HIGHs at positions 3 and 94, and this list shows the first 100. #}
+<p class="security-sort">
+    Sort:
+    {% for key, label in sort_options %}
+    {% if key == active_sort %}<strong>{{ label }}</strong>{% else %}<a
+        href="{% url 'dashboard:security_list' %}?sort={{ key }}{% if active_status != 'all' %}&amp;status={{ active_status }}{% endif %}">{{ label }}</a>{% endif %}
+    {% if not forloop.last %}&middot;{% endif %}
+    {% endfor %}
+</p>
 
 <ul class="pr-list">
     {% for report in reports %}
@@ -78,6 +133,15 @@
             {% endif %}
         </div>
         <div class="pr-meta">
+            {# What put this report where it is in the list. Shown rather than #}
+            {# just applied: a rank nobody can account for is a rank nobody #}
+            {# trusts, and the reason is what the scanner itself said. #}
+            {% if report.priority %}
+            <span class="priority-badge" title="Rank from the archive's own metadata: {{ report.priority_reason }}">
+                ▲ {{ report.priority|floatformat:0 }}
+            </span>
+            {% if report.priority_reason %}<span class="muted">{{ report.priority_reason }}</span> &middot; {% endif %}
+            {% endif %}
             {{ report.get_source_display }}
             {# Which archive, for a zip import. Two scans of one repo carry the same #}
             {# entry paths, so the title alone doesn't say which scan found this. #}

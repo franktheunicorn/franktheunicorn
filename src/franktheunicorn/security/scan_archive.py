@@ -7,27 +7,51 @@ one looked like this:
 
     VULN-FINDINGS.json      {"findings": [129 dicts], "target": ..., "commit": ...}
     TRIAGE.json             {"findings": [129 dicts]}   # a panel's take, same ids
+    CRITICAL-CANDIDATES.json{"findings": [2 dicts]}     # a CVSS overlay, same ids
+    PATCHES.json            {"patches": [{"id": "bug_01", "finding": "f001", ...}]}
+    VULN-FINDINGS.md        the same 129 findings as prose, one "## f001 — …" each
+    TRIAGE.md               ditto, "### f003 — …"
+    MAINTAINER-REPORT.md    a 343 KB rollup, per-finding bullets inside clusters
+    review_verdicts.txt     "bug_94: ACCEPT | style=5 | …" one line per patch
     PATCHES/bug_01/meta.json  {"finding": "f001", "title": ..., "severity": ...}
     PATCHES/bug_01/patch.diff  the proposed fix
     ...                     124 more of those
-    MAINTAINER-REPORT.md    a 75 KB prose rollup over the same 129 findings
 
-File-per-report gave 107 reports out of that, of which the useful ones were a
-284 KB blob nobody can triage and 124 patches imported as "reports" whose body is
-a diff. What the operator wants is 129 findings, each with the patch that fixes
-it — which the archive can express, because ``meta.json`` names the finding its
-patch belongs to. Measured on the real thing: 124 of 124 patches join.
+File-per-report gave 143 reports out of that: 129 findings and then fourteen
+rollups, of which four were 200-350 KB blobs holding *the same findings again* —
+nobody can triage a 343 KB file, and its f003 paragraph is worth reading only
+next to f003. So everything per-finding is de-normalised onto the finding:
+
+* a second (third, fourth) manifest merges by id, as it always did;
+* a cross-reference manifest — ``PATCHES.json``, whose rows carry their own
+  ``bug_NN`` id and name the finding they fix — attaches as a labelled block,
+  *not* merged, because "verdict: ACCEPT" there is a patch review and "verdict:
+  true_positive" in TRIAGE.json is the panel, and collapsing them loses one;
+* a rollup's per-finding sections are cut out and attached, and whatever is left
+  (summary tables, cluster narrative, appendices) imports as one overview report
+  instead of the whole blob.
+
+Measured on the real archive: 124 of 124 patches join, and 129 findings each pick
+up their PATCHES.json row plus their VULN-FINDINGS.md, TRIAGE.md and
+MAINTAINER-REPORT.md sections.
+
+The archive also ranks its own findings and that ranking is the only thing that
+makes a 129-report backlog approachable, so :func:`_priority` reads it off
+(severity, panel verdict, confidence, CVSS overlay) and the caller creates rows
+highest-first.
 
 Everything here is opt-out-safe: an archive with no recognisable manifest yields
 no records and ``zip_import`` falls back to file-per-report. Nothing guesses at
-prose — splitting ``MAINTAINER-REPORT.md`` on headings would be inventing
-structure, so the rollups are left to the generic path.
+free prose — a rollup is only cut where the file itself puts the finding id at
+the head of a heading, a bullet or a line, and a file with fewer than
+``_MIN_ROLLUP_ANCHORS`` of those is left whole.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 import zipfile
 from dataclasses import dataclass, field
 from typing import Any
@@ -43,6 +67,17 @@ _ID_KEYS = ("id", "finding_id", "identifier", "key")
 #: Keys a patch's sidecar uses to name the finding it fixes.
 _PATCH_LINK_KEYS = ("finding", "finding_id", "id")
 
+#: Keys a *cross-reference* row uses to name the finding it is about.
+#:
+#: ``id`` is deliberately absent, unlike :data:`_PATCH_LINK_KEYS`: a PATCHES.json
+#: row's own ``id`` is ``bug_01``, a different namespace from ``f001``, and
+#: accepting it would key the row under an id no finding has.
+_XREF_LINK_KEYS = ("finding", "finding_id", "finding_ref")
+
+#: Keys under which a cross-reference row carries its own scanner-local name, so
+#: ``review_verdicts.txt``'s ``bug_94:`` lines can be resolved to ``f094``.
+_ALIAS_KEYS = ("id", "bug", "patch", "name")
+
 #: Cap on findings expanded from one archive. The same order of magnitude as
 #: ``zip_import.MAX_ENTRIES`` and for the same reason: one manifest can claim any
 #: number of findings, and each becomes a row plus a potential triage run.
@@ -56,8 +91,10 @@ _PREFERRED_ORDER = (
     "category",
     "severity",
     "original_severity",
+    "verdict",
     "confidence",
     "mean_conf",
+    "cvss_score",
     "file",
     "line",
     "description",
@@ -72,6 +109,36 @@ _PREFERRED_ORDER = (
 #: says "line 412 of Foo.java" with no indication of which repo or commit.
 _CONTEXT_KEYS = ("target", "repo", "commit", "run", "scope", "branch", "generated", "date")
 
+#: Entries worth cutting per-finding sections out of. Text only, and only names a
+#: rollup plausibly has — a ``.json`` is either a manifest or it isn't, and
+#: splitting one on line prefixes would be nonsense.
+_ROLLUP_SUFFIXES = frozenset({".md", ".markdown", ".txt", ".rst", ".text"})
+
+#: How many distinct findings a file must anchor before it's treated as a rollup.
+#: Two mentions is a cross-reference in someone's prose; a dozen is a rollup. Set
+#: low enough for a small archive and high enough that a note saying "see also
+#: f012/f013" isn't torn in half.
+_MIN_ROLLUP_ANCHORS = 3
+
+#: Cap on one attached section. Real ones are 1-3 KB; this is here so a rollup
+#: that anchors a finding once and then runs for 300 KB can't put all of it on one
+#: report (and from there into a triage prompt).
+MAX_ATTACHMENT_CHARS = 20_000
+
+#: Cap on attachments per finding, for the same reason — an archive with fifty
+#: rollups shouldn't produce a fifty-section report.
+MAX_ATTACHMENTS = 12
+
+
+@dataclass
+class Attachment:
+    """A block of per-finding text lifted out of some other entry."""
+
+    #: Entry it came from, plus the alias it was filed under where that differs
+    #: from the finding id — ``PATCHES.json (bug_01)``.
+    label: str
+    text: str
+
 
 @dataclass
 class FindingRecord:
@@ -84,6 +151,10 @@ class FindingRecord:
     origin: str
     patch: str = ""
     patch_path: str = ""
+    #: The archive's own ranking of this finding, higher first. See :func:`_priority`.
+    priority: float = 0.0
+    #: What that number was read off, for the dashboard to show.
+    priority_reason: str = ""
 
     @property
     def origin_label(self) -> str:
@@ -115,11 +186,38 @@ class ScanArchive:
     #: Entries the expander consumed, which the generic walk must then skip or
     #: the same content imports twice — once split, once as a blob.
     consumed: set[str] = field(default_factory=set)
+    #: Entries the expander only *partly* consumed: the text left over once the
+    #: per-finding sections were lifted out. The generic walk imports this in
+    #: place of the entry's real bytes, so a 343 KB rollup becomes a readable
+    #: overview instead of vanishing (its cluster narrative and summary tables
+    #: are not per-finding and are worth keeping) or importing whole (which is
+    #: what made it unreadable).
+    residuals: dict[str, str] = field(default_factory=dict)
     truncated: bool = False
 
     @property
     def recognised(self) -> bool:
         return bool(self.findings)
+
+
+@dataclass
+class _Index:
+    """Everything one pass over the archive found out about it."""
+
+    #: ``(entry name, manifest payload, findings list)`` per findings manifest.
+    manifests: list[tuple[str, dict[str, Any], list[dict[str, Any]]]] = field(default_factory=list)
+    bundles: dict[str, Bundle] = field(default_factory=dict)
+    #: Finding id -> cross-reference rows about it, in entry-name order.
+    xrefs: dict[str, list[Attachment]] = field(default_factory=dict)
+    #: Scanner-local name (``bug_01``) -> finding id (``f001``).
+    aliases: dict[str, str] = field(default_factory=dict)
+    #: Entries already spoken for by a bundle, so a per-finding note isn't also
+    #: run through the rollup splitter.
+    claimed: set[str] = field(default_factory=set)
+    #: What is left of a cross-reference manifest once its rows were attached.
+    residuals: dict[str, str] = field(default_factory=dict)
+    #: Cross-reference manifests with nothing left over.
+    spent: set[str] = field(default_factory=set)
 
 
 def expand_scan_archive(archive: zipfile.ZipFile, read_entry: Any) -> ScanArchive:
@@ -135,12 +233,12 @@ def expand_scan_archive(archive: zipfile.ZipFile, read_entry: Any) -> ScanArchiv
     """
     result = ScanArchive()
     try:
-        manifests, bundles = _index(archive, read_entry)
+        index = _index(archive, read_entry)
     except Exception:
         logger.warning("Could not index scan archive; falling back", exc_info=True)
         return ScanArchive()
 
-    if not manifests:
+    if not index.manifests:
         return result
 
     # Merge every manifest by finding id, so TRIAGE.json's panel verdict lands on
@@ -149,7 +247,7 @@ def expand_scan_archive(archive: zipfile.ZipFile, read_entry: Any) -> ScanArchiv
     merged: dict[str, dict[str, Any]] = {}
     order: list[str] = []
     context: dict[str, Any] = {}
-    for entry_name, payload, findings in manifests:
+    for entry_name, payload, findings in index.manifests:
         result.consumed.add(entry_name)
         context.update(_context_of(payload))
         for raw in findings:
@@ -165,27 +263,42 @@ def expand_scan_archive(archive: zipfile.ZipFile, read_entry: Any) -> ScanArchiv
             for key, value in raw.items():
                 merged[fid].setdefault(key, value)
 
+    result.residuals.update(index.residuals)
+    result.consumed |= index.spent
+
+    # Rollups last, because which entries are still up for grabs depends on what
+    # the bundles claimed, and the anchors it matches depend on the finding ids
+    # and aliases everything above established.
+    #
+    # Capped to the findings that will actually become records: cutting a section
+    # out for a finding past MAX_FINDINGS would delete it from the rollup's
+    # residual and then drop it with the finding, so the only copy in the archive
+    # would go missing. Left uncut, it stays in the overview report.
+    rollups = _split_rollups(archive, read_entry, set(order[:MAX_FINDINGS]), index, result)
+
     for fid in order[:MAX_FINDINGS]:
         fields = merged[fid]
-        bundle = bundles.get(fid)
-        body = _render(fid, fields, context)
-        if bundle is not None and bundle.note.strip():
-            # Appended, not substituted. The manifest has the structured fields
-            # triage parses; the note is the prose a human wrote about the same
-            # finding, and it was importing as a *separate* report — 97 of them in
-            # one archive, each a near-duplicate of a finding already expanded.
-            body = f"{body}\n\n-- {bundle.note_path} --\n{bundle.note.strip()}"
+        bundle = index.bundles.get(fid)
+        attachments = [*index.xrefs.get(fid, ()), *rollups.get(fid, ())]
+        if bundle is not None:
             result.consumed |= bundle.consumed
-        elif bundle is not None:
-            result.consumed |= bundle.consumed
+            if bundle.note.strip():
+                # Appended, not substituted. The manifest has the structured fields
+                # triage parses; the note is the prose a human wrote about the same
+                # finding, and it was importing as a *separate* report — 97 of them in
+                # one archive, each a near-duplicate of a finding already expanded.
+                attachments.append(Attachment(label=bundle.note_path, text=bundle.note))
+        priority, reason = _priority(fields, has_patch=bool(bundle and bundle.patch))
         result.findings.append(
             FindingRecord(
                 finding_id=fid,
                 title=_title_for(fid, fields),
-                body=body,
-                origin=_origin_of(fid, manifests),
+                body=_body(fid, fields, context, attachments),
+                origin=_origin_of(fid, index.manifests),
                 patch=bundle.patch if bundle else "",
                 patch_path=bundle.patch_path if bundle else "",
+                priority=priority,
+                priority_reason=reason,
             )
         )
     if len(order) > MAX_FINDINGS:
@@ -196,20 +309,22 @@ def expand_scan_archive(archive: zipfile.ZipFile, read_entry: Any) -> ScanArchiv
     return result
 
 
-def _index(
-    archive: zipfile.ZipFile, read_entry: Any
-) -> tuple[list[tuple[str, dict[str, Any], list[dict[str, Any]]]], dict[str, Bundle]]:
-    """Locate findings manifests, then the per-finding bundle each one refers to.
+def _index(archive: zipfile.ZipFile, read_entry: Any) -> _Index:
+    """Locate findings manifests, then everything else that refers to them.
 
-    Two passes, because the second needs the first's finding ids: a patch
-    directory identifies its finding either in a JSON sidecar (``{"finding":
-    "f001"}``) or, in the two archives that ship prose instead, in the heading of
-    a sibling note — ``# bug_80 (f080) — ...``. Matching against *known* ids
-    rather than a guessed ``f\\d+`` pattern means the link is only made when the
-    manifest actually has that finding.
+    Three things come out of the JSON pass: findings manifests, patch sidecars,
+    and cross-reference rows. The last two can't be resolved until the first has
+    produced a set of known ids — a patch directory identifies its finding either
+    in a JSON sidecar (``{"finding": "f001"}``) or, in the two archives that ship
+    prose instead, in the heading of a sibling note (``# bug_80 (f080) — …``), and
+    matching against *known* ids rather than a guessed ``f\\d+`` pattern means the
+    link is only made when the manifest actually has that finding.
     """
-    manifests: list[tuple[str, dict[str, Any], list[dict[str, Any]]]] = []
+    index = _Index()
     sidecars: dict[str, dict[str, Any]] = {}
+    #: Deferred: ``(entry name, payload, [(key, rows), …])`` for every list of
+    #: dicts that might be about findings we haven't enumerated yet.
+    candidates: list[tuple[str, dict[str, Any], list[tuple[str, list[dict[str, Any]]]]]] = []
 
     for info in archive.infolist():
         if info.is_dir() or not info.filename.lower().endswith(".json"):
@@ -224,18 +339,131 @@ def _index(
         if isinstance(payload, list):
             # A bare list of findings is a manifest too.
             if payload and all(isinstance(v, dict) for v in payload):
-                manifests.append((info.filename, {}, payload))
+                index.manifests.append((info.filename, {}, payload))
             continue
         if not isinstance(payload, dict):
             continue
         findings = _findings_in(payload)
         if findings is not None:
-            manifests.append((info.filename, payload, findings))
-        elif any(k in payload for k in _PATCH_LINK_KEYS):
+            index.manifests.append((info.filename, payload, findings))
+            continue
+        if any(k in payload for k in _PATCH_LINK_KEYS):
             sidecars[info.filename] = payload
+        linked = _linked_lists(payload)
+        if linked:
+            candidates.append((info.filename, payload, linked))
 
-    known = {fid for _n, _p, fs in manifests for fid in map(_finding_id, fs) if fid}
-    return manifests, _bundles(archive, read_entry, sidecars, known)
+    known = {fid for _n, _p, fs in index.manifests for fid in map(_finding_id, fs) if fid}
+    index.bundles = _bundles(archive, read_entry, sidecars, known)
+    for bundle in index.bundles.values():
+        index.claimed |= bundle.consumed
+    _collect_xrefs(candidates, known, index)
+    _alias_bundles(index)
+    return index
+
+
+def _linked_lists(payload: dict[str, Any]) -> list[tuple[str, list[dict[str, Any]]]]:
+    """Lists of dicts in *payload* that look like they're about findings.
+
+    Any value that is a non-empty list of dicts where at least one row names a
+    finding. ``PATCHES.json`` puts its 124 rows under ``"patches"``, which is not
+    a key worth adding to :data:`_FINDINGS_KEYS` — those rows are *about* findings
+    rather than being them, and merging them in would have collided ``title``,
+    ``severity`` and ``verdict`` with the panel's own. Keying off the link instead
+    of the key name means the next scanner's ``"fixes"`` works without an edit.
+    """
+    found = []
+    for key, value in payload.items():
+        if not isinstance(value, list) or not value:
+            continue
+        rows = [v for v in value if isinstance(v, dict)]
+        if len(rows) == len(value) and any(_xref_link(r) for r in rows):
+            found.append((key, rows))
+    return found
+
+
+def _xref_link(row: dict[str, Any]) -> str:
+    for key in _XREF_LINK_KEYS:
+        value = row.get(key)
+        if value not in (None, ""):
+            return str(value)[:100]
+    return ""
+
+
+def _collect_xrefs(
+    candidates: list[tuple[str, dict[str, Any], list[tuple[str, list[dict[str, Any]]]]]],
+    known: set[str],
+    index: _Index,
+) -> None:
+    """File each cross-reference row under the finding it names.
+
+    Rows pointing at an id no manifest declared are dropped rather than kept under
+    a made-up finding, and an entry is only claimed once at least one row landed —
+    otherwise a file full of unrelated dict lists would vanish.
+
+    What's left of the payload once the linked lists are lifted out is a
+    residual, same as for a markdown rollup: ``PATCHES.json``'s 296 KB is 124
+    per-finding rows plus a run summary, and that summary is worth a small report
+    even though the rows aren't worth a second copy of themselves.
+    """
+    for entry_name, payload, linked in sorted(candidates, key=lambda c: c[0]):
+        spent_keys: set[str] = set()
+        for key, rows in linked:
+            for row in rows:
+                fid = _xref_link(row)
+                if fid not in known:
+                    continue
+                alias = _alias_of(row)
+                label = f"{entry_name} ({alias})" if alias and alias != fid else entry_name
+                text = _render_fields(row, skip={*_XREF_LINK_KEYS})
+                if not text:
+                    continue
+                index.xrefs.setdefault(fid, []).append(Attachment(label=label, text=text))
+                if alias:
+                    index.aliases.setdefault(alias, fid)
+                spent_keys.add(key)
+        if not spent_keys:
+            continue
+        index.claimed.add(entry_name)
+        leftover = _render_fields(
+            {k: v for k, v in payload.items() if k not in spent_keys}, skip=set()
+        )
+        if leftover:
+            # Headed, because a bare wall of labelled lines gives the operator no
+            # way to tell a run summary from a report — and because the entry has
+            # to clear zip_import's security-keyword gate on its own merits now
+            # that the findings that used to carry it have moved out.
+            index.residuals[entry_name] = (
+                f"Security scan artifact: {entry_name} (run-level summary)\n"
+                f"Its per-finding records were attached to the matching findings.\n\n"
+                f"{leftover}"
+            )
+        else:
+            index.spent.add(entry_name)
+
+
+def _alias_of(row: dict[str, Any]) -> str:
+    for key in _ALIAS_KEYS:
+        value = row.get(key)
+        if isinstance(value, str | int) and str(value).strip():
+            return str(value).strip()[:100]
+    return ""
+
+
+def _alias_bundles(index: _Index) -> None:
+    """Alias each bundle directory's name to the finding it holds.
+
+    ``PATCHES/bug_03/`` holding f003 is what lets ``review_verdicts.txt``'s
+    ``bug_03: ACCEPT`` line find its finding in an archive that ships no
+    PATCHES.json to say so.
+    """
+    for fid, bundle in index.bundles.items():
+        for name in (bundle.patch_path, bundle.note_path):
+            if "/" not in name:
+                continue
+            parent = name.rsplit("/", 1)[0].rsplit("/", 1)[-1]
+            if parent:
+                index.aliases.setdefault(parent, fid)
 
 
 def _bundles(
@@ -418,6 +646,359 @@ def _title_for(fid: str, fields: dict[str, Any]) -> str:
     return f"Finding {fid}"[:500]
 
 
+# --------------------------------------------------------------------------- #
+# Ranking
+# --------------------------------------------------------------------------- #
+
+#: Severity tiers, in the spellings scanners actually use. The gap between tiers
+#: is wide enough that no confidence or CVSS bonus below can lift a LOW over a
+#: MEDIUM — severity is the operator's first question and stays the coarse sort.
+_SEVERITY_BASE = {
+    "critical": 100.0,
+    "high": 80.0,
+    "medium": 50.0,
+    "moderate": 50.0,
+    "low": 20.0,
+    "informational": 5.0,
+    "info": 5.0,
+    "none": 5.0,
+}
+
+#: Above LOW and below MEDIUM: an unranked finding should not outrank one the
+#: panel called MEDIUM, nor sink below one it called LOW.
+_UNRANKED_BASE = 35.0
+
+#: What a triage panel's verdict does to the tier. A refuted finding keeps a
+#: nonzero score so it still sorts *among* the false positives rather than
+#: collapsing into a tie with every other one.
+_VERDICT_WEIGHT = {
+    "true_positive": 1.0,
+    "true-positive": 1.0,
+    "truepositive": 1.0,
+    "tp": 1.0,
+    "confirmed": 1.0,
+    "valid": 1.0,
+    "needs_manual_test": 0.6,
+    "needs-manual-test": 0.6,
+    "needs_manual": 0.6,
+    "unclear": 0.6,
+    "undetermined": 0.6,
+    "duplicate": 0.3,
+    "false_positive": 0.05,
+    "false-positive": 0.05,
+    "falsepositive": 0.05,
+    "fp": 0.05,
+    "invalid": 0.05,
+    "refuted": 0.05,
+}
+
+
+def _priority(fields: dict[str, Any], *, has_patch: bool) -> tuple[float, str]:
+    """Rank one finding from what the archive already decided about it.
+
+    A 129-finding import is unusable in arrival order — the archive's own two
+    HIGHs were at positions 3 and 94 — and the scanner has already done the work:
+    a severity tier, a panel verdict, a confidence, and sometimes a CVSS overlay.
+    This reads those off rather than asking an LLM, so the ordering costs nothing
+    and exists before triage rather than after it.
+
+    Returns ``(score, reason)``; the reason is what the dashboard shows, because a
+    bare number nobody can account for is a number nobody trusts.
+    """
+    parts: list[str] = []
+
+    severity = _text(fields.get("severity")) or _text(fields.get("original_severity"))
+    base = _SEVERITY_BASE.get(severity.lower(), _UNRANKED_BASE) if severity else _UNRANKED_BASE
+    if severity:
+        parts.append(severity.upper())
+
+    verdict = _text(fields.get("verdict")) or _text(fields.get("triage_verdict"))
+    weight = _VERDICT_WEIGHT.get(verdict.lower().replace(" ", "_"), 1.0) if verdict else 1.0
+    if verdict:
+        parts.append(verdict.lower())
+    score = base * weight
+
+    confidence = max(
+        _fraction(fields.get("confidence")),
+        _fraction(fields.get("mean_conf")),
+        _fraction(fields.get("panel_confidence")),
+    )
+    if confidence:
+        score += 20.0 * confidence
+        parts.append(f"conf {confidence:.2f}")
+
+    cvss = _clamp(_number(fields.get("cvss_score") or fields.get("cvss")), 0.0, 10.0)
+    if cvss:
+        score += cvss
+        parts.append(f"CVSS {cvss:g}")
+
+    if fields.get("critical_candidate") is True:
+        score += 15.0
+        parts.append("critical candidate")
+
+    # Replication is weak evidence and priced as such: four researchers finding
+    # the same thing independently is worth a nudge, not a tier.
+    discoveries = int(_clamp(_number(fields.get("independent_discoveries")), 0.0, 5.0))
+    if discoveries > 1:
+        score += 2.0 * discoveries
+        parts.append(f"{discoveries} discoveries")
+
+    if has_patch:
+        # Not a claim about severity — a claim about cost. A finding that arrives
+        # with a diff is cheaper to act on than one that doesn't, so among equals
+        # it goes first.
+        score += 3.0
+        parts.append("patch")
+
+    return round(score, 3), ", ".join(parts)[:200]
+
+
+def _text(value: Any) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _number(value: Any) -> float:
+    if isinstance(value, bool):
+        return 0.0
+    if isinstance(value, int | float):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
+def _fraction(value: Any) -> float:
+    """A confidence as 0..1, whichever scale the scanner used.
+
+    Both spellings are in the wild — ``0.79`` and ``79`` — and reading a
+    percentage as a fraction would have made every such finding look
+    maximally confident.
+    """
+    number = _number(value)
+    if number > 1.0:
+        number /= 100.0
+    return _clamp(number, 0.0, 1.0)
+
+
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+# --------------------------------------------------------------------------- #
+# Rollup splitting
+# --------------------------------------------------------------------------- #
+
+#: A line that puts an id at its head. The optional marker is a heading (``###``)
+#: or a list bullet (``-``), then up to three emphasis characters, then the token.
+#:
+#: Table pipes are deliberately not in the marker set: ``| f003 | 7.5 | …`` is a
+#: row of a per-finding table, and claiming it would cut the table apart and
+#: leave the residual's header rows dangling over nothing.
+_ANCHOR_RE = re.compile(
+    r"^(?P<indent>[ \t]*)"
+    r"(?:(?P<heading>\#{1,6})|(?P<bullet>[-*+]))?[ \t]*"
+    r"[*_`]{0,3}"
+    r"(?P<token>[A-Za-z][A-Za-z0-9_.-]{0,63})"
+)
+
+_HEADING_RE = re.compile(r"^ {0,3}(\#{1,6})[ \t]")
+
+_FENCE_RE = re.compile(r"^ {0,3}(```|~~~)")
+
+
+@dataclass
+class _Anchor:
+    line: int
+    finding_id: str
+    #: Heading depth, or 0 for a bullet or bare line.
+    level: int
+    indent: int
+
+
+def _split_rollups(
+    archive: zipfile.ZipFile,
+    read_entry: Any,
+    known: set[str],
+    index: _Index,
+    result: ScanArchive,
+) -> dict[str, list[Attachment]]:
+    """Cut per-finding sections out of every rollup, recording what's left over.
+
+    Populates ``result.residuals`` for each file it cut, so the generic walk
+    imports the remainder — the summary tables and cluster narrative that are
+    genuinely about the run rather than about one finding.
+    """
+    sections: dict[str, list[Attachment]] = {}
+    for info in sorted(archive.infolist(), key=lambda i: i.filename):
+        if info.is_dir() or _suffix(info.filename) not in _ROLLUP_SUFFIXES:
+            continue
+        if info.filename in index.claimed or info.filename in result.consumed:
+            continue
+        raw = read_entry(info)
+        if raw is None:
+            continue
+        text = raw.decode("utf-8", errors="replace")
+        cut, residual = _split_rollup(text, known, index.aliases)
+        if not cut:
+            continue
+        for fid, body in cut.items():
+            sections.setdefault(fid, []).append(Attachment(label=info.filename, text=body))
+        if residual:
+            # Says where the rest went. Without it the operator opens what looks
+            # like a truncated TRIAGE.md and has no way to know its f003 section
+            # is now on the f003 report.
+            result.residuals[info.filename] = (
+                f"{residual}\n\n"
+                f"-- {len(cut)} per-finding section(s) from this file were attached "
+                f"to the matching findings --"
+            )
+        else:
+            # Nothing but per-finding sections. Consumed outright rather than
+            # imported as a report holding only that footer.
+            result.consumed.add(info.filename)
+        logger.info(
+            "Scan archive: lifted %d per-finding section(s) out of %s", len(cut), info.filename
+        )
+    return sections
+
+
+def _split_rollup(
+    text: str, known: set[str], aliases: dict[str, str]
+) -> tuple[dict[str, str], str]:
+    """Split *text* into per-finding sections and everything else.
+
+    Returns ``({finding id: section}, residual)``, or ``({}, "")`` when the file
+    doesn't anchor enough distinct findings to be a rollup — in which case the
+    caller leaves it alone entirely.
+    """
+    lines = text.splitlines()
+    anchors = _anchors(lines, known, aliases)
+    if len({a.finding_id for a in anchors}) < _MIN_ROLLUP_ANCHORS:
+        return {}, ""
+
+    anchor_lines = {a.line for a in anchors}
+    claimed: set[int] = set()
+    sections: dict[str, list[str]] = {}
+    for anchor in anchors:
+        end = _section_end(lines, anchor, anchor_lines)
+        claimed.update(range(anchor.line, end))
+        sections.setdefault(anchor.finding_id, []).append("\n".join(lines[anchor.line : end]))
+
+    cut = {
+        fid: _cap("\n\n".join(block.strip() for block in blocks).strip())
+        for fid, blocks in sections.items()
+    }
+    residual = _tidy("\n".join(line for n, line in enumerate(lines) if n not in claimed))
+    return {fid: body for fid, body in cut.items() if body}, residual
+
+
+def _anchors(lines: list[str], known: set[str], aliases: dict[str, str]) -> list[_Anchor]:
+    """Every line whose leading token names a known finding, outside code fences.
+
+    Fences matter: ``PATCHES.md`` and ``composition.md`` both quote shell
+    transcripts, and a ``bug_01`` inside one is an example, not a section head.
+    """
+    anchors: list[_Anchor] = []
+    fence = ""
+    for number, line in enumerate(lines):
+        opening = _FENCE_RE.match(line)
+        if opening:
+            marker = opening.group(1)
+            fence = "" if fence == marker else (fence or marker)
+            continue
+        if fence:
+            continue
+        match = _ANCHOR_RE.match(line)
+        if match is None:
+            continue
+        token = match.group("token")
+        fid = token if token in known else aliases.get(token, "")
+        if not fid or fid not in known:
+            continue
+        heading = match.group("heading")
+        anchors.append(
+            _Anchor(
+                line=number,
+                finding_id=fid,
+                level=len(heading) if heading else 0,
+                indent=len(match.group("indent").expandtabs(4)),
+            )
+        )
+    return anchors
+
+
+def _section_end(lines: list[str], anchor: _Anchor, anchor_lines: set[int]) -> int:
+    """Where *anchor*'s section stops.
+
+    A heading section runs to the next anchor or the next heading at the same or
+    shallower depth — so ``### f003`` ends at ``### f013`` or at ``## True
+    positives — MEDIUM``, but swallows a ``#### `` of its own.
+
+    A bullet or bare-line section runs while the following lines are blank or
+    more deeply indented, which is exactly how ``MAINTAINER-REPORT.md`` writes a
+    finding (a ``- **f003 …**`` bullet with indented ``Panel:`` / ``What goes
+    wrong:`` continuation) and how ``review_verdicts.txt`` writes one (a single
+    ``bug_94: ACCEPT | …`` line).
+    """
+    for number in range(anchor.line + 1, len(lines)):
+        if number in anchor_lines:
+            return number
+        line = lines[number]
+        heading = _HEADING_RE.match(line)
+        if anchor.level:
+            if heading and len(heading.group(1)) <= anchor.level:
+                return number
+            continue
+        if not line.strip():
+            continue
+        # expandtabs on both sides, as _anchors does when it records the anchor's
+        # own indent: comparing a tab-indented anchor against a space-indented
+        # continuation by raw character count made a continuation look shallower
+        # than the bullet it belongs to and ended the section a line early.
+        if len(line.expandtabs(4)) - len(line.expandtabs(4).lstrip()) <= anchor.indent:
+            return number
+    return len(lines)
+
+
+def _cap(text: str) -> str:
+    if len(text) <= MAX_ATTACHMENT_CHARS:
+        return text
+    return text[:MAX_ATTACHMENT_CHARS].rstrip() + "\n… (section truncated)"
+
+
+def _tidy(text: str) -> str:
+    """Collapse the blank-line runs that cutting sections out leaves behind."""
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+# --------------------------------------------------------------------------- #
+# Rendering
+# --------------------------------------------------------------------------- #
+
+
+def _body(
+    fid: str, fields: dict[str, Any], context: dict[str, Any], attachments: list[Attachment]
+) -> str:
+    """The finding's manifest fields, then everything else that was about it.
+
+    Attachments are appended in a fixed order (cross-references by entry name,
+    then rollup sections by entry name, then the bundle note) because the body is
+    the dedup key: a re-import has to render byte-identically or the archive
+    imports twice.
+    """
+    blocks = [_render(fid, fields, context)]
+    for attachment in attachments[:MAX_ATTACHMENTS]:
+        text = attachment.text.strip()
+        if text:
+            blocks.append(f"-- {attachment.label} --\n{text}")
+    if len(attachments) > MAX_ATTACHMENTS:
+        blocks.append(f"({len(attachments) - MAX_ATTACHMENTS} further section(s) not attached)")
+    return "\n\n".join(blocks)
+
+
 def _render(fid: str, fields: dict[str, Any], context: dict[str, Any]) -> str:
     """Render a finding as the text a human (and the triage prompt) reads.
 
@@ -425,24 +1006,31 @@ def _render(fid: str, fields: dict[str, Any], context: dict[str, Any]) -> str:
     POC and impact out of a report, and it does that better from labelled lines
     than from a nested object. Unknown keys are appended rather than dropped.
     """
-    lines = [f"Finding: {fid}"]
-    seen = {"id", *(_ID_KEYS)}
+    body = f"Finding: {fid}"
+    fields_text = _render_fields(fields, skip={"id", *_ID_KEYS})
+    if fields_text:
+        body = f"{body}\n{fields_text}"
+    if context:
+        body = f"{body}\n\n-- scan context --\n{_render_fields(context, skip=set())}"
+    return body
+
+
+def _render_fields(fields: dict[str, Any], skip: set[str]) -> str:
+    """Labelled lines for *fields*, preferred keys first and the rest sorted.
+
+    Empty values are dropped — ``_field_line`` returns "" for a blank one — so a
+    scanner that ships every key with a null doesn't produce a wall of labels.
+    """
+    lines: list[str] = []
+    seen = set(skip)
     for key in _PREFERRED_ORDER:
-        if key in fields:
+        if key in fields and key not in seen:
             seen.add(key)
             lines.append(_field_line(key, fields[key]))
     for key in sorted(fields):
         if key not in seen:
             lines.append(_field_line(key, fields[key]))
-    if context:
-        lines.append("-- scan context --")
-        lines.extend(_field_line(k, v) for k, v in sorted(context.items()))
-    # Empty strings dropped — _field_line returns one for a field whose value is
-    # blank — and then the section break is re-inserted. Appending a bare "" as the
-    # separator didn't work: this filter removed it, so "-- scan context --" ran
-    # straight on from the last field and read as another value.
-    body = "\n".join(line for line in lines if line)
-    return body.replace("\n-- scan context --\n", "\n\n-- scan context --\n")
+    return "\n".join(line for line in lines if line).strip()
 
 
 def _field_line(key: str, value: Any) -> str:
@@ -461,3 +1049,10 @@ def _field_line(key: str, value: Any) -> str:
     if "\n" in rendered:
         return f"\n{label}:\n{rendered}\n"
     return f"{label}: {rendered}"
+
+
+def _suffix(name: str) -> str:
+    base = name.rsplit("/", 1)[-1]
+    if "." not in base:
+        return ""
+    return "." + base.rsplit(".", 1)[-1].lower()
