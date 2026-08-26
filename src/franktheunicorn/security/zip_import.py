@@ -138,6 +138,15 @@ _BINARY_SUFFIXES = frozenset(
 )
 
 
+#: Cap on a reported entry name. ZIP filenames may be up to 64 KiB, and this one
+#: is attacker-supplied and never lands in a column that would bound it — it goes
+#: to logging and to Django's message storage, where eight 60 KB names spill ~480
+#: KB past the cookie backend into the session store for a request anyone on the
+#: Tailscale net can POST. Every other untrusted string on this path is already
+#: truncated to its column width.
+_MAX_ENTRY_NAME_LEN = 300
+
+
 @dataclass(frozen=True)
 class EntryOutcome:
     """What became of one entry in the archive."""
@@ -148,6 +157,12 @@ class EntryOutcome:
     outcome: str
     report_id: int | None = None
     detail: str = ""
+
+    def __post_init__(self) -> None:
+        # Truncated here rather than at each construction site, so a name that
+        # reaches a log line or a flash message is bounded however it got here.
+        if len(self.name) > _MAX_ENTRY_NAME_LEN:
+            object.__setattr__(self, "name", self.name[:_MAX_ENTRY_NAME_LEN] + "…")
 
 
 @dataclass
@@ -161,6 +176,10 @@ class ZipImportResult:
     #: callers don't have to guess a cause from ``queued_triage == 0`` and blame
     #: the operator's config for a bad parse.
     triage_skipped_reason: str = ""
+    #: Things the operator should know that are not failures. ``error`` means "the
+    #: import stopped"; the CLI turns it into a non-zero exit, so a cap that was
+    #: reached after doing the work belongs here instead.
+    warnings: list[str] = field(default_factory=list)
     #: The archive had more entries than the caller allowed. A flag, not a
     #: substring of ``error``: the dashboard used ``"over the" in result.error`` to
     #: decide whether to suggest the CLI, which breaks the moment anyone rewords
@@ -200,6 +219,7 @@ class ZipImportResult:
             parts.append(f"{self.failed} failed")
         if self.queued_triage:
             parts.append(f"{self.queued_triage} queued for triage")
+        parts.extend(self.warnings)
         if self.error:
             # A cap tripped mid-walk after rows were already committed. Saying
             # only "failed" hid N reports that are now in the operator's DB.
@@ -306,10 +326,36 @@ def import_reports_from_zip(
             )
     except zipfile.BadZipFile:
         result.error = "not a valid zip archive"
-    except Exception as exc:  # pragma: no cover - defensive
+    except Exception as exc:
         logger.exception("Security report zip import failed")
         result.error = str(exc) or exc.__class__.__name__
+        # The walk runs in one transaction, so anything escaping it rolled every
+        # row back — including the ones already recorded as "imported" with a
+        # report_id. Reporting those would tell the operator about reports that do
+        # not exist ("4 imported, then stopped: database is locked" with an empty
+        # table) and hand the CLI and the dashboard the same fiction. Reconcile to
+        # what the database actually holds.
+        _discard_uncommitted_outcomes(result)
     return result
+
+
+def _discard_uncommitted_outcomes(result: ZipImportResult) -> None:
+    """Rewrite committed-looking outcomes after a rollback.
+
+    Only ``imported`` and ``duplicate`` are rewritten: a duplicate points at a row
+    from a previous import, which is still there, but its *outcome for this run* is
+    no longer "we checked and it was present" — the check happened in the
+    transaction that vanished. Skips and failures were decisions about the entry,
+    not writes, so they stand.
+    """
+    rewritten = [
+        EntryOutcome(name=entry.name, outcome="error", detail="rolled back with the transaction")
+        if entry.outcome in ("imported", "duplicate")
+        else entry
+        for entry in result.entries
+    ]
+    result.entries[:] = rewritten
+    result.queued_triage = 0
 
 
 def _import_entries(
@@ -350,7 +396,19 @@ def _import_entries(
     # layout. Detection is all-or-nothing per archive and yields nothing for an
     # ordinary folder of reports, so the generic walk below is unchanged for
     # everything that isn't a scan bundle.
-    expanded = expand_scan_archive(archive, lambda info: _read_entry(archive, info)[0])
+    #
+    # Through a budgeted reader, not a bare lambda. The expansion pass reads every
+    # .json and every patch/note, and handing it a lambda that dropped
+    # _read_entry's byte count meant MAX_TOTAL_BYTES simply did not apply to it:
+    # measured, a 163 KB archive of 40 four-megabyte entries decompressed 160 MiB
+    # in 0.49s, and at the dashboard's 8 MB upload cap that extrapolates to ~7.8
+    # GiB inside one web request. The reader also caches, so an entry the expander
+    # inspects and rejects isn't inflated a second time by the walk below.
+    reader = _BudgetedReader(archive)
+    expanded = expand_scan_archive(archive, reader)
+    if reader.exhausted:
+        result.error = f"archive expands past the {MAX_TOTAL_BYTES} byte total limit"
+        return
     with transaction.atomic():
         if expanded.recognised:
             _import_findings(
@@ -378,6 +436,46 @@ def _import_entries(
         )
 
 
+class _BudgetedReader:
+    """Reads entries once, and charges every byte against the archive budget.
+
+    Two jobs the expansion pass needed and a lambda couldn't do. It reads every
+    ``.json`` before deciding whether it's a manifest and every patch/note in a
+    bundle directory, so without the budget the aggregate cap covered only the
+    generic walk, and without the cache each rejected entry was inflated twice —
+    once here, once by the walk that never saw it marked consumed.
+
+    Returns None for a refused entry, which the expander already treats as "skip
+    this one", so a bomb degrades to "not recognised as a scan archive" rather
+    than to an unbounded read.
+    """
+
+    def __init__(self, archive: zipfile.ZipFile) -> None:
+        self._archive = archive
+        self._cache: dict[str, bytes | None] = {}
+        self.produced = 0
+        self.exhausted = False
+
+    def __call__(self, info: zipfile.ZipInfo) -> bytes | None:
+        if info.filename in self._cache:
+            return self._cache[info.filename]
+        if self.exhausted:
+            return None
+        data, _outcome, _detail, produced = _read_entry(self._archive, info)
+        self.produced += produced
+        if self.produced > MAX_TOTAL_BYTES:
+            self.exhausted = True
+            logger.warning(
+                "Scan expansion hit the %d byte archive budget at %s",
+                MAX_TOTAL_BYTES,
+                info.filename,
+            )
+            self._cache[info.filename] = None
+            return None
+        self._cache[info.filename] = data
+        return data
+
+
 def _import_findings(
     expanded: ScanArchive,
     project: Project | None,
@@ -396,6 +494,13 @@ def _import_findings(
     for record in expanded.findings:
         text_key = _text_key(record.body, project_id)
         existing = seen.get(text_key)
+        if existing is None and project_id is not None:
+            # The same project-less fallback _import_entry does. Without it, the
+            # findings path alone re-imported on a second pass with --project:
+            # measured, three findings became six rows while the plain text file
+            # in the same archive correctly deduped — half the archive honouring
+            # the page's "re-importing is safe" hint and half not.
+            existing = seen.get(_text_key(record.body, None))
         if existing is not None:
             _record(
                 result,
@@ -436,7 +541,14 @@ def _import_findings(
                 logger.warning("Could not queue triage for finding %s", record.finding_id)
 
     if expanded.truncated:
-        result.error = f"manifest claimed more than {MAX_FINDINGS} findings; expanded the first"
+        # A warning on the result, not result.error. The command raises
+        # CommandError on result.error, so putting it there exited 1 on a run that
+        # committed every row it meant to and simply stopped at the cap — any cron
+        # or CI wrapper reading the status treated a working import as a permanent
+        # failure.
+        result.warnings.append(
+            f"manifest claimed more than {MAX_FINDINGS} findings; expanded the first {MAX_FINDINGS}"
+        )
 
 
 def _walk_entries(

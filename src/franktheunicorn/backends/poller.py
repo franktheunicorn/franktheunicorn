@@ -164,10 +164,26 @@ def poll_project(
             _rewind_refresh_marker(project, pr_number, known_row)
             consecutive_failures += 1
             if consecutive_failures >= _MAX_CONSECUTIVE_REFRESH_FAILURES:
+                # Hand the untouched tail back as skipped. Bailing out is about not
+                # spending API calls on a project that's failing everything — it is
+                # not a reason to drop those PRs from the cycle, which is exactly
+                # the cycle-wide loss the counter-reset above exists to prevent:
+                # rows in neither results nor skipped_numbers never reach
+                # skipped_prs, so the worker gives them no review, no shepherding
+                # and no dependency pass. Their stored state is still perfectly
+                # usable by every pass that doesn't re-fetch.
+                remaining = [
+                    d["number"]
+                    for d in raw_prs[raw_prs.index(pr_data) + 1 :]
+                    if d.get("number") is not None
+                ]
+                skipped_numbers.extend(remaining)
                 logger.error(
-                    "Giving up on %s after %d consecutive refresh failures",
+                    "Giving up on %s after %d consecutive refresh failures; "
+                    "%d PR(s) left unrefreshed this cycle",
                     project.full_name,
                     consecutive_failures,
+                    len(remaining),
                 )
                 break
             continue

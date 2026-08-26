@@ -47,17 +47,28 @@ class TestQueueTriage:
         assert queue_triage(report) is True
         assert WorkerCommand.objects.filter(security_report=report).count() == 2
 
-    def test_the_db_constraint_catches_a_lost_race(self) -> None:
-        """The pre-check is the fast path; the partial unique index is the guarantee."""
+    def test_the_db_constraint_is_the_whole_guarantee(self) -> None:
+        """There's no pre-flight SELECT any more — the partial unique index decides.
+
+        It used to be checked first and the constraint was the backstop, which
+        meant a bulk import ran one provably-empty SELECT per freshly created row.
+        Dropping it changes nothing an observer can see: a second call still
+        returns False and still leaves one command.
+        """
+        report = SecurityReportFactory()
+
+        assert queue_triage(report) is True
+        assert queue_triage(report) is False
+        assert WorkerCommand.objects.filter(security_report=report).count() == 1
+
+    def test_a_finished_run_does_not_block_a_new_one(self) -> None:
+        """The index is partial — only pending/running conflict."""
         report = SecurityReportFactory()
         queue_triage(report)
+        WorkerCommand.objects.filter(security_report=report).update(status="completed")
 
-        # Simulate the interleaving the pre-check can't see: it reports "clear"
-        # while a concurrent request has already inserted.
-        with patch("franktheunicorn.security.queue._in_flight", return_value=False):
-            assert queue_triage(report) is False
-
-        assert WorkerCommand.objects.filter(security_report=report).count() == 1
+        assert queue_triage(report) is True
+        assert WorkerCommand.objects.filter(security_report=report).count() == 2
 
 
 @pytest.mark.django_db

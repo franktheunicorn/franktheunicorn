@@ -1261,3 +1261,32 @@ class TestFailureCounterAndRewindScope:
             poll_project(client, config, operator_username="nobody")
 
         assert PullRequest.objects.get(number=99).state == "open"
+
+
+@pytest.mark.django_db
+class TestBailOutStillReportsTheTail:
+    """Giving up on API calls is not a reason to drop PRs from the cycle."""
+
+    def test_the_unrefreshed_tail_comes_back_as_skipped(self, tmp_path: Path) -> None:
+        """PRs in neither results nor skipped_prs never reach the worker's all_prs,
+        so they get no review, no shepherding and no dependency pass — the same
+        cycle-wide loss the counter reset exists to prevent."""
+        client = _CountingMockClient(tmp_path, [_listed_pr(n) for n in range(1, 21)])
+        config = ProjectConfig(owner="apache", repo="spark", poll_refresh_hours=24)
+        # A steady-state repo: the rows already exist, which is the whole point —
+        # their stored state is usable by every pass that doesn't re-fetch. (On a
+        # first poll there is nothing to hand back, and nothing is lost either.)
+        poll_project(client, config, "holdenk")
+
+        # Everything looks changed, so every PR is attempted rather than skipped.
+        client.pr_list = [_listed_pr(n, updated_at="2026-04-09T11:00:00Z") for n in range(1, 21)]
+        skipped: list[PullRequest] = []
+        with patch(
+            "franktheunicorn.backends.poller.score_pull_request_from_model",
+            side_effect=RuntimeError("project-wide fault"),
+        ):
+            got = poll_project(client, config, "holdenk", skipped_prs=skipped)
+
+        assert got == []
+        # 5 attempted and failed, so 15 remain — handed back, not dropped.
+        assert len(skipped) == 15, [pr.number for pr in skipped]

@@ -288,6 +288,15 @@ def _bundles(
         if fid in bundles:
             # Two directories claiming one finding. Says so rather than dropping
             # silently — this is how the _id_in bug showed itself.
+            #
+            # The loser's files still count as consumed. Returning here without
+            # recording them let its note flow into the generic walk and import as
+            # a separate near-duplicate report — the double-import `consumed`
+            # exists to prevent, and "keeping the first" would have been only half
+            # true: the second's prose was kept too, as its own row.
+            bundles[fid].consumed |= (
+                {i.filename for i in patches} | {i.filename for i in notes} | set(sidecar_here)
+            )
             logger.warning(
                 "Scan archive: %s and %s both resolve to finding %s; keeping the first",
                 bundles[fid].patch_path,
@@ -426,10 +435,14 @@ def _render(fid: str, fields: dict[str, Any], context: dict[str, Any]) -> str:
         if key not in seen:
             lines.append(_field_line(key, fields[key]))
     if context:
-        lines.append("")
         lines.append("-- scan context --")
         lines.extend(_field_line(k, v) for k, v in sorted(context.items()))
-    return "\n".join(line for line in lines if line)
+    # Empty strings dropped — _field_line returns one for a field whose value is
+    # blank — and then the section break is re-inserted. Appending a bare "" as the
+    # separator didn't work: this filter removed it, so "-- scan context --" ran
+    # straight on from the last field and read as another value.
+    body = "\n".join(line for line in lines if line)
+    return body.replace("\n-- scan context --\n", "\n\n-- scan context --\n")
 
 
 def _field_line(key: str, value: Any) -> str:

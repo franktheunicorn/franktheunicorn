@@ -1883,10 +1883,17 @@ def _poll_security_emails(operator_config: OperatorConfig) -> None:
             .exclude(message_id="")
             .values_list("message_id", flat=True)
         )
+        # Any source, not just "email". The zip importer's headline case is an
+        # inbox export, and it stores email_message_id on source="zip" rows — so
+        # filtering by source meant every message in an imported archive was still
+        # unseen: re-downloaded on the next poll and given a fresh EmailScanRecord
+        # each cycle. No duplicate report (the per-message check isn't
+        # source-filtered), just a wasted IMAP pass and a spurious audit row per
+        # message, for as long as the archive's messages stay in the mailbox.
         seen_ids.update(
-            SecurityReport.objects.filter(source="email")
-            .exclude(email_message_id="")
-            .values_list("email_message_id", flat=True)
+            SecurityReport.objects.exclude(email_message_id="").values_list(
+                "email_message_id", flat=True
+            )
         )
 
         fetch = fetch_security_emails(operator_config.security_triage.email, seen_ids)

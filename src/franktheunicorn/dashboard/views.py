@@ -1382,13 +1382,13 @@ def _has_triage_assessment(report: SecurityReport) -> bool:
     return bool(
         report.triage_summary
         or report.poc_assessment
-        # Only with the flag. The partial renders this text inside
-        # {% if report.is_expected_behavior %}, so a run that wrote *only* the
-        # explanation — which _analyze_report can do — counted as a result the
-        # partial then declined to show: an empty "Triage Analysis" heading with
-        # the "produced no assessment" notice suppressed. Exactly the blank panel
-        # this predicate exists to prevent.
-        or (report.is_expected_behavior and report.expected_behavior_explanation)
+        # The flag alone, not the explanation. The partial renders that text only
+        # inside {% if report.is_expected_behavior %}, so a run writing *only* the
+        # explanation counted as a result the partial then declined to show — an
+        # empty "Triage Analysis" heading with the re-run notice suppressed. (An
+        # earlier pass at this added `is_expected_behavior and explanation`
+        # alongside, which the bare flag below already subsumes; two clauses where
+        # one is dead just makes the next reader guess which is load-bearing.)
         or report.is_expected_behavior
         or report.poc_plausible is not None
     )

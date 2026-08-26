@@ -42,20 +42,14 @@ def queue_triage(report: SecurityReport) -> bool:
     work, and the button is the obvious next move on a report whose auto-triage
     hasn't landed yet — so without this, a click (or a double-click) meant two
     NVD lookups and two pairs of LLM calls, with the second overwriting the
-    first's verdict. The DB constraint is what actually enforces it; the query
-    below just avoids relying on an IntegrityError for the common case.
-    """
-    if _in_flight(report):
-        return False
+    first's verdict.
 
-    try:
-        with transaction.atomic():
-            WorkerCommand.objects.create(command="run_security_triage", security_report=report)
-    except IntegrityError:
-        # Lost the race against a concurrent request; the other one queued it.
-        logger.debug("Triage already queued for report #%d (constraint)", report.pk)
-        return False
-    return True
+    Delegates rather than repeating ``queue_command`` with the command name fixed.
+    The two had already drifted — different log levels for the same event — which
+    is how one copy of a policy in a module whose whole point is to be the single
+    door gets fixed and the other doesn't.
+    """
+    return queue_command("run_security_triage", report)
 
 
 def queue_command(command: str, report: SecurityReport) -> bool:
@@ -69,22 +63,18 @@ def queue_command(command: str, report: SecurityReport) -> bool:
     do nothing and clicked again. This is the door CLAUDE.md's "never straight to
     WorkerCommand" rule wants to be structural rather than conventional.
     """
-    if (
-        WorkerCommand.objects.filter(
-            command=command, security_report=report, status__in=_IN_FLIGHT_STATUSES
-        )
-        .only("id")
-        .exists()
-    ):
-        logger.info("%s already queued for report #%d", command, report.pk)
-        return False
+    # The constraint is the check. There used to be a pre-flight SELECT here to
+    # avoid relying on an IntegrityError for the common case, and it cost more than
+    # it saved: a bulk import calls this on a row it created microseconds earlier,
+    # which cannot have a command, so a 2000-entry archive with --triage ran 2000
+    # provably-empty SELECTs inside the single write transaction the design is
+    # built around. The semantics are identical either way — already-in-flight
+    # returns False from the constraint just as it did from the query.
     try:
         with transaction.atomic():
             WorkerCommand.objects.create(command=command, security_report=report)
     except IntegrityError:
-        # Lost the race against the constraint. Someone else queued it, which is
-        # the outcome the caller wanted.
-        logger.info("%s was queued concurrently for report #%d", command, report.pk)
+        logger.info("%s already queued for report #%d", command, report.pk)
         return False
     return True
 
@@ -143,11 +133,3 @@ def _resolve(operator_config: OperatorConfig | None) -> OperatorConfig:
     from franktheunicorn.config.loader import get_operator_config
 
     return get_operator_config()
-
-
-def _in_flight(report: SecurityReport) -> bool:
-    return WorkerCommand.objects.filter(
-        command="run_security_triage",
-        security_report=report,
-        status__in=_IN_FLIGHT_STATUSES,
-    ).exists()

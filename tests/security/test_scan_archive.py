@@ -248,3 +248,50 @@ class TestImportIntegration:
 
         assert result.imported == 1
         assert SecurityReport.objects.get().finding_id == ""
+
+
+class TestBundleCollision:
+    def test_the_losing_bundle_is_still_consumed(self) -> None:
+        """Otherwise its note flows into the generic walk as a near-duplicate report.
+
+        "keeping the first" was only half true: the second directory's prose was
+        kept too, as its own row.
+        """
+        entries = note_archive()
+        # A third directory whose note also resolves to f001.
+        entries["PATCHES/bug_09/notes.md"] = "# bug_09 — f001: same finding, second dir\n"
+        entries["PATCHES/bug_09/patch.diff"] = PATCH_1
+
+        result = expand(entries)
+
+        assert "PATCHES/bug_09/notes.md" in result.consumed
+        assert "PATCHES/bug_09/patch.diff" in result.consumed
+
+
+class TestRendering:
+    def test_the_scan_context_gets_its_own_break(self) -> None:
+        """The deliberate blank line was being filtered out with the empty fields,
+        so "-- scan context --" read as another field value."""
+        from franktheunicorn.security.scan_archive import _render
+
+        body = _render("f001", {"title": "T", "description": "d"}, {"target": "repo"})
+
+        assert "\n\n-- scan context --\n" in body
+
+
+@pytest.mark.django_db
+class TestFindingDedupAcrossProjects:
+    def test_a_second_pass_with_a_project_does_not_duplicate_findings(self) -> None:
+        """Measured before the fix: 3 findings became 6 rows, while a plain text
+        file in the same archive correctly deduped."""
+        from tests.factories import ProjectFactory
+
+        entries = sidecar_archive()
+        import_reports_from_zip(make_zip(entries), require_security_content=False)
+        result = import_reports_from_zip(
+            make_zip(entries), project=ProjectFactory(), require_security_content=False
+        )
+
+        assert result.imported == 0
+        assert result.duplicates == 2
+        assert SecurityReport.objects.exclude(finding_id="").count() == 2

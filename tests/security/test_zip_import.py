@@ -934,3 +934,80 @@ class TestImportAutoTriage:
         assert result.imported == 1
         assert result.queued_triage == 0
         assert SecurityReport.objects.count() == 1
+
+
+@pytest.mark.django_db
+class TestBudgetAndHonesty:
+    """Two holes the single-transaction / scan-expansion rework opened."""
+
+    def test_the_expansion_pass_is_charged_the_archive_budget(self, no_auto_triage: Any) -> None:
+        """A lambda that dropped _read_entry's byte count exempted this pass entirely.
+
+        Measured before the fix: a 163 KB archive of 40 four-megabyte entries
+        decompressed 160 MiB, and at the dashboard's 8 MB upload cap that is ~7.8
+        GiB inside one request. Every entry here is .json, so the expander reads
+        all of them looking for a manifest.
+        """
+        from franktheunicorn.security import zip_import as zi
+
+        big = {f"a{i:03d}.json": b"\x00" * (200 * 1024) for i in range(40)}
+        archive = zipfile.ZipFile(make_zip(big))
+
+        # Asserted on the reader, not on result.error: the generic walk charges the
+        # same budget, so an end-to-end run trips the cap either way and the test
+        # would pass with the expansion pass still unbounded. What changed is that
+        # the *expansion* stops, so measure what it decompressed.
+        with patch.object(zi, "MAX_TOTAL_BYTES", 1024 * 1024):
+            reader = zi._BudgetedReader(archive)
+            for info in archive.infolist():
+                reader(info)
+
+        assert reader.exhausted is True
+        assert reader.produced < 2 * 1024 * 1024, f"decompressed {reader.produced} bytes"
+
+    def test_the_reader_only_inflates_an_entry_once(self, no_auto_triage: Any) -> None:
+        """The expander reads every .json before deciding; the walk then re-read it."""
+        from franktheunicorn.security import zip_import as zi
+
+        archive = zipfile.ZipFile(make_zip({"a.json": b'{"not": "a manifest"}'}))
+        reader = zi._BudgetedReader(archive)
+        info = archive.infolist()[0]
+
+        first = reader(info)
+        charged_once = reader.produced
+        second = reader(info)
+
+        assert first == second
+        assert reader.produced == charged_once, "second read was charged again"
+
+    def test_a_rolled_back_import_is_not_reported_as_imported(self, no_auto_triage: Any) -> None:
+        """The walk is one transaction, so an escape rolls back rows already recorded.
+
+        Reporting them told the operator "4 imported, then stopped: database is
+        locked" over an empty table, and handed out report_ids that never existed.
+        """
+        entries = {f"r{i}.txt": f"{REPORT_TEXT} variant {i}" for i in range(4)}
+
+        # Records four entries, then raises past the per-entry savepoint so the
+        # outer atomic rolls back — the shape of a lock taken at COMMIT, which is
+        # live because web and worker share one SQLite file.
+        def record_then_die(result: Any, outcome: Any) -> None:
+            result.entries.append(outcome)
+            if len(result.entries) >= 4:
+                msg = "database is locked"
+                raise RuntimeError(msg)
+
+        with patch("franktheunicorn.security.zip_import._record", side_effect=record_then_die):
+            result = import_reports_from_zip(make_zip(entries))
+
+        assert SecurityReport.objects.count() == 0
+        assert result.imported == 0, result.summary()
+        assert not any(e.report_id for e in result.entries if e.outcome == "imported")
+
+    def test_an_overlong_entry_name_is_bounded(self, no_auto_triage: Any) -> None:
+        """ZIP names run to 64 KiB and this one reaches flash messages and logs."""
+        from franktheunicorn.security.zip_import import EntryOutcome
+
+        outcome = EntryOutcome(name="x" * 60_000, outcome="error")
+
+        assert len(outcome.name) < 400
