@@ -28,7 +28,7 @@
       <td>{% if item.ci_pass %}✓{% else %}✗{% endif %}</td>
       <td>{% if item.approvals_met %}✓{% else %}✗{% endif %}</td>
       <td>{% if item.no_conflicts %}✓{% else %}✗{% endif %}</td>
-      <td>{% if item.eligible %}<strong style="color: #2e7d32;">Ready</strong>{% else %}Not ready{% endif %}</td>
+      <td>{% if item.eligible %}<strong style="color: var(--green);">Ready</strong>{% else %}Not ready{% endif %}</td>
       <td>
         {% if item.eligible %}
           {% if item.merge_command %}

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -294,23 +295,67 @@ class GitHubClient(ForgeClient):
         Returns raw search-API items; each has a ``pull_request`` key and ``repository_url``.
         Returns [] gracefully on rate-limit (403/422/429) or any other failure.
         """
-        url = "/search/issues"
-        query = f"involves:{username} type:pr state:open"
+        return self._search_prs(
+            f"involves:{username} type:pr state:open", max_results, what="mention scan"
+        )
+
+    def search_prs_authored_by(self, username: str, max_results: int = 100) -> list[dict[str, Any]]:
+        """Search for open PRs authored by ``username``.
+
+        ``author:`` rather than relying on ``involves:`` to cover it — see the
+        base-class docstring for why the operator's own PRs get their own call.
+        """
+        return self._search_prs(
+            f"author:{username} type:pr state:open", max_results, what="own-PR scan"
+        )
+
+    #: Search results per page. GitHub's own ceiling for /search/issues.
+    _SEARCH_PAGE = 100
+
+    def _search_prs(self, query: str, max_results: int, *, what: str) -> list[dict[str, Any]]:
+        """Run one issue search, paginated, sorted most-recently-updated first.
+
+        Two things the single-page version got wrong. It passed ``per_page`` =
+        ``max_results``, which GitHub silently clamps to 100, so any caller asking
+        for more quietly got 100 — and it took GitHub's default *relevance* sort,
+        which for "PRs involving me" is not a defensible order to truncate on.
+        Sorting by ``updated`` desc means a truncated result set is the N most
+        recently active, which is the set worth having.
+        """
+        items: list[dict[str, Any]] = []
         try:
-            response = self._get(url, params={"q": query, "per_page": max_results})
-            if response.status_code in (403, 422, 429):
-                logger.info(
-                    "GitHub search rate-limited or unavailable (status %d); skipping mention scan.",
-                    response.status_code,
+            for page in range(1, (max_results // self._SEARCH_PAGE) + 2):
+                response = self._get(
+                    "/search/issues",
+                    params={
+                        "q": query,
+                        "per_page": min(self._SEARCH_PAGE, max_results - len(items)),
+                        "page": page,
+                        "sort": "updated",
+                        "order": "desc",
+                    },
                 )
-                return []
-            response.raise_for_status()
-            data: dict[str, Any] = response.json()
-            items: list[dict[str, Any]] = data.get("items", [])
-            return items
+                if response.status_code in (403, 422, 429):
+                    logger.info(
+                        "GitHub search rate-limited or unavailable (status %d); "
+                        "%s returning %d result(s) so far.",
+                        response.status_code,
+                        what,
+                        len(items),
+                    )
+                    return items
+                response.raise_for_status()
+                data: dict[str, Any] = response.json()
+                page_items: list[dict[str, Any]] = data.get("items", [])
+                items.extend(page_items)
+                if len(page_items) < self._SEARCH_PAGE or len(items) >= max_results:
+                    break
         except Exception:
-            logger.debug("PR mention scan failed for %s", username, exc_info=True)
-            return []
+            logger.debug("GitHub %s failed for query %r", what, query, exc_info=True)
+            # Whatever came back before the failure is still worth having: a
+            # second-page timeout shouldn't discard the first page.
+            return items
+        return items[:max_results]
 
     def close(self) -> None:
         self._client.close()
@@ -398,9 +443,36 @@ def _log_auth_suggestions(owner: str, repo: str, response: httpx.Response | None
             _FINE_GRAINED_NOTE,
         )
     else:
+        frank_token_set = bool(os.environ.get("FRANK_GITHUB_TOKEN"))
+        generic_token_set = bool(os.environ.get("GITHUB_TOKEN"))
+        # These checks assume the common case: this forge entry's token came
+        # from FRANK_GITHUB_TOKEN, the default operator.yaml sets
+        # `github_token: "${FRANK_GITHUB_TOKEN}"`. A forge entry can instead
+        # point `token:` at any other env var (multi-account setups), in
+        # which case these two vars say nothing about what was actually
+        # sent — hence the hedge appended below.
+        if not frank_token_set and generic_token_set:
+            token_hint = (
+                "FRANK_GITHUB_TOKEN is not set, but GITHUB_TOKEN is — franktheunicorn "
+                "only reads FRANK_GITHUB_TOKEN by default (see .env.example). GITHUB_TOKEN "
+                "is ignored unless a forge entry explicitly points `token:` at it; rename "
+                "it or set FRANK_GITHUB_TOKEN as well."
+            )
+        elif not frank_token_set:
+            token_hint = (
+                "FRANK_GITHUB_TOKEN is not set or is empty — check your .env file. If this "
+                "repo's forge entry in operator.yaml uses a different `token:` variable, "
+                "check that one instead."
+            )
+        else:
+            token_hint = (
+                "FRANK_GITHUB_TOKEN is set but was rejected by GitHub — see causes below. "
+                "(If this repo's forge entry uses a different `token:` variable, the "
+                "rejected token may not be FRANK_GITHUB_TOKEN's value.)"
+            )
         logger.error(
             "GitHub API returned 401 Unauthorized for %s/%s. Possible causes:\n"
-            "  1. GITHUB_TOKEN is not set or is empty — check your .env file.\n"
+            "  1. %s\n"
             "  2. Token has expired or been revoked — generate a new one at "
             "https://github.com/settings/tokens\n"
             "  3. Classic PAT missing 'public_repo' (public) or 'repo' (private) scope.%s\n"
@@ -408,6 +480,7 @@ def _log_auth_suggestions(owner: str, repo: str, response: httpx.Response | None
             "  5. %s",
             owner,
             repo,
+            token_hint,
             missing_scope_hint,
             owner,
             repo,

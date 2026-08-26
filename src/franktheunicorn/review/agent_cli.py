@@ -121,16 +121,29 @@ def run_agent_cli_review(
         timeout=_GIT_DIFF_TIMEOUT_SECONDS,
     )
     if diff_result is None or not diff_result.ok:
-        logger.debug(
-            "git diff failed in %s; skipping %s review.",
-            cwd,
+        # WARNING, not DEBUG. This is a reviewer the operator explicitly enabled
+        # declining to run, and at DEBUG the whole path was invisible: the symptom
+        # is "claude_cli never fires" with a completely clean INFO log.
+        logger.warning(
+            "%s review skipped: git diff %s..HEAD failed in %s%s",
             config.name,
+            base_commit,
+            cwd,
+            f" — {(diff_result.stderr or '').strip()[:300]}"
+            if diff_result is not None
+            else " — the executor returned nothing (SSH command failed or timed out)",
         )
         return []
 
     diff = diff_result.stdout
     if not diff.strip():
-        logger.debug("Empty diff against %s; skipping %s review.", base_commit, config.name)
+        logger.info(
+            "%s review skipped: no diff between %s and HEAD in %s "
+            "(the checkout may not have the PR head fetched).",
+            config.name,
+            base_commit,
+            cwd,
+        )
         return []
 
     if len(diff) > config.max_diff_chars:
@@ -145,8 +158,35 @@ def run_agent_cli_review(
     cmd = list(config.cli_argv) + config.build_invocation(prompt)
 
     timeout = config.timeout_seconds if config.timeout_seconds > 0 else DEFAULT_TIMEOUT_SECONDS
+    # The argv, once, at INFO. Without it there is no way to tell from a log
+    # whether the CLI was invoked at all, let alone whether `cli_path`,
+    # `prompt_mode` and `model_flag` came out the way the YAML meant them to —
+    # and a wrong prompt_mode (`codex -p …` instead of `codex exec …`) fails by
+    # producing no findings, which looks identical to not running.
+    logger.info(
+        "%s review: running %s in %s (timeout %ds, %d diff chars)",
+        config.name,
+        " ".join(cmd[: len(config.cli_argv) + 3])
+        + (" …" if len(cmd) > len(config.cli_argv) + 3 else ""),
+        cwd,
+        timeout,
+        len(diff),
+    )
     result = executor.run(cmd, cwd=cwd, timeout=timeout)
     if result is None:
+        # The single loudest silent failure on this path: for a RemoteSSHExecutor
+        # this is "the ssh_command did not come back" — a bad `ssh_command`, an
+        # unreachable workspace, or the CLI hanging past the timeout — and it
+        # returned an empty list with no log line whatsoever.
+        logger.error(
+            "%s review failed: the executor returned no result for %s. "
+            "For remote.mode: ssh check that ssh_command works from this host and "
+            "that %s exists on the remote; the call may also have exceeded the %ds timeout.",
+            config.name,
+            cmd[0],
+            cwd,
+            timeout,
+        )
         return []
     if not result.ok:
         logger.error(
@@ -158,6 +198,15 @@ def run_agent_cli_review(
         return []
 
     blocks = parse_prompt_only_output(result.stdout)
+    if not blocks:
+        # Ran fine, said nothing parseable. Distinguishing "clean review" from
+        # "the model ignored the output format" needs the raw head of stdout.
+        logger.info(
+            "%s review returned no findings (%d bytes of output%s).",
+            config.name,
+            len(result.stdout or ""),
+            f", starting {result.stdout.strip()[:120]!r}" if (result.stdout or "").strip() else "",
+        )
     return [
         AgentCLIFinding(
             file_path=b.file_path,

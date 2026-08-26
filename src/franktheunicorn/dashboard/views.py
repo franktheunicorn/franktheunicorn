@@ -634,7 +634,7 @@ def post_review(request: HttpRequest, pr_id: int) -> HttpResponse:
         client = _make_posting_client(pr)
         if client is None:
             return HttpResponse(
-                '<div class="post-result" style="color: #c00;">'
+                '<div class="post-result" class="error-note">'
                 "Cannot post: no forge client/token configured.</div>"
             )
 
@@ -645,13 +645,13 @@ def post_review(request: HttpRequest, pr_id: int) -> HttpResponse:
             client.close()  # type: ignore[attr-defined]
 
         return HttpResponse(
-            f'<div class="post-result" style="color: #2e7d32;">'
+            f'<div class="post-result" class="ok-note">'
             f"Posted {len(approved)} findings to GitHub.</div>"
         )
     except Exception:
         logger.exception("Failed to post review for PR #%d", pr.number)
         return HttpResponse(
-            '<div class="post-result" style="color: #c00;">Failed to post review.</div>'
+            '<div class="post-result" class="error-note">Failed to post review.</div>'
         )
 
 
@@ -701,12 +701,12 @@ def send_feedback(request: HttpRequest, pr_id: int) -> HttpResponse:
     valid_assessments = {choice[0] for choice in AgentFeedback.ASSESSMENT_CHOICES}
     if assessment not in valid_assessments:
         return HttpResponse(
-            '<div class="feedback-result" style="color: #c00;">Invalid assessment value.</div>'
+            '<div class="feedback-result" class="error-note">Invalid assessment value.</div>'
         )
 
     if not feedback_body.strip():
         return HttpResponse(
-            '<div class="feedback-result" style="color: #c00;">Feedback body cannot be empty.</div>'
+            '<div class="feedback-result" class="error-note">Feedback body cannot be empty.</div>'
         )
 
     feedback_method = "session-url" if pr.agent_session_url else "github-comment"
@@ -898,7 +898,7 @@ def merge_pr(request: HttpRequest, pr_id: int) -> HttpResponse:
     )
     if not pc or not pc.merge_queue.enabled:
         return HttpResponse(
-            '<div class="merge-result" style="color: #c00;">'
+            '<div class="merge-result" class="error-note">'
             "Merge queue not enabled for this project.</div>"
         )
 
@@ -906,14 +906,14 @@ def merge_pr(request: HttpRequest, pr_id: int) -> HttpResponse:
     eligibility = evaluate_merge_eligibility(pr, pc.merge_queue)
     if not eligibility.eligible:
         return HttpResponse(
-            f'<div class="merge-result" style="color: #c00;">'
+            f'<div class="merge-result" class="error-note">'
             f"PR is no longer eligible for merge: {eligibility.details}</div>"
         )
 
     token = getattr(settings, "FRANK_GITHUB_TOKEN", "")
     if not token:
         return HttpResponse(
-            '<div class="merge-result" style="color: #c00;">'
+            '<div class="merge-result" class="error-note">'
             "Cannot merge: GITHUB_TOKEN not configured.</div>"
         )
 
@@ -925,11 +925,11 @@ def merge_pr(request: HttpRequest, pr_id: int) -> HttpResponse:
 
     if result.success:
         return HttpResponse(
-            f'<div class="merge-result" style="color: #2e7d32;">'
+            f'<div class="merge-result" class="ok-note">'
             f"Merged PR #{pr.number} via {result.method}.</div>"
         )
     return HttpResponse(
-        f'<div class="merge-result" style="color: #c00;">Merge failed: {result.error}</div>'
+        f'<div class="merge-result" class="error-note">Merge failed: {result.error}</div>'
     )
 
 
@@ -1535,9 +1535,12 @@ def security_report_triage(request: HttpRequest, report_id: int) -> HttpResponse
         # subject to auto_triage — nor to security_triage.enabled, which defaults
         # off and is commented out in the shipped example config, and would make
         # this button a no-op on a default install.
-        from franktheunicorn.security.queue import queue_triage_on_request
+        from franktheunicorn.security.queue import (
+            PRIORITY_INTERACTIVE,
+            queue_triage_on_request,
+        )
 
-        created = queue_triage_on_request(report, operator_config)
+        created = queue_triage_on_request(report, operator_config, priority=PRIORITY_INTERACTIVE)
         logger.info(
             "%s manual triage for security report #%d",
             "Queued" if created else "Reused in-flight",
@@ -1620,8 +1623,7 @@ def security_report_sandbox(request: HttpRequest, report_id: int) -> HttpRespons
 
     if not _is_sandbox_enabled():
         return HttpResponse(
-            '<div class="sandbox-result" style="color: #c00;">'
-            "Sandbox execution is not enabled.</div>"
+            '<div class="sandbox-result" class="error-note">Sandbox execution is not enabled.</div>'
         )
 
     # The web container does not have Docker access; enqueue a WorkerCommand for
@@ -1630,15 +1632,15 @@ def security_report_sandbox(request: HttpRequest, report_id: int) -> HttpRespons
     # sandbox_requested when the run *finishes*, so any reload re-offers the
     # button and the second click was an uncaught IntegrityError — a 500 that htmx
     # doesn't swap, so it looked like the click did nothing.
-    from franktheunicorn.security.queue import queue_command
+    from franktheunicorn.security.queue import PRIORITY_INTERACTIVE, queue_command
 
-    created = queue_command("run_security_sandbox", report)
+    created = queue_command("run_security_sandbox", report, priority=PRIORITY_INTERACTIVE)
     message = (
         "Sandbox run queued. Reload this page in a few minutes to see the verdict."
         if created
         else "A sandbox run is already queued for this report."
     )
-    return HttpResponse(f'<div class="sandbox-result" style="color: #1565c0;">{message}</div>')
+    return HttpResponse(f'<div class="sandbox-result" class="queued-note">{message}</div>')
 
 
 @require_POST
@@ -1671,7 +1673,7 @@ def security_report_cve_check(request: HttpRequest, report_id: int) -> HttpRespo
         report.save(update_fields=["cve_matches", "updated_at"])
     except Exception:
         logger.exception("CVE check failed for report %d", report.pk)
-        return HttpResponse('<div class="cve-result" style="color: #c00;">CVE lookup failed.</div>')
+        return HttpResponse('<div class="cve-result" class="error-note">CVE lookup failed.</div>')
 
     return render(request, "dashboard/_security_cve_matches.html", {"report": report})
 
@@ -1741,15 +1743,32 @@ def run_agents(request: HttpRequest, pr_id: int) -> HttpResponse:
     project_config = get_project_config(pr.project.full_name)
     if not project_config:
         return HttpResponse(
-            '<div class="run-agents-result" style="color: #c00;">'
-            "No project config found for this repo.</div>"
+            '<div class="run-agents-result error-note">No project config found for this repo.</div>'
         )
     # Enqueue rather than run inline: process_pr makes external HTTP +
     # LLM calls and can take 30-120s, which would tie up the web request.
-    WorkerCommand.objects.create(command="run_agents", pull_request=pr)
+    #
+    # Through security.queue, not straight to WorkerCommand — that is where the
+    # in-flight dedup and the priority live. Without them this button queued a
+    # second full pipeline run per impatient click, all of them behind whatever
+    # bulk work the queue already held.
+    from franktheunicorn.security.queue import PRIORITY_INTERACTIVE, queue_command
+
+    created = queue_command("run_agents", pull_request=pr, priority=PRIORITY_INTERACTIVE)
+    if not created:
+        # Says so instead of silently queueing nothing. The old button gave the
+        # same "queued" message either way, so a run already in flight looked
+        # identical to a fresh one and the honest answer — "it is already going" —
+        # was never shown.
+        return HttpResponse(
+            '<div class="run-agents-result queued-note">'
+            "An agent run for this PR is already queued or running — "
+            "reload to see it land.</div>"
+        )
     return HttpResponse(
-        '<div class="run-agents-result" style="color: #1565c0; margin: 0;">'
-        "Agent run queued. Reload this page in a few minutes to see updated findings.</div>"
+        '<div class="run-agents-result queued-note">'
+        "Agent run queued at the front of the worker queue. "
+        "Reload this page in a minute or two to see updated findings.</div>"
     )
 
 
@@ -1768,19 +1787,26 @@ def run_dual_tests(request: HttpRequest, pr_id: int) -> HttpResponse:
     project_config = get_project_config(pr.project.full_name)
     if not project_config:
         return HttpResponse(
-            '<div class="run-tests-result" style="color: #c00;">'
-            "No project config found for this repo.</div>"
+            '<div class="run-tests-result error-note">No project config found for this repo.</div>'
         )
     if not project_config.tests.enabled:
         return HttpResponse(
-            '<div class="run-tests-result" style="color: #c00;">'
+            '<div class="run-tests-result error-note">'
             "Differential tests are not enabled for this project. "
             "Add <code>tests: enabled: true</code> to the project YAML.</div>"
         )
 
-    WorkerCommand.objects.create(command="run_dual_tests", pull_request=pr)
+    # Same door as the other buttons: dedup so a double-click is one container
+    # run, and interactive priority so it does not wait behind bulk work.
+    from franktheunicorn.security.queue import PRIORITY_INTERACTIVE, queue_command
+
+    if not queue_command("run_dual_tests", pull_request=pr, priority=PRIORITY_INTERACTIVE):
+        return HttpResponse(
+            '<div class="run-tests-result queued-note">'
+            "A test run for this PR is already queued or running.</div>"
+        )
     return HttpResponse(
-        '<div class="run-tests-result" style="color: #1565c0;">'
+        '<div class="run-tests-result queued-note">'
         "Test run queued. Reload this page in a few minutes to see the verdict.</div>"
     )
 

@@ -873,6 +873,16 @@ class WorkerCommand(models.Model):
         related_name="worker_commands",
     )
 
+    # Higher runs first, then oldest-first within a priority. Zero is bulk work
+    # nobody is watching; the dashboard's buttons queue above it.
+    #
+    # This exists because the queue was strictly FIFO, and one bulk import with
+    # --triage puts a thousand run_security_triage rows in front of the operator.
+    # Each is an NVD lookup plus two LLM calls, so "Force Run Agents" — a click,
+    # with someone sitting there waiting for it — landed hours later while the
+    # dashboard cheerfully said "in a few minutes".
+    priority = models.SmallIntegerField(default=0)
+
     # Optional command-specific arguments (e.g. force flags).
     kwargs = models.JSONField(default=dict)
     log = models.TextField(blank=True, default="")
@@ -889,9 +899,11 @@ class WorkerCommand(models.Model):
     objects: models.Manager[WorkerCommand] = models.Manager()
 
     class Meta:
-        ordering = ["created_at"]
+        ordering = ["-priority", "created_at"]
         indexes = [
             models.Index(fields=["status", "created_at"]),
+            # The claim query's exact shape: pending rows, best first.
+            models.Index(fields=["status", "-priority", "created_at"]),
         ]
         constraints = [
             # At most one queued/running command of a kind per security report.
@@ -904,6 +916,18 @@ class WorkerCommand(models.Model):
                 fields=["command", "security_report"],
                 condition=models.Q(status__in=["pending", "running"]),
                 name="unique_inflight_command_per_report",
+            ),
+            # The same rule for the PR-targeted commands, which had none: SQL
+            # treats NULLs as distinct, so the constraint above covered exactly
+            # the rows whose security_report is set. "Force Run Agents" is a
+            # 30-120s pipeline behind an htmx button that says "reload in a few
+            # minutes", so an operator who reloads and clicks again queued a
+            # second full run — five impatient clicks, five sequential runs, and
+            # the button looking broken the whole time.
+            models.UniqueConstraint(
+                fields=["command", "pull_request"],
+                condition=models.Q(status__in=["pending", "running"]),
+                name="unique_inflight_command_per_pr",
             ),
         ]
 

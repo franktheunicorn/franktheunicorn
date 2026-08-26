@@ -30,7 +30,7 @@
 </div>
 
 {% if pr.ai_agent_source %}
-<div style="margin-top: 0.75rem; padding: 0.5rem 0.75rem; background: #e3f2fd; border-radius: 4px; font-size: 0.9rem; border-left: 3px solid #1976d2;">
+<div class="context-panel is-session">
     <strong>Agent:</strong> {{ pr.ai_agent_source }}
     {% if pr.agent_session_url %}&middot; <a href="{{ pr.agent_session_url }}" target="_blank" rel="noopener noreferrer">Open Session &nearr;</a>{% endif %}
     {% if pr.agent_task_id %}&middot; Task: <code>{{ pr.agent_task_id }}</code>{% endif %}
@@ -45,13 +45,13 @@
 {% endif %}
 
 {% if pr.body %}
-<div style="margin-top: 1rem; padding: 0.75rem; background: #f5f5f5; border-radius: 4px; font-size: 0.9rem;">
+<div class="context-panel">
     <div class="md-content">{{ pr.body|render_markdown }}</div>
 </div>
 {% endif %}
 
 {% if jira_context %}
-<div style="margin-top: 1rem; padding: 0.75rem; background: #f0f4ff; border-left: 3px solid #0052cc; border-radius: 4px; font-size: 0.9rem;">
+<div class="context-panel is-jira">
     <strong>JIRA:
     {% if jira_server and jira_context.ticket_id %}
         <a href="{{ jira_server }}/browse/{{ jira_context.ticket_id }}" target="_blank" rel="noopener noreferrer">{{ jira_context.ticket_id }} &nearr;</a>
@@ -60,15 +60,15 @@
     {% endif %}
     </strong>
     {% if jira_context.summary %}&mdash; {{ jira_context.summary }}{% endif %}
-    <span style="font-size: 0.8rem; color: #555; margin-left: 0.5rem;">
+    <span class="faint" style="font-size: 0.8rem; margin-left: 0.5rem;">
         {% if jira_context.status %}{{ jira_context.status }}{% endif %}
         {% if jira_context.priority %}&middot; {{ jira_context.priority }}{% endif %}
         {% if jira_context.assignee %}&middot; {{ jira_context.assignee }}{% endif %}
     </span>
     {% if jira_context.description %}
     <details style="margin-top: 0.5rem;">
-        <summary style="cursor: pointer; font-size: 0.8rem; color: #0052cc;">Description</summary>
-        <div style="margin-top: 0.4rem; font-size: 0.85rem; color: #333; white-space: pre-wrap;">{{ jira_context.description|truncatewords:200 }}</div>
+        <summary style="cursor: pointer; font-size: 0.8rem; color: var(--accent);">Description</summary>
+        <div style="margin-top: 0.4rem; font-size: 0.85rem; white-space: pre-wrap;">{{ jira_context.description|truncatewords:200 }}</div>
     </details>
     {% endif %}
 </div>
@@ -134,14 +134,14 @@
                 <span class="source-badge source-agent">{{ agent.display_name }}</span>
                 {% endif %}
             {% else %}
-            <span class="source-badge" style="background: #e0e0e0; color: #666;">{{ agent.display_name }}</span>
+            <span class="source-badge neutral-chip">{{ agent.display_name }}</span>
             {% endif %}
         </td>
         <td>
             {% if agent.did_run %}
             <span style="color: var(--green); font-weight: 600;">&#10003; ran</span>
             {% else %}
-            <span style="color: #bbb; font-style: italic;">not run</span>
+            <span class="fainter" style="font-style: italic;">not run</span>
             {% endif %}
         </td>
         <td>
@@ -151,7 +151,7 @@
             {% if agent.edited %}&middot; <span style="color: var(--orange);">{{ agent.edited }} edited</span>{% endif %}
             {% if agent.posted %}&middot; <span style="color: var(--blue);">{{ agent.posted }} posted</span>{% endif %}
             {% if agent.rejected %}&middot; <span style="color: var(--red);">{{ agent.rejected }} rejected</span>{% endif %}
-            {% if agent.suppressed %}&middot; <span style="color: #999;">{{ agent.suppressed }} suppressed</span>{% endif %}
+            {% if agent.suppressed %}&middot; <span class="faint">{{ agent.suppressed }} suppressed</span>{% endif %}
             {% if agent.pending %}&middot; <span style="color: var(--muted);">{{ agent.pending }} pending</span>{% endif %}
             {% else %}
             &mdash;
@@ -165,7 +165,7 @@
             {% elif agent.diff_source == "github_scrape" %}
             <span style="color: var(--orange);">GitHub (scrape)</span>
             {% else %}
-            <span style="color: #bbb;">—</span>
+            <span class="fainter">—</span>
             {% endif %}
         </td>
         <td>
@@ -175,19 +175,19 @@
                 <ul style="list-style: none; margin-top: 0.4rem; padding: 0; font-size: 0.78rem;">
                 {% for f in agent.findings %}
                 <li style="margin-bottom: 0.2rem;
-                    {% if f.is_suppressed %}color: #aaa;
+                    {% if f.is_suppressed %}color: var(--muted); opacity: 0.7;
                     {% elif f.status == 'rejected' %}color: var(--red);
                     {% elif f.status == 'accepted' or f.status == 'edited' or f.status == 'posted' %}color: var(--green);
                     {% else %}color: var(--text);{% endif %}">
                     <code>{{ f.file_path }}{% if f.line_number %}:{{ f.line_number }}{% endif %}</code>
-                    <span style="color: #999; font-size: 0.7rem;">[{{ f.severity }}{% if f.is_suppressed %}, suppressed{% else %}, {{ f.status }}{% endif %}]</span>
+                    <span class="faint" style="font-size: 0.7rem;">[{{ f.severity }}{% if f.is_suppressed %}, suppressed{% else %}, {{ f.status }}{% endif %}]</span>
                     {% if f.body_snippet %}&mdash; <em style="color: var(--muted);">{{ f.body_snippet }}</em>{% endif %}
                 </li>
                 {% endfor %}
                 </ul>
             </details>
             {% elif agent.did_run %}
-            <span style="color: #999; font-size: 0.8rem;">(no line findings)</span>
+            <span class="faint" style="font-size: 0.8rem;">(no line findings)</span>
             {% else %}
             &mdash;
             {% endif %}
@@ -208,7 +208,7 @@
     {% endif %}
     {% if run.error_log %}
     <details><summary style="font-size: 0.8rem; cursor: pointer;">Error log</summary>
-    <pre style="font-size: 0.75rem; background: #f0f0f0; padding: 0.5rem; margin-top: 0.25rem;">{{ run.error_log }}</pre>
+    <pre class="log-pre">{{ run.error_log }}</pre>
     </details>
     {% endif %}
 </div>
@@ -230,7 +230,7 @@
             <td style="font-size: 0.8rem;">{{ dep.source_file }}</td>
             <td>
                 {% if dep.changelog_url %}<a href="{{ dep.changelog_url }}" target="_blank">View &nearr;</a>
-                {% elif dep.changelog_fetch_error %}<span style="color: #999; font-size: 0.8rem;">{{ dep.changelog_fetch_error }}</span>
+                {% elif dep.changelog_fetch_error %}<span class="faint" style="font-size: 0.8rem;">{{ dep.changelog_fetch_error }}</span>
                 {% else %}&mdash;{% endif %}
             </td>
             <td>
@@ -240,7 +240,7 @@
         </tr>
         {% if dep.changelog_text %}
         <tr><td colspan="6"><details><summary style="cursor: pointer; font-size: 0.8rem;">Release notes</summary>
-            <div style="margin-top: 0.5rem; padding: 0.75rem; background: #f9f9f9; border-radius: 4px; font-size: 0.85rem; white-space: pre-wrap;">{{ dep.changelog_text|truncatewords:500 }}</div>
+            <div class="context-panel is-notes">{{ dep.changelog_text|truncatewords:500 }}</div>
         </details></td></tr>
         {% endif %}
         {% endfor %}
@@ -252,7 +252,7 @@
 <h3 style="margin-top: 1.5rem;">Agent Vibes</h3>
 <div class="agent-vibes">
     {% for vibe in agent_vibes %}
-    <div style="margin-bottom: 0.5rem; padding: 0.75rem; background: #fffaf0; border-left: 3px solid #d97706; border-radius: 4px; font-size: 0.9rem;">
+    <div class="context-panel is-vibe">
         <strong>{{ vibe.backend }}:</strong>
         <div class="md-content">{{ vibe.vibe_text|render_markdown }}</div>
     </div>
@@ -284,9 +284,9 @@
 
 {% if suppressed_drafts %}
 <details style="margin-top: 1.5rem;">
-    <summary style="cursor: pointer; font-size: 0.9rem; color: #666;">
+    <summary class="faint" style="cursor: pointer; font-size: 0.9rem;">
         Suppressed Findings ({{ suppressed_drafts|length }})
-        <span style="font-size: 0.75rem; color: #999;">&mdash; auto-suppressed by rejection predictor</span>
+        <span class="faint" style="font-size: 0.75rem;">&mdash; auto-suppressed by rejection predictor</span>
     </summary>
     <div class="draft-list suppressed" data-suppressed-section style="margin-top: 0.5rem; opacity: 0.8;">
         {% for draft in suppressed_drafts %}

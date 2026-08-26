@@ -54,23 +54,59 @@ def _forge_client_for(
         return None
 
 
-def process_pending_commands(operator_config: OperatorConfig) -> int:
-    """Pick up and execute every pending WorkerCommand.
+#: How many commands one drain will run before handing control back.
+#:
+#: The drain is called from inside the poll cycle and from the worker's sleep
+#: loop, and it used to run the whole backlog: one bulk import with --triage meant
+#: a single drain call sat there for a thousand NVD lookups and two thousand LLM
+#: calls, during which the poll cycle made no progress and a SIGTERM waited.
+#: Bounded, the backlog still drains — across successive drains five seconds
+#: apart — and everything else keeps its turn.
+MAX_COMMANDS_PER_DRAIN = 20
 
-    Returns the number of commands processed (success or failure).
-    Each command is claimed atomically by flipping ``pending → running``
-    inside a transaction so two workers can't double-run the same row.
+
+def process_pending_commands(operator_config: OperatorConfig, *, limit: int | None = None) -> int:
+    """Run pending WorkerCommands, best first, up to *limit* of them.
+
+    Returns the number of commands processed (success or failure). Each command
+    is claimed atomically by flipping ``pending → running`` inside a transaction
+    so two workers can't double-run the same row.
+
+    Re-queries between commands rather than taking one snapshot of the pending
+    set up front, and that is the point: a snapshot fixes the running order at
+    the moment the drain started, so "Force Run Agents" clicked while a hundred
+    imported reports were being triaged went to the *back* of that batch no
+    matter what priority it carried. Re-querying means the next command is always
+    the best one that exists right now — one extra indexed SELECT per command,
+    against work that takes tens of seconds.
     """
+    budget = MAX_COMMANDS_PER_DRAIN if limit is None else limit
     processed = 0
-    pending_ids = list(
-        WorkerCommand.objects.filter(status="pending")
-        .order_by("created_at")
-        .values_list("pk", flat=True)
-    )
-    for cmd_id in pending_ids:
+    while processed < budget:
+        cmd_id = (
+            WorkerCommand.objects.filter(status="pending")
+            .order_by("-priority", "created_at")
+            .values_list("pk", flat=True)
+            .first()
+        )
+        if cmd_id is None:
+            break
         cmd = _claim_command(cmd_id)
         if cmd is None:
+            # Another worker took it between the SELECT and the claim. Counted
+            # against the budget so a row we keep losing the race for cannot spin
+            # this loop — the queue is shared with a second worker only during a
+            # restart overlap, but an unbounded retry there is a hang.
+            processed += 1
             continue
+        started = timezone.now()
+        logger.info(
+            "WorkerCommand #%d (%s, priority %d) on %s: starting",
+            cmd.pk,
+            cmd.command,
+            cmd.priority,
+            _target_label(cmd),
+        )
         try:
             _dispatch(cmd, operator_config)
             cmd.status = "completed"
@@ -88,7 +124,26 @@ def process_pending_commands(operator_config: OperatorConfig) -> int:
             cmd.finished_at = timezone.now()
             cmd.save(update_fields=["status", "error", "log", "finished_at"])
             processed += 1
+            # At INFO with the elapsed time, because "the button did nothing" is
+            # almost always "it ran and took 90 seconds" or "it ran and found
+            # nothing", and neither was visible in the log before.
+            logger.info(
+                "WorkerCommand #%d (%s) %s in %.1fs: %s",
+                cmd.pk,
+                cmd.command,
+                cmd.status,
+                (cmd.finished_at - started).total_seconds(),
+                (cmd.error or cmd.log or "(no output)").splitlines()[0][:200],
+            )
     return processed
+
+
+def _target_label(cmd: WorkerCommand) -> str:
+    if cmd.pull_request is not None:
+        return f"{cmd.pull_request.project} #{cmd.pull_request.number}"
+    if cmd.security_report is not None:
+        return f"report #{cmd.security_report.pk}"
+    return "(no target)"
 
 
 def requeue_interrupted_commands() -> int:

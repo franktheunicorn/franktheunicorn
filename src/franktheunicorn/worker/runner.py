@@ -20,7 +20,9 @@ import shutil
 import signal
 import sys
 import time
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from types import FrameType
 from typing import TYPE_CHECKING, Any
@@ -357,17 +359,41 @@ def _openai_chat_preflight(
 def _check_backends(operator_config: OperatorConfig) -> frozenset[int]:
     """Probe each configured LLM backend and return indices of those that fail.
 
-    Logs provider, URL, and masked API key for every backend checked.
-    Backends that pass are logged at INFO; failures at WARNING.
-    Skips providers that need no API key (stub, ollama).
+    Every backend gets exactly one verdict line — OK, DISABLED or SKIPPED — and
+    the run ends with a roll-up. The completeness is the point: this used to
+    ``continue`` past stub/ollama and log unknown providers at DEBUG, so a config
+    where nothing usable was set up produced a startup log that didn't mention
+    some backends at all. A backend that is never going to work should say so
+    before the first poll rather than silently at the first LLM call, which is
+    where "no agent ingestions have happened" comes from.
     """
     import os
 
     disabled: set[int] = set()
+    #: Backends nothing was proven about — no probe exists, or none is needed.
+    unchecked: list[str] = []
 
+    if not operator_config.llm_backends:
+        logger.error(
+            "No llm_backends configured in operator.yaml. Every agent run will finish "
+            "with nothing to show — add a backend and restart the worker."
+        )
+        return frozenset()
+
+    logger.info("Checking %d configured LLM backend(s) ...", len(operator_config.llm_backends))
     for idx, bc in enumerate(operator_config.llm_backends):
         provider = bc.provider.lower()
         if provider in ("stub", "ollama"):
+            # Named, not skipped in silence. "stub" especially: it is why an
+            # install can look wired up and quietly produce canned reviews.
+            logger.info(
+                "Backend[%d] %s (%s): SKIPPED preflight — needs no API key%s",
+                idx,
+                provider,
+                bc.base_url or "(default)",
+                " — note stub returns canned text, not a real review" if provider == "stub" else "",
+            )
+            unchecked.append(f"{idx}:{provider}")
             continue
 
         key_env = bc.api_key_env or {
@@ -385,7 +411,7 @@ def _check_backends(operator_config: OperatorConfig) -> frozenset[int]:
 
         if not api_key:
             logger.warning(
-                "Backend[%d] %s (%s): no API key in env var %r — backend disabled for this run",
+                "Backend[%d] %s (%s): DISABLED — no API key in env var %r",
                 idx,
                 provider,
                 base_url,
@@ -420,18 +446,19 @@ def _check_backends(operator_config: OperatorConfig) -> frozenset[int]:
 
                 genai.Client(api_key=api_key).models.list()
             else:
-                logger.debug(
-                    "Backend[%d] %s (%s key=%s): no preflight check for this provider",
+                logger.info(
+                    "Backend[%d] %s (%s key=%s): SKIPPED preflight — no probe implemented "
+                    "for this provider, so a bad key will only surface at the first call",
                     idx,
                     provider,
                     base_url,
                     masked,
                 )
+                unchecked.append(f"{idx}:{provider}")
                 continue
         except Exception as exc:
             logger.warning(
-                "Backend[%d] %s (%s key=%s): preflight check failed — %s — "
-                "backend disabled for this run",
+                "Backend[%d] %s (%s key=%s): DISABLED — preflight failed: %s",
                 idx,
                 provider,
                 base_url,
@@ -447,6 +474,25 @@ def _check_backends(operator_config: OperatorConfig) -> frozenset[int]:
             provider,
             base_url,
             masked,
+        )
+
+    total = len(operator_config.llm_backends)
+    ok = total - len(disabled) - len(unchecked)
+    logger.info(
+        "LLM backends: %d OK, %d disabled, %d unchecked, of %d configured%s",
+        ok,
+        len(disabled),
+        len(unchecked),
+        total,
+        f" (unchecked: {', '.join(unchecked)})" if unchecked else "",
+    )
+    if ok == 0 and not unchecked:
+        # The loud case. Every backend failed its probe, so every agent run this
+        # process makes produces nothing, and the only prior evidence was N
+        # scattered WARNINGs the operator had to add up themselves.
+        logger.error(
+            "Every configured LLM backend failed preflight. Agent runs will produce no "
+            "findings until one works — fix the keys above and restart the worker."
         )
 
     return frozenset(disabled)
@@ -490,30 +536,96 @@ def resolve_agent_cli_reviewers(
 
 
 def _check_agent_cli_reviewers(operator_config: OperatorConfig) -> None:
-    """Resolve + log the agent-CLI reviewer set once at startup (no per-PR noise).
+    """Give every configured agent-CLI reviewer a verdict at startup.
+
+    One line per reviewer — ENABLED, SKIPPED or a warning — and for the ssh ones
+    an actual probe of the remote binary. That last part is the point.
+    ``resolve_agent_cli_reviewers`` enables an ``ssh``-mode reviewer
+    *optimistically* (it won't pay for a remote probe per PR), which is the right
+    call per-PR and terrible at startup: a reviewer whose ``cli_path`` isn't on
+    the remote PATH reports as enabled, then yields zero findings on every PR
+    forever, with the failure buried inside a per-PR DEBUG line. Probing once
+    here costs one SSH round trip and turns "claude_cli never fires" into a
+    sentence naming the binary and the host.
 
     Also primes the memoized cache on ``operator_config`` so per-PR processing
-    reuses this result instead of re-probing PATH.
+    reuses the PATH probe rather than re-running it.
     """
     resolved = resolve_agent_cli_reviewers(operator_config)
-    if resolved:
-        logger.info(
-            "Agent CLI reviewers enabled: %s",
-            ", ".join(f"{rc.name} ({rc.cli_argv[0]})" for rc in resolved),
-        )
-    else:
-        logger.info("Agent CLI reviewers enabled: (none)")
-    # Surface auto+local entries skipped because their binary is absent. Derived
-    # from the resolved set (for auto+local, "resolved" == "available"), so this
-    # reuses the single PATH probe rather than re-running it.
     resolved_names = {rc.name for rc in resolved}
+
+    if not operator_config.agent_cli_reviewers:
+        logger.info("Agent CLI reviewers: (none configured)")
+        return
+
     for rc in operator_config.agent_cli_reviewers:
-        if rc.enabled == "auto" and rc.remote.mode != "ssh" and rc.name not in resolved_names:
-            logger.info(
-                "Agent CLI reviewer %r skipped: %r not found on PATH",
-                rc.name,
-                rc.cli_argv[0],
+        where = "ssh" if rc.remote.mode == "ssh" else "local"
+        if rc.name not in resolved_names:
+            reason = (
+                f"{rc.cli_argv[0]!r} not found on PATH"
+                if rc.enabled == "auto"
+                else f"enabled={rc.enabled!r}"
             )
+            logger.info("Agent CLI %r: SKIPPED (%s) — %s", rc.name, where, reason)
+            continue
+        logger.info(
+            "Agent CLI %r: ENABLED (%s) — %s%s",
+            rc.name,
+            where,
+            " ".join(rc.cli_argv),
+            f", model {rc.model!r} via {rc.model_flag}" if rc.model else "",
+        )
+        if rc.remote.mode == "ssh":
+            _probe_remote_agent_cli(rc)
+
+
+def _probe_remote_agent_cli(rc: AgentCLIReviewerConfig) -> None:
+    """Check that an ssh-mode reviewer's binary exists on the remote host.
+
+    Never raises and never disables anything — the reviewer stays enabled either
+    way, because a probe that fails for its own reasons (a slow bastion, a
+    wrapper that needs a TTY) shouldn't switch off a working reviewer. It only
+    says so.
+    """
+    from franktheunicorn.review.tool_executor import RemoteSSHExecutor
+
+    binary = rc.cli_argv[0]
+    try:
+        executor = RemoteSSHExecutor(config=rc.remote)
+        # `command -v` rather than `which`: POSIX, and present in the shells that
+        # a workspace wrapper might drop us into. cwd is the workspace dir, which
+        # is also a cheap check that it exists.
+        result = executor.run(
+            ["sh", "-lc", f"command -v {binary}"],
+            cwd=rc.remote.remote_workspace_dir or ".",
+            timeout=60,
+        )
+    except Exception:
+        logger.warning(
+            "Agent CLI %r: could not probe the remote for %r (see DEBUG); leaving it enabled.",
+            rc.name,
+            binary,
+            exc_info=True,
+        )
+        return
+    if result is None:
+        logger.warning(
+            "Agent CLI %r: the remote probe did not come back. Check that "
+            "`%s` works from this host. Reviews will produce nothing until it does.",
+            rc.name,
+            " ".join(rc.remote.ssh_command),
+        )
+        return
+    if not result.ok or not result.stdout.strip():
+        logger.warning(
+            "Agent CLI %r: %r is NOT on the remote PATH (%s). Every review will come "
+            "back empty until it is installed there or cli_path is corrected.",
+            rc.name,
+            binary,
+            (result.stderr or result.stdout or "no output").strip()[:200],
+        )
+        return
+    logger.info("Agent CLI %r: remote %r found at %s", rc.name, binary, result.stdout.strip()[:200])
 
 
 def _check_ssh_configs(operator_config: OperatorConfig) -> frozenset[str]:
@@ -658,6 +770,68 @@ def _should_auto_review(pr: PullRequest, operator_username: str) -> bool:
     )
 
 
+@dataclass(frozen=True)
+class ReviewSkip:
+    """Why the review pipeline declined to run on a PR.
+
+    A short machine-ish ``reason`` for counting, and a sentence saying what to
+    change. The second half is the point: "no agent ingestions have happened" is
+    almost never a broken pipeline, it's one of four gates doing exactly what it
+    was configured to do, and nothing said which or how to turn it off.
+    """
+
+    reason: str
+    explanation: str
+
+
+def review_skip_reason(
+    pr: PullRequest,
+    pc: ProjectConfig,
+    operator_config: OperatorConfig | None,
+    *,
+    force: bool,
+) -> ReviewSkip | None:
+    """The gate that stops a review of *pr*, or None to run the pipeline.
+
+    Split out of ``process_pr`` so the decision has one home and the cycle can
+    aggregate it. It used to be four inline early-returns, two of which said
+    nothing at all: the drafts-already-exist case — by far the most common —
+    returned an empty list silently, and the wip case logged at DEBUG. So a cycle
+    that reviewed nothing looked exactly like a cycle that never ran.
+    """
+    if force:
+        return None
+    if pr.review_drafts.exists():
+        return ReviewSkip(
+            "already-reviewed",
+            "It already has review drafts; use Force Run Agents to review it again.",
+        )
+    if pr.queue == "wip":
+        return ReviewSkip(
+            "wip",
+            "It is routed to the wip queue (draft, or a WIP title). "
+            "Reviews wait until it comes out of draft.",
+        )
+    policy = getattr(pc, "auto_review_policy", "mentioned_or_authored")
+    if policy == "none":
+        return ReviewSkip(
+            "policy-none",
+            f"auto_review_policy is 'none' for {getattr(pc, 'full_name', '?')} — "
+            f"it is ingested and scored but never auto-reviewed. "
+            f"Set auto_review_policy: all (or mentioned_or_authored) to change that.",
+        )
+    operator_username = operator_config.github_username if operator_config else ""
+    if policy == "mentioned_or_authored" and not _should_auto_review(pr, operator_username):
+        return ReviewSkip(
+            "not-involved",
+            f"auto_review_policy is 'mentioned_or_authored' and {operator_username or '(you)'} "
+            f"is not the author, a requested reviewer, an assignee, or @-mentioned. "
+            f"Set auto_review_policy: all to review every PR.",
+        )
+    # policy == "all" falls through to the full pipeline.
+    return None
+
+
 def process_pr(
     pr: PullRequest,
     pc: ProjectConfig,
@@ -669,6 +843,7 @@ def process_pr(
     forge_client: ForgeClient | None = None,
     force: bool = False,
     log_lines: list[str] | None = None,
+    decisions: Counter[str] | None = None,
 ) -> list[Any]:
     """Run the full review pipeline for a single PR.
 
@@ -677,6 +852,9 @@ def process_pr(
 
     ``force=True`` runs the full pipeline even when review drafts already
     exist (used by the dashboard to re-run on demand).
+
+    ``decisions`` is bumped with ``"ran"`` or the skip reason, so the caller can
+    print one aggregate line per cycle instead of this logging 900 of them.
 
     Returns the list of ReviewDraft objects created by ``draft_review``.
     """
@@ -712,34 +890,23 @@ def process_pr(
             log_lines.append(msg)
 
     try:
-        if not force and pr.review_drafts.exists():
+        skip = review_skip_reason(pr, pc, operator_config, force=force)
+        if skip:
+            # Counted, then logged at DEBUG. Per-PR at INFO would be 900 lines a
+            # cycle on a repo the size of Spark; the aggregate the caller prints
+            # from this counter is the line that actually answers "did any agent
+            # run, and if not, which gate stopped them".
+            if decisions is not None:
+                decisions[skip.reason] += 1
+            logger.debug("PR #%d: no agent run — %s. %s", pr.number, skip.reason, skip.explanation)
+            if log_lines is not None:
+                # The dashboard's force-run log is a different audience: one PR,
+                # on purpose, and the operator needs the reason in front of them.
+                log_lines.append(f"No agent run — {skip.reason}. {skip.explanation}")
             return []
 
-        if not force and pr.queue == "wip":
-            logger.debug("PR #%d is in the wip queue; skipping review pipeline.", pr.number)
-            return []
-
-        # Default review-gating policy (token saver). Ingestion/scoring/routing
-        # already happened upstream; here we decide whether to spend LLM tokens
-        # auto-reviewing this PR. ``force=True`` (dashboard "Force Run Agents")
-        # always bypasses this gate.
-        if not force:
-            policy = getattr(pc, "auto_review_policy", "mentioned_or_authored")
-            operator_username = operator_config.github_username if operator_config else ""
-            if policy == "none":
-                _log(
-                    f"Auto-review policy 'none' for {getattr(pc, 'full_name', '?')}; "
-                    f"skipping LLM review for PR #{pr.number} (still ingested/scored)."
-                )
-                return []
-            if policy == "mentioned_or_authored" and not _should_auto_review(pr, operator_username):
-                _log(
-                    f"Auto-review policy 'mentioned_or_authored': operator not involved in "
-                    f"PR #{pr.number}; skipping LLM review (still ingested/scored)."
-                )
-                return []
-            # policy == "all" falls through to the full pipeline.
-
+        if decisions is not None:
+            decisions["ran"] += 1
         _log(f"Starting agent run for PR #{pr.number}: {pr.title}")
 
         community_ctx = ""
@@ -998,6 +1165,13 @@ def _run_cycle(
     # one whose earlier review failed) has to stay eligible for it, or nothing
     # reviews it until its upstream updated_at moves.
     reviewed_pks: set[int | None] = set()
+    # Why each PR did or didn't get an agent run, aggregated into one line at the
+    # end of the cycle. "I'm not seeing any agent ingestions" was unanswerable
+    # from the log before this: the common skips were silent or DEBUG-only, so a
+    # cycle that reviewed nothing and a cycle that never ran looked identical.
+    decisions: Counter[str] = Counter()
+    seen_prs = 0
+    refreshed_prs = 0
 
     for pc in project_configs:
         if not isinstance(pc, ProjectConfig) or not pc.enabled:
@@ -1053,7 +1227,15 @@ def _run_cycle(
                 repo_path=repo_path,
                 skipped_prs=project_skipped,  # type: ignore[arg-type]
             )
-            logger.debug("poll_project returned %d PR(s) for %s/%s", len(prs), pc.owner, pc.repo)
+            logger.info(
+                "Polled %s/%s: %d refreshed, %d unchanged",
+                pc.owner,
+                pc.repo,
+                len(prs),
+                len(project_skipped),
+            )
+            seen_prs += len(prs) + len(project_skipped)
+            refreshed_prs += len(prs)
             # Unchanged PRs still belong to this cycle for the passes that read
             # stored state rather than re-fetching it.
             for skipped in project_skipped:
@@ -1079,6 +1261,7 @@ def _run_cycle(
                     diff_http=diff_http,
                     repo_path=repo_path,
                     forge_client=client,  # type: ignore[arg-type]
+                    decisions=decisions,
                 )
 
                 # Differential test verification (§9).
@@ -1161,6 +1344,7 @@ def _run_cycle(
         disabled_backends=disabled_backends,
         diff_http=diff_http,
         clients=clients,
+        decisions=decisions,
     )
 
     # Alert mode: working-overlap + security-report alerts, batched email.
@@ -1170,7 +1354,56 @@ def _run_cycle(
 
         run_alert_sweep(project_configs, operator_config)
 
+    _log_cycle_summary(seen_prs, refreshed_prs, decisions)
     diff_http.close()
+
+
+def _log_cycle_summary(seen: int, refreshed: int, decisions: Counter[str]) -> None:
+    """One line saying what the cycle actually did, and why it didn't do more.
+
+    This exists because the answer to "no agent ingestions have happened" was not
+    in the log. Every gate that declines a review is a deliberate,
+    correctly-configured behaviour, and between them they can decline all of them
+    — silently. So the counts go in one place, and when nothing ran at all the
+    dominant reason gets spelled out with the knob that changes it.
+    """
+    ran = decisions.get("ran", 0)
+    skipped = {reason: n for reason, n in decisions.items() if reason != "ran"}
+    detail = ", ".join(f"{reason} {n}" for reason, n in sorted(skipped.items())) or "none"
+    logger.info(
+        "Cycle summary: %d PR(s) seen, %d refreshed; agent runs: %d ran, %d skipped (%s)",
+        seen,
+        refreshed,
+        ran,
+        sum(skipped.values()),
+        detail,
+    )
+    if ran or not skipped:
+        return
+    # Nothing reviewed and something declined it: name the biggest gate and how to
+    # open it, rather than leaving the operator to read the source.
+    reason, count = max(skipped.items(), key=lambda kv: (kv[1], kv[0]))
+    advice = _SKIP_ADVICE.get(reason, "See the DEBUG log for the per-PR reason.")
+    logger.warning(
+        "No agent ran this cycle. The commonest reason was %r (%d PR(s)). %s",
+        reason,
+        count,
+        advice,
+    )
+
+
+#: What to do about each gate, for the "nothing ran" warning above. Kept next to
+#: the summary rather than in ``ReviewSkip`` because this is advice about the
+#: whole cycle ("all of them were already reviewed" is fine; "all of them were
+#: filtered by policy" probably isn't what the operator wanted).
+_SKIP_ADVICE = {
+    "already-reviewed": "That is the steady state — every open PR already has drafts.",
+    "wip": "Every candidate is in the wip queue (draft, or a WIP title).",
+    "policy-none": "auto_review_policy is 'none' in the project YAML; set it to 'all' "
+    "or 'mentioned_or_authored' to auto-review.",
+    "not-involved": "auto_review_policy is 'mentioned_or_authored' and none of these PRs "
+    "involve you; set auto_review_policy: all in the project YAML to review every PR.",
+}
 
 
 def _scan_mentioned_prs(
@@ -1178,61 +1411,93 @@ def _scan_mentioned_prs(
     operator_username: str,
     operator_config: OperatorConfig | None,
 ) -> None:
-    """Ingest open PRs where the operator is involved (mentioned/assigned/review-requested).
+    """Ingest the operator's own open PRs, and the ones they're involved in.
 
-    Iterates every configured forge client and calls ``search_prs_involving``.
-    Each found PR is ingested via ``ingest_single_pr`` (idempotent upsert).
+    Two searches per forge, not one. ``search_prs_authored_by`` asks for the
+    operator's own PRs by name; ``search_prs_involving`` is the wider
+    mentioned/assigned/review-requested sweep. They used to be a single
+    ``involves:`` query, and that quietly under-served the more important half:
+    ``involves:`` returns every thread the operator has ever commented on, one
+    page of it, so on a busy account their own PRs could be crowded out of the
+    result set entirely — and it is their own PRs that the shepherding pass, the
+    merge queue and the "Your PRs" queue are all built on. Own-PRs are also
+    ingested first, so if anything downstream gives up part-way they are the part
+    that landed.
+
+    Each found PR is ingested via ``ingest_single_pr``, which is an idempotent
+    upsert *including* a per-PR detail fetch — so this refreshes mergeable state
+    on a PR the project poll didn't list, which is the other half of the problem:
+    a repo with more open PRs than one listing returns leaves the operator's PR
+    invisible to the poll entirely.
+
     Failures per-PR are caught individually so one bad PR doesn't stop the rest.
     """
     from franktheunicorn.backends.poller import ingest_single_pr
 
-    total_found = 0
     total_ingested = 0
+    # Deduped across the two searches and across forges: an authored PR that also
+    # mentions the operator would otherwise be ingested twice, at one detail
+    # fetch plus one files fetch each.
+    seen: set[tuple[str, str, int]] = set()
 
-    for _forge_name, client in clients.items():
-        if not hasattr(client, "search_prs_involving"):
-            continue
-        try:
-            items = client.search_prs_involving(operator_username)
-        except Exception:
-            logger.debug("search_prs_involving failed for forge %s", _forge_name, exc_info=True)
-            continue
-
-        total_found += len(items)
-        for item in items:
-            # Skip plain issues — only process actual PRs.
-            if not item.get("pull_request"):
+    for forge_name, client in clients.items():
+        for label, finder in (
+            ("authored", getattr(client, "search_prs_authored_by", None)),
+            ("involved", getattr(client, "search_prs_involving", None)),
+        ):
+            if finder is None:
                 continue
-
-            # Parse owner/repo from repository_url:
-            # e.g. "https://api.github.com/repos/apache/spark"
-            repo_url: str = item.get("repository_url", "")
-            parts = repo_url.rstrip("/").rsplit("/", 2)
-            if len(parts) < 3:
-                logger.debug("Could not parse repository_url %r; skipping", repo_url)
-                continue
-            owner, repo = parts[-2], parts[-1]
-            pr_number: int | None = item.get("number")
-            if not pr_number:
-                continue
-
             try:
-                ingest_single_pr(owner, repo, pr_number)
-                total_ingested += 1
+                items = finder(operator_username)
             except Exception:
-                logger.debug(
-                    "Failed to ingest mentioned PR %s/%s#%d",
-                    owner,
-                    repo,
-                    pr_number,
-                    exc_info=True,
-                )
+                logger.debug("%s PR search failed for forge %s", label, forge_name, exc_info=True)
+                continue
+            logger.info(
+                "%s scan (%s): %d open PR(s) for %s",
+                label.capitalize(),
+                forge_name,
+                len(items),
+                operator_username or "(username not set)",
+            )
+            for item in items:
+                # Skip plain issues — only process actual PRs.
+                if not item.get("pull_request"):
+                    continue
 
-    if total_found:
+                # Parse owner/repo from repository_url:
+                # e.g. "https://api.github.com/repos/apache/spark"
+                repo_url: str = item.get("repository_url", "")
+                parts = repo_url.rstrip("/").rsplit("/", 2)
+                if len(parts) < 3:
+                    logger.debug("Could not parse repository_url %r; skipping", repo_url)
+                    continue
+                owner, repo = parts[-2], parts[-1]
+                pr_number: int | None = item.get("number")
+                if not pr_number:
+                    continue
+                key = (owner, repo, pr_number)
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                try:
+                    ingest_single_pr(owner, repo, pr_number)
+                    total_ingested += 1
+                except Exception:
+                    logger.warning(
+                        "Could not ingest %s PR %s/%s#%d — it will not appear in the "
+                        "dashboard this cycle",
+                        label,
+                        owner,
+                        repo,
+                        pr_number,
+                        exc_info=True,
+                    )
+
+    if seen or operator_username:
         logger.info(
-            "Mention scan: %d PR(s) found involving %s, %d ingested/refreshed.",
-            total_found,
-            operator_username,
+            "Own/involved PR scan: %d distinct PR(s) found, %d ingested or refreshed.",
+            len(seen),
             total_ingested,
         )
 
@@ -1244,6 +1509,7 @@ def _backfill_unreviewed_prs(
     disabled_backends: frozenset[int],
     diff_http: httpx.Client,
     clients: Mapping[str, object] | None = None,
+    decisions: Counter[str] | None = None,
 ) -> None:
     """Draft reviews for open PRs in the DB that have no review drafts yet.
 
@@ -1295,6 +1561,7 @@ def _backfill_unreviewed_prs(
                 disabled_backends=disabled_backends,
                 forge_client=forge_client,  # type: ignore[arg-type]
                 diff_http=diff_http,
+                decisions=decisions,
             )
             logger.info("  Backfill PR #%d: %d drafts generated", pr.number, len(drafts))
         except Exception:
@@ -1541,8 +1808,10 @@ def _resolve_cwd_for_tool(
 
     if isinstance(executor, LocalExecutor):
         if local_repo_path is None or not local_repo_path.exists():
-            logger.debug(
-                "Repo clone unavailable for %s; skipping %s for PR #%d",
+            logger.warning(
+                "No local clone at %s for %s; %s needs one (or remote.mode: ssh). "
+                "Skipping it for PR #%d.",
+                local_repo_path or "(unset)",
                 pr.project.full_name,
                 tool_name,
                 pr.number,
@@ -1550,17 +1819,36 @@ def _resolve_cwd_for_tool(
             return None
         base_ref = _resolve_base_ref(local_repo_path, pr)
         if base_ref is None:
+            # Was a silent return. Usually the base branch isn't fetched in the
+            # clone, which is fixable and worth saying out loud.
+            logger.warning(
+                "Could not resolve a base ref for PR #%d in %s; skipping %s.",
+                pr.number,
+                local_repo_path,
+                tool_name,
+            )
             return None
         ok, temp_branch = _checkout_pr_head_with_merge(executor, str(local_repo_path), pr, base_ref)
         if not ok:
+            logger.warning(
+                "Could not check out PR #%d's head onto %s in %s; skipping %s.",
+                pr.number,
+                base_ref,
+                local_repo_path,
+                tool_name,
+            )
             return None
         return str(local_repo_path), base_ref, temp_branch
 
     # Remote execution: clone (or fetch) the repo on the remote host.
     # No merge-before-diff remotely — returns _REMOTE sentinel as temp_branch.
     if not isinstance(executor, RemoteSSHExecutor):
-        logger.debug(
-            "Unexpected executor type %s for remote path; skipping %s.", type(executor), tool_name
+        logger.warning(
+            "remote.mode is %r but the executor came back as %s; skipping %s. "
+            "Only 'local' and 'ssh' are supported.",
+            getattr(remote_config, "mode", "?"),
+            type(executor).__name__,
+            tool_name,
         )
         return None
     remote_cwd = executor.prepare_repo(
@@ -1569,15 +1857,27 @@ def _resolve_cwd_for_tool(
         clone_url=clone_url,
     )
     if remote_cwd is None:
-        logger.debug(
-            "Remote prepare_repo failed for %s; skipping %s for PR #%d",
+        # The most likely reason an ssh-mode reviewer never runs, and it was
+        # DEBUG-only: a bad ssh_command, an unreachable workspace, a
+        # remote_workspace_dir that can't be created, or a clone that failed.
+        logger.warning(
+            "Could not prepare %s on the remote for %s; skipping %s for PR #%d. "
+            "Check that ssh_command works from this host and that "
+            "remote_workspace_dir is writable there.",
             pr.project.full_name,
+            clone_url or "(no clone url — is the forge token set?)",
             tool_name,
             pr.number,
         )
         return None
     base_ref = _resolve_remote_base_ref(executor, remote_cwd, pr)
     if base_ref is None:
+        logger.warning(
+            "Could not resolve a base ref for PR #%d in the remote checkout %s; skipping %s.",
+            pr.number,
+            remote_cwd,
+            tool_name,
+        )
         return None
     # Remote: checkout head but don't attempt merge (no conflict tracking).
     head_sha = (pr.head_sha or "").strip()
@@ -1652,12 +1952,30 @@ def _run_review_tool_for_pr(
     """
     from franktheunicorn.review.tool_executor import make_executor
 
+    mode = getattr(remote_config, "mode", "local")
     resolved = _resolve_cwd_for_tool(pr, remote_config, repo_path, tool_name, clone_url=clone_url)
     if resolved is None:
+        # Was a bare `return`. Every reason _resolve_cwd_for_tool declines is
+        # logged at DEBUG in there, so a configured reviewer that never got a
+        # checkout produced no INFO output at all — which is what "claude_cli
+        # doesn't seem to be getting fired" looks like from the outside.
+        logger.warning(
+            "%s did not run for PR #%d: no usable checkout (remote.mode=%s). "
+            "Re-run with --debug for the specific step that failed.",
+            tool_name,
+            pr.number,
+            mode,
+        )
         return
     cwd, base_ref, temp_branch = resolved
 
     if temp_branch is None:
+        logger.info(
+            "%s skipped for PR #%d: the PR does not merge cleanly onto %s.",
+            tool_name,
+            pr.number,
+            base_ref,
+        )
         _handle_merge_conflict(pr, project_config, operator_config, diff_http)
         return
 
@@ -1665,15 +1983,21 @@ def _run_review_tool_for_pr(
     real_branch: str | None = None if temp_branch == _REMOTE else temp_branch
     try:
         findings = run_review(cwd, base_ref, tool_config, executor=executor)
-        if findings:
-            drafts = create_drafts(pr, findings, pr.project, diff_source="local_git_merged")
-            logger.info(
-                "  PR #%d: %d %s findings → %d drafts",
-                pr.number,
-                len(findings),
-                tool_name,
-                len(drafts),
-            )
+        # Outside the `if findings:` — a reviewer that ran and found nothing used
+        # to log nothing, so "it worked and the PR is clean" and "it never ran"
+        # were the same empty log.
+        drafts = (
+            create_drafts(pr, findings, pr.project, diff_source="local_git_merged")
+            if findings
+            else []
+        )
+        logger.info(
+            "  PR #%d: %s produced %d finding(s) → %d draft(s)",
+            pr.number,
+            tool_name,
+            len(findings),
+            len(drafts),
+        )
     except Exception:
         logger.exception("%s failed for PR #%d; continuing.", tool_name, pr.number)
     finally:

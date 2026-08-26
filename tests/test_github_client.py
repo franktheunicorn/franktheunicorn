@@ -172,6 +172,84 @@ class TestListPullRequestsAuthFallback:
         assert "GITHUB_TOKEN" in combined
         assert "repo" in combined.lower()
 
+    def test_401_hints_at_frank_github_token_when_neither_set(
+        self,
+        httpx_mock: HTTPXMock,
+        client: GitHubClient,
+        caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("FRANK_GITHUB_TOKEN", raising=False)
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        html = (_FIXTURES / "pulls_listing_scrape.html").read_text()
+        httpx_mock.add_response(
+            url="https://api.github.test/repos/apache/spark/pulls?state=open&per_page=100&page=1",
+            status_code=401,
+        )
+        httpx_mock.add_response(
+            url="https://github.com/apache/spark/issues?q=is%3Aopen+is%3Apr",
+            text=html,
+        )
+        import logging
+
+        with caplog.at_level(logging.ERROR, logger="franktheunicorn.backends.github"):
+            client.list_pull_requests("apache", "spark")
+
+        combined = " ".join(caplog.messages)
+        assert "FRANK_GITHUB_TOKEN is not set or is empty" in combined
+
+    def test_401_hints_at_mismatch_when_only_generic_token_set(
+        self,
+        httpx_mock: HTTPXMock,
+        client: GitHubClient,
+        caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("FRANK_GITHUB_TOKEN", raising=False)
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_something")
+        html = (_FIXTURES / "pulls_listing_scrape.html").read_text()
+        httpx_mock.add_response(
+            url="https://api.github.test/repos/apache/spark/pulls?state=open&per_page=100&page=1",
+            status_code=401,
+        )
+        httpx_mock.add_response(
+            url="https://github.com/apache/spark/issues?q=is%3Aopen+is%3Apr",
+            text=html,
+        )
+        import logging
+
+        with caplog.at_level(logging.ERROR, logger="franktheunicorn.backends.github"):
+            client.list_pull_requests("apache", "spark")
+
+        combined = " ".join(caplog.messages)
+        assert "FRANK_GITHUB_TOKEN is not set, but GITHUB_TOKEN is" in combined
+        assert "GITHUB_TOKEN is ignored" in combined
+
+    def test_401_says_rejected_when_frank_token_set(
+        self,
+        httpx_mock: HTTPXMock,
+        client: GitHubClient,
+        caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("FRANK_GITHUB_TOKEN", "bad-token")
+        html = (_FIXTURES / "pulls_listing_scrape.html").read_text()
+        httpx_mock.add_response(
+            url="https://api.github.test/repos/apache/spark/pulls?state=open&per_page=100&page=1",
+            status_code=401,
+        )
+        httpx_mock.add_response(
+            url="https://github.com/apache/spark/issues?q=is%3Aopen+is%3Apr",
+            text=html,
+        )
+        import logging
+
+        with caplog.at_level(logging.ERROR, logger="franktheunicorn.backends.github"):
+            client.list_pull_requests("apache", "spark")
+
+        combined = " ".join(caplog.messages)
+        assert "FRANK_GITHUB_TOKEN is set but was rejected by GitHub" in combined
+
     def test_401_returns_scraped_prs(self, httpx_mock: HTTPXMock, client: GitHubClient) -> None:
         html = (_FIXTURES / "pulls_listing_scrape.html").read_text()
         httpx_mock.add_response(

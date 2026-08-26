@@ -7,6 +7,14 @@
  * light-only inline <style> in base.html meant dark mode never applied). */
 
 :root {
+    /* Tell the UA our palette tracks the system scheme. Without this the browser
+     * paints every form control, scrollbar and default canvas with its LIGHT
+     * defaults even on a dark page — and because `body` sets
+     * `color: var(--text)` (near-white in the dark scheme), an inheriting
+     * <textarea>, <select> or <input> came out as a white box with white text
+     * in it. One declaration, and the UA switches the whole native-widget
+     * palette; the explicit rules further down stop it mattering either way. */
+    color-scheme: light dark;
     --bg: #fafafa;
     --card: #fff;
     --border: #e0e0e0;
@@ -65,6 +73,22 @@ body {
     padding: 1rem;
     background: var(--bg);
 }
+
+/* Text-entry controls, on the theme rather than on whatever the UA feels like.
+ * Checkboxes, radios and file pickers are left to the UA — color-scheme above
+ * already gives those a matching palette, and painting a background onto a
+ * checkbox just makes it look broken. */
+input:not([type="checkbox"]):not([type="radio"]):not([type="file"]),
+select,
+textarea {
+    font-family: inherit;
+    color: var(--text);
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+}
+textarea { font-family: var(--font-mono); }
+input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 header { border-bottom: 2px solid var(--border); padding-bottom: 0.5rem; margin-bottom: 1rem; }
 header h1 { font-size: 1.4rem; display: inline; }
@@ -195,6 +219,82 @@ thead th { border-bottom: 2px solid var(--border); }
 @keyframes frank-spin {
     to { transform: rotate(360deg); }
 }
+
+/* Assessed-severity chips. Was inline `background: var(--red)` etc. with a
+ * hardcoded `color: #fff`, which works in the light scheme and not in the dark
+ * one: --red and --orange are light pastels there (#fca5a5, #fdba74), so white
+ * on them is unreadable. Paired tint/foreground like .score-badge instead, so
+ * both schemes are legible by construction. */
+.severity-badge {
+    font-size: 0.7rem;
+    padding: 0.1rem 0.4rem;
+    border-radius: 3px;
+    margin-left: 0.3rem;
+    font-weight: 600;
+    vertical-align: middle;
+    background: var(--code-bg);
+    color: var(--muted);
+}
+.severity-badge.sev-critical { background: var(--red-bg); color: var(--red); }
+.severity-badge.sev-high { background: var(--orange-bg); color: var(--orange); }
+.severity-badge.sev-medium { background: var(--yellow-bg); color: var(--orange); }
+
+/* Context panels — the PR body, the JIRA card, agent vibes, release notes.
+ *
+ * These were inline `background: #f5f5f5` / `#f0f4ff` / `#fffaf0`, written
+ * before dark mode existed. The background stayed hardcoded light while --text
+ * went to near-white, so on a dark-scheme browser the PR body rendered as a big
+ * white box with white text in it. Nothing was broken in light mode, which is
+ * why it survived: this file's own header notes the same class of bug in the
+ * old base.html inline <style>.
+ *
+ * Every panel takes its colours from the theme variables, so both schemes get a
+ * readable pairing by construction rather than by two hand-picked hex values. */
+.context-panel {
+    margin-top: 1rem;
+    padding: 0.75rem;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    font-size: 0.9rem;
+}
+/* Tinted variants. --*-bg is dark in the dark scheme, so --text stays legible
+   on all of them; the accent is reused for the left rule. */
+.context-panel.is-jira { background: var(--blue-bg); border-color: var(--blue); border-left-width: 3px; }
+.context-panel.is-session { background: var(--blue-bg); border-color: var(--blue); border-left-width: 3px; margin-top: 0.75rem; padding: 0.5rem 0.75rem; }
+.context-panel.is-vibe { background: var(--yellow-bg); border-color: var(--orange); border-left-width: 3px; margin: 0 0 0.5rem; }
+.context-panel.is-notes { white-space: pre-wrap; font-size: 0.85rem; margin-top: 0.5rem; }
+.context-panel.is-compose { padding: 1rem; }
+
+/* Raw text nobody should have to squint at: error logs, suggested patches.
+   --code-bg is translucent, so it darkens a light card and lightens a dark one
+   without a second hardcoded value. */
+.log-pre {
+    background: var(--code-bg);
+    border-radius: 4px;
+    padding: 0.5rem;
+    margin-top: 0.25rem;
+    font-size: 0.75rem;
+    overflow-x: auto;
+}
+
+/* Secondary and tertiary text. Was #555/#666 (invisible on a dark card) and
+   #999/#aaa/#bbb (invisible on a light one). */
+.faint { color: var(--muted); }
+.fainter { color: var(--muted); opacity: 0.7; }
+
+/* Inline results swapped in by htmx (post review, merge, force run, test run).
+   These fragments are built in views.py, which spelled the colour as a literal
+   #c00 / #2e7d32 / #1565c0 — the same hardcoded-light problem the templates had,
+   and harder to spot because the markup is in Python. */
+.error-note { color: var(--red); }
+.ok-note { color: var(--green); }
+.queued-note { color: var(--blue); margin: 0; }
+.warn-note { color: var(--orange); }
+
+/* A neutral chip — the agent name column, the auto-suppressed marker. Was
+   `background: #e0e0e0; color: #666`, i.e. grey on grey in either scheme. */
+.neutral-chip { background: var(--code-bg); color: var(--muted); }
 
 /* Markdown-rendered content (draft items, PR body, agent vibes) */
 .md-content p { margin: 0.4rem 0; }

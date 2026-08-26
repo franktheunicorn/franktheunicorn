@@ -165,6 +165,23 @@ class ForgeClient(ABC):
         """
         return []
 
+    def search_prs_authored_by(self, username: str, max_results: int = 100) -> list[dict[str, Any]]:
+        """Search for open PRs ``username`` wrote.
+
+        Separate from :meth:`search_prs_involving` even though ``involves:``
+        nominally covers authorship, because the two compete for the same result
+        budget and lose differently. "Involved" is the noisy set — every thread
+        the operator ever commented on — and a single relevance-ranked page of it
+        can push the operator's *own* PRs out entirely, which is exactly the set
+        the shepherding pass, the merge queue and the "Your PRs" queue are built
+        on. Asking for them by name costs one more search call and makes them
+        unmissable.
+
+        Default implementation returns an empty list; forges with a search API
+        should override.
+        """
+        return []
+
 
 def infer_username(client: ForgeClient) -> str:
     """Infer the authenticated user's login from any ForgeClient.

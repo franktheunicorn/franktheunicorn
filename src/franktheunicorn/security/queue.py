@@ -1,8 +1,17 @@
-"""Queueing for security-report triage.
+"""Queueing for worker commands — security-report triage and the PR buttons.
 
-One door for every caller — the paste form, the dashboard's Triage button, and
-email ingestion. Triage is worker work (an NVD lookup plus two LLM calls), and
-whoever asks for it should only ever be creating a ``WorkerCommand`` row.
+One door for every caller — the paste form, the dashboard's Triage button, email
+ingestion, and the PR detail page's Force Run / Run Dual Tests. All of it is
+worker work (LLM calls, NVD lookups, Docker), and whoever asks for it should only
+ever be creating a ``WorkerCommand`` row.
+
+Two policies live here rather than at each call site:
+
+* **In-flight dedup**, enforced by a partial unique constraint per target, so a
+  double-click is one run rather than two.
+* **Priority**, because the queue is shared. A bulk import can put a thousand
+  triage rows in it, and a FIFO queue then makes the operator's click wait behind
+  all of them.
 """
 
 from __future__ import annotations
@@ -16,11 +25,17 @@ from franktheunicorn.core.models import WorkerCommand
 
 if TYPE_CHECKING:
     from franktheunicorn.config.models import OperatorConfig
-    from franktheunicorn.core.models import SecurityReport
+    from franktheunicorn.core.models import PullRequest, SecurityReport
 
 logger = logging.getLogger(__name__)
 
 _IN_FLIGHT_STATUSES = ("pending", "running")
+
+#: Someone is sitting in front of the dashboard waiting for this one.
+PRIORITY_INTERACTIVE = 100
+
+#: Queued by ingestion or a bulk import. Nobody is watching; it can wait.
+PRIORITY_BULK = 0
 
 
 def in_flight_statuses() -> tuple[str, ...]:
@@ -33,7 +48,7 @@ def in_flight_statuses() -> tuple[str, ...]:
     return _IN_FLIGHT_STATUSES
 
 
-def queue_triage(report: SecurityReport) -> bool:
+def queue_triage(report: SecurityReport, *, priority: int = PRIORITY_BULK) -> bool:
     """Queue triage for *report* unless a run is already waiting or in flight.
 
     Returns True if a new command was created.
@@ -49,20 +64,33 @@ def queue_triage(report: SecurityReport) -> bool:
     is how one copy of a policy in a module whose whole point is to be the single
     door gets fixed and the other doesn't.
     """
-    return queue_command("run_security_triage", report)
+    return queue_command("run_security_triage", report=report, priority=priority)
 
 
-def queue_command(command: str, report: SecurityReport) -> bool:
-    """Queue *command* for *report* unless one is already waiting or running.
+def queue_command(
+    command: str,
+    report: SecurityReport | None = None,
+    *,
+    pull_request: PullRequest | None = None,
+    priority: int = PRIORITY_BULK,
+) -> bool:
+    """Queue *command* for a report or a PR unless one is already in flight.
 
-    The generic form of :func:`queue_triage`. The partial unique constraint
-    ``unique_inflight_command_per_report`` covers ``(command, security_report)``
-    for *every* command type, not just triage — so ``security_report_sandbox``
-    creating a WorkerCommand directly was an uncaught IntegrityError, and a 500 on
-    the second click. htmx doesn't swap on a 5xx, so the operator saw the button
-    do nothing and clicked again. This is the door CLAUDE.md's "never straight to
-    WorkerCommand" rule wants to be structural rather than conventional.
+    Exactly one of *report* / *pull_request* is the target. Both partial unique
+    constraints — ``unique_inflight_command_per_report`` and
+    ``unique_inflight_command_per_pr`` — cover ``(command, target)`` for *every*
+    command type, so a double-click is one run: ``security_report_sandbox``
+    creating a WorkerCommand directly was an uncaught IntegrityError and a 500 on
+    the second click, and ``run_agents`` had no constraint at all, so five
+    impatient clicks were five sequential 30-120s pipeline runs. This is the door
+    CLAUDE.md's "never straight to WorkerCommand" rule wants to be structural
+    rather than conventional.
+
+    *priority* orders the queue; see :data:`PRIORITY_INTERACTIVE`.
     """
+    if (report is None) == (pull_request is None):
+        msg = "queue_command needs exactly one of report / pull_request"
+        raise ValueError(msg)
     # The constraint is the check. There used to be a pre-flight SELECT here to
     # avoid relying on an IntegrityError for the common case, and it cost more than
     # it saved: a bulk import calls this on a row it created microseconds earlier,
@@ -72,9 +100,15 @@ def queue_command(command: str, report: SecurityReport) -> bool:
     # returns False from the constraint just as it did from the query.
     try:
         with transaction.atomic():
-            WorkerCommand.objects.create(command=command, security_report=report)
+            WorkerCommand.objects.create(
+                command=command,
+                security_report=report,
+                pull_request=pull_request,
+                priority=priority,
+            )
     except IntegrityError:
-        logger.info("%s already queued for report #%d", command, report.pk)
+        target = f"report #{report.pk}" if report is not None else f"PR #{pull_request.pk}"  # type: ignore[union-attr]
+        logger.info("%s already queued for %s", command, target)
         return False
     return True
 
@@ -95,13 +129,22 @@ def queue_triage_if_enabled(
     triage_config = _resolve(operator_config).security_triage
     if not triage_config.enabled or not triage_config.auto_triage:
         return False
-    return queue_triage(report)
+    return queue_triage(report, priority=PRIORITY_BULK)
 
 
 def queue_triage_on_request(
-    report: SecurityReport, operator_config: OperatorConfig | None = None
+    report: SecurityReport,
+    operator_config: OperatorConfig | None = None,
+    *,
+    priority: int = PRIORITY_BULK,
 ) -> bool:
     """Queue triage because the operator asked for it, not because ingest did.
+
+    *priority* is the caller's, not this function's: the bulk importer asks on
+    the operator's behalf for a thousand reports at once (bulk), while the
+    detail page's Triage button is one report with someone watching
+    (:data:`PRIORITY_INTERACTIVE`). Defaults to bulk, because the loud caller is
+    the import.
 
     Ungated, deliberately. Both settings describe *automatic* behaviour:
     ``auto_triage`` is "triage things as they arrive", and ``enabled`` switches on
@@ -118,7 +161,7 @@ def queue_triage_on_request(
     ``llm_backends``, which is what genuinely has to be there.
     """
     del operator_config  # nothing to gate on; kept for call-site symmetry
-    return queue_triage(report)
+    return queue_triage(report, priority=priority)
 
 
 def _resolve(operator_config: OperatorConfig | None) -> OperatorConfig:

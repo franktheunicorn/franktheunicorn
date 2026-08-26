@@ -6,13 +6,13 @@
     {% else %}
     <span class="source-badge source-agent">Agent</span>
     {% endif %}
-    <span style="font-size: 0.75rem; color: #999;">
+    <span class="faint" style="font-size: 0.75rem;">
         ({{ draft.severity }}, confidence: {{ draft.confidence|floatformat:1 }}, {{ draft.status }})
         {% if draft.tone_guard_applied %}<span title="Tone guard applied">TG</span>{% endif %}
         {% if draft.rejection_probability != None %}
         <span title="P(rejection) from Bayesian model" style="margin-left: 0.25rem;">P(reject): {{ draft.rejection_probability|floatformat:2 }}</span>
         {% if draft.is_auto_suppressed %}
-        <span style="background: #e0e0e0; color: #555; padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.7rem; margin-left: 0.25rem;">auto-suppressed</span>
+        <span class="neutral-chip" style="padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.7rem; margin-left: 0.25rem;">auto-suppressed</span>
         {% elif draft.rejection_probability > 0.5 %}
         <span style="background: var(--orange-bg, #fff3e0); color: var(--orange, #e65100); padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.7rem; margin-left: 0.25rem;">likely low-value</span>
         {% endif %}
@@ -22,14 +22,14 @@
     {% if draft.status == "edited" and draft.edited_body %}
     <div class="md-content" style="margin-top: 0.25rem;">{{ draft.edited_body|render_markdown }}</div>
     <details><summary style="font-size: 0.75rem; cursor: pointer;">Original</summary>
-        <div class="md-content" style="font-size: 0.85rem; color: #666;">{{ draft.comment_body|render_markdown }}</div>
+        <div class="md-content faint" style="font-size: 0.85rem;">{{ draft.comment_body|render_markdown }}</div>
     </details>
     {% else %}
     <div class="md-content" style="margin-top: 0.25rem;">{{ draft.comment_body|render_markdown }}</div>
     {% endif %}
 
     {% if draft.suggestion %}
-    <pre style="background: #f0f0f0; padding: 0.5rem; margin-top: 0.25rem; font-size: 0.8rem;">{{ draft.suggestion }}</pre>
+    <pre class="log-pre" style="font-size: 0.8rem;">{{ draft.suggestion }}</pre>
     {% endif %}
 
     {% if draft.status == "pending" or draft.status == "edited" %}

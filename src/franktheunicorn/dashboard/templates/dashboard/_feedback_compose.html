@@ -1,4 +1,4 @@
-<div style="margin-top: 1rem; padding: 1rem; background: #f5f5f5; border-radius: 4px; border: 1px solid #ddd;">
+<div class="context-panel is-compose">
     <h4 style="margin-top: 0;">Compose Feedback for Agent Session</h4>
 
     {% if pr.agent_session_url %}
@@ -30,7 +30,7 @@
             <label for="feedback_body" style="font-weight: 600; font-size: 0.9rem;">Feedback:</label>
             <textarea id="feedback_body" name="feedback_body"
                       rows="15"
-                      style="width: 100%; font-family: monospace; font-size: 0.85rem; padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; margin-top: 0.25rem;">{{ feedback_body }}</textarea>
+                      style="width: 100%; font-size: 0.85rem; padding: 0.5rem; margin-top: 0.25rem;">{{ feedback_body }}</textarea>
         </div>
 
         <div style="display: flex; gap: 0.5rem;">

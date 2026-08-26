@@ -10,9 +10,7 @@
         {{ report.get_status_display }}
     </span>
     {% if report.assessed_severity != "unknown" %}
-    <span class="source-badge" style="background: {% if report.assessed_severity == 'critical' %}var(--red){% elif report.assessed_severity == 'high' %}var(--orange){% elif report.assessed_severity == 'medium' %}#f9a825{% else %}var(--muted){% endif %}; color: #fff;">
-        {{ report.get_assessed_severity_display }}
-    </span>
+    <span class="severity-badge sev-{{ report.assessed_severity }}">{{ report.get_assessed_severity_display }}</span>
     {% endif %}
 </div>
 

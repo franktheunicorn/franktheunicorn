@@ -281,8 +281,10 @@ class TestProcessPendingCommands:
             pull_request=db_pr,
         )
         WorkerCommand.objects.filter(pk=orphaned.pk).update(status="running")
+        # A different command, because unique_inflight_command_per_pr forbids two
+        # in-flight rows of one kind per PR — which is the point of it.
         done = WorkerCommand.objects.create(
-            command="run_dual_tests",
+            command="run_agents",
             pull_request=db_pr,
         )
         WorkerCommand.objects.filter(pk=done.pk).update(status="completed")
@@ -324,14 +326,8 @@ class TestProcessPendingCommands:
 
     def test_processes_in_creation_order(self, db_pr: PullRequest) -> None:
         operator_config = MagicMock()
-        first = WorkerCommand.objects.create(
-            command="run_dual_tests",
-            pull_request=db_pr,
-        )
-        second = WorkerCommand.objects.create(
-            command="run_dual_tests",
-            pull_request=db_pr,
-        )
+        first = WorkerCommand.objects.create(command="run_dual_tests", pull_request=db_pr)
+        second = WorkerCommand.objects.create(command="run_agents", pull_request=db_pr)
 
         order: list[int] = []
 
@@ -342,6 +338,144 @@ class TestProcessPendingCommands:
             process_pending_commands(operator_config)
 
         assert order == [first.pk, second.pk]
+
+
+@pytest.mark.django_db
+class TestCommandPriority:
+    """A shared FIFO queue makes the operator wait behind every bulk import.
+
+    One archive imported with --triage is a thousand run_security_triage rows, at
+    an NVD lookup plus two LLM calls each. Force Run Agents is a click with
+    someone watching, and it used to land behind all of them.
+    """
+
+    def test_interactive_runs_before_bulk(self, db_pr: PullRequest) -> None:
+        from franktheunicorn.security.queue import PRIORITY_INTERACTIVE
+
+        operator_config = MagicMock()
+        bulk = [
+            WorkerCommand.objects.create(
+                command="run_security_triage", security_report=SecurityReportFactory()
+            )
+            for _ in range(3)
+        ]
+        clicked = WorkerCommand.objects.create(
+            command="run_agents", pull_request=db_pr, priority=PRIORITY_INTERACTIVE
+        )
+
+        order: list[int] = []
+        with patch(
+            "franktheunicorn.worker.commands._dispatch",
+            side_effect=lambda cmd, _opc: order.append(cmd.pk),
+        ):
+            process_pending_commands(operator_config)
+
+        assert order[0] == clicked.pk, "the click goes first"
+        assert sorted(order[1:]) == sorted(c.pk for c in bulk)
+
+    def test_a_click_mid_drain_jumps_the_rest_of_the_batch(self, db_pr: PullRequest) -> None:
+        """The drain used to snapshot the pending set up front, which fixed the
+        running order at the moment it started — so a click that arrived while a
+        backlog was draining went to the back of it whatever its priority."""
+        from franktheunicorn.security.queue import PRIORITY_INTERACTIVE
+
+        operator_config = MagicMock()
+        bulk = [
+            WorkerCommand.objects.create(
+                command="run_security_triage", security_report=SecurityReportFactory()
+            )
+            for _ in range(4)
+        ]
+        clicked: list[int] = []
+        order: list[int] = []
+
+        def record(cmd, _opc):
+            order.append(cmd.pk)
+            if len(order) == 1:
+                # The operator clicks Force Run while the first bulk item runs.
+                row = WorkerCommand.objects.create(
+                    command="run_agents", pull_request=db_pr, priority=PRIORITY_INTERACTIVE
+                )
+                clicked.append(row.pk)
+
+        with patch("franktheunicorn.worker.commands._dispatch", side_effect=record):
+            process_pending_commands(operator_config)
+
+        assert order[1] == clicked[0], "next up, not last"
+        assert len(order) == len(bulk) + 1
+
+    def test_a_drain_is_bounded_so_the_poll_cycle_keeps_its_turn(self) -> None:
+        """An unbounded drain sat in one call for a thousand triage runs, during
+        which the cycle made no progress and a SIGTERM waited."""
+        from franktheunicorn.worker.commands import MAX_COMMANDS_PER_DRAIN
+
+        operator_config = MagicMock()
+        for _ in range(MAX_COMMANDS_PER_DRAIN + 5):
+            WorkerCommand.objects.create(
+                command="run_security_triage", security_report=SecurityReportFactory()
+            )
+
+        with patch("franktheunicorn.worker.commands._dispatch"):
+            processed = process_pending_commands(operator_config)
+
+        assert processed == MAX_COMMANDS_PER_DRAIN
+        assert WorkerCommand.objects.filter(status="pending").count() == 5
+
+    def test_the_backlog_still_drains_across_calls(self) -> None:
+        operator_config = MagicMock()
+        for _ in range(3):
+            WorkerCommand.objects.create(
+                command="run_security_triage", security_report=SecurityReportFactory()
+            )
+
+        with patch("franktheunicorn.worker.commands._dispatch"):
+            process_pending_commands(operator_config, limit=2)
+            process_pending_commands(operator_config, limit=2)
+
+        assert WorkerCommand.objects.filter(status="pending").count() == 0
+
+
+@pytest.mark.django_db
+class TestInFlightDedup:
+    """Force Run Agents is a 30-120s pipeline behind a button that says "reload in
+    a few minutes", so an impatient operator used to queue a run per click."""
+
+    def test_a_second_click_does_not_queue_a_second_run(self, db_pr: PullRequest) -> None:
+        from franktheunicorn.security.queue import queue_command
+
+        assert queue_command("run_agents", pull_request=db_pr) is True
+        assert queue_command("run_agents", pull_request=db_pr) is False
+        assert WorkerCommand.objects.filter(command="run_agents").count() == 1
+
+    def test_a_different_command_on_the_same_pr_is_fine(self, db_pr: PullRequest) -> None:
+        from franktheunicorn.security.queue import queue_command
+
+        assert queue_command("run_agents", pull_request=db_pr) is True
+        assert queue_command("run_dual_tests", pull_request=db_pr) is True
+
+    def test_the_same_command_on_another_pr_is_fine(self, db_pr: PullRequest) -> None:
+        from franktheunicorn.security.queue import queue_command
+
+        other = PullRequestFactory(project=db_pr.project, number=db_pr.number + 1)
+
+        assert queue_command("run_agents", pull_request=db_pr) is True
+        assert queue_command("run_agents", pull_request=other) is True
+
+    def test_a_finished_run_does_not_block_a_new_one(self, db_pr: PullRequest) -> None:
+        from franktheunicorn.security.queue import queue_command
+
+        queue_command("run_agents", pull_request=db_pr)
+        WorkerCommand.objects.filter(command="run_agents").update(status="completed")
+
+        assert queue_command("run_agents", pull_request=db_pr) is True
+
+    def test_exactly_one_target_is_required(self, db_pr: PullRequest) -> None:
+        from franktheunicorn.security.queue import queue_command
+
+        with pytest.raises(ValueError, match="exactly one"):
+            queue_command("run_agents")
+        with pytest.raises(ValueError, match="exactly one"):
+            queue_command("run_agents", SecurityReportFactory(), pull_request=db_pr)
 
 
 class TestForgeClientFor:
