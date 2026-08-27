@@ -690,7 +690,9 @@ class TestRemoteSSHExecutorProbeSSH:
         assert executor._probe_ssh() is True
         argv = mock_run.call_args.args[0]
         assert "true" in argv
-        assert "ConnectTimeout=10" in argv
+        # Goes through run_script/_run_via_argv now, which does not add its own
+        # ConnectTimeout — the 15s subprocess timeout in _probe_ssh is the bound.
+        assert "BatchMode=yes" in argv
 
     @patch("franktheunicorn.review.tool_executor.subprocess.run")
     def test_probe_returns_false_on_failure(self, mock_run: Any) -> None:
@@ -892,6 +894,18 @@ class TestRemoteCommandDelivery:
         # 2 probes (argv rejected, then stdin accepted) + 3 real commands. The
         # probe is sequential now, so a wrapper whose argv form works pays one.
         assert mock_run.call_count == 5
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_probe_ssh_reports_a_stdin_only_wrapper_as_reachable(self, mock_run: Any) -> None:
+        """The generic startup probe used to bypass delivery-mode detection
+        entirely — ``subprocess.run([*ssh_command, "true"])`` — which ``sf``
+        reads as "run in the workspace named true" and rejects. That reported
+        a healthy, working host as down, contradicting the agent-CLI probe's
+        own (correct) verdict for the very same target."""
+        mock_run.side_effect = self._fake_sf
+        executor = RemoteSSHExecutor(config=self._wrapper_config())
+
+        assert executor._probe_ssh() is True
 
     @patch("franktheunicorn.review.tool_executor.subprocess.run")
     def test_plain_ssh_keeps_the_argv_form_without_probing(self, mock_run: Any) -> None:

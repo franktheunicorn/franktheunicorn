@@ -221,32 +221,46 @@ class RemoteSSHExecutor:
         return cmd
 
     def _probe_ssh(self) -> bool:
-        """Run ``<ssh_command> true`` to test connectivity, independent of git.
+        """Run ``true`` on the remote to test connectivity, independent of git.
 
         Returns True when the connection succeeds, False on any failure.
-        The 15 s subprocess timeout is the bound that always applies;
-        ``ConnectTimeout`` is only added when we are really talking to ssh.
+
+        Goes through ``run_script`` — the same delivery-mode detection every
+        other remote call uses — rather than appending ``true`` to
+        ``_ssh_command()`` directly. That used to run
+        ``sf workspace ssh true``, which ``sf`` reads as "run in the workspace
+        named true" and rejects, so this reported a reachable, working
+        stdin-only wrapper as down. ``_check_ssh_configs`` and
+        ``_check_agent_cli_reviewers`` probe the same SSH-mode reviewers at
+        startup, and the mismatch between this and the agent-CLI probe's own
+        (correct) sentinel round-trip was two contradictory verdicts for one
+        target.
+
+        Bounded but not tight: an uncached, non-OpenSSH config pays up to two
+        15s delivery-mode probes before the real ``true`` call, so a wrapper
+        that hangs rather than refusing can take ~45s to report down. Accepted
+        because this runs at startup and on an already-slow retry path, not in
+        a loop.
         """
-        extra = ["-o", "ConnectTimeout=10"] if self.wraps_openssh() else []
         try:
-            probe = subprocess.run(
-                [*self._ssh_command(), *extra, "true"],
-                capture_output=True,
-                text=True,
-                timeout=15,
+            result = self.run_script("true", timeout=15, label="ssh probe")
+        except Exception:
+            logger.warning(
+                "SSH probe raised for %s", " ".join(self.config.ssh_command), exc_info=True
             )
-        except (FileNotFoundError, subprocess.TimeoutExpired):
             return False
-        if probe.returncode != 0:
+        if result is None:
+            return False
+        if result.returncode != 0:
             # The stderr is the whole diagnosis for a wrapper that rejected our
             # argv, and it used to be thrown away.
             logger.warning(
                 "Remote probe failed (exit %d) for %s: %s",
-                probe.returncode,
+                result.returncode,
                 " ".join(self.config.ssh_command),
-                (probe.stderr or probe.stdout or "no output").strip()[:300],
+                (result.stderr or result.stdout or "no output").strip()[:300],
             )
-        return probe.returncode == 0
+        return result.returncode == 0
 
     def _remote_repo_path(self, owner: str, repo: str) -> str:
         base = self.config.remote_workspace_dir.rstrip("/")
