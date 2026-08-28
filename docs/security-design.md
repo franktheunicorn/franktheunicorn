@@ -451,6 +451,17 @@ the code" by putting a coding agent (via an `agent_cli_reviewers` entry, typical
 a checkout of the project with the report in hand, once per active branch, and parsing a JSON
 verdict back out. Triggered by a button on a report or by `--verify` / a checkbox at import.
 
+Each branch's answer also carries the **release line** that branch ships (`version_impact`, e.g.
+`3.5.x`), because a branch name is not something you can publish and the translation isn't
+mechanical — whether `branch-3.5` means 3.5.x is in the build files, and only something standing
+in the checkout can read them. `version_rollup()` merges those across branches into the
+affected-lines list the detail page leads with. Deliberately **line** granularity, not
+per-release: everything shipped on an affected line is assumed affected. That is not exactly
+true and it is close enough to act on, and it costs the agent a glance at `pom.xml` instead of
+an archaeology dig through tags. Where two branches disagree about the same line the row is
+flagged as a conflict and resolved to `affected` — over-listing a line costs a correction,
+omitting a shipping release costs users.
+
 **Risk:** this is the sharpest input-trust problem in the codebase, and it is worth being
 blunt about why. The review path feeds an agent a diff from a PR the operator can see, on a
 repo they chose. This path feeds an agent **text a stranger emailed them**, and gives that
@@ -485,8 +496,19 @@ table, which invites being trusted more than it has earned.
   arrives at `security@`, the security team reads it, and the maintainer reads it again before
   pasting it in. Turn the refusal on for an intake without that: unattended email ingest, or a
   bulk import of somebody else's scanner output.
-- **Off by default**, and even when on, never automatic: it takes a button press or an explicit
-  per-import opt-in.
+- **Never automatic**: it takes a button press or an explicit per-import opt-in.
+  `verifier.enabled` defaults **true** as of 2026-08-28, having previously defaulted false. That
+  change removed a gate, and the argument for removing it is that it was gating something already
+  gated: the flag and the button were two things in series for one action, and the flag was the
+  invisible one. What actually happened is what you would predict — an import with the checkbox
+  ticked queued nothing and logged its reason to a worker log nobody was tailing, which reads as
+  a broken checkbox. The button and `--verify` are the consent: explicit, per-report, not
+  reachable by accident. Setting `enabled: false` still removes the button, which is the case it
+  remains good for.
+
+  `security_triage.enabled` defaults true for the same reason. `sandbox_enabled` (§4.1) does
+  **not**, and that is the line: it executes proof-of-concept code a stranger emailed you, and no
+  button press makes that a default.
 - **A distinct checkout** (`workspace_subdir`) in both execution modes — a separate clone on a
   remote, a linked `git worktree` locally. This was claimed here before it was true:
   `LocalExecutor.prepare_repo` accepted the argument and ignored it, so in local mode the
@@ -524,6 +546,16 @@ table, which invites being trusted more than it has earned.
   `--network=none`. An agent that has been successfully steered can reach the internet.
 - The verdict is not re-checked as the branch moves; `commit` records what was examined but
   nothing flags a verdict as stale when that commit is no longer the branch head.
+- **The release lines are the agent's reading of the build files, and nothing checks them.**
+  `parse_version_impact` bounds them — a dozen entries, 60-char names, 300-char reasons, statuses
+  coerced to the three known values — because the text arrives by way of an agent reading a
+  report a stranger wrote and lands in a `JSONField` a template renders. What it cannot do is
+  tell whether `3.5.x` is the right answer. A wrong line name propagates into whatever the
+  operator publishes, and the branch column next to it is the only cross-check.
+- **"Every release on an affected line is affected" is an approximation the operator asked for**,
+  and it will sometimes over-state: a line whose early releases predate the vulnerable code gets
+  listed anyway. The trade was made knowingly — the alternative is per-tag verification, which is
+  a great deal more agent time for a distinction that usually doesn't change what you ship.
 
 ---
 

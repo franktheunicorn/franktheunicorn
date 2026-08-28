@@ -194,11 +194,24 @@ def run_agent_cli_review(
         )
         return []
     if not result.ok:
+        from franktheunicorn.review.tool_executor import (
+            looks_like_workspace_trust_refusal,
+            workspace_trust_advice,
+        )
+
+        # stdout as well as stderr: cursor-agent puts the trust notice on stderr,
+        # but which stream a CLI picks for a refusal is not something to rely on.
+        trust = (
+            " " + workspace_trust_advice(config.name)
+            if looks_like_workspace_trust_refusal(result.stderr, result.stdout)
+            else ""
+        )
         logger.error(
-            "%s CLI exited with code %d: %s",
+            "%s CLI exited with code %d: %s%s",
             config.name,
             result.returncode,
             (result.stderr or "")[:500] or "(no stderr)",
+            trust,
         )
         return []
 

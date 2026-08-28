@@ -121,6 +121,25 @@ def triage_report(
             logger.warning(
                 "CVE lookup failed for report #%d; triaging without it", report.pk, exc_info=True
             )
+
+        # The other dedup question, and the one that bites at volume: the CVE check
+        # asks whether the *public record* already has this, this asks whether *your
+        # backlog* does. Placed here for the same reason and guarded the same way —
+        # it is a link on the row, not part of the verdict, and it must not be able
+        # to abort a run whose parse call has already been billed.
+        #
+        # After _parse_report on purpose: the comparison reads parsed_component and
+        # parsed_poc, so running it earlier would compare on the raw text alone and
+        # miss the structure that makes it accurate.
+        try:
+            _check_duplicates(report, operator_config)
+        except Exception:
+            logger.warning(
+                "Duplicate detection failed for report #%d; triaging without it",
+                report.pk,
+                exc_info=True,
+            )
+
         security_model = _resolve_security_model(project_config)
 
         from franktheunicorn.security.learning import resolve_triage_guidance
@@ -434,6 +453,40 @@ def _check_cves(report: SecurityReport, operator_config: OperatorConfig) -> None
     # Always save results (even empty) so stale matches are cleared on re-run.
     report.cve_matches = [m.to_dict() for m in matches]
     report.save(update_fields=["cve_matches", "updated_at"])
+
+
+def _check_duplicates(report: SecurityReport, operator_config: OperatorConfig) -> None:
+    """Link *report* to an earlier report of the same hole, if there is one.
+
+    Local string comparison, no model call — see ``security.duplicates`` for why
+    (500 reports is 125,000 pairs, and a model call per pair is a bill rather than
+    a feature).
+
+    Clears a previous link when a re-triage finds nothing, for the same reason
+    ``_check_cves`` always saves: a stale link from an earlier run presented as this
+    run's answer is worse than no link, because the operator has no way to tell it's
+    stale. The exception is a link the *operator* set by hand, which is a decision
+    and not ours to revoke — detection only ever overwrites its own work, which is
+    what a non-null ``duplicate_confidence`` marks.
+    """
+    from franktheunicorn.security.duplicates import detect_for_report
+
+    config = operator_config.security_triage.duplicates
+    match = detect_for_report(report, config)
+    if match is not None:
+        return
+    if report.duplicate_of_id is not None and report.duplicate_confidence is not None:
+        logger.info(
+            "Clearing report #%d's previous duplicate link to #%s: this run found no "
+            "match above the threshold (%.2f).",
+            report.pk,
+            report.duplicate_of_id,
+            config.threshold,
+        )
+        report.duplicate_of = None
+        report.duplicate_confidence = None
+        report.duplicate_reason = ""
+        report.save(update_fields=["duplicate_of", "duplicate_confidence", "duplicate_reason"])
 
 
 def _read_file(path: Path, max_chars: int = 5000) -> str | None:

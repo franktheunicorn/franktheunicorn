@@ -32,6 +32,42 @@
     </dl>
 </div>
 
+{# Possible duplicate, either direction. Above the report text on purpose: if #}
+{# you've already investigated this hole, that's worth knowing before you read #}
+{# it again, which is the entire point of the feature. #}
+{% if report.duplicate_of %}
+<div class="dup-note">
+    <strong>Looks like a duplicate of
+        <a href="{% url 'dashboard:security_detail' report.duplicate_of.pk %}">#{{ report.duplicate_of.pk }}</a>:</strong>
+    {{ report.duplicate_of.title|default:"Untitled Report" }}
+    {% if report.duplicate_of.status != 'new' %}
+    <span class="score-badge mid">{{ report.duplicate_of.get_status_display }}</span>
+    {% endif %}
+    <div class="dup-why">
+        {% if report.duplicate_confidence != None %}score {{ report.duplicate_confidence|floatformat:2 }} — {% endif %}
+        {{ report.duplicate_reason|default:"linked by hand" }}
+    </div>
+    {# Said outright, because a heuristic link on a security page will otherwise be #}
+    {# read as a ruling. Nothing here sets status=duplicate. #}
+    <div class="dup-why">
+        This is a suggestion from text comparison, not a verdict. Set the status
+        yourself if you agree.
+    </div>
+</div>
+{% endif %}
+{% if report.duplicates.all %}
+<div class="dup-note">
+    <strong>{{ report.duplicates.all|length }} other report(s) point at this one as the original:</strong>
+    <div class="dup-why">
+        {% for dup in report.duplicates.all %}
+        <a href="{% url 'dashboard:security_detail' dup.pk %}">#{{ dup.pk }}</a>
+        {{ dup.title|default:"Untitled"|truncatechars:60 }}{% if not forloop.last %} · {% endif %}
+        {% endfor %}
+    </div>
+    <div class="dup-why">Fixing this one probably closes those too — check before you fix each separately.</div>
+</div>
+{% endif %}
+
 <!-- Raw Report -->
 <details open style="margin-bottom: 1rem;">
     <summary style="font-weight: 600; font-size: 0.9rem; cursor: pointer;">Raw Report</summary>
@@ -123,6 +159,36 @@
         real on the default branch may be gone from one release branch and still
         shipping in another.
     </p>
+
+    {% if version_rows %}
+    {# The advisory line. Above the branch table on purpose: a branch name is not #}
+    {# something you can publish, and this is the sentence being looked for. #}
+    <div class="verify-versions">
+        <p class="verify-versions-label">Release lines</p>
+        {% if affected_versions %}
+        <p class="verify-versions-headline">
+            Affected: {% for name in affected_versions %}<code>{{ name }}</code>{% if not forloop.last %}, {% endif %}{% endfor %}
+        </p>
+        {% endif %}
+        <ul class="verify-version-list">
+            {% for row in version_rows %}
+            <li>
+                <span class="verify-verdict verdict-{{ row.status }}">{{ row.status }}</span>
+                <code>{{ row.name }}</code>
+                <span class="muted">from {{ row.branches|join:", " }}</span>
+                {% if row.conflict %}
+                <span class="verify-conflict" title="Branches disagreed about this line; shown as affected, which is the safe direction to be wrong in.">⚠ branches disagreed</span>
+                {% endif %}
+                {% if row.reason %}<div class="verify-version-reason">{{ row.reason }}</div>{% endif %}
+            </li>
+            {% endfor %}
+        </ul>
+        <p class="verify-versions-caveat muted">
+            Line granularity: everything released on an affected line is assumed
+            affected. Close enough to act on, not a per-release audit.
+        </p>
+    </div>
+    {% endif %}
 
     {% if verifications %}
     <table class="verify-table">

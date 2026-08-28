@@ -507,6 +507,34 @@ thead th { border-bottom: 2px solid var(--border); }
 .verify-btn { color: var(--orange); border-color: var(--orange); }
 .verify-result { margin: 0.4rem 0 0; font-size: 0.8rem; }
 
+/* Release lines, above the branch table: a branch name is not something you can
+   publish in an advisory, and this is the sentence being looked for. */
+.verify-versions {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.4rem 0.6rem 0.5rem;
+    margin: 0.5rem 0;
+}
+.verify-versions-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--muted);
+    margin: 0 0 0.3rem;
+}
+.verify-versions-headline { margin: 0 0 0.4rem; font-weight: 600; }
+.verify-version-list { list-style: none; margin: 0; padding: 0; }
+.verify-version-list li { margin-bottom: 0.35rem; line-height: 1.5; }
+.verify-version-reason {
+    color: var(--muted);
+    font-size: 0.78rem;
+    /* Indented under its version rather than run on, so a long reason can't be
+       misread as belonging to the next line down. */
+    margin-left: 0.4rem;
+}
+.verify-conflict { color: var(--orange); font-size: 0.75rem; }
+.verify-versions-caveat { font-size: 0.72rem; margin: 0.45rem 0 0; }
+
 /* A comment that came back from the shared sheet. Visibly not the operator's
    own notes — same reason they're separate fields. */
 .external-notes {
@@ -594,4 +622,21 @@ thead th { border-bottom: 2px solid var(--border); }
     header h1 img { width: 22px; height: 17px; }
     .filter-bar { flex-direction: column; align-items: flex-start; }
     .md-content pre { font-size: 0.72rem; }
+}
+
+/* Possible-duplicate notice. Deliberately not styled as an error or a verdict:
+   it is a suggestion from text comparison, and the copy says so. Orange rather
+   than red for the same reason — red on a security page reads as "confirmed". */
+.dup-note {
+    border-left: 3px solid var(--orange);
+    background: var(--card);
+    border-radius: var(--radius);
+    padding: 0.45rem 0.65rem;
+    margin-bottom: 0.75rem;
+    font-size: 0.85rem;
+}
+.dup-why {
+    color: var(--muted);
+    font-size: 0.78rem;
+    margin-top: 0.25rem;
 }

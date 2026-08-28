@@ -384,7 +384,8 @@ def _queue_verifications(result: ZipImportResult) -> None:
     try:
         from franktheunicorn.config.loader import get_operator_config
 
-        verifier = get_operator_config().security_triage.verifier
+        operator_config = get_operator_config()
+        verifier = operator_config.security_triage.verifier
     except Exception as exc:
         logger.warning("Could not load operator config; importing unverified", exc_info=True)
         result.verify_skipped_reason = (
@@ -393,7 +394,23 @@ def _queue_verifications(result: ZipImportResult) -> None:
         return
     if not verifier.enabled:
         logger.info("security_triage.verifier.enabled is false; importing unverified")
-        result.verify_skipped_reason = "security_triage.verifier.enabled is false in operator.yaml"
+        result.verify_skipped_reason = (
+            "security_triage.verifier.enabled is false in operator.yaml — it defaults "
+            "true, so either something set it or the config failed to load and took "
+            "every other setting with it (`manage.py show_config` tells those apart)"
+        )
+        return
+    # The remaining way this is genuinely unconfigured, and worth saying at import
+    # time rather than once per report in the worker log. Same reasoning as the
+    # enabled gate above: --verify is an explicit ask, so silence is the wrong answer.
+    from franktheunicorn.security.verifier import resolve_verifier_reviewer
+
+    if resolve_verifier_reviewer(operator_config, verifier) is None:
+        have = ", ".join(rc.name for rc in operator_config.agent_cli_reviewers) or "none"
+        result.verify_skipped_reason = (
+            f"no agent_cli_reviewers entry named {verifier.reviewer!r} (configured: "
+            f"{have}), so there is no coding-agent CLI to run"
+        )
         return
 
     from franktheunicorn.core.models import SecurityReport

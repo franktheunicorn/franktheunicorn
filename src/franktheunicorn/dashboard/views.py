@@ -1580,7 +1580,15 @@ def security_report_create(request: HttpRequest) -> HttpResponse:
 
 def security_report_detail(request: HttpRequest, report_id: int) -> HttpResponse:
     """Detail view for a single security report."""
-    report = get_object_or_404(SecurityReport.objects.select_related("project"), pk=report_id)
+    # duplicate_of is select_related and the reverse `duplicates` prefetched: the
+    # template renders both directions of the link, and without these that's one
+    # query for the parent plus one per report pointing at this one.
+    report = get_object_or_404(
+        SecurityReport.objects.select_related("project", "duplicate_of").prefetch_related(
+            "duplicates"
+        ),
+        pk=report_id,
+    )
 
     sandbox_enabled = _is_sandbox_enabled()
 
@@ -1601,6 +1609,15 @@ def security_report_detail(request: HttpRequest, report_id: int) -> HttpResponse
     # again would sort the default row last for any project on `develop` or `2.x`.
     verifications = list(report.verifications.order_by("branch_order", "branch"))
 
+    # The branch table answers "did you look and what did you find"; this answers
+    # "so what do I write in the advisory", which is a different sentence and the
+    # one the operator is actually here for. Assembled in the view rather than the
+    # template because merging conflicting answers across branches is a decision,
+    # not a loop.
+    from franktheunicorn.security.verifier import version_rollup
+
+    version_rows = version_rollup(verifications)
+
     return render(
         request,
         "dashboard/security_detail.html",
@@ -1608,6 +1625,10 @@ def security_report_detail(request: HttpRequest, report_id: int) -> HttpResponse
             "report": report,
             "sandbox_enabled": sandbox_enabled,
             "verifications": verifications,
+            "version_rows": version_rows,
+            "affected_versions": [
+                row["name"] for row in version_rows if row["status"] == "affected"
+            ],
             **_triage_area_context(report, triage_command),
         },
     )
@@ -1902,8 +1923,10 @@ def security_report_verify(request: HttpRequest, report_id: int) -> HttpResponse
 
     from franktheunicorn.config.loader import get_operator_config
     from franktheunicorn.security.queue import PRIORITY_INTERACTIVE, queue_verification
+    from franktheunicorn.security.verifier import resolve_verifier_reviewer
 
-    verifier = get_operator_config().security_triage.verifier
+    operator_config = get_operator_config()
+    verifier = operator_config.security_triage.verifier
     if not verifier.enabled:
         return render(
             request,
@@ -1911,9 +1934,35 @@ def security_report_verify(request: HttpRequest, report_id: int) -> HttpResponse
             {
                 "report": report,
                 "blocked": (
-                    "Verification is off. Set security_triage.verifier.enabled: true in "
-                    "operator.yaml — it runs a coding agent over a checkout once per "
-                    "active branch, so it is opt-in."
+                    "Verification has been switched off. It defaults on, so something "
+                    "set security_triage.verifier.enabled: false in operator.yaml — or "
+                    "the file failed to load and took every other setting with it "
+                    "(run `manage.py show_config` to tell those apart)."
+                ),
+            },
+        )
+    # Checked here rather than left to the worker because it is the one remaining
+    # way this can be genuinely unconfigured, and the answer belongs on the page
+    # with the button on it. `verifier.enabled` defaults True now, so an install
+    # with no agent_cli_reviewers at all would otherwise queue a command whose only
+    # output is a line in a log nobody is tailing.
+    if resolve_verifier_reviewer(operator_config, verifier) is None:
+        have = ", ".join(rc.name for rc in operator_config.agent_cli_reviewers)
+        return render(
+            request,
+            "dashboard/_security_verify_queued.html",
+            {
+                "report": report,
+                "blocked": (
+                    f"No agent_cli_reviewers entry named '{verifier.reviewer}', so there "
+                    "is no coding-agent CLI to run. "
+                    + (
+                        f"Configured entries: {have}. Point "
+                        "security_triage.verifier.reviewer at one of them."
+                        if have
+                        else "Add one to operator.yaml — it describes the CLI to invoke "
+                        "and, for a remote setup, how to reach the box it runs on."
+                    )
                 ),
             },
         )

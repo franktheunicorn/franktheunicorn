@@ -24,6 +24,8 @@ from franktheunicorn.config.loader import load_operator_config
 if TYPE_CHECKING:
     from django.core.management.base import CommandParser
 
+    from franktheunicorn.config.models import OperatorConfig
+
 
 class Command(BaseCommand):
     help = "Show the operator config path in force and the flags it resolved to"
@@ -45,7 +47,9 @@ class Command(BaseCommand):
             self.stdout.write(
                 self.style.WARNING(
                     "  This file does not exist, so every setting is at its built-in "
-                    "default — which means every optional feature is off."
+                    "default. Security triage and verification default on; everything "
+                    "needing a credential or a CLI (llm_backends, agent_cli_reviewers, "
+                    "the email inbox) has nothing to work with."
                 )
             )
             return
@@ -59,7 +63,8 @@ class Command(BaseCommand):
             self.stdout.write(self.style.ERROR(f"  This file is not valid YAML: {exc}"))
             self.stdout.write(
                 self.style.ERROR(
-                    "  Nothing in it is being used. Every feature is at its default (off)."
+                    "  Nothing in it is being used — every setting is at its built-in "
+                    "default, including your backends and credentials, which have none."
                 )
             )
             return
@@ -91,22 +96,47 @@ class Command(BaseCommand):
         # The specific gate the security features check, spelled out, because
         # "enabled: true" in the file and "enabled" in force are different claims
         # and this command exists to tell them apart.
+        #
+        # Both flags now default *true*, which inverts what a False here means: it
+        # is no longer "you never turned it on", it is "something turned it off",
+        # and the most likely something is an unrelated validation error that sent
+        # the whole file back to defaults. Except that defaults are on, so the
+        # remaining causes are a real `false` in the file or a stale file — and
+        # those are the two this text now points at.
         if not triage.enabled:
             self.stdout.write(
                 self.style.WARNING(
-                    "\nsecurity_triage.enabled is FALSE in force. If your file says true, "
-                    "then either this is not the file you edited (compare with --path), a "
-                    "block is nested one level too shallow, or something else in the file "
-                    "failed validation and sent the whole config back to defaults — the "
-                    "loader logs which, at ERROR."
+                    "\nsecurity_triage.enabled is FALSE in force, and it defaults TRUE. "
+                    "So something set it: either this file says false, or this is not "
+                    "the file you edited (compare with --path)."
                 )
             )
         elif not verifier.enabled:
             self.stdout.write(
                 self.style.WARNING(
-                    "\nVerification is off. Add `verifier: {enabled: true}` *under* "
-                    "security_triage — at the top level it is silently ignored."
+                    "\nsecurity_triage.verifier.enabled is FALSE in force, and it "
+                    "defaults TRUE — so this file, or a stale copy of it, sets it false."
+                )
+            )
+        elif not self._verifier_reviewer_resolves(config):
+            # The one thing left that can stop verification on an otherwise-fine
+            # config, now that neither flag needs setting. Worth naming here rather
+            # than leaving to a warning in the worker log.
+            names = ", ".join(rc.name for rc in config.agent_cli_reviewers) or "none"
+            self.stdout.write(
+                self.style.WARNING(
+                    f"\nTriage and verification are both on, but "
+                    f"security_triage.verifier.reviewer={verifier.reviewer!r} matches no "
+                    f"agent_cli_reviewers entry (configured: {names}), so there is no "
+                    "coding-agent CLI to run. Verification cannot work until that "
+                    "resolves."
                 )
             )
         else:
             self.stdout.write(self.style.SUCCESS("\nTriage and verification are both on."))
+
+    @staticmethod
+    def _verifier_reviewer_resolves(config: OperatorConfig) -> bool:
+        from franktheunicorn.security.verifier import resolve_verifier_reviewer
+
+        return resolve_verifier_reviewer(config, config.security_triage.verifier) is not None

@@ -451,7 +451,60 @@ class TestCursorReviewer:
     def test_the_prompt_is_the_trailing_argument(self) -> None:
         argv = list(self._cursor().cli_argv) + self._cursor().build_invocation("REVIEW")
 
-        assert argv == ["cursor-agent", "--mode", "ask", "-p", "REVIEW"]
+        assert argv == ["cursor-agent", "--trust", "--mode", "ask", "-p", "REVIEW"]
+
+    def test_it_passes_trust_because_otherwise_it_refuses_to_run(self) -> None:
+        """Not a nicety. Every checkout frank drives an agent in is one frank
+        created, so the first run in each is in a workspace cursor-agent has never
+        been told to trust — and it exits 1 with empty stdout and "⚠ Workspace Trust
+        Required", advising you to run it interactively, which a worker cannot.
+        Verified against the real binary, along with ``--trust`` fixing it.
+
+        ``--trust`` specifically, and not ``--yolo``: its own --help gives ``--yolo``
+        as an alias for ``--force`` ("Force allow commands unless explicitly
+        denied"), which is a far larger grant than "this is the directory I meant"
+        and would undo the point of ``--mode ask``.
+        """
+        cursor = self._cursor()
+
+        assert cursor.trust_args == ["--trust"]
+        assert "--yolo" not in cursor.trust_args
+        assert "--force" not in cursor.trust_args
+
+    def test_claude_needs_no_trust_flag(self) -> None:
+        """``claude --help``: "the workspace trust dialog is skipped when Claude is
+        run in non-interactive mode (via -p, or when stdout is not a TTY)".
+        Confirmed by running it in a directory absent from ~/.claude.json's project
+        map — exit 0, and no entry added. So an empty list here is the correct
+        answer, not an oversight."""
+        claude = next(rc for rc in OperatorConfig().agent_cli_reviewers if rc.name == "claude")
+
+        assert claude.trust_args == []
+
+    def test_trust_survives_an_operator_overriding_the_mode(self) -> None:
+        """The reason trust lives in its own field. Entries merge by *name*, not by
+        field, so an operator setting ``extra_args`` replaces the seed's outright —
+        which is exactly what someone changing ``--mode`` does, and folding trust in
+        there would have silently broken their reviewer."""
+        rc = AgentCLIReviewerConfig(
+            name="cursor-agent", trust_args=["--trust"], extra_args=["--mode", "agent"]
+        )
+
+        argv = list(rc.cli_argv) + rc.build_invocation("REVIEW")
+
+        assert argv == ["cursor-agent", "--trust", "--mode", "agent", "-p", "REVIEW"]
+
+    def test_trust_args_land_after_the_subcommand_in_subcommand_mode(self) -> None:
+        """A flag ahead of ``exec`` is a flag to the wrong parser."""
+        rc = AgentCLIReviewerConfig(
+            name="codex-ish",
+            cli_path="codex",
+            prompt_mode="subcommand",
+            prompt_arg="exec",
+            trust_args=["--trust-me"],
+        )
+
+        assert rc.build_invocation("REVIEW") == ["exec", "--trust-me", "REVIEW"]
 
     def test_it_is_auto_detected_not_forced_on(self) -> None:
         """Same contract as the other seeds: runs only if the binary is present."""

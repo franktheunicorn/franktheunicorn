@@ -220,6 +220,20 @@ digest_enabled: false
 # into this registry as the `claude` entry. It picks up the same
 # `model: "sonnet"` default, so if your `cli_path` is a wrapper that rejects
 # unknown flags, set `model: ""` there to go back to passing no --model at all.
+#
+# WORKSPACE TRUST. Every checkout frank drives an agent in is one frank created
+# — the review clone, and the verifier's separate `security-verify` tree — so
+# the first run in each is, as far as the CLI is concerned, a directory nobody
+# vouched for. `cursor-agent -p` in one exits 1 with empty stdout and "⚠
+# Workspace Trust Required" on stderr, telling you to run it interactively,
+# which a worker cannot. `trust_args` is where the flag that fixes that goes;
+# the seeds already set it where it's needed (cursor-agent: ["--trust"]).
+# `claude` needs nothing — its own --help says the trust dialog is skipped in
+# non-interactive mode. If you add your own agent and it fails on first run with
+# nothing useful on stdout, this is the first thing to check.
+# Note it is a SEPARATE field from `extra_args` on purpose: overriding an entry
+# replaces the seed rather than merging into it, so folding trust into
+# `extra_args` would mean anyone customizing `--mode` silently lost it.
 # agent_cli_reviewers:
 #   - name: "claude"
 #     enabled: "auto"                # "auto" (default) | true | false
@@ -228,6 +242,7 @@ digest_enabled: false
 #     model_flag: "--model"
 #     prompt_mode: "flag"            # claude/pi are flag-style: <cli> -p <prompt>
 #     prompt_arg: "-p"
+#     trust_args: []                 # claude needs none; see WORKSPACE TRUST above
 #     extra_args: []
 #     timeout_seconds: 300
 #     max_diff_chars: 60000          # diffs above this are truncated
@@ -239,6 +254,14 @@ digest_enabled: false
 #   - name: "pi"
 #     prompt_mode: "flag"
 #     prompt_arg: "-p"
+#   - name: "cursor-agent"           # the binary is cursor-agent, not cursor
+#     prompt_mode: "flag"
+#     prompt_arg: "-p"
+#     trust_args: ["--trust"]        # without this it refuses; NOT --yolo, which
+#                                    # is an alias for --force ("allow commands
+#                                    # unless explicitly denied") — a much bigger
+#                                    # grant than "this is the directory I meant"
+#     extra_args: ["--mode", "ask"]  # read-only Q&A mode; the actual containment
 
 # Snowflake code review CLI integration
 # Mirrors CodeRabbit's invocation contract; expects the same
@@ -287,22 +310,66 @@ digest_enabled: false
 # a standard keyword/flag. Mail is still never marked read, moved, or
 # deleted. Leave it unset for a fully read-only scanner.
 #
+# Everything in this block is at its default below EXCEPT sandbox_enabled and
+# email.enabled. In other words: triage and verification are already on for you,
+# and this block is here so you can see what to turn *off*, not what to turn on.
+# The two exceptions are deliberate — sandbox_enabled runs proof-of-concept code
+# a stranger emailed you, and email.enabled cannot work without IMAP credentials.
+#
 # security_triage:
-#   enabled: true
-#   auto_triage: true          # draft an LLM assessment on ingest (no send)
-#   sandbox_enabled: false     # allow sandboxed POC execution (worker only)
+#   enabled: true              # DEFAULT. Set false to hide the whole feature.
+#   auto_triage: true          # DEFAULT: draft an LLM assessment on ingest (no send)
+#   sandbox_enabled: false     # DEFAULT, and the one you should think hardest
+#                              # about before flipping: it executes the reported
+#                              # POC in a container. Worker only.
 #   # nvd_api_key_env: "NVD_API_KEY"   # optional, for higher NVD rate limits
+#
+#   # "Have I already got this one?" — dedup against your own backlog, which is a
+#   # different question from the CVE check (that one asks the public record).
+#   # It matters at volume: a scanner archive emits one finding per site, so a
+#   # missing check in a shared helper arrives as six findings against six
+#   # callers; two scans of a repo duplicate everything; a public disclosure gets
+#   # forwarded by three people. Working through hundreds of those, the expensive
+#   # mistake is investigating the same hole four times.
+#   #
+#   # Local string comparison, no API calls — 500 reports is 125,000 pairs and a
+#   # model call per pair would be a bill, not a feature. It writes a link plus
+#   # the reasoning that produced it and NEVER sets status: duplicate; that is a
+#   # verdict and verdicts are yours.
+#   #
+#   # For reports already imported before this existed:
+#   #   python manage.py find_security_duplicates             # dry run, prints pairs
+#   #   python manage.py find_security_duplicates --threshold 0.5   # try a cutoff
+#   #   python manage.py find_security_duplicates --apply     # write the links
+#   duplicates:
+#     enabled: true            # DEFAULT
+#     threshold: 0.62          # raise if you disagree with the links you're seeing
+#     # Weights, because the signals fail in different places: body overlap alone
+#     # calls every finding in a scanner bundle a duplicate of every other (shared
+#     # boilerplate), title alone misses six callers of one helper, paths alone
+#     # tie together unrelated bugs in the same big file.
+#     title_weight: 0.45
+#     body_weight: 0.25
+#     path_weight: 0.30
+#     same_component_bonus: 0.05   # corroboration only — half of Spark is "core"
+#     trust_finding_id: true       # same scanner id in a different archive = same finding
+#     trust_identical_title: true  # set false if your scanner's titles collide
+#     max_candidates: 500          # per-report bound during triage; the command ignores it
 #
 #   # Deep verification: not "is this report plausible" (that's triage above),
 #   # but "is the vulnerability actually in my code". Puts a coding agent in a
 #   # checkout and has it read the source, once per active branch — because a
 #   # hole real on master may be gone from branch-4.0 and still shipping in
-#   # branch-3.5, and that last one decides whether there's an emergency.
+#   # branch-3.5, and that last one decides whether there's an emergency. It also
+#   # reports which released versions off each branch are and aren't affected.
 #   #
-#   # Off by default because it is genuinely expensive: one full agent run per
-#   # report per branch. Even with this on, nothing verifies automatically —
-#   # it takes the Verify button on a report, or --verify / the "Verify against
-#   # the code" checkbox at import.
+#   # `enabled` defaults true, but nothing verifies automatically: it takes the
+#   # Verify button on a report, or --verify / the "Verify against the code"
+#   # checkbox at import. Those are the consent — they are explicit, per-report,
+#   # and can't be reached by accident. What this flag is still good for is an
+#   # install where you'd rather the button weren't there at all.
+#   # It is genuinely expensive when you do press it: one full agent run per
+#   # report per branch, up to timeout_seconds each.
 #   # SECURITY: the agent is handed report text somebody else wrote, and it has
 #   # whatever tool access the reviewer entry gives it. The prompt tells it the
 #   # report is data rather than instructions, and injection patterns are scanned
@@ -315,7 +382,7 @@ digest_enabled: false
 #   # (e.g. the cursor-agent entry's `--mode ask`) — that, and the humans
 #   # upstream, are the real containment. See docs/security-design.md 4.10.
 #   verifier:
-#     enabled: false
+#     enabled: true            # DEFAULT. False removes the button entirely.
 #     refuse_on_injection: false
 #     # Which agent_cli_reviewers entry to borrow the CLI path, argv shape and
 #     # (for a remote setup) the whole `remote:` block from. One description of

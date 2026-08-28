@@ -628,9 +628,32 @@ class SecurityReport(models.Model):
     sandbox_result = models.TextField(blank=True, default="")
     sandbox_verdict = models.CharField(max_length=20, blank=True, default="")
 
-    # CVE dedup
+    # CVE dedup — against the *public* record.
     cve_matches = models.JSONField(default=list, blank=True)
     matched_cve_id = models.CharField(max_length=50, blank=True, default="")
+
+    # Dedup against your own backlog, which is a different question and the one that
+    # bites at volume. A scanner archive emits one finding per site, so a missing
+    # check in a shared helper arrives as six findings against six callers; two scans
+    # of the same repo duplicate everything; a public disclosure gets forwarded by
+    # three people. Working through several hundred of those, the expensive mistake
+    # isn't mis-triaging one report, it's investigating the same hole four times —
+    # or fixing it once and leaving three open rows that read as live vulnerabilities.
+    #
+    # SET_NULL rather than CASCADE: deleting the report you kept must not delete the
+    # duplicates pointing at it. They'd be the only remaining record of the finding.
+    duplicate_of = models.ForeignKey(
+        "self",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="duplicates",
+    )
+    duplicate_confidence = models.FloatField(null=True, blank=True)
+    # What pushed it over the threshold, in words. A bare 0.72 is not something an
+    # operator can check, and a heuristic link is only worth having if it gets
+    # checked. See security.duplicates.score_pair for what goes in here.
+    duplicate_reason = models.CharField(max_length=500, blank=True, default="")
 
     # Operator verdict
     operator_notes = models.TextField(blank=True, default="")
@@ -738,6 +761,26 @@ class SecurityVerification(models.Model):
     #: File/line references the agent based its answer on, one per line. The
     #: difference between a verdict and a verdict somebody can check.
     evidence = models.TextField(blank=True, default="")
+    #: Which release *line* this branch ships, and whether it's affected:
+    #: ``[{"name": "3.5.x", "status": "affected", "reason": "..."}, ...]``.
+    #: ``status`` is one of the :attr:`VERDICT_CHOICES` values minus ``error``.
+    #: Normally one entry — a branch ships one line.
+    #:
+    #: Separate from ``verdict`` because a branch name is not something you can
+    #: write in an advisory, and the translation is not mechanical: whether
+    #: ``branch-3.5`` means 3.5.x or something else is in the build files, and only
+    #: something standing in the checkout can read them. Line granularity on
+    #: purpose — everything released on an affected line is assumed affected, which
+    #: is not exactly true and is close enough to act on, and it costs the agent a
+    #: glance at pom.xml rather than an archaeology dig through tags.
+    #:
+    #: A list of small dicts rather than its own table: this is the agent's report
+    #: of what it found, not a normalised fact about releases, and it is only ever
+    #: read back whole. Attacker-influenced (it derives from an agent reading a
+    #: report a stranger wrote), so :func:`security.verifier.parse_version_impact`
+    #: normalises and caps it before it lands here — nothing downstream should
+    #: assume more than "a short list of dicts of short strings".
+    version_impact = models.JSONField(default=list, blank=True)
     #: Which agent and model produced this, because the answer is only as good as
     #: its source and that changes between runs.
     agent = models.CharField(max_length=100, blank=True, default="")

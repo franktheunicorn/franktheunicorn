@@ -165,6 +165,53 @@ class ExecResult:
         return self.returncode == 0
 
 
+#: Phrases a coding-agent CLI uses when it is refusing because nobody has vouched
+#: for the working directory. Matched case-insensitively against stderr and stdout
+#: together.
+#:
+#: Worth detecting rather than reporting as a generic non-zero exit, because it is
+#: both the most likely first-run failure on this path and the one whose raw output
+#: is least self-explanatory in a log. Every directory this codebase drives an agent
+#: in is one it created — the review clone, the verifier's ``security-verify`` tree
+#: — so the first invocation in each is in a workspace the CLI has never been told
+#: to trust. ``cursor-agent`` exits 1 with empty stdout and advises you to "run
+#: 'agent' interactively to decide", which a worker cannot do; without this, the
+#: verifier records an unexplained ``unclear`` per branch and the review path logs a
+#: bare "exited with code 1".
+_TRUST_REFUSAL_MARKERS = (
+    "workspace trust required",
+    "do you trust the contents of this directory",
+    "do you trust the files in this folder",
+    "trust the current workspace",
+    "--trust",
+)
+
+
+def looks_like_workspace_trust_refusal(*streams: str) -> bool:
+    """Whether a CLI's output is it refusing to act in an untrusted directory.
+
+    Deliberately a phrase match rather than an exit-code check: the exit code is 1,
+    which is also every other kind of failure. Over-matching costs a sentence of
+    advice appended to an error the operator was going to read anyway, so the
+    markers are kept broad — including a bare ``--trust``, on the grounds that a
+    CLI mentioning that flag while failing is telling us something.
+    """
+    haystack = " ".join(stream or "" for stream in streams).lower()
+    return any(marker in haystack for marker in _TRUST_REFUSAL_MARKERS)
+
+
+def workspace_trust_advice(reviewer_name: str) -> str:
+    """One sentence naming the fix, for appending to whatever error we log."""
+    return (
+        f"This looks like {reviewer_name} refusing to run in a directory nothing has "
+        "marked as trusted — which every checkout frank creates is, on its first run. "
+        f"Add the CLI's own trust flag to the {reviewer_name} entry's `trust_args` in "
+        'operator.yaml (cursor-agent: `trust_args: ["--trust"]`). Note `trust_args`, '
+        "not `extra_args`: the seeded entries already set it, and overriding "
+        "`extra_args` replaces the seed rather than merging with it."
+    )
+
+
 class ToolExecutor(Protocol):
     """Run a CLI command in a working directory containing a repo checkout."""
 

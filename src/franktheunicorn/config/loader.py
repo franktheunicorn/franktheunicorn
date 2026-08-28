@@ -58,15 +58,20 @@ def load_operator_config(path: str | Path) -> OperatorConfig:
     """Load operator config from a YAML file. Returns defaults if file doesn't exist.
 
     Every failure here degrades to :class:`OperatorConfig` defaults, and that is a
-    much bigger event than it looks: the defaults have *every* optional feature
-    off, so one bad key anywhere turns the whole file into "nothing is enabled".
-    An operator then reads "security_triage.enabled is false in operator.yaml"
-    while looking at a file that plainly says ``enabled: true``, and there is
-    nothing to connect the two.
+    much bigger event than it looks: one bad key anywhere discards the *whole file*
+    — every backend, every reviewer entry, every credential, and every setting the
+    operator deliberately turned off. The symptom lands on whichever feature stops
+    working, with nothing to connect it back to the typo.
 
     So the failures are logged at ERROR, name the file, name the specific fields,
     and say outright that everything fell back to defaults — the same standard
     CLAUDE.md sets for a gate that stops configured work.
+
+    Note that "defaults" no longer means "everything off": security triage and
+    verification default on. That removes the original symptom (reading
+    "enabled is false" beside a file saying ``enabled: true``) and adds its mirror
+    image, which is why the message says *every* setting rather than naming a
+    direction: an operator who switched something off gets it back on.
     """
     p = Path(path)
     try:
@@ -84,8 +89,8 @@ def load_operator_config(path: str | Path) -> OperatorConfig:
         # buries the one line that matters, which is what fell back to what.
         logger.error(
             "Could not parse %s as YAML, so EVERY setting in it has been ignored and "
-            "the built-in defaults are in force — which means every optional feature "
-            "is off, whatever the file says. %s",
+            "the built-in defaults are in force — your backends, reviewer entries and "
+            "credentials are all gone, and anything you switched off is back on. %s",
             p,
             exc,
         )
@@ -97,8 +102,9 @@ def load_operator_config(path: str | Path) -> OperatorConfig:
         )
         logger.error(
             "%s failed validation, so EVERY setting in it has been ignored and the "
-            "built-in defaults are in force — every optional feature is off, whatever "
-            "the file says. Fix these and restart: %s",
+            "built-in defaults are in force — your backends, reviewer entries and "
+            "credentials are all gone, and anything you switched off is back on. "
+            "Fix these and restart: %s",
             p,
             fields,
         )

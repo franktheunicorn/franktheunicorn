@@ -262,6 +262,32 @@ class AgentCLIReviewerConfig(BaseModel):
     prompt_mode: Literal["flag", "subcommand"] = "flag"
     prompt_arg: str = "-p"
     extra_args: list[str] = Field(default_factory=list)
+    #: Flags that tell this CLI the working directory is one we meant to point it
+    #: at. Separate from ``extra_args`` because they are a property of the *CLI*,
+    #: not of the operator's taste, and because an operator setting ``extra_args``
+    #: replaces the seed outright — folding trust in there would mean anyone who
+    #: customised a flag silently lost it.
+    #:
+    #: The problem is real and measured. Every checkout this codebase drives an
+    #: agent in is one it created: the review clone, and the verifier's separate
+    #: ``security-verify`` tree. So the first run in each is, from the CLI's point
+    #: of view, a directory nobody has vouched for. ``cursor-agent -p`` in one
+    #: exits **1** with nothing on stdout and "⚠ Workspace Trust Required" on
+    #: stderr, naming ``--trust``/``--yolo``/``-f`` and suggesting you "run
+    #: interactively to decide" — which a worker cannot do. Verified, along with
+    #: ``cursor-agent --trust -p --mode ask`` then exiting 0.
+    #:
+    #: ``--trust`` and not ``--yolo``: ``--yolo`` is documented as an alias for
+    #: ``--force`` ("Force allow commands unless explicitly denied"), which is a
+    #: different and much larger permission grant than "this directory is the one
+    #: I meant". The seed keeps ``--mode ask`` doing the actual containment.
+    #:
+    #: Empty for ``claude``, which needs nothing: ``claude --help`` states that
+    #: "the workspace trust dialog is skipped when Claude is run in non-interactive
+    #: mode (via -p, or when stdout is not a TTY)". Confirmed by running it in a
+    #: directory absent from ``~/.claude.json``'s project map — exit 0, and no
+    #: entry added.
+    trust_args: list[str] = Field(default_factory=list)
     timeout_seconds: int = 300
     max_diff_chars: int = 60_000
     deduplicate: bool = True
@@ -304,15 +330,20 @@ class AgentCLIReviewerConfig(BaseModel):
     def build_invocation(self, prompt: str) -> list[str]:
         """Turn a prompt into the argv suffix appended to ``cli_argv``.
 
-        Handles the model flag, any operator ``extra_args``, and the two
-        prompt-delivery styles. For ``subcommand`` mode the subcommand comes
-        first and the prompt is the trailing positional argument; for
-        ``flag`` mode the prompt follows ``prompt_arg`` (e.g. ``-p``).
+        Handles the model flag, the CLI's ``trust_args``, any operator
+        ``extra_args``, and the two prompt-delivery styles. For ``subcommand``
+        mode the subcommand comes first and the prompt is the trailing positional
+        argument; for ``flag`` mode the prompt follows ``prompt_arg`` (e.g.
+        ``-p``).
+
+        ``trust_args`` goes ahead of ``extra_args`` so an operator's own flags win
+        a conflict, and after the subcommand in ``subcommand`` mode — a flag before
+        ``exec`` is a flag to the wrong parser.
         """
         model_part = [self.model_flag, self.model] if self.model else []
         if self.prompt_mode == "subcommand":
-            return [self.prompt_arg, *model_part, *self.extra_args, prompt]
-        return [*model_part, *self.extra_args, self.prompt_arg, prompt]
+            return [self.prompt_arg, *model_part, *self.trust_args, *self.extra_args, prompt]
+        return [*model_part, *self.trust_args, *self.extra_args, self.prompt_arg, prompt]
 
 
 def _default_agent_cli_reviewers() -> list[AgentCLIReviewerConfig]:
@@ -350,10 +381,20 @@ def _default_agent_cli_reviewers() -> list[AgentCLIReviewerConfig]:
         # defaults to ``name``: a config entry of ``- name: cursor`` would
         # otherwise look for a binary called ``cursor`` (the editor) and quietly
         # never run.
+        #
+        # ``--trust`` is not optional here, it is what makes the thing run at all.
+        # Every directory this codebase points an agent at is one it created — the
+        # review clone, the verifier's separate ``security-verify`` tree — so the
+        # first invocation in each is in a workspace cursor-agent has never been
+        # told to trust, and it refuses: exit 1, empty stdout, "⚠ Workspace Trust
+        # Required" on stderr, advising you to "run 'agent' interactively to
+        # decide". A worker has no interactive anything. In ``trust_args`` rather
+        # than ``extra_args`` so an operator changing ``--mode`` doesn't drop it.
         AgentCLIReviewerConfig(
             name="cursor-agent",
             prompt_mode="flag",
             prompt_arg="-p",
+            trust_args=["--trust"],
             extra_args=["--mode", "ask"],
         ),
     ]
@@ -1150,8 +1191,21 @@ class SecurityVerifierConfig(BaseModel):
     Triage reads the *report* and rules on plausibility from the text plus a CVE
     lookup. This reads the *code*: it puts a coding agent in a checkout of the
     project with the report in hand and asks it to go and look. Slow and
-    expensive — one long agent run per branch — so it is off by default and never
-    fires without either a button press or an explicit opt-in at import.
+    expensive — one long agent run per branch — so it never fires without either
+    a button press or an explicit opt-in at import.
+
+    That last sentence is why ``enabled`` now defaults True. It used to default
+    False, which made two gates in series for one action: the operator had to set
+    a flag *and* press the button, and the flag was the invisible one. What
+    actually happened is what you'd expect — an import with the "verify against
+    the code" box ticked queued nothing, logged its reason to a worker log nobody
+    was tailing, and looked like a bug in the checkbox. The button and the
+    ``--verify`` flag are the consent; they are explicit, they are per-report, and
+    they cannot be reached by accident. A second flag in front of them protected
+    nothing that they don't already protect.
+
+    Set it False if you want the button gone in an install where somebody else
+    might press it — that is the case it is still good for.
 
     ``reviewer`` names an entry in ``agent_cli_reviewers`` and borrows its CLI
     path, argv shape and — the point of this, for a remote setup — its
@@ -1169,7 +1223,7 @@ class SecurityVerifierConfig(BaseModel):
     verdict without a branch attached isn't actionable.
     """
 
-    enabled: bool = False
+    enabled: bool = True
     #: Which ``agent_cli_reviewers`` entry to borrow the CLI and remote config from.
     reviewer: str = "claude"
     #: Override the reviewer's model. Empty means "whatever the reviewer uses".
@@ -1238,15 +1292,113 @@ class SecurityVerifierConfig(BaseModel):
     workspace_subdir: str = "security-verify"
 
 
-class SecurityTriageConfig(BaseModel):
-    """Config for security report triage feature."""
+class SecurityDuplicateConfig(BaseModel):
+    """Config for "have I already got this one?" — see ``security.duplicates``.
 
-    enabled: bool = False
+    Weights rather than one threshold because the signals fail in different places.
+    Body overlap alone calls every finding in a scanner bundle a duplicate of every
+    other, since they share the boilerplate the tool emits. Title alone misses the
+    six-callers-of-one-shared-helper case, where the titles name six different
+    files. Paths alone tie together two unrelated bugs that live in the same big
+    file. The defaults lean on titles and paths for that reason.
+
+    On by default: it is local string comparison over rows already in the database,
+    costs no API calls, and only ever writes a link plus its reasoning. It never
+    sets ``status="duplicate"`` — that is a verdict and verdicts are the operator's.
+    """
+
+    enabled: bool = True
+    #: Score above which a pair is linked. Tuned so the scanner-bundle case (many
+    #: findings sharing boilerplate) stays below it and a genuine re-report clears
+    #: it. Raise it if you are seeing links you don't agree with; the reasoning is
+    #: stored on every link so you can see what pushed each one over.
+    threshold: float = 0.62
+    title_weight: float = 0.45
+    body_weight: float = 0.25
+    path_weight: float = 0.30
+    #: Corroboration, not evidence: on a project like Spark half the backlog is
+    #: "core", so a shared component nudges rather than scores.
+    same_component_bonus: float = 0.05
+    #: The same scanner finding id in a *different* archive is the same finding
+    #: re-scanned, not something merely similar. Turn off if your archives reuse ids
+    #: across unrelated scans.
+    trust_finding_id: bool = True
+    #: An identical title within one project is what a re-forwarded disclosure looks
+    #: like. Turn off for a scanner whose titles are templated to the point of
+    #: colliding between genuinely different findings.
+    trust_identical_title: bool = True
+    #: Bound on the per-report comparison during triage, so one report's triage cost
+    #: doesn't grow with the size of the backlog it lands in. The backfill command
+    #: is not subject to this — it compares everything.
+    max_candidates: int = 500
+
+    @field_validator("threshold", "title_weight", "body_weight", "path_weight")
+    @classmethod
+    def must_be_a_fraction(cls, v: float) -> float:
+        if not 0.0 <= v <= 1.0:
+            msg = f"must be between 0 and 1, got {v}"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("max_candidates")
+    @classmethod
+    def candidates_must_be_positive(cls, v: int) -> int:
+        if v <= 0:
+            msg = "max_candidates must be positive"
+            raise ValueError(msg)
+        return v
+
+    @model_validator(mode="after")
+    def weights_must_not_all_be_zero(self) -> SecurityDuplicateConfig:
+        """Otherwise every pair scores 0.0 and the feature silently never fires.
+
+        Which would present as "duplicate detection doesn't work" with a config that
+        looks deliberate — the failure mode this codebase has a rule about.
+        """
+        if self.title_weight + self.body_weight + self.path_weight <= 0:
+            msg = (
+                "at least one of title_weight/body_weight/path_weight must be "
+                "non-zero, or nothing can ever score above the threshold"
+            )
+            raise ValueError(msg)
+        return self
+
+
+class SecurityTriageConfig(BaseModel):
+    """Config for security report triage feature.
+
+    On by default since 2026-08-28. It used to default off, on the general
+    principle that optional features stay dark until asked for, and that turned
+    out to be the wrong principle for this one. Nothing in here *does* anything
+    until a report exists, and a report only exists because somebody pasted one,
+    imported one, or configured an inbox — all of which are the ask. So the
+    default was buying no safety and costing the specific failure this codebase
+    keeps writing rules about: a maintainer who set ``enabled: true``, watched
+    the feature stay dark for an unrelated reason, and had nothing to connect the
+    two. See ``security.queue.queue_triage_on_request`` for the same argument
+    reaching the same conclusion one gate earlier.
+
+    Two things are *not* covered by this default, and neither is an oversight:
+
+    ``sandbox_enabled`` stays off. It executes proof-of-concept code that a
+    stranger emailed you, in a container, and no amount of "but the operator
+    clicked a button" makes that a default. It also needs rootless Docker
+    reachable from the worker, which most installs don't have.
+
+    ``email.enabled`` stays off, for the dull reason that it cannot work without
+    IMAP credentials. Defaulting it on would turn every worker cycle into a
+    connection attempt to nowhere.
+    """
+
+    enabled: bool = True
     email: SecurityEmailConfig = Field(default_factory=SecurityEmailConfig)
     nvd_api_key_env: str = ""  # optional, for higher NVD rate limits
     auto_triage: bool = True  # automatically run LLM triage on new reports
-    sandbox_enabled: bool = False  # allow sandbox POC execution
+    #: Sandboxed POC execution. Stays off by default: this one runs code an
+    #: attacker wrote. See the class docstring.
+    sandbox_enabled: bool = False
     verifier: SecurityVerifierConfig = Field(default_factory=SecurityVerifierConfig)
+    duplicates: SecurityDuplicateConfig = Field(default_factory=SecurityDuplicateConfig)
 
 
 class ForgeRegistryEntry(BaseModel):
