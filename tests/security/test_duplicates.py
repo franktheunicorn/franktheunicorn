@@ -868,3 +868,52 @@ class TestReviewRegressions:
         text = out.getvalue()
         assert f"#{detected.pk} ->" not in text
         assert f"#{hand.pk} ->" not in text
+
+    def test_the_dry_run_and_apply_cannot_disagree(self) -> None:
+        """The preview shares plan_duplicates/would_link with --apply now. It used to
+        keep its own copy of the loop, and the copies diverged the moment
+        link_duplicate grew a guard: the dry run printed "#2 -> #1" for a hand-linked
+        report and --apply then refused it and reported "Linked 0"."""
+        import io
+
+        from django.core.management import call_command
+
+        project = ProjectFactory(owner="apache", repo="spark")
+        first = SecurityReportFactory(project=project, **_RPC_REPORT)
+        hand = SecurityReportFactory(
+            project=project, duplicate_of=first, duplicate_confidence=None, **_RPC_REPORT
+        )
+
+        preview = io.StringIO()
+        call_command("find_security_duplicates", "--relink", stdout=preview, stderr=preview)
+        applied = io.StringIO()
+        call_command(
+            "find_security_duplicates", "--relink", "--apply", stdout=applied, stderr=applied
+        )
+
+        assert f"#{hand.pk} ->" not in preview.getvalue()
+        assert "would not be written" in preview.getvalue()
+        assert "Linked 0" in applied.getvalue()
+        hand.refresh_from_db()
+        assert hand.duplicate_of_id == first.pk
+        assert hand.duplicate_confidence is None
+
+    def test_the_dry_run_shows_the_canonical_target(self) -> None:
+        """--apply writes the end of the chain, so a preview naming a row that is
+        itself a pointer would be showing a link that never gets made."""
+        import io
+
+        from django.core.management import call_command
+
+        project = ProjectFactory(owner="apache", repo="spark")
+        original = SecurityReportFactory(project=project, **_RPC_REPORT)
+        middle = SecurityReportFactory(
+            project=project, duplicate_of=original, duplicate_confidence=0.9, **_RPC_REPORT
+        )
+        SecurityReportFactory(project=project, **_RPC_REPORT)
+
+        out = io.StringIO()
+        call_command("find_security_duplicates", stdout=out, stderr=out)
+
+        assert f"-> #{original.pk}" in out.getvalue()
+        assert f"-> #{middle.pk}" not in out.getvalue()

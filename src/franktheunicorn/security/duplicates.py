@@ -478,9 +478,36 @@ def detect_across_backlog(
     Processed oldest-first so links point backwards in time, which is what makes the
     canonical report the one carrying the accumulated triage.
     """
+    return sum(
+        1 for subject, match in plan_duplicates(reports, config) if link_duplicate(subject, match)
+    )
+
+
+def plan_duplicates(
+    reports: Sequence[SecurityReport],
+    config: SecurityDuplicateConfig,
+) -> list[tuple[SecurityReport, Match]]:
+    """The (report, best-match) pairs a sweep would consider linking.
+
+    Split out so the command's dry run and its ``--apply`` cannot disagree. They had
+    two copies of this loop, and the copies diverged the moment ``link_duplicate``
+    grew a guard: the dry run printed ``#2 -> #1`` for a report whose link the
+    operator had set by hand, and ``--apply`` then correctly refused it and reported
+    "Linked 0". The database ended up right and the preview lied, which for a
+    read-only preview is the whole of its job.
+
+    Pairs are *candidates*, not promises — ``link_duplicate`` still has the final say
+    on cycles, hand-set links and no-op rewrites. The caller renders that honestly by
+    running the same function.
+
+    Quadratic on purpose, and affordable: the comparison is set intersections over a
+    few hundred tokens, so 500 reports (125,000 pairs) is under a second. An inverted
+    index would be faster and would also be the third thing to go wrong in a feature
+    whose job is to be a hint.
+    """
     ordered = sorted(reports, key=lambda r: (r.created_at, r.pk))
     signatures = [(report, build_signature(report)) for report in ordered]
-    linked = 0
+    planned: list[tuple[SecurityReport, Match]] = []
     for index, (report, signature) in enumerate(signatures):
         best: Match | None = None
         for earlier, earlier_sig in signatures[:index]:
@@ -491,6 +518,24 @@ def detect_across_backlog(
                 continue
             if best is None or match.score > best.score:
                 best = match
-        if best is not None and link_duplicate(report, best):
-            linked += 1
-    return linked
+        if best is not None:
+            planned.append((report, best))
+    return planned
+
+
+def would_link(subject: SecurityReport, match: Match) -> bool:
+    """Whether :func:`link_duplicate` would actually write this pair.
+
+    The read-only half of ``link_duplicate``'s guards, so a dry run can show what an
+    ``--apply`` will really do. Kept next to it rather than in the command, because
+    the two going out of step is the bug this exists to prevent.
+    """
+    from franktheunicorn.core.models import SecurityReport as Report
+
+    if subject.duplicate_of_id is not None and subject.duplicate_confidence is None:
+        return False  # the operator's own link
+    target = Report.objects.filter(pk=match.report_id).first()
+    if target is None or target.pk == subject.pk:
+        return False
+    target = resolve_canonical(target)
+    return not (target.pk == subject.pk or would_create_cycle(subject, target))

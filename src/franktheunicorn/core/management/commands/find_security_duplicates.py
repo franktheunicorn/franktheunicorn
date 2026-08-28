@@ -18,11 +18,7 @@ from django.core.management.base import BaseCommand
 
 from franktheunicorn.config.loader import get_operator_config
 from franktheunicorn.core.models import Project, SecurityReport
-from franktheunicorn.security.duplicates import (
-    build_signature,
-    detect_across_backlog,
-    score_pair,
-)
+from franktheunicorn.security.duplicates import detect_across_backlog
 
 if TYPE_CHECKING:
     from django.core.management.base import CommandParser
@@ -146,30 +142,45 @@ class Command(BaseCommand):
     ) -> None:
         """Print the links that would be made.
 
-        Duplicates the pairing loop from ``detect_across_backlog`` rather than
-        calling it, because that one writes. Same ordering — oldest first, so links
-        point backwards in time at the report carrying the accumulated triage.
+        Shares ``plan_duplicates`` and ``would_link`` with ``--apply`` rather than
+        keeping its own copy of the pairing loop. The copies diverged the moment
+        ``link_duplicate`` grew a guard: this printed ``#2 -> #1`` for a report the
+        operator had linked by hand, and ``--apply`` then refused it and said
+        "Linked 0". A preview that misreports the write is worse than no preview.
         """
-        ordered = sorted(candidates, key=lambda r: (r.created_at, r.pk))
-        signatures = [(report, build_signature(report)) for report in ordered]
+        from franktheunicorn.core.models import SecurityReport as Report
+        from franktheunicorn.security.duplicates import (
+            plan_duplicates,
+            resolve_canonical,
+            would_link,
+        )
+
+        planned = plan_duplicates(candidates, config)
         found = 0
-        for index, (report, signature) in enumerate(signatures):
-            best = None
-            for earlier, earlier_sig in signatures[:index]:
-                if earlier.project_id != report.project_id:
-                    continue
-                match = score_pair(signature, earlier_sig, config)
-                if match.score < config.threshold:
-                    continue
-                if best is None or match.score > best[0].score:
-                    best = (match, earlier)
-            if best is None:
+        skipped = 0
+        for report, match in planned:
+            if not would_link(report, match):
+                skipped += 1
                 continue
             found += 1
-            match, earlier = best
-            self.stdout.write(f"  #{report.pk} -> #{earlier.pk}  {match.score:.2f}  {match.reason}")
+            target = Report.objects.filter(pk=match.report_id).first()
+            # The canonical end of the chain, which is what --apply writes. Printing
+            # the raw match would show a link to a row that is itself a pointer.
+            if target is not None:
+                target = resolve_canonical(target)
+            target_pk = target.pk if target else match.report_id
+            self.stdout.write(f"  #{report.pk} -> #{target_pk}  {match.score:.2f}  {match.reason}")
             self.stdout.write(f"      this : {(report.title or report.raw_text)[:90]!r}")
-            self.stdout.write(f"      that : {(earlier.title or earlier.raw_text)[:90]!r}")
+            if target is not None:
+                self.stdout.write(f"      that : {(target.title or target.raw_text)[:90]!r}")
+
+        if skipped:
+            # Counted rather than hidden: these scored above the threshold and were
+            # held back by a guard, which is a different fact from not matching.
+            self.stdout.write(
+                f"  ({skipped} scored above the threshold but would not be written — "
+                "a link you set by hand, or one that would close a cycle.)"
+            )
 
         if found:
             self.stdout.write(
