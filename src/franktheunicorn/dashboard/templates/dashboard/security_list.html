@@ -93,6 +93,79 @@
     {% endif %}
 </section>
 
+{# Review by people who aren't the operator. A security backlog on an ASF project #}
+{# gets ruled on by the PMC, and they are not going to be handed a Tailscale #}
+{# address and a Django login — but they will open a doc somebody shared. So: CSV #}
+{# out, into a Sheet with the ACL the project already trusts, edits back in. #}
+{# Deliberately not the Sheets API: that wants a Google Cloud project, an OAuth #}
+{# client and a consent screen configured by hand before one row moves. #}
+<section class="sheet-sync" aria-label="Share the backlog for outside review">
+    <h3>Review with the PMC</h3>
+    <p class="zip-import-hint">
+        Export this list as a spreadsheet, share it with whoever rules on these
+        reports, then import their edits back. Only
+        <code>status</code>, <code>severity</code>, <code>duplicate_of_cve</code>,
+        <code>external_notes</code> and <code>operator_notes</code> come back in —
+        every other column is read-only context. Keep the <code>check</code>
+        column: it's what stops a stale sheet overwriting a ruling you made after
+        exporting it.
+    </p>
+
+    {# Said at the button, not just in docs/security-design.md §4.9. This is the #}
+    {# one feature here that deliberately moves report data off this machine, and #}
+    {# a link-shared sheet of unfixed vulnerabilities is a public one. #}
+    <p class="sheet-sync-warning">
+        These are unfixed vulnerability reports. Wherever you put this file
+        inherits them — share the sheet with named people, not with a link.
+    </p>
+
+    {# The row cap, said before the click. A cap applied silently means the #}
+    {# operator shares "the security backlog" and the bottom of it isn't in the #}
+    {# file — the same lie MAX_CELL_CHARS refuses to tell about a truncated cell. #}
+    {% if export_capped %}
+    <p class="sheet-sync-warning">
+        This install has {{ export_total }} reports and the export stops at
+        {{ export_cap }} — the sheet will hold the top {{ export_cap }} in the
+        order below, not everything. For the lot, use
+        <code>manage.py export_security_csv</code>, which has no cap.
+    </p>
+    {% endif %}
+
+    {# sort as well as status: the export honours whichever ordering the page is #}
+    {# showing, so the cap keeps the rows the operator is actually looking at. #}
+    <div class="sheet-sync-row">
+        <a class="action-btn"
+           href="{% url 'dashboard:security_export_csv' %}?sort={{ active_sort }}{% if active_status != 'all' %}&amp;status={{ active_status }}{% endif %}">
+            ⬇ Export CSV{% if active_status != 'all' %} ({{ active_status }}){% endif %}
+        </a>
+        <a class="action-btn sheet-sync-full"
+           href="{% url 'dashboard:security_export_csv' %}?full=1&amp;sort={{ active_sort }}{% if active_status != 'all' %}&amp;status={{ active_status }}{% endif %}"
+           title="Also include the raw report text and any proposed patch — bigger, and a good deal more sensitive to leave in a shared Drive">
+            ⬇ Export CSV (full text)
+        </a>
+    </div>
+
+    <form method="post" action="{% url 'dashboard:security_import_csv' %}"
+          enctype="multipart/form-data" class="sheet-sync-form">
+        {% csrf_token %}
+        <input type="file" name="csv_file" accept=".csv,text/csv" required
+               aria-label="Reviewed CSV to import">
+        <label title="Report what every row would do and write nothing">
+            <input type="checkbox" name="dry_run"> Dry run
+        </label>
+        <label title="Apply rows whose report changed here after the export. Off by default: the alternative to refusing is silently picking a winner.">
+            <input type="checkbox" name="force"> Let the sheet win on conflicts
+        </label>
+        <button type="submit" class="action-btn post">⬆ Import edits</button>
+    </form>
+
+    <p class="zip-import-hint">
+        Download the sheet as <em>Comma-separated values</em> — not .xlsx.
+        From a shell, <code>manage.py export_security_csv --out</code> and
+        <code>manage.py import_security_csv reviewed.csv --dry-run</code>.
+    </p>
+</section>
+
 <div class="tab-bar">
     {% for tab in status_tabs %}
     <a href="{% url 'dashboard:security_list' %}?sort={{ active_sort }}{% if tab.key != 'all' %}&amp;status={{ tab.key }}{% endif %}"
@@ -148,7 +221,16 @@
             {% if report.reporter_name %} &middot; from {{ report.reporter_name }}{% endif %}
             &middot; {{ report.created_at|timesince }} ago
             {% if report.is_expected_behavior %} &middot; <strong style="color: var(--orange);">Expected Behavior</strong>{% endif %}
-            {% if report.matched_cve_id %} &middot; Dup of {{ report.matched_cve_id }}{% endif %}
+            {# "Dup of" only when it actually is one. A CVE on this report no #}
+            {# longer implies duplicate: the verdict form keeps the field for every #}
+            {# status and the review sheet writes it independently, so the exact #}
+            {# PMC ruling this feature carries — "valid, and here's the related #}
+            {# CVE" — was being displayed as "this is a duplicate" in the queue the #}
+            {# operator triages from. #}
+            {% if report.matched_cve_id %} &middot;
+                {% if report.status == "duplicate" %}Dup of{% else %}Related{% endif %}
+                {{ report.matched_cve_id }}
+            {% endif %}
         </div>
     </li>
     {% empty %}

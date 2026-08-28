@@ -12,11 +12,16 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from franktheunicorn.config.models import OperatorConfig, ProjectConfig
+    from franktheunicorn.security.sheet_sync import SheetImportResult
     from franktheunicorn.security.zip_import import ZipImportResult
 
 from django.contrib import messages
 from django.db.models import Count, Max, Min, Q, Sum
-from django.http import HttpRequest, HttpResponse
+from django.http import HttpRequest, HttpResponse, StreamingHttpResponse
+
+# StreamingHttpResponse is not an HttpResponse — both descend from
+# HttpResponseBase — so the streaming CSV view is annotated with the base.
+from django.http.response import HttpResponseBase
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.views.decorators.http import require_POST
@@ -995,6 +1000,11 @@ def security_report_list(request: HttpRequest) -> HttpResponse:
             "archives": _imported_archives(),
             "projects": Project.objects.filter(enabled=True).order_by("owner", "repo"),
             "zip_import_command": _zip_import_command(),
+            # So the page can say the CSV export is capped *before* the operator
+            # shares a sheet that quietly stops short of the backlog.
+            "export_cap": MAX_SECURITY_CSV_EXPORT_ROWS,
+            "export_total": all_count,
+            "export_capped": all_count > MAX_SECURITY_CSV_EXPORT_ROWS,
         },
     )
 
@@ -1313,6 +1323,162 @@ def _back_to_security_list(request: HttpRequest) -> HttpResponse:
     return redirect(target)
 
 
+#: Cap on the CSV export. Not a performance bound — the export streams, so the
+#: size it can serve is unbounded — but a review bound: a sheet nobody is going
+#: to read to the bottom is a sheet whose bottom half gets rubber-stamped, and
+#: the ranking already puts what matters at the top. The CLI has --limit and no
+#: default cap for the operator who really does want the lot.
+MAX_SECURITY_CSV_EXPORT_ROWS = 2000
+
+#: Same 8 MB as the zip door. A reviewed export is a few hundred KB; anything
+#: this size is a mistake or a different file altogether.
+MAX_SECURITY_CSV_UPLOAD_BYTES = 8 * 1024 * 1024
+
+
+def security_report_export_csv(request: HttpRequest) -> HttpResponseBase:
+    """Stream the security backlog as a CSV for review in a shared spreadsheet.
+
+    The collaboration path for a backlog that isn't one person's to rule on: the
+    operator drops this into a Google Sheet (or anything else), shares it with
+    whoever decides — a PMC, a co-maintainer — and imports their edits back
+    through :func:`security_report_import_csv`. Nothing here talks to Google;
+    see :mod:`franktheunicorn.security.sheet_sync` for why not.
+
+    Streams rather than building the file, and stays in-request because it's a
+    read: no LLM call, no container, no write. Honours the same ``status`` *and*
+    ``sort`` the list page is using, so "export what I'm looking at" is one click
+    and means it — forwarding only the status re-ranked the sheet under the
+    operator, and with the row cap on top, kept a different set of reports than
+    the ones they were looking at.
+    """
+    from franktheunicorn.security.sheet_sync import (
+        DEFAULT_EXPORT_SORT,
+        EXPORT_SORTS,
+        export_filename,
+        reports_for_export,
+        stream_reports_csv,
+    )
+
+    # "all" is the list page's own name for no filter, and it arrives here
+    # whenever the operator exports from the default tab.
+    status = request.GET.get("status", "")
+    if status == "all":
+        status = ""
+    if status and status not in {key for key, _ in SecurityReport.STATUS_CHOICES}:
+        # A bad tab in a hand-edited URL. Exporting everything instead would hand
+        # back a wider sheet than the operator asked for, which is the wrong way
+        # to be wrong about a security backlog.
+        return HttpResponse("Unknown status filter.", status=400)
+
+    sort = request.GET.get("sort", DEFAULT_EXPORT_SORT)
+    if sort not in EXPORT_SORTS:
+        sort = DEFAULT_EXPORT_SORT
+    full = request.GET.get("full") == "1"
+    reports = reports_for_export(status=status, limit=MAX_SECURITY_CSV_EXPORT_ROWS, sort=sort)
+
+    # .iterator() so a big backlog isn't fully materialised to serve a stream.
+    response = StreamingHttpResponse(
+        stream_reports_csv(reports.iterator(chunk_size=200), full=full),
+        content_type="text/csv; charset=utf-8",
+    )
+    filename = export_filename(full=full, status=status)
+    response["Content-Disposition"] = f'attachment; filename="{filename}"'
+    # This file is unfixed vulnerability reports, and with full=1 it's a working
+    # description of how to exploit them. Without no-store it's heuristically
+    # cacheable: it sits in the disk cache of whatever laptop reached the
+    # dashboard over Tailscale, recoverable long after the operator thinks the
+    # download was deleted.
+    response["Cache-Control"] = "no-store"
+    logger.info(
+        "Security CSV export: status=%s sort=%s full=%s (cap %d rows)",
+        status or "all",
+        sort,
+        full,
+        MAX_SECURITY_CSV_EXPORT_ROWS,
+    )
+    return response
+
+
+@require_POST
+def security_report_import_csv(request: HttpRequest) -> HttpResponse:
+    """Apply a reviewed CSV back onto the reports it was exported from.
+
+    Runs in-request like the zip door and for the same reasons: one transaction,
+    bounded by the upload cap, no container and no LLM call. Refuses rows whose
+    report changed after the export rather than picking a winner — see
+    :func:`franktheunicorn.security.sheet_sync.import_reports_csv`.
+    """
+    from franktheunicorn.security.sheet_sync import import_reports_csv
+
+    upload = request.FILES.get("csv_file")
+    if upload is None:
+        messages.error(request, "Choose a reviewed .csv file to import.")
+        return _back_to_security_list(request)
+
+    if upload.size and upload.size > MAX_SECURITY_CSV_UPLOAD_BYTES:
+        limit_mb = MAX_SECURITY_CSV_UPLOAD_BYTES // (1024 * 1024)
+        messages.error(request, f"That file is larger than the {limit_mb} MB upload limit.")
+        return _back_to_security_list(request)
+
+    try:
+        # utf-8-sig: Sheets and Excel both write a BOM on a CSV download, and
+        # without stripping it the first header becomes "﻿report_id" and the
+        # whole file reads as "not an export from here".
+        text = upload.read().decode("utf-8-sig")
+    except UnicodeDecodeError:
+        messages.error(
+            request,
+            "That file isn't UTF-8 text. Download the sheet as "
+            "Comma-separated values, not as .xlsx or .ods.",
+        )
+        return _back_to_security_list(request)
+
+    # Forcing from the browser is deliberately possible but explicit: the
+    # checkbox is the only way to overwrite a ruling made after the export, and
+    # it says so.
+    force = request.POST.get("force") == "on"
+    dry_run = request.POST.get("dry_run") == "on"
+
+    # The whole string, not text.splitlines() — that deletes the newline inside a
+    # quoted multi-line cell and runs the words either side of it together, which
+    # is every operator_notes cell in the sheet. import_reports_csv splits it.
+    result = import_reports_csv(text, dry_run=dry_run, force=force)
+
+    if result.error:
+        messages.error(request, f"Import failed: {result.error}")
+        return _back_to_security_list(request)
+
+    level = messages.warning if (result.conflicts or result.failed) else messages.success
+    level(request, result.summary())
+    for warning in result.warnings:
+        messages.warning(request, warning)
+    _report_rejected_rows(request, result)
+    return _back_to_security_list(request)
+
+
+def _report_rejected_rows(request: HttpRequest, result: SheetImportResult) -> None:
+    """Name every row the operator has to look at, capped the way the zip door caps.
+
+    ``needs_attention``, not "didn't apply". Filtering on outcome alone skipped
+    the rows that applied *by overwriting a newer ruling* — the loudest thing this
+    importer does — so a forced import flashed a bare "applied 1" and the
+    operator's own verdict was gone with nothing naming which report. Same for a
+    note left unwritten because the sheet only carried a prefix of it. This is
+    the mistake ``_REPORTED_ENTRY_OUTCOMES`` below already documents for the zip
+    door: a dropped edit is dropped whether the importer calls it a failure or a
+    decision.
+    """
+    notable = [row for row in result.rows if row.needs_attention]
+    for row in notable[:MAX_UPLOAD_ENTRY_MESSAGES]:
+        target = f"report {row.report_id}" if row.report_id else "no report"
+        fields = f" [{', '.join(row.changed)}]" if row.changed else ""
+        detail = f" — {row.detail}" if row.detail else ""
+        messages.warning(request, f"Row {row.row} ({target}): {row.outcome}{fields}{detail}")
+    remaining = len(notable) - MAX_UPLOAD_ENTRY_MESSAGES
+    if remaining > 0:
+        messages.warning(request, f"…and {remaining} more row(s) worth a look.")
+
+
 #: How many individual entry failures to name before summarising the rest.
 #: FallbackStorage spills past the cookie into the session rather than dropping
 #: them, so this is about legibility, not loss: one message per bad entry in a
@@ -1587,11 +1753,38 @@ def security_report_verdict(request: HttpRequest, report_id: int) -> HttpRespons
     if new_status not in valid_statuses:
         return HttpResponse("Invalid status.", status=400)
 
+    # Read before the assignment below: whether the CVE reference still means
+    # anything depends on where the status came *from*, not just where it lands.
+    was_duplicate = report.status == "duplicate"
     report.status = new_status
     report.operator_notes = notes
-    if new_status == "duplicate":
-        report.matched_cve_id = request.POST.get("matched_cve_id", "")
-    else:
+
+    # Take what the form submitted, whatever the status. This used to blank the
+    # CVE for every status but "duplicate", which was a harmless tidy-up while
+    # this form was the only thing that could write the field — and became silent
+    # data loss the moment the review sheet could too (security.sheet_sync): a PMC
+    # rules "valid, and here's the related CVE", the operator opens the report,
+    # hits Save Verdict without touching a thing, and the reference is gone,
+    # including out of the next export. Guarded on presence rather than read with
+    # a default, so a POST that doesn't carry the field can't blank it either.
+    if "matched_cve_id" in request.POST:
+        # Validated with sheet_sync's own pattern, not a looser one: this column
+        # now has two writers and they must agree about what fits in it. Bounded
+        # because the field is CharField(max_length=50) and SQLite doesn't enforce
+        # that — a 309-character "CVE" persisted here and would be a DataError,
+        # i.e. an unhandled 500 losing the status and notes in the same save(), on
+        # the Postgres install DATABASE_URL promises.
+        from franktheunicorn.security.sheet_sync import looks_like_cve
+
+        candidate = request.POST["matched_cve_id"].strip()
+        if candidate and not looks_like_cve(candidate):
+            return HttpResponse("That doesn't look like a CVE id (CVE-2026-1234).", status=400)
+        report.matched_cve_id = candidate.upper()
+    if was_duplicate and new_status != "duplicate":
+        # The one case where dropping it is right, and the original intent behind
+        # the old rule: "actually valid" means the CVE this was a duplicate of no
+        # longer describes it. Ruling on a report that was never a duplicate
+        # leaves the reference alone.
         report.matched_cve_id = ""
     report.save(update_fields=["status", "operator_notes", "matched_cve_id", "updated_at"])
 

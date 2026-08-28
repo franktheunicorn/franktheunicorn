@@ -57,6 +57,17 @@ src/franktheunicorn/
                      #   SecurityReport.priority read off the archive's own
                      #   ranking so rows (and triage commands) are created
                      #   highest-first.
+                     #   sheet_sync.py is the collaboration path: export the
+                     #   backlog as CSV, review it in a shared spreadsheet
+                     #   (Google Sheets or anything else) with whatever ACL the
+                     #   project already trusts, import the edits back. No
+                     #   Google integration on purpose — the Sheets API needs a
+                     #   Cloud project, an OAuth client and a consent screen
+                     #   configured by hand before one row moves. Writes back
+                     #   only five columns, refuses a row whose report changed
+                     #   after the export rather than picking a winner, and
+                     #   escapes every cell against spreadsheet formula
+                     #   injection (report titles are attacker-supplied).
   curator/           # Textual TUI for curating voice datasets from
                      #   historical comments (used to seed fine-tuning;
                      #   not part of the live review path)
@@ -139,7 +150,7 @@ The anti-pattern list is the primary feedback mechanism — not a side feature. 
 - **Draft-only by default.** Posting to GitHub requires the operator clicking approve. The default `posting.mode` is `draft-only`. `review/auto_poster.py` exists for the v1.5 confidence-gated path but is *not wired* into the worker — it only fires when a project explicitly sets `posting.mode = "confidence-gated"` and the triple gate (mode + confidence threshold + tone guard) passes. New review-pipeline features should keep the default draft-only path intact.
 - **Graceful feature gates.** Every optional feature (CodeRabbit, email, tests, JIRA, community search, Sentry) must degrade gracefully when not configured. Check config before using; skip silently, don't error.
 - **SQLite is first-class.** Don't use Postgres-specific features. Test against SQLite. The `DATABASE_URL` env var switches to Postgres but SQLite must always work.
-- **No Docker socket in web container.** Only the worker container accesses Docker for test execution and the security sandbox. The web container never spawns containers. `run_dual_tests` and `security_report_sandbox` both enqueue a `WorkerCommand` and return immediately — the worker-queue refactor that used to be described here as in flight has landed, and `views.py` no longer imports `threading` at all. Three endpoints still do their work in-request rather than in the worker: `security_report_upload` (the whole zip import, one transaction — measured at 166ms end to end for a real 265-entry scanner archive, of which 43ms is the scan-archive expansion; bounded by the 8 MB upload cap), `security_archive_drop` (a bulk delete — 44ms for 143 rows), and `security_report_cve_check` (a synchronous NVD call). None spawns a container, so none needs the Docker socket, but the first and last would be better as `WorkerCommand`s.
+- **No Docker socket in web container.** Only the worker container accesses Docker for test execution and the security sandbox. The web container never spawns containers. `run_dual_tests` and `security_report_sandbox` both enqueue a `WorkerCommand` and return immediately — the worker-queue refactor that used to be described here as in flight has landed, and `views.py` no longer imports `threading` at all. Five endpoints still do their work in-request rather than in the worker: `security_report_upload` (the whole zip import, one transaction — measured at 166ms end to end for a real 265-entry scanner archive, of which 43ms is the scan-archive expansion; bounded by the 8 MB upload cap), `security_archive_drop` (a bulk delete — 44ms for 143 rows), `security_report_cve_check` (a synchronous NVD call), `security_report_export_csv` (a streaming read — `StreamingHttpResponse` over a `.iterator()`, so it never materialises the file) and `security_report_import_csv` (one transaction over at most a few thousand rows, bounded by the same 8 MB upload cap). None spawns a container, so none needs the Docker socket, but the zip upload and the NVD call would be better as `WorkerCommand`s.
 - **Blame: run fresh, don't cache.** Run `git blame` on the base branch for changed files each time. No blame cache.
 - **A skipped step logs why, at a level someone will see.** Almost every "X isn't working" report against this codebase has turned out to be a correctly-configured gate declining to run, invisibly: the review pipeline's drafts-exist skip returned an empty list silently, the agent-CLI runner logged "no checkout could be prepared" at DEBUG and its caller logged nothing at all, and `_check_backends` didn't mention stub/ollama backends. So: a gate that stops configured work logs at INFO with the setting that changes it; a configured tool that can't run logs at WARNING; zero findings is logged as explicitly as N findings, because "it ran and the PR is clean" and "it never ran" must not look the same. `_run_cycle` ends with one `Cycle summary:` line counting agent runs by outcome, and warns naming the dominant gate when nothing ran at all. Per-PR detail stays at DEBUG — INFO per PR is 900 lines a cycle on Spark.
 

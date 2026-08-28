@@ -20,8 +20,31 @@
 
         <div class="form-row" style="margin-bottom: 0.5rem;">
             <label style="min-width: 5rem; font-size: 0.85rem; font-weight: 600;">CVE ID</label>
-            <input type="text" name="matched_cve_id" value="{{ report.matched_cve_id }}" placeholder="CVE-YYYY-NNNNN (if duplicate)">
+            {# "related or duplicate", not "if duplicate": the field is kept for any #}
+            {# status now, because the review sheet can set it too and blanking it on #}
+            {# every non-duplicate save deleted references a PMC had supplied. Flipping #}
+            {# away from Duplicate still drops it — see security_report_verdict. #}
+            <input type="text" name="matched_cve_id" value="{{ report.matched_cve_id }}" placeholder="CVE-YYYY-NNNNN (related or duplicate)">
         </div>
+
+        {# What came back from the shared sheet (security.sheet_sync), when #}
+        {# anything did. Shown here rather than nowhere: an import that lands a #}
+        {# PMC's ruling in a field no page displays is worse than not importing #}
+        {# it, because the operator then rules on the report believing nobody #}
+        {# else has. Read-only on purpose — the sheet is the source of truth for #}
+        {# this column, and an edit here would go back out on the next export #}
+        {# over the top of whoever wrote it. #}
+        {% if report.external_notes %}
+        <div class="external-notes">
+            <span class="external-notes-label">
+                From the review sheet
+                {% if report.external_notes_at %}
+                <span class="muted">&middot; {{ report.external_notes_at|timesince }} ago</span>
+                {% endif %}
+            </span>
+            <p>{{ report.external_notes|linebreaksbr }}</p>
+        </div>
+        {% endif %}
 
         <div style="margin-bottom: 0.5rem;">
             <label style="display: block; font-size: 0.85rem; font-weight: 600; margin-bottom: 0.3rem;">Notes</label>

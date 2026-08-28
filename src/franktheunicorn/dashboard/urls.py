@@ -46,6 +46,10 @@ urlpatterns = [
     path("security/upload/", views.security_report_upload, name="security_upload"),
     # The undo for one: delete every report that came from a named archive.
     path("security/drop-archive/", views.security_archive_drop, name="security_archive_drop"),
+    # Round-trip through a shared spreadsheet, for a backlog other people rule on.
+    # ".csv" in the path so a browser and a shell both name the download sensibly.
+    path("security/export.csv", views.security_report_export_csv, name="security_export_csv"),
+    path("security/import-csv/", views.security_report_import_csv, name="security_import_csv"),
     # Read-only transparency: everything the email scanner has looked at.
     path("security/email-activity/", views.email_activity, name="email_activity"),
     # Learned triage guidance overview (iterative learning loop).

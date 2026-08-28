@@ -6,6 +6,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import Client
 
 from franktheunicorn.core.models import SecurityReport, SecurityTriageFeedback
@@ -954,3 +955,338 @@ class TestTriageFailureVisibleAlongsideSummary:
         assert b"model timed out" in body
         assert b"An earlier verdict." in body  # the old result is still shown
         assert b"Re-run LLM Triage" in body
+
+
+@pytest.mark.django_db
+class TestSecurityCsvRoundTrip:
+    """The dashboard door onto the shared-spreadsheet round trip.
+
+    The module tests (tests/security/test_sheet_sync.py) cover the semantics; these
+    cover the bit that only exists at the HTTP boundary — the streaming response,
+    the BOM a real Sheets download carries, and the multi-line cell that a naive
+    upload handler mangles.
+    """
+
+    def _csv(self, client: Client, query: str = "") -> str:
+        response = client.get(f"/security/export.csv{query}")
+        assert response.status_code == 200
+        return b"".join(response.streaming_content).decode()
+
+    def test_export_streams_a_csv_attachment(self, client: Client) -> None:
+        SecurityReportFactory(title="Path traversal in the loader")
+        response = client.get("/security/export.csv")
+
+        assert response.status_code == 200
+        assert response["Content-Type"].startswith("text/csv")
+        assert "attachment; filename=" in response["Content-Disposition"]
+        assert ".csv" in response["Content-Disposition"]
+        body = b"".join(response.streaming_content).decode()
+        assert "report_id,check," in body
+        assert "Path traversal in the loader" in body
+
+    def test_export_honours_the_status_tab(self, client: Client) -> None:
+        SecurityReportFactory(title="still new", status="new")
+        SecurityReportFactory(title="already ruled", status="valid")
+
+        body = self._csv(client, "?status=valid")
+
+        assert "already ruled" in body
+        assert "still new" not in body
+
+    def test_export_refuses_a_bogus_status_rather_than_widening(self, client: Client) -> None:
+        """Exporting everything for an unknown filter hands back a wider sheet than
+        the operator asked for, which is the wrong way to be wrong about this."""
+        assert client.get("/security/export.csv?status=nonsense").status_code == 400
+
+    def test_full_export_carries_the_payload_and_the_plain_one_does_not(
+        self, client: Client
+    ) -> None:
+        SecurityReportFactory(raw_text="the proof of concept text")
+
+        assert "the proof of concept text" not in self._csv(client)
+        assert "the proof of concept text" in self._csv(client, "?full=1")
+
+    def test_the_export_cap_is_real_and_takes_the_top_of_the_ranking(self, client: Client) -> None:
+        """A cap nobody tested is a cap that silently isn't applied — and if it
+        cut from the wrong end it would drop exactly the reports worth reviewing."""
+        SecurityReportFactory(title="ranked first", priority=90.0)
+        SecurityReportFactory(title="ranked second", priority=50.0)
+        SecurityReportFactory(title="ranked last", priority=1.0)
+
+        with patch("franktheunicorn.dashboard.views.MAX_SECURITY_CSV_EXPORT_ROWS", 2):
+            body = self._csv(client)
+
+        assert "ranked first" in body
+        assert "ranked second" in body
+        assert "ranked last" not in body
+
+    def test_import_applies_an_edited_verdict(self, client: Client) -> None:
+        report = SecurityReportFactory(status="new")
+        edited = self._csv(client).replace(",new,", ",valid,")
+        upload = SimpleUploadedFile("reviewed.csv", edited.encode(), content_type="text/csv")
+
+        response = client.post("/security/import-csv/", {"csv_file": upload}, follow=True)
+
+        assert response.status_code == 200
+        report.refresh_from_db()
+        assert report.status == "valid"
+
+    def test_import_survives_the_bom_a_real_sheets_download_carries(self, client: Client) -> None:
+        """Sheets and Excel both write a UTF-8 BOM. Without stripping it the first
+        header reads as "﻿report_id" and the whole file looks like somebody
+        else's CSV."""
+        report = SecurityReportFactory(status="new")
+        edited = self._csv(client).replace(",new,", ",valid,")
+        upload = SimpleUploadedFile(
+            "reviewed.csv", b"\xef\xbb\xbf" + edited.encode(), content_type="text/csv"
+        )
+
+        client.post("/security/import-csv/", {"csv_file": upload}, follow=True)
+
+        report.refresh_from_db()
+        assert report.status == "valid"
+
+    def test_import_keeps_the_line_breaks_in_a_multiline_comment(self, client: Client) -> None:
+        """str.splitlines() deletes the newline inside a quoted cell and runs the
+        words either side of it together. This is that regression, at the door it
+        actually happened at."""
+        report = SecurityReportFactory()
+        # A reviewer's two-line comment, quoted the way a spreadsheet writes it.
+        rows = self._csv(client).split("\n")
+        header = rows[0].split(",")
+        note_index = header.index("external_notes")
+        cells = next(row for row in rows[1:] if row.startswith(f"{report.pk},")).split(",")
+        cells[note_index] = '"first line\nsecond line"'
+        edited = "\n".join([rows[0], ",".join(cells)]) + "\n"
+        upload = SimpleUploadedFile("reviewed.csv", edited.encode(), content_type="text/csv")
+
+        client.post("/security/import-csv/", {"csv_file": upload}, follow=True)
+
+        report.refresh_from_db()
+        assert report.external_notes == "first line\nsecond line"
+
+    def test_import_reports_a_conflict_instead_of_reverting_a_ruling(self, client: Client) -> None:
+        report = SecurityReportFactory(status="new")
+        edited = self._csv(client).replace(",new,", ",invalid,")
+        # The operator rules on it while the sheet is out with the PMC.
+        report.status = "valid"
+        report.save()
+        upload = SimpleUploadedFile("reviewed.csv", edited.encode(), content_type="text/csv")
+
+        response = client.post("/security/import-csv/", {"csv_file": upload}, follow=True)
+
+        report.refresh_from_db()
+        assert report.status == "valid"
+        body = response.content.decode()
+        assert "conflicted" in body
+        assert f"report {report.pk}" in body
+
+    def test_force_checkbox_lets_the_sheet_win(self, client: Client) -> None:
+        report = SecurityReportFactory(status="new")
+        edited = self._csv(client).replace(",new,", ",invalid,")
+        report.status = "valid"
+        report.save()
+        upload = SimpleUploadedFile("reviewed.csv", edited.encode(), content_type="text/csv")
+
+        client.post("/security/import-csv/", {"csv_file": upload, "force": "on"}, follow=True)
+
+        report.refresh_from_db()
+        assert report.status == "invalid"
+
+    def test_dry_run_checkbox_writes_nothing(self, client: Client) -> None:
+        report = SecurityReportFactory(status="new")
+        edited = self._csv(client).replace(",new,", ",valid,")
+        upload = SimpleUploadedFile("reviewed.csv", edited.encode(), content_type="text/csv")
+
+        response = client.post(
+            "/security/import-csv/", {"csv_file": upload, "dry_run": "on"}, follow=True
+        )
+
+        report.refresh_from_db()
+        assert report.status == "new"
+        assert "would apply" in response.content.decode()
+
+    def test_import_with_no_file_says_so(self, client: Client) -> None:
+        response = client.post("/security/import-csv/", {}, follow=True)
+        assert "Choose a reviewed" in response.content.decode()
+
+    def test_import_rejects_a_spreadsheet_binary(self, client: Client) -> None:
+        upload = SimpleUploadedFile(
+            "reviewed.xlsx",
+            b"PK\x03\x04\xff\xfe\x00binary",
+            content_type="application/vnd.ms-excel",
+        )
+        response = client.post("/security/import-csv/", {"csv_file": upload}, follow=True)
+        assert "Comma-separated values" in response.content.decode()
+
+    def test_an_impossible_report_id_does_not_500_the_upload(self, client: Client) -> None:
+        """A twenty-digit id parses as a Python int and then raises OverflowError out
+        of the pk__in query. Unhandled, that is a 500 on an endpoint anybody on the
+        Tailscale net can POST to."""
+        SecurityReportFactory(status="new")
+        rows = self._csv(client).splitlines()
+        cells = rows[1].split(",")
+        cells[0] = "9" * 20
+        payload = f"{rows[0]}\n{','.join(cells)}\n"
+        upload = SimpleUploadedFile("reviewed.csv", payload.encode(), content_type="text/csv")
+
+        response = client.post("/security/import-csv/", {"csv_file": upload}, follow=True)
+
+        assert response.status_code == 200
+        assert "no-id" in response.content.decode()
+
+    def test_import_rejects_someone_elses_csv(self, client: Client) -> None:
+        upload = SimpleUploadedFile(
+            "scan.csv", b"finding,severity\nsome scan,high\n", content_type="text/csv"
+        )
+        response = client.post("/security/import-csv/", {"csv_file": upload}, follow=True)
+        assert "report_id" in response.content.decode()
+
+    def test_import_is_post_only(self, client: Client) -> None:
+        assert client.get("/security/import-csv/").status_code == 405
+
+    def test_the_list_page_offers_the_round_trip(self, client: Client) -> None:
+        body = client.get("/security/").content.decode()
+        assert "Export CSV" in body
+        assert "Import edits" in body
+        # The guard column is the whole safety story; the page has to say so.
+        assert "check" in body
+
+    def test_a_no_op_verdict_save_does_not_delete_the_pmc_s_cve(self, client: Client) -> None:
+        """The verdict form used to blank matched_cve_id for any status but
+        "duplicate". Harmless while that form was the only writer; silent data loss
+        once the review sheet could set it too — the operator opens the report,
+        saves without touching anything, and the PMC's reference is gone."""
+        report = SecurityReportFactory(status="valid", matched_cve_id="CVE-2026-1234")
+
+        client.post(
+            f"/security/{report.pk}/verdict/",
+            {"status": "valid", "operator_notes": "", "matched_cve_id": "CVE-2026-1234"},
+        )
+
+        report.refresh_from_db()
+        assert report.matched_cve_id == "CVE-2026-1234"
+
+    def test_clearing_the_cve_field_still_clears_it(self, client: Client) -> None:
+        report = SecurityReportFactory(status="valid", matched_cve_id="CVE-2026-1234")
+
+        client.post(
+            f"/security/{report.pk}/verdict/",
+            {"status": "valid", "operator_notes": "", "matched_cve_id": ""},
+        )
+
+        report.refresh_from_db()
+        assert report.matched_cve_id == ""
+
+    def test_flipping_away_from_duplicate_still_drops_the_reference(self, client: Client) -> None:
+        """The one case where dropping it is right, and why the old blanket rule
+        existed: "actually valid" means the CVE it duplicated no longer describes
+        it. Kept working — see test_clearing_duplicate_clears_cve_id."""
+        report = SecurityReportFactory(status="duplicate", matched_cve_id="CVE-2026-1234")
+
+        client.post(
+            f"/security/{report.pk}/verdict/",
+            {"status": "valid", "operator_notes": "", "matched_cve_id": "CVE-2026-1234"},
+        )
+
+        report.refresh_from_db()
+        assert report.matched_cve_id == ""
+
+    def test_a_forced_overwrite_names_the_report_it_overwrote(self, client: Client) -> None:
+        """Filtering the per-row messages on outcome alone skipped every applied row,
+        so a forced import flashed a bare "applied 1" and the operator's own ruling
+        was gone with nothing saying which report."""
+        report = SecurityReportFactory(status="new")
+        edited = self._csv(client).replace(",new,", ",invalid,")
+        report.status = "valid"
+        report.save()
+        upload = SimpleUploadedFile("reviewed.csv", edited.encode(), content_type="text/csv")
+
+        response = client.post(
+            "/security/import-csv/", {"csv_file": upload, "force": "on"}, follow=True
+        )
+
+        body = response.content.decode()
+        assert "forced over newer work" in body
+        assert f"report {report.pk}" in body
+        assert "forced over a newer state" in body
+
+    def test_a_valid_report_with_a_cve_is_not_labelled_a_duplicate(self, client: Client) -> None:
+        """A CVE here no longer implies duplicate — the verdict form keeps the field
+        for every status and the sheet writes it independently — so the exact PMC
+        ruling this feature carries was displayed as "this is a duplicate"."""
+        SecurityReportFactory(title="Real one", status="valid", matched_cve_id="CVE-2026-1234")
+
+        body = client.get("/security/").content.decode()
+
+        assert "CVE-2026-1234" in body
+        assert "Dup of" not in body
+        assert "Related" in body
+
+    def test_a_genuine_duplicate_still_says_dup_of(self, client: Client) -> None:
+        SecurityReportFactory(status="duplicate", matched_cve_id="CVE-2026-1234")
+        assert "Dup of" in client.get("/security/").content.decode()
+
+    def test_the_verdict_form_rejects_an_overlong_cve(self, client: Client) -> None:
+        """SQLite doesn't enforce max_length, so a 309-character "CVE" persisted here
+        and would be a DataError — an unhandled 500 losing the status and notes in the
+        same save() — on the Postgres install DATABASE_URL promises."""
+        report = SecurityReportFactory(status="valid")
+
+        response = client.post(
+            f"/security/{report.pk}/verdict/",
+            {"status": "valid", "matched_cve_id": "CVE-2026-" + "9" * 300},
+        )
+
+        assert response.status_code == 400
+        report.refresh_from_db()
+        assert report.matched_cve_id == ""
+
+    def test_the_export_says_it_is_capped_before_you_click(self, client: Client) -> None:
+        """A cap applied silently means the operator shares "the backlog" and the
+        bottom of it isn't in the file."""
+        for _ in range(3):
+            SecurityReportFactory()
+
+        with patch("franktheunicorn.dashboard.views.MAX_SECURITY_CSV_EXPORT_ROWS", 2):
+            body = client.get("/security/").content.decode()
+
+        assert "stops at" in body
+        assert "export_security_csv" in body
+
+    def test_no_cap_notice_when_everything_fits(self, client: Client) -> None:
+        SecurityReportFactory()
+        assert "stops at" not in client.get("/security/").content.decode()
+
+    def test_the_export_honours_the_sort_the_page_is_showing(self, client: Client) -> None:
+        SecurityReportFactory(title="ranked high", priority=90.0)
+        SecurityReportFactory(title="arrived later", priority=1.0)
+
+        body = self._csv(client, "?sort=newest")
+
+        assert body.index("arrived later") < body.index("ranked high")
+        # And the list page hands the sort to the export link, or the setting is moot.
+        assert "sort=newest" in client.get("/security/?sort=newest").content.decode()
+
+    def test_the_csv_is_not_cacheable(self, client: Client) -> None:
+        """Unfixed vulnerability reports — with full=1, a working description of how
+        to exploit them — persisting in the disk cache of whatever laptop reached the
+        dashboard over Tailscale."""
+        SecurityReportFactory()
+        response = client.get("/security/export.csv?full=1")
+        assert response["Cache-Control"] == "no-store"
+
+    def test_the_download_filename_says_which_slice(self, client: Client) -> None:
+        SecurityReportFactory(status="valid")
+        response = client.get("/security/export.csv?status=valid")
+        assert "-valid-" in response["Content-Disposition"]
+
+    def test_a_pmc_comment_is_visible_on_the_report(self, client: Client) -> None:
+        """An import that lands a ruling in a field no page shows is worse than no
+        import: the operator then rules on the report believing nobody else has."""
+        report = SecurityReportFactory(external_notes="PMC: this is a real one, CVE it")
+
+        body = client.get(f"/security/{report.pk}/").content.decode()
+
+        assert "From the review sheet" in body
+        assert "PMC: this is a real one, CVE it" in body

@@ -635,6 +635,23 @@ class SecurityReport(models.Model):
     # Operator verdict
     operator_notes = models.TextField(blank=True, default="")
 
+    # What somebody who isn't the operator said about this report. A security
+    # backlog gets ruled on by more people than the one maintainer running this
+    # install — on an ASF project that's the PMC — and they are not going to be
+    # handed a Tailscale address and a login. So the collaboration path is a CSV
+    # round-trip through a shared spreadsheet (see security.sheet_sync), and this
+    # is the column they write in.
+    #
+    # Deliberately not operator_notes: merging two people's notes into one field
+    # means the next export can't tell whose text it's sending back out, and an
+    # import silently overwrites whichever was edited more recently. Two fields
+    # cost a migration; one field costs somebody's review comment.
+    external_notes = models.TextField(blank=True, default="")
+    # When external_notes last actually changed, not when the row was last
+    # imported — a re-import of an unedited sheet must not make stale comments
+    # look fresh, which is the whole reason this isn't just updated_at.
+    external_notes_at = models.DateTimeField(null=True, blank=True)
+
     # A scanner's own id for this finding (e.g. "f001"), when the report came out
     # of a findings manifest rather than a standalone file. Kept because it's the
     # join key the archive itself uses: PATCHES/bug_N/meta.json names the finding
