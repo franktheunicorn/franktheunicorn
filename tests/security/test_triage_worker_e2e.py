@@ -238,7 +238,16 @@ class TestEmailIngestionQueuesTriage:
                 return_value=fetched,
             ),
         ):
-            runner._last_security_email_poll = 0.0
+            # -inf, not 0.0. The poll gate is
+            # `time.monotonic() - _last_security_email_poll < poll_interval_seconds`,
+            # and monotonic() is *seconds since boot*: on a developer box that has
+            # been up for days it is ~460,000 and 0.0 looks infinitely stale, but on
+            # a freshly-booted CI runner it is double digits, so 0.0 - with a 300s
+            # default interval - meant the poll returned early, no report was
+            # created, and the test died on DoesNotExist. Reproduced by pinning
+            # monotonic() to 120.0. tests/worker/test_security_email_poll.py already
+            # used -inf for this reason; this copy did not.
+            runner._last_security_email_poll = float("-inf")
             runner._poll_security_emails(config)
 
         report = SecurityReport.objects.get(email_message_id="<m1>")
