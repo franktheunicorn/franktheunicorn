@@ -441,6 +441,72 @@ thead th { border-bottom: 2px solid var(--border); }
     white-space: nowrap;
 }
 
+/* Deep verification: per-branch verdicts on whether the vulnerability is real.
+   A table because the whole point is comparing branches, and it scrolls rather
+   than wrapping a branch name mid-word on a phone. */
+.verify-panel {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.5rem 0.75rem;
+    margin-bottom: 1rem;
+    font-size: 0.85rem;
+}
+.verify-panel h3 { font-size: 0.9rem; margin: 0.25rem 0 0.35rem; }
+.verify-hint { color: var(--muted); margin: 0.35rem 0 0.6rem; }
+.verify-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0.5rem 0;
+    font-size: 0.8rem;
+    display: block;
+    overflow-x: auto;
+}
+.verify-table th {
+    text-align: left;
+    font-weight: 600;
+    color: var(--muted);
+    border-bottom: 1px solid var(--border);
+    padding: 0.3rem 0.5rem 0.3rem 0;
+}
+.verify-table td { padding: 0.35rem 0.5rem 0.35rem 0; vertical-align: top; }
+.verify-detail-row td {
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0.6rem;
+    color: var(--fg);
+}
+.verify-detail-row p { margin: 0 0 0.35rem; }
+.verify-evidence-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--muted);
+    margin-top: 0.4rem;
+}
+.verify-evidence {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.4rem 0.55rem;
+    margin: 0.2rem 0 0;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    font-size: 0.75rem;
+}
+/* The verdict is the thing the eye should land on, and "affected" is the one
+   that means drop everything. */
+.verify-verdict {
+    display: inline-block;
+    padding: 0.05rem 0.4rem;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 600;
+}
+.verdict-affected { background: var(--red-bg); color: var(--red); }
+.verdict-not-affected { background: var(--green-bg, var(--card)); color: var(--green, var(--fg)); }
+.verdict-unclear { background: var(--orange-bg); color: var(--orange); }
+.verdict-error { background: var(--card); color: var(--muted); }
+.verify-btn { color: var(--orange); border-color: var(--orange); }
+.verify-result { margin: 0.4rem 0 0; font-size: 0.8rem; }
+
 /* A comment that came back from the shared sheet. Visibly not the operator's
    own notes — same reason they're separate fields. */
 .external-notes {

@@ -1144,6 +1144,63 @@ class SecurityEmailConfig(BaseModel):
         return v
 
 
+class SecurityVerifierConfig(BaseModel):
+    """Config for the deep verifier: does this reported vulnerability exist?
+
+    Triage reads the *report* and rules on plausibility from the text plus a CVE
+    lookup. This reads the *code*: it puts a coding agent in a checkout of the
+    project with the report in hand and asks it to go and look. Slow and
+    expensive — one long agent run per branch — so it is off by default and never
+    fires without either a button press or an explicit opt-in at import.
+
+    ``reviewer`` names an entry in ``agent_cli_reviewers`` and borrows its CLI
+    path, argv shape and — the point of this, for a remote setup — its
+    ``remote`` block. There is no second copy of "how do I reach the box where
+    the agent runs".
+
+    ``extra_args`` is where the depth knobs go. Deliberately not a hardcoded
+    ``--ultra``: the flag for "think as hard as you can" differs per CLI and
+    changes between releases, so the operator names it and it stays correct
+    without a code change.
+
+    The branch list is the reason this is per-project rather than per-file: a
+    vulnerability that is real on ``master`` may be absent from ``branch-3.5``
+    because the code was rewritten, or real on both and only fixed on one. A
+    verdict without a branch attached isn't actionable.
+    """
+
+    enabled: bool = False
+    #: Which ``agent_cli_reviewers`` entry to borrow the CLI and remote config from.
+    reviewer: str = "claude"
+    #: Override the reviewer's model. Empty means "whatever the reviewer uses".
+    model: str = ""
+    #: Appended to the agent's argv. Where "run it in ultra mode" is expressed.
+    extra_args: list[str] = Field(default_factory=list)
+    #: Per-branch budget. A real investigation reads files and runs greps; the
+    #: review-path default of 300s is nowhere near enough.
+    timeout_seconds: int = 1800
+    #: Branches beyond the default one, newest-committed first. Each costs a full
+    #: agent run, so the cap is the cost control.
+    max_branches: int = 3
+    #: A branch with no commits in this long is not a branch anyone is shipping
+    #: from, and verifying against it is spend with no consumer.
+    branch_active_within_days: int = 180
+    #: Regexes for "a named version branch". The defaults cover Spark's
+    #: ``branch-4.0``/``branch-3.5``, plus the common ``release-*`` and ``v1.2``
+    #: shapes. Anchored at the start; matched against the short branch name.
+    branch_patterns: list[str] = Field(
+        default_factory=lambda: [r"^branch-\d", r"^release[-/]", r"^v?\d+\.\d+$", r"^stable[-/]"]
+    )
+    #: How much of the report to hand the agent. A scanner archive's raw entry can
+    #: be enormous and the prompt has to leave room for the agent to work.
+    max_report_chars: int = 12_000
+    #: Where the verification checkout lives, under the remote workspace dir. Kept
+    #: separate from the review pipeline's clone on purpose: this one gets checked
+    #: out onto arbitrary release branches and left there, and doing that to the
+    #: tree the review path is mid-diff on would corrupt an unrelated review.
+    workspace_subdir: str = "security-verify"
+
+
 class SecurityTriageConfig(BaseModel):
     """Config for security report triage feature."""
 
@@ -1152,6 +1209,7 @@ class SecurityTriageConfig(BaseModel):
     nvd_api_key_env: str = ""  # optional, for higher NVD rate limits
     auto_triage: bool = True  # automatically run LLM triage on new reports
     sandbox_enabled: bool = False  # allow sandbox POC execution
+    verifier: SecurityVerifierConfig = Field(default_factory=SecurityVerifierConfig)
 
 
 class ForgeRegistryEntry(BaseModel):

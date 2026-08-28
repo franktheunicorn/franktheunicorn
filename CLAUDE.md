@@ -68,6 +68,20 @@ src/franktheunicorn/
                      #   after the export rather than picking a winner, and
                      #   escapes every cell against spreadsheet formula
                      #   injection (report titles are attacker-supplied).
+                     #   verifier.py answers the other question about a report —
+                     #   not "is this plausible" (triage) but "is it actually in
+                     #   my code". Puts a coding agent in a checkout and has it
+                     #   read the source, once per active branch, because a hole
+                     #   real on master may be gone from branch-4.0 and still
+                     #   shipping in branch-3.5. One SecurityVerification row per
+                     #   (report, branch). Uses a checkout distinct from the
+                     #   review pipeline's, since it checks out release branches
+                     #   and leaves them there. Off by default
+                     #   (security_triage.verifier.enabled) and never automatic:
+                     #   a full agent run per branch is real money, so it needs a
+                     #   button press or an explicit --verify / checkbox at
+                     #   import. Borrows an agent_cli_reviewers entry for the CLI
+                     #   and remote config rather than describing the box twice.
   curator/           # Textual TUI for curating voice datasets from
                      #   historical comments (used to seed fine-tuning;
                      #   not part of the live review path)

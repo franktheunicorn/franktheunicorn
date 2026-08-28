@@ -171,6 +171,11 @@ class ZipImportResult:
 
     entries: list[EntryOutcome] = field(default_factory=list)
     queued_triage: int = 0
+    #: Deep-verification runs queued by this import (``auto_verify``).
+    queued_verifications: int = 0
+    #: Why an explicitly requested verification didn't happen. Same reasoning as
+    #: ``triage_skipped_reason``: the caller asked, so silence is a wrong answer.
+    verify_skipped_reason: str = ""
     error: str = ""
     #: Why an explicitly requested triage didn't happen. Carried explicitly so
     #: callers don't have to guess a cause from ``queued_triage == 0`` and blame
@@ -219,6 +224,8 @@ class ZipImportResult:
             parts.append(f"{self.failed} failed")
         if self.queued_triage:
             parts.append(f"{self.queued_triage} queued for triage")
+        if self.queued_verifications:
+            parts.append(f"{self.queued_verifications} queued for verification")
         parts.extend(self.warnings)
         if self.error:
             # A cap tripped mid-walk after rows were already committed. Saying
@@ -232,6 +239,7 @@ def import_reports_from_zip(
     *,
     project: Project | None = None,
     auto_triage: bool = False,
+    auto_verify: bool = False,
     require_security_content: bool = True,
     max_entries: int = MAX_ENTRIES,
     archive_label: str = "",
@@ -264,6 +272,14 @@ def import_reports_from_zip(
     all text, so content sniffing waves them through, each becoming a "report"
     that an operator may then send to an LLM. Set it False to import everything
     textual regardless.
+
+    ``auto_verify`` queues the deep verifier (``security.verifier``) for every
+    report that imported. Opt-in for the same reason as ``auto_triage`` and more
+    so: triage is two LLM calls a report, verification is a full agent run *per
+    active branch* on a real checkout. Queued after the walk rather than inside
+    it, because a verification needs nothing from the per-entry loop and threading
+    a second flag through five functions to arrive at the same place is how the
+    two get out of step.
 
     ``max_entries`` lets a caller ask for a tighter bound than ``MAX_ENTRIES``.
     Neither door does any more — the dashboard used to, on the grounds that the
@@ -336,7 +352,67 @@ def import_reports_from_zip(
         # table) and hand the CLI and the dashboard the same fiction. Reconcile to
         # what the database actually holds.
         _discard_uncommitted_outcomes(result)
+        return result
+
+    if auto_verify:
+        # After the transaction, deliberately. A command queued for a row that then
+        # rolled back is a foreign key to nothing, and the failure mode is the
+        # worker picking up work for a report the operator never got.
+        _queue_verifications(result)
     return result
+
+
+def _queue_verifications(result: ZipImportResult) -> None:
+    """Queue the deep verifier for everything that imported.
+
+    Honours ``verifier.enabled`` and says so when it declines, because this is
+    reached by an explicit ``--verify``/checkbox: an operator who asked for it and
+    got silence would reasonably conclude the flag was broken rather than that a
+    setting they've never seen is false.
+    """
+    ids = [entry.report_id for entry in result.entries if entry.outcome == "imported"]
+    ids = [report_id for report_id in ids if report_id]
+    if not ids:
+        return
+
+    try:
+        from franktheunicorn.config.loader import get_operator_config
+
+        verifier = get_operator_config().security_triage.verifier
+    except Exception as exc:
+        logger.warning("Could not load operator config; importing unverified", exc_info=True)
+        result.verify_skipped_reason = (
+            f"could not read the operator config ({str(exc) or exc.__class__.__name__})"
+        )
+        return
+    if not verifier.enabled:
+        logger.info("security_triage.verifier.enabled is false; importing unverified")
+        result.verify_skipped_reason = "security_triage.verifier.enabled is false in operator.yaml"
+        return
+
+    from franktheunicorn.core.models import SecurityReport
+    from franktheunicorn.security.queue import PRIORITY_BULK, queue_verification
+
+    unattached = 0
+    for report in SecurityReport.objects.filter(pk__in=ids).select_related("project"):
+        if report.project_id is None:
+            # No repo to check against. Counted rather than queued, because the
+            # worker would only reach the same conclusion minutes later, once per
+            # report, and log it where nobody is looking.
+            unattached += 1
+            continue
+        if queue_verification(report, priority=PRIORITY_BULK):
+            result.queued_verifications += 1
+    if unattached:
+        result.verify_skipped_reason = (
+            f"{unattached} report(s) have no project, so there is no repo to verify them "
+            "against — re-import with a project selected"
+        )
+    logger.info(
+        "Queued %d verification(s) from this import%s",
+        result.queued_verifications,
+        f" ({unattached} skipped for having no project)" if unattached else "",
+    )
 
 
 def _discard_uncommitted_outcomes(result: ZipImportResult) -> None:

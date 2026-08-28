@@ -9,6 +9,9 @@ Commands supported:
 - ``run_dual_tests``: differential test verification on a PR.
 - ``run_security_sandbox``: execute a security-report POC in the sandbox.
 - ``run_security_triage``: LLM triage of a security report (NVD + two LLM calls).
+- ``verify_security_report``: put a coding agent in a checkout and have it read
+  the code, once per active branch, to say whether the reported vulnerability is
+  actually there. The long one — see ``STUCK_COMMAND_TIMEOUT_SECONDS``.
 - ``run_agents``: force-run the review pipeline on a PR (no trusted-author
   gate, no dedup against existing drafts).
 """
@@ -164,10 +167,18 @@ def requeue_interrupted_commands() -> int:
 
 
 #: How long a command may sit in ``running`` before this worker calls it hung.
-#: Well past the longest legitimate handler — an agent-CLI review on a large PR
-#: with its clone, fetch and model call — because the cost of being wrong in this
-#: direction is failing a run that was about to succeed.
-STUCK_COMMAND_TIMEOUT_SECONDS = 3 * 60 * 60
+#:
+#: Sized off the longest legitimate handler, which is ``verify_security_report``:
+#: ``verifier.timeout_seconds`` (1800 by default) times ``max_branches`` + 1, plus
+#: a clone of something the size of Spark before any of that. Four branches at the
+#: defaults is two hours of agent time alone, so a three-hour ceiling would fail
+#: runs that were about to succeed — and the cost of being wrong in that direction
+#: is losing work, where being wrong in the other direction just means a hung row
+#: sits a few hours longer than it had to.
+#:
+#: If you raise ``verifier.timeout_seconds`` or ``max_branches`` much past the
+#: defaults, raise this too.
+STUCK_COMMAND_TIMEOUT_SECONDS = 6 * 60 * 60
 
 
 def fail_stuck_commands(now: datetime | None = None) -> int:
@@ -241,6 +252,7 @@ def _dispatch(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
         "run_dual_tests": _run_dual_tests,
         "run_security_sandbox": _run_security_sandbox,
         "run_security_triage": _run_security_triage,
+        "verify_security_report": _verify_security_report,
         "run_agents": _run_agents,
     }
     handler = handlers.get(cmd.command)
@@ -332,6 +344,35 @@ def _run_security_triage(cmd: WorkerCommand, operator_config: OperatorConfig) ->
     triage_report(report, project_config, operator_config)
     report.refresh_from_db()
     cmd.log = f"Triage complete: severity={report.assessed_severity!r} status={report.status!r}"
+
+
+def _verify_security_report(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
+    """Send one report to the deep verifier: is the vulnerability actually there?
+
+    Runs here rather than in the request for the same reason the sandbox does —
+    it is minutes of agent time per branch, on a checkout it may have to fetch
+    first — and the whole outcome goes into ``cmd.log`` so the operator can see
+    what happened even when every branch came back "unclear".
+    """
+    if cmd.security_report is None:
+        msg = "verify_security_report requires a security_report target"
+        raise ValueError(msg)
+
+    from franktheunicorn.security.verifier import verify_report
+
+    run = verify_report(cmd.security_report, operator_config)
+    lines = [run.summary()]
+    for result in run.results:
+        confidence = f" confidence={result.confidence:.2f}" if result.confidence is not None else ""
+        lines.append(f"  {result.branch}: {result.verdict}{confidence} ({result.agent})")
+    cmd.log = "\n".join(lines)
+    if run.error:
+        # A gate declining is not a crash, so this stays a successful command with
+        # a log that says why nothing happened — the alternative is a red "failed"
+        # for `enabled: false`, which sends the operator hunting for a bug.
+        logger.info(
+            "Verification for report #%s did not run: %s", cmd.security_report.pk, run.error
+        )
 
 
 def _run_agents(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:

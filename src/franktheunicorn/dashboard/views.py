@@ -1204,6 +1204,9 @@ def security_report_upload(request: HttpRequest) -> HttpResponse:
     # NVD lookup and two LLM calls per report, which is not a thing to start by
     # accident from a file picker.
     auto_triage = request.POST.get("auto_triage") == "on"
+    # Off unless ticked, and a sharper knob than triage: this is a full agent run
+    # per report per active branch, not two LLM calls.
+    auto_verify = request.POST.get("auto_verify") == "on"
 
     # Not gated on the file name: the importer decides by content and reports a
     # non-zip as an error, so a ".ZIP" or an extensionless export still works.
@@ -1219,6 +1222,7 @@ def security_report_upload(request: HttpRequest) -> HttpResponse:
         upload,
         project=project,
         auto_triage=auto_triage,
+        auto_verify=auto_verify,
         # The filename is the only provenance a browser upload carries, and two
         # scans of one repo share entry paths, so without it the list has pairs of
         # identically-titled reports from different archives.
@@ -1251,6 +1255,10 @@ def security_report_upload(request: HttpRequest) -> HttpResponse:
             else:
                 reason = "open one and hit Run LLM Triage, or re-upload with triage ticked."
             messages.info(request, f"{result.imported} report(s) imported untriaged — {reason}")
+        # Reported only when it was asked for. An operator who didn't tick the box
+        # doesn't need telling that a thing they declined didn't happen.
+        if auto_verify and result.verify_skipped_reason:
+            messages.warning(request, f"Not verified: {result.verify_skipped_reason}.")
     elif result.duplicates and not result.failed:
         # The hint above the button advertises re-import as safe, so the case it
         # invites must not come back as a warning-coloured "nothing imported".
@@ -1580,12 +1588,18 @@ def security_report_detail(request: HttpRequest, report_id: int) -> HttpResponse
         .first()
     )
 
+    # Default branch first, then the rest alphabetically — not by created_at.
+    # A run writes every branch's row with the same timestamp, so ordering by it
+    # leaves the table in whatever order the database felt like.
+    verifications = list(report.verifications.order_by("branch"))
+
     return render(
         request,
         "dashboard/security_detail.html",
         {
             "report": report,
             "sandbox_enabled": sandbox_enabled,
+            "verifications": verifications,
             **_triage_area_context(report, triage_command),
         },
     )
@@ -1842,6 +1856,60 @@ def security_report_sandbox(request: HttpRequest, report_id: int) -> HttpRespons
         else "A sandbox run is already queued for this report."
     )
     return HttpResponse(f'<div class="sandbox-result queued-note">{message}</div>')
+
+
+@require_POST
+def security_report_verify(request: HttpRequest, report_id: int) -> HttpResponse:
+    """Queue the deep verifier: go and read the code, is this vulnerability real (htmx).
+
+    Not the same question as triage. Triage rules on the report; this puts an agent
+    in a checkout of the project — a distinct one, so it can check out release
+    branches without disturbing the review pipeline's tree — and has it look, once
+    per active branch.
+
+    Queued rather than run in-request for the obvious reason: it is minutes of
+    agent time per branch. The gate is reported rather than hidden, because a
+    button that silently does nothing when ``verifier.enabled`` is false is the
+    exact failure this codebase keeps writing rules about.
+    """
+    report = get_object_or_404(SecurityReport.objects.select_related("project"), pk=report_id)
+
+    from franktheunicorn.config.loader import get_operator_config
+    from franktheunicorn.security.queue import PRIORITY_INTERACTIVE, queue_verification
+
+    verifier = get_operator_config().security_triage.verifier
+    if not verifier.enabled:
+        return render(
+            request,
+            "dashboard/_security_verify_queued.html",
+            {
+                "report": report,
+                "blocked": (
+                    "Verification is off. Set security_triage.verifier.enabled: true in "
+                    "operator.yaml — it runs a coding agent over a checkout once per "
+                    "active branch, so it is opt-in."
+                ),
+            },
+        )
+    if report.project is None:
+        return render(
+            request,
+            "dashboard/_security_verify_queued.html",
+            {
+                "report": report,
+                "blocked": (
+                    "This report isn't attached to a project, so there's no repository "
+                    "to check it against. Set one and try again."
+                ),
+            },
+        )
+
+    created = queue_verification(report, priority=PRIORITY_INTERACTIVE)
+    return render(
+        request,
+        "dashboard/_security_verify_queued.html",
+        {"report": report, "created": created, "verifier": verifier},
+    )
 
 
 @require_POST

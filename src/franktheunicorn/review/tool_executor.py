@@ -132,6 +132,7 @@ class ToolExecutor(Protocol):
         repo: str,
         local_path: Path | None = None,
         clone_url: str = "",
+        workspace_subdir: str = "",
     ) -> str | None:
         """Ensure a checkout exists and return its working-directory path.
 
@@ -164,6 +165,7 @@ class LocalExecutor:
         repo: str,
         local_path: Path | None = None,
         clone_url: str = "",
+        workspace_subdir: str = "",
     ) -> str | None:
         if local_path is None:
             logger.debug("LocalExecutor: no local_path provided for %s/%s", owner, repo)
@@ -309,8 +311,10 @@ class RemoteSSHExecutor:
             )
         return result.returncode == 0
 
-    def _remote_repo_path(self, owner: str, repo: str) -> str:
+    def _remote_repo_path(self, owner: str, repo: str, subdir: str = "") -> str:
         base = self.config.remote_workspace_dir.rstrip("/")
+        if subdir:
+            return f"{base}/{subdir.strip('/')}/{owner}/{repo}"
         return f"{base}/{owner}/{repo}"
 
     @staticmethod
@@ -363,6 +367,7 @@ class RemoteSSHExecutor:
         repo: str,
         local_path: Path | None = None,
         clone_url: str = "",
+        workspace_subdir: str = "",
     ) -> str | None:
         if not clone_url:
             clone_url = self.config.clone_url_template.format(owner=owner, repo=repo)
@@ -370,8 +375,8 @@ class RemoteSSHExecutor:
         https_fallback = self._https_fallback_url(clone_url)
         ssh_fallback = self._ssh_fallback_url(clone_url)
 
-        remote_dir = self._remote_repo_path(owner, repo)
-        parent_dir = f"{self.config.remote_workspace_dir.rstrip('/')}/{owner}"
+        remote_dir = self._remote_repo_path(owner, repo, workspace_subdir)
+        parent_dir = remote_dir.rsplit("/", 1)[0]
 
         quoted_parent = self._quote_remote_path(parent_dir)
         quoted_remote = self._quote_remote_path(remote_dir)

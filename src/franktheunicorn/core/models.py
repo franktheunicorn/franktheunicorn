@@ -695,6 +695,74 @@ class SecurityReport(models.Model):
         return f"SecurityReport: {self.title or self.raw_text[:60]}"
 
 
+class SecurityVerification(models.Model):
+    """One branch's answer to "is this reported vulnerability actually there?".
+
+    Triage rules on the *report* — is it plausible, is it a known CVE, is it
+    documented behaviour — from the text. This is the other question, and only
+    the code can answer it: a coding agent is put in a checkout of the project
+    with the report in hand and told to go and look.
+
+    One row per branch, not one per report, because that is the shape of the
+    answer. A deserialization hole in the RPC path may be real on ``master``,
+    gone from ``branch-4.0`` where the code was rewritten, and still present in
+    ``branch-3.5`` which the project is also shipping. "Is it real?" has no
+    single answer for a repo with live release branches, and a verdict with no
+    branch attached is not something a maintainer can act on.
+    """
+
+    VERDICT_CHOICES = [
+        ("affected", "Affected"),
+        ("not-affected", "Not affected"),
+        ("unclear", "Unclear"),
+        ("error", "Could not check"),
+    ]
+
+    report = models.ForeignKey(
+        SecurityReport,
+        on_delete=models.CASCADE,
+        related_name="verifications",
+    )
+    #: Short branch name as git reports it: "master", "branch-3.5".
+    branch = models.CharField(max_length=255)
+    #: The commit actually examined. Without it a verdict has no shelf life —
+    #: "not affected on master" means nothing a month later.
+    commit = models.CharField(max_length=64, blank=True, default="")
+    verdict = models.CharField(max_length=20, choices=VERDICT_CHOICES, default="unclear")
+    #: The agent's own confidence, when it gave one. Kept separate from the
+    #: verdict because "affected, 0.4" is a different thing to act on than
+    #: "affected, 0.95" and collapsing them loses the distinction.
+    confidence = models.FloatField(null=True, blank=True)
+    #: The reasoning, as prose. This is what the operator actually reads.
+    summary = models.TextField(blank=True, default="")
+    #: File/line references the agent based its answer on, one per line. The
+    #: difference between a verdict and a verdict somebody can check.
+    evidence = models.TextField(blank=True, default="")
+    #: Which agent and model produced this, because the answer is only as good as
+    #: its source and that changes between runs.
+    agent = models.CharField(max_length=100, blank=True, default="")
+    #: Raw output, kept when parsing found no structured verdict. The fallback
+    #: that stops an unparseable run looking like a clean "unclear".
+    raw_output = models.TextField(blank=True, default="")
+    duration_seconds = models.FloatField(null=True, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["-created_at", "branch"]
+        constraints = [
+            # One verdict per report per branch: a re-run replaces rather than
+            # accumulates, so the detail page shows the current answer instead of
+            # a pile of them in unclear order.
+            models.UniqueConstraint(
+                fields=["report", "branch"],
+                name="unique_verification_per_report_branch",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"SecurityVerification(report={self.report_id}, {self.branch}): {self.verdict}"
+
+
 class SecurityTriageFeedback(models.Model):
     """Operator agree/disagree feedback on a single triage verdict.
 

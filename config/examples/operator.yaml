@@ -292,6 +292,46 @@ digest_enabled: false
 #   auto_triage: true          # draft an LLM assessment on ingest (no send)
 #   sandbox_enabled: false     # allow sandboxed POC execution (worker only)
 #   # nvd_api_key_env: "NVD_API_KEY"   # optional, for higher NVD rate limits
+#
+#   # Deep verification: not "is this report plausible" (that's triage above),
+#   # but "is the vulnerability actually in my code". Puts a coding agent in a
+#   # checkout and has it read the source, once per active branch — because a
+#   # hole real on master may be gone from branch-4.0 and still shipping in
+#   # branch-3.5, and that last one decides whether there's an emergency.
+#   #
+#   # Off by default because it is genuinely expensive: one full agent run per
+#   # report per branch. Even with this on, nothing verifies automatically —
+#   # it takes the Verify button on a report, or --verify / the "Verify against
+#   # the code" checkbox at import.
+#   # SECURITY: the agent is handed report text a stranger emailed you, and it
+#   # has whatever tool access the reviewer entry gives it. Reports carrying
+#   # prompt-injection patterns are refused outright before they reach it, but
+#   # that filter is not exhaustive — so point `reviewer` at an entry running in
+#   # a read-only mode (e.g. the cursor-agent entry's `--mode ask`) if you can.
+#   # See docs/security-design.md section 4.10.
+#   verifier:
+#     enabled: false
+#     # Which agent_cli_reviewers entry to borrow the CLI path, argv shape and
+#     # (for a remote setup) the whole `remote:` block from. One description of
+#     # how to reach the box the agent runs on, not two.
+#     reviewer: "claude"
+#     # Override the reviewer's model for verification only. Worth pointing at
+#     # your strongest one: this is the job where being wrong is expensive.
+#     model: "claude-opus-5"
+#     # Where "run it in ultra mode" goes. Deliberately not a hardcoded flag —
+#     # the name for "think as hard as you can" differs per CLI and changes
+#     # between releases, so you name it and it stays correct.
+#     extra_args: []
+#     timeout_seconds: 1800      # per branch; a real investigation reads files
+#     max_branches: 3            # version branches beyond the default one
+#     branch_active_within_days: 180
+#     # What counts as a named version branch. Defaults cover Spark's
+#     # branch-4.0/branch-3.5 plus the common release-* and v1.2 shapes.
+#     # branch_patterns: ["^branch-\\d", "^release[-/]", "^v?\\d+\\.\\d+$"]
+#     #
+#     # NOTE: if you raise timeout_seconds or max_branches much past these,
+#     # raise worker.commands.STUCK_COMMAND_TIMEOUT_SECONDS too, or a long
+#     # legitimate run gets failed as hung.
 #   email:
 #     enabled: true
 #     # --- Gmail over IMAP ---

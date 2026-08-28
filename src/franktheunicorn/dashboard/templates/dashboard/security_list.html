@@ -33,6 +33,14 @@
                title="Off by default: one NVD lookup and two LLM calls per report">
             <input type="checkbox" name="auto_triage"> Triage on import
         </label>
+        {# Sharper than triage and priced accordingly: a full agent run per report #}
+        {# per active branch, on a real checkout. Queued through the worker like #}
+        {# every other command, so a big archive drains in order rather than #}
+        {# starting hundreds of agents at once. #}
+        <label class="zip-import-triage"
+               title="Off by default and expensive: one coding-agent run per report per active branch. Needs security_triage.verifier.enabled.">
+            <input type="checkbox" name="auto_verify"> Verify against the code
+        </label>
         <button type="submit" class="action-btn post">📦 Upload &amp; Import</button>
     </form>
 

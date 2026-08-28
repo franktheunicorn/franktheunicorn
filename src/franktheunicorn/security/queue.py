@@ -67,6 +67,16 @@ def queue_triage(report: SecurityReport, *, priority: int = PRIORITY_BULK) -> bo
     return queue_command("run_security_triage", report=report, priority=priority)
 
 
+def queue_verification(report: SecurityReport, *, priority: int = PRIORITY_BULK) -> bool:
+    """Queue the deep verifier for one report unless a run is already in flight.
+
+    Same door, same dedup, same priority rules as everything else here — a
+    verification is minutes of agent time per branch, so a double-click producing
+    two of them is worse than for any other command in this queue.
+    """
+    return queue_command("verify_security_report", report=report, priority=priority)
+
+
 def queue_command(
     command: str,
     report: SecurityReport | None = None,

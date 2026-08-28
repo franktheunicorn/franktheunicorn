@@ -109,6 +109,71 @@
 </div>
 {% endif %}
 
+<!-- Deep verification: an agent reads the code, once per active branch -->
+{# Shown whether or not there are results yet, and whether or not the feature is #}
+{# enabled — the button's answer explains the gate rather than the button being #}
+{# absent, because a missing button is indistinguishable from a missing feature. #}
+<section class="verify-panel">
+    <h3>Does the vulnerability actually exist?</h3>
+    <p class="verify-hint">
+        Different question from the triage above: this puts a coding agent in a
+        checkout of
+        {% if report.project %}<code>{{ report.project.full_name }}</code>{% else %}the project{% endif %}
+        and has it read the source, once per active branch — because a hole that's
+        real on the default branch may be gone from one release branch and still
+        shipping in another.
+    </p>
+
+    {% if verifications %}
+    <table class="verify-table">
+        <thead>
+            <tr><th>Branch</th><th>Verdict</th><th>Confidence</th><th>Checked</th></tr>
+        </thead>
+        <tbody>
+            {% for v in verifications %}
+            <tr>
+                <td><code>{{ v.branch }}</code>
+                    {% if v.commit %}<span class="muted">@{{ v.commit|slice:":8" }}</span>{% endif %}
+                </td>
+                <td><span class="verify-verdict verdict-{{ v.verdict }}">{{ v.get_verdict_display }}</span></td>
+                <td>{% if v.confidence != None %}{{ v.confidence|floatformat:2 }}{% else %}<span class="muted">—</span>{% endif %}</td>
+                <td class="muted">{{ v.created_at|timesince }} ago{% if v.agent %} · {{ v.agent }}{% endif %}</td>
+            </tr>
+            {% if v.summary or v.evidence or v.raw_output %}
+            <tr class="verify-detail-row">
+                <td colspan="4">
+                    {% if v.summary %}<p>{{ v.summary|linebreaksbr }}</p>{% endif %}
+                    {% if v.evidence %}
+                    <p class="verify-evidence-label">Evidence</p>
+                    <pre class="verify-evidence">{{ v.evidence }}</pre>
+                    {% endif %}
+                    {# Only when parsing found no verdict — kept so an unparseable #}
+                    {# answer can't pass for a considered one. #}
+                    {% if v.raw_output %}
+                    <details>
+                        <summary>Raw agent output (no JSON verdict found)</summary>
+                        <pre class="verify-evidence">{{ v.raw_output }}</pre>
+                    </details>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endif %}
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+
+    <div id="verify-area">
+        <button class="action-btn verify-btn"
+                hx-post="{% url 'dashboard:security_verify' report.pk %}"
+                hx-target="#verify-area"
+                hx-swap="innerHTML"
+                hx-confirm="Run the deep verifier? This runs a coding agent over a checkout once per active branch — minutes each.">
+            🔍 {% if verifications %}Re-verify{% else %}Verify against the code{% endif %}
+        </button>
+    </div>
+</section>
+
 <!-- Operator Verdict -->
 <div id="verdict-area" style="margin-bottom: 1rem;">
     {% include "dashboard/_security_verdict.html" %}

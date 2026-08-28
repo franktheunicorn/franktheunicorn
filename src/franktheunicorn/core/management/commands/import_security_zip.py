@@ -33,6 +33,17 @@ class Command(BaseCommand):
             ),
         )
         parser.add_argument(
+            "--verify",
+            action="store_true",
+            help=(
+                "Queue the deep verifier for every imported report — an agent reads "
+                "the code and says whether the vulnerability is actually there, once "
+                "per active branch. Off by default and more expensive than --triage: "
+                "a full agent run per report per branch. Needs "
+                "security_triage.verifier.enabled."
+            ),
+        )
+        parser.add_argument(
             "--no-filter",
             action="store_true",
             help=(
@@ -58,6 +69,7 @@ class Command(BaseCommand):
             archive,
             project=project,
             auto_triage=bool(options.get("triage")),
+            auto_verify=bool(options.get("verify")),
             require_security_content=not options.get("no_filter"),
         )
 
@@ -83,6 +95,13 @@ class Command(BaseCommand):
             raise CommandError(result.error)
 
         self.stdout.write(self.style.SUCCESS(summary))
+        # Named separately from triage's: an operator who passed --verify and got
+        # nothing needs the reason, and "verifier.enabled is false" is a setting
+        # they may never have seen.
+        if options.get("verify") and result.verify_skipped_reason:
+            self.stdout.write(
+                self.style.WARNING(f"  Not verified: {result.verify_skipped_reason}.")
+            )
         if result.imported and not result.queued_triage:
             if result.triage_skipped_reason:
                 self.stdout.write(

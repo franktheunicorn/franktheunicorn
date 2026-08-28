@@ -1290,3 +1290,143 @@ class TestSecurityCsvRoundTrip:
 
         assert "From the review sheet" in body
         assert "PMC: this is a real one, CVE it" in body
+
+
+@pytest.mark.django_db
+class TestSecurityVerifyButton:
+    """The Verify button and the per-branch verdict table.
+
+    Every outcome is said out loud, including the gate declining — a button that
+    swaps in nothing is indistinguishable from a broken one, which is the failure
+    this codebase keeps writing rules about.
+    """
+
+    @staticmethod
+    def _config(*, enabled: bool) -> Any:
+        from franktheunicorn.config.models import OperatorConfig
+
+        config = OperatorConfig()
+        config.security_triage.verifier.enabled = enabled
+        return config
+
+    def test_the_button_is_on_the_report_page(self, client: Client) -> None:
+        report = SecurityReportFactory(project=ProjectFactory())
+        body = client.get(f"/security/{report.pk}/").content.decode()
+        assert "Verify against the code" in body
+        assert "Does the vulnerability actually exist?" in body
+
+    def test_clicking_queues_a_worker_command(self, client: Client) -> None:
+        from franktheunicorn.core.models import WorkerCommand
+
+        report = SecurityReportFactory(project=ProjectFactory())
+        with patch(
+            "franktheunicorn.config.loader.get_operator_config",
+            return_value=self._config(enabled=True),
+        ):
+            response = client.post(f"/security/{report.pk}/verify/")
+
+        assert response.status_code == 200
+        assert "queued" in response.content.decode().lower()
+        assert (
+            WorkerCommand.objects.filter(
+                command="verify_security_report", security_report=report
+            ).count()
+            == 1
+        )
+
+    def test_a_second_click_does_not_queue_a_second_run(self, client: Client) -> None:
+        """Minutes of agent time per branch, so a double-click mattering here is
+        worse than for anything else in this queue."""
+        from franktheunicorn.core.models import WorkerCommand
+
+        report = SecurityReportFactory(project=ProjectFactory())
+        with patch(
+            "franktheunicorn.config.loader.get_operator_config",
+            return_value=self._config(enabled=True),
+        ):
+            client.post(f"/security/{report.pk}/verify/")
+            response = client.post(f"/security/{report.pk}/verify/")
+
+        assert "already running" in response.content.decode()
+        assert WorkerCommand.objects.filter(command="verify_security_report").count() == 1
+
+    def test_the_disabled_gate_names_the_setting(self, client: Client) -> None:
+        from franktheunicorn.core.models import WorkerCommand
+
+        report = SecurityReportFactory(project=ProjectFactory())
+        with patch(
+            "franktheunicorn.config.loader.get_operator_config",
+            return_value=self._config(enabled=False),
+        ):
+            response = client.post(f"/security/{report.pk}/verify/")
+
+        body = response.content.decode()
+        assert "verifier.enabled" in body
+        assert WorkerCommand.objects.filter(command="verify_security_report").count() == 0
+
+    def test_a_report_with_no_project_says_why_it_cannot_run(self, client: Client) -> None:
+        report = SecurityReportFactory(project=None)
+        with patch(
+            "franktheunicorn.config.loader.get_operator_config",
+            return_value=self._config(enabled=True),
+        ):
+            response = client.post(f"/security/{report.pk}/verify/")
+
+        assert "no repository" in response.content.decode() or (
+            "isn't attached" in response.content.decode()
+        )
+
+    def test_verify_is_post_only(self, client: Client) -> None:
+        report = SecurityReportFactory()
+        assert client.get(f"/security/{report.pk}/verify/").status_code == 405
+
+    def test_per_branch_verdicts_are_shown(self, client: Client) -> None:
+        """The whole point is comparing branches: real on master, fixed on 4.0,
+        still shipping in 3.5 is three different pieces of news."""
+        from franktheunicorn.core.models import SecurityVerification
+
+        report = SecurityReportFactory(project=ProjectFactory())
+        SecurityVerification.objects.create(
+            report=report,
+            branch="master",
+            commit="deadbeefcafe1234",
+            verdict="affected",
+            confidence=0.88,
+            summary="Reachable from the RPC handler with no auth.",
+            evidence="core/rpc.py:88 — no auth check",
+            agent="claude/opus",
+        )
+        SecurityVerification.objects.create(
+            report=report, branch="branch-3.5", verdict="not-affected", summary="Fixed here."
+        )
+
+        body = client.get(f"/security/{report.pk}/").content.decode()
+
+        assert "master" in body and "branch-3.5" in body
+        assert "Affected" in body and "Not affected" in body
+        assert "0.88" in body
+        assert "core/rpc.py:88" in body
+        assert "deadbeef" in body  # the commit, so the verdict has a shelf life
+        assert "Re-verify" in body
+
+    def test_raw_output_is_kept_visible_when_parsing_failed(self, client: Client) -> None:
+        """So an unparseable answer can't pass for a considered one."""
+        from franktheunicorn.core.models import SecurityVerification
+
+        report = SecurityReportFactory(project=ProjectFactory())
+        SecurityVerification.objects.create(
+            report=report,
+            branch="master",
+            verdict="unclear",
+            raw_output="I had a look and honestly I'm not sure.",
+        )
+
+        body = client.get(f"/security/{report.pk}/").content.decode()
+
+        assert "no JSON verdict found" in body
+        assert "honestly I&#x27;m not sure" in body or "honestly I'm not sure" in body
+
+    def test_the_import_form_offers_verify_on_import(self, client: Client) -> None:
+        body = client.get("/security/").content.decode()
+        assert 'name="auto_verify"' in body
+        assert "Verify against the code" in body

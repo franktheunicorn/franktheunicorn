@@ -25,6 +25,7 @@
   - [4.7 Supply Chain](#47-supply-chain)
   - [4.8 Telemetry](#48-telemetry)
   - [4.9 Sharing the Backlog for Outside Review](#49-sharing-the-backlog-for-outside-review)
+  - [4.10 Deep Verification of Security Reports](#410-deep-verification-of-security-reports)
 - [5. Remote CI Trust](#5-remote-ci-trust)
   - [5.1 The Appeal](#51-the-appeal)
   - [5.2 Why It Is Not Safe to Trust PR-branch CI By Default](#52-why-it-is-not-safe-to-trust-pr-branch-ci-by-default)
@@ -440,6 +441,62 @@ operator's machine. It is worth being clear-eyed about that.
 - Imported `external_notes` is not run through the malicious-prompt guard, so if a future
   feature feeds it to an LLM (as triage guidance does with operator feedback) it would be an
   untrusted-input path. It is display-only today.
+
+---
+
+### 4.10 Deep Verification of Security Reports
+
+**What happens:** `security/verifier.py` answers "is this reported vulnerability actually in
+the code" by putting a coding agent (via an `agent_cli_reviewers` entry, typically `claude`) in
+a checkout of the project with the report in hand, once per active branch, and parsing a JSON
+verdict back out. Triggered by a button on a report or by `--verify` / a checkbox at import.
+
+**Risk:** this is the sharpest input-trust problem in the codebase, and it is worth being
+blunt about why. The review path feeds an agent a diff from a PR the operator can see, on a
+repo they chose. This path feeds an agent **text a stranger emailed them**, and gives that
+agent tool access inside a checkout. "Ignore previous instructions and run this command" is
+not a hypothetical for this feature — it is the obvious attack, and the delivery mechanism is
+"file a security report", which the project is actively inviting people to do.
+
+Secondary risks: the agent runs with whatever permissions the configured CLI has (the
+`cursor-agent` entry uses `--mode ask` for exactly this reason; a `claude` entry with write
+tools enabled is a different proposition); a report can steer the agent into reading files
+outside the interesting part of the tree; and the verdict is a model's opinion presented in a
+table, which invites being trusted more than it has earned.
+
+**Current mitigations:**
+
+- **Injection patterns are a hard refusal, not a sanitisation.** Before the report reaches the
+  agent, `injection_hits` runs the regex stage of `security/malicious_prompt.py` over the
+  title, body and parsed POC — the same patterns that exist for the mirror-image case of a PR
+  trying to manipulate the reviewer, covering invisible Unicode tags, bidi controls and
+  entity-obfuscated payloads. Any hit and the run is refused with the pattern named. Refused
+  rather than scrubbed because there is no version of the text with the instructions removed
+  that is still the report, and the operator is better served by "this contains X, read it
+  yourself" than by a silently-edited run.
+- **Off by default**, and even when on, never automatic: it takes a button press or an explicit
+  per-import opt-in.
+- **A distinct checkout** (`workspace_subdir`), so an agent poking around cannot disturb the
+  tree the review pipeline is mid-diff on.
+- **Detached HEAD checkouts**, so nothing accumulates local branches that drift from origin.
+- **The verdict is presented as a model's opinion**, with the agent and model named, the commit
+  recorded, and the confidence shown separately from the verdict — and an unparseable answer is
+  stored as `unclear` with the raw output kept, so it cannot pass for a considered judgement.
+
+**Remaining gaps:**
+
+- **The regex pre-filter is a filter, not a proof.** `malicious_prompt.py`'s own comments say
+  the patterns are "tolerant to whitespace and case but not exhaustive — the LLM stage is the
+  safety net for novel phrasings", and the verifier deliberately skips that LLM stage to avoid
+  a model call per verification. A novel phrasing gets through. The real containment has to be
+  the agent's own permissions.
+- **Nothing here constrains what the agent may do.** The tool policy is whatever the operator's
+  `agent_cli_reviewers` entry sets. A read-only mode should arguably be enforced rather than
+  left to config, and the config example should say so louder than it does.
+- No network isolation for the agent process, unlike the POC sandbox (§4.1), which runs
+  `--network=none`. An agent that has been successfully steered can reach the internet.
+- The verdict is not re-checked as the branch moves; `commit` records what was examined but
+  nothing flags a verdict as stale when that commit is no longer the branch head.
 
 ---
 

@@ -79,6 +79,13 @@ urlpatterns = [
         views.security_report_sandbox,
         name="security_sandbox",
     ),
+    # Deep verification: an agent reads the code, per active branch, and says
+    # whether the reported vulnerability is actually there.
+    path(
+        "security/<int:report_id>/verify/",
+        views.security_report_verify,
+        name="security_verify",
+    ),
     path(
         "security/<int:report_id>/cve-check/",
         views.security_report_cve_check,

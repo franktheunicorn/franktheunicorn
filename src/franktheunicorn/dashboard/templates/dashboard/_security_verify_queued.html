@@ -1,0 +1,17 @@
+{# Answer to the Verify button. Three outcomes, all of them said out loud: the #}
+{# gate declined, the run was queued, or one was already in flight. A button #}
+{# that swaps in nothing is indistinguishable from a broken one. #}
+{% if blocked %}
+<div class="verify-result error-note">{{ blocked }}</div>
+{% elif created %}
+<div class="verify-result queued-note">
+    Verification queued. The agent will check
+    {% if verifier %}the default branch plus up to {{ verifier.max_branches }} active
+    version branch(es){% else %}each active branch{% endif %}
+    against this report — expect minutes per branch. Reload to see the verdicts.
+</div>
+{% else %}
+<div class="verify-result queued-note">
+    A verification is already running for this report. Reload to see it land.
+</div>
+{% endif %}
