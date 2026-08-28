@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from franktheunicorn.security.zip_import import ZipImportResult
 
 from django.contrib import messages
+from django.db import transaction
 from django.db.models import Count, Max, Min, Q, Sum
 from django.http import HttpRequest, HttpResponse, StreamingHttpResponse
 
@@ -122,7 +123,8 @@ def index(request: HttpRequest) -> HttpResponse:
 
     prs = (
         PullRequest.objects.select_related("project")
-        .filter(state="open", queue=queue)
+        .filter(state="open", queue=queue, project__enabled=True)
+        .filter(Project.configured_q(lookup="project"))
         .annotate(last_local_action_at=Max("actions__created_at"))
         .order_by("-interest_score", "-github_updated_at")
     )
@@ -173,7 +175,9 @@ def index(request: HttpRequest) -> HttpResponse:
             pr.latest_test_verdict = latest_verdicts.get(pr.pk)  # type: ignore[attr-defined]
 
     # Count PRs per queue for tab badges (respects the same project/type filters).
-    base_qs = PullRequest.objects.filter(state="open")
+    base_qs = PullRequest.objects.filter(state="open", project__enabled=True).filter(
+        Project.configured_q(lookup="project")
+    )
     if workspace_projects is not None:
         base_qs = base_qs.filter(_build_workspace_q(workspace_projects))
     if active_project_type:
@@ -187,8 +191,7 @@ def index(request: HttpRequest) -> HttpResponse:
         {**tab, "count": queue_counts.get(tab["key"], 0)} for tab in QUEUE_TABS
     ]
 
-    # Build available filter options from enabled projects only.
-    enabled_projects_qs = Project.objects.filter(enabled=True)
+    enabled_projects_qs = Project.objects.filter(enabled=True).filter(Project.configured_q())
     available_type_keys = list(
         enabled_projects_qs.values_list("project_type", flat=True)
         .distinct()
@@ -753,7 +756,11 @@ def anti_pattern_list(request: HttpRequest) -> HttpResponse:
     if project_filter:
         aps = aps.filter(project__pk=project_filter)
 
-    projects = Project.objects.filter(enabled=True).order_by("owner", "repo")
+    projects = (
+        Project.objects.filter(enabled=True)
+        .filter(Project.configured_q())
+        .order_by("owner", "repo")
+    )
     return render(
         request,
         "dashboard/anti_patterns.html",
@@ -1000,7 +1007,11 @@ def security_report_list(request: HttpRequest) -> HttpResponse:
             "active_sort": sort,
             "sort_options": _SECURITY_SORT_LABELS,
             "archives": _imported_archives(),
-            "projects": Project.objects.filter(enabled=True).order_by("owner", "repo"),
+            "projects": (
+                Project.objects.filter(enabled=True)
+                .filter(Project.configured_q())
+                .order_by("owner", "repo")
+            ),
             "zip_import_command": _zip_import_command(),
             # So the page can say the CSV export is capped *before* the operator
             # shares a sheet that quietly stops short of the backlog.
@@ -1213,6 +1224,7 @@ def security_report_upload(request: HttpRequest) -> HttpResponse:
     # Off unless ticked, and a sharper knob than triage: this is a full agent run
     # per report per active branch, not two LLM calls.
     auto_verify = request.POST.get("auto_verify") == "on"
+    auto_verify_versions = request.POST.get("auto_verify_versions") == "on"
 
     # Not gated on the file name: the importer decides by content and reports a
     # non-zip as an error, so a ".ZIP" or an extensionless export still works.
@@ -1229,6 +1241,7 @@ def security_report_upload(request: HttpRequest) -> HttpResponse:
         project=project,
         auto_triage=auto_triage,
         auto_verify=auto_verify,
+        auto_verify_versions=auto_verify_versions,
         # The filename is the only provenance a browser upload carries, and two
         # scans of one repo share entry paths, so without it the list has pairs of
         # identically-titled reports from different archives.
@@ -1265,6 +1278,8 @@ def security_report_upload(request: HttpRequest) -> HttpResponse:
         # doesn't need telling that a thing they declined didn't happen.
         if auto_verify and result.verify_skipped_reason:
             messages.warning(request, f"Not verified: {result.verify_skipped_reason}.")
+        if auto_verify_versions and result.version_map_skipped_reason:
+            messages.warning(request, f"Versions not mapped: {result.version_map_skipped_reason}.")
     elif result.duplicates and not result.failed:
         # The hint above the button advertises re-import as safe, so the case it
         # invites must not come back as a warning-coloured "nothing imported".
@@ -1290,12 +1305,15 @@ def security_archive_drop(request: HttpRequest) -> HttpResponse:
     app with no other copy (the archive on disk has the findings, but not the
     triage verdicts, the operator notes or the feedback rows).
 
-    Cascades take care of the rest: ``WorkerCommand.security_report`` is
-    ``CASCADE`` so a queued or in-flight triage goes with it, and
     ``SecurityTriageFeedback.report`` is ``SET_NULL`` so the learning corpus
     distilled from real operator decisions survives — those rows are about the
     operator's judgement, not about the report, and re-importing the archive
     shouldn't have to re-earn them.
+
+    Pending worker jobs are deleted first in this same transaction so a
+    worker cannot claim one in the gap and burn an NVD lookup or an agent
+    run on a report that no longer exists. Running ones are already claimed;
+    CASCADE takes them with the report.
     """
     archive = request.POST.get("archive", "").strip()
     if not archive:
@@ -1306,16 +1324,31 @@ def security_archive_drop(request: HttpRequest) -> HttpResponse:
     # Counted before the delete: the queryset is empty afterwards, and reporting
     # "0 reports dropped" for a successful drop is how an operator concludes the
     # button is broken and clicks it again.
-    total = doomed.count()
+    report_ids = list(doomed.values_list("pk", flat=True))
+    total = len(report_ids)
     if not total:
         messages.warning(request, f"No reports left from {archive}.")
         return _back_to_security_list(request)
 
     touched = doomed.exclude(status="new").count()
-    doomed.delete()
-    note = f" ({touched} had already been triaged or ruled on)" if touched else ""
+    from franktheunicorn.security.queue import cancel_pending_for_reports
+
+    with transaction.atomic():
+        cancelled = cancel_pending_for_reports(report_ids)
+        doomed.delete()
+    bits: list[str] = []
+    if cancelled:
+        bits.append(f"cancelled {cancelled} queued job(s)")
+    if touched:
+        bits.append(f"{touched} had already been triaged or ruled on")
+    note = f" ({'; '.join(bits)})" if bits else ""
     messages.success(request, f"Dropped {total} report(s) from {archive}{note}.")
-    logger.info("Dropped %d security report(s) from archive %s", total, archive)
+    logger.info(
+        "Dropped %d security report(s) from archive %s; cancelled %d pending command(s)",
+        total,
+        archive,
+        cancelled,
+    )
     return _back_to_security_list(request)
 
 
@@ -1570,7 +1603,11 @@ def security_report_create(request: HttpRequest) -> HttpResponse:
 
         return redirect("dashboard:security_detail", report_id=report.pk)
 
-    projects = Project.objects.filter(enabled=True).order_by("owner", "repo")
+    projects = (
+        Project.objects.filter(enabled=True)
+        .filter(Project.configured_q())
+        .order_by("owner", "repo")
+    )
     return render(
         request,
         "dashboard/security_create.html",
@@ -1625,6 +1662,7 @@ def security_report_detail(request: HttpRequest, report_id: int) -> HttpResponse
             "report": report,
             "sandbox_enabled": sandbox_enabled,
             "verifications": verifications,
+            "has_version_map": any(v.agent == "version-map" for v in verifications),
             "version_rows": version_rows,
             "affected_versions": [
                 row["name"] for row in version_rows if row["status"] == "affected"
@@ -1984,6 +2022,68 @@ def security_report_verify(request: HttpRequest, report_id: int) -> HttpResponse
         request,
         "dashboard/_security_verify_queued.html",
         {"report": report, "created": created, "verifier": verifier},
+    )
+
+
+@require_POST
+def security_report_map_versions(request: HttpRequest, report_id: int) -> HttpResponse:
+    """Queue cheap version mapping: cited files vs every shipping branch (htmx).
+
+    Not the deep verifier. Git ls-tree only, no agent, no branch cap. The box
+    you want on a 143-report archive.
+    """
+    report = get_object_or_404(SecurityReport.objects.select_related("project"), pk=report_id)
+
+    from franktheunicorn.config.loader import get_operator_config
+    from franktheunicorn.security.queue import PRIORITY_INTERACTIVE, queue_version_map
+    from franktheunicorn.security.verifier import resolve_verifier_reviewer
+
+    operator_config = get_operator_config()
+    verifier = operator_config.security_triage.verifier
+    if not verifier.enabled:
+        return render(
+            request,
+            "dashboard/_security_version_map_queued.html",
+            {
+                "report": report,
+                "blocked": (
+                    "Version mapping has been switched off with the rest of verification. "
+                    "security_triage.verifier.enabled is false in operator.yaml."
+                ),
+            },
+        )
+    if resolve_verifier_reviewer(operator_config, verifier) is None:
+        have = ", ".join(rc.name for rc in operator_config.agent_cli_reviewers)
+        return render(
+            request,
+            "dashboard/_security_version_map_queued.html",
+            {
+                "report": report,
+                "blocked": (
+                    f"No agent_cli_reviewers entry named '{verifier.reviewer}', so there "
+                    "is no checkout to list branches in. "
+                    + (f"Configured entries: {have}." if have else "Add one to operator.yaml.")
+                ),
+            },
+        )
+    if report.project is None:
+        return render(
+            request,
+            "dashboard/_security_version_map_queued.html",
+            {
+                "report": report,
+                "blocked": (
+                    "This report isn't attached to a project, so there's no repository "
+                    "to map versions against. Set one and try again."
+                ),
+            },
+        )
+
+    created = queue_version_map(report, priority=PRIORITY_INTERACTIVE)
+    return render(
+        request,
+        "dashboard/_security_version_map_queued.html",
+        {"report": report, "created": created},
     )
 
 

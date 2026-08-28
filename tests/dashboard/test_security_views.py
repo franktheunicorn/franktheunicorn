@@ -175,6 +175,27 @@ class TestSecurityArchiveDrop:
 
         assert WorkerCommand.objects.count() == 0
 
+    def test_dropping_cancels_pending_jobs_and_leaves_other_archives_alone(
+        self, client: Client
+    ) -> None:
+        from franktheunicorn.core.models import WorkerCommand
+
+        doomed = SecurityReportFactory(source_archive="bad.zip")
+        keeper = SecurityReportFactory(source_archive="good.zip")
+        WorkerCommand.objects.create(command="run_security_triage", security_report=doomed)
+        WorkerCommand.objects.create(command="map_report_versions", security_report=doomed)
+        WorkerCommand.objects.create(command="verify_security_report", security_report=doomed)
+        keep_cmd = WorkerCommand.objects.create(
+            command="run_security_triage", security_report=keeper
+        )
+
+        response = client.post("/security/drop-archive/", {"archive": "bad.zip"}, follow=True)
+
+        assert SecurityReport.objects.filter(pk=keeper.pk).exists()
+        remaining = list(WorkerCommand.objects.values_list("pk", "command", "status"))
+        assert remaining == [(keep_cmd.pk, "run_security_triage", "pending")]
+        assert "cancelled 3 queued job(s)" in response.content.decode()
+
     def test_operator_feedback_outlives_the_report(self, client: Client) -> None:
         """Those rows are the operator's judgement, and the learning loop distils
         them. Re-importing an archive shouldn't have to re-earn them."""
@@ -1322,6 +1343,7 @@ class TestSecurityVerifyButton:
         body = client.get(f"/security/{report.pk}/").content.decode()
         assert "Verify against the code" in body
         assert "Does the vulnerability actually exist?" in body
+        assert "Verify versions" in body
 
     def test_clicking_queues_a_worker_command(self, client: Client) -> None:
         from franktheunicorn.core.models import WorkerCommand
@@ -1438,6 +1460,36 @@ class TestSecurityVerifyButton:
         body = client.get("/security/").content.decode()
         assert 'name="auto_verify"' in body
         assert "Verify against the code" in body
+        assert 'name="auto_verify_versions"' in body
+        assert "Verify versions" in body
+
+    def test_map_versions_click_queues_a_worker_command(self, client: Client) -> None:
+        from franktheunicorn.core.models import WorkerCommand
+
+        report = SecurityReportFactory(project=ProjectFactory())
+        with patch(
+            "franktheunicorn.config.loader.get_operator_config",
+            return_value=self._config(enabled=True),
+        ):
+            response = client.post(f"/security/{report.pk}/map-versions/")
+
+        assert response.status_code == 200
+        assert b"Version mapping queued" in response.content
+        assert (
+            WorkerCommand.objects.filter(
+                command="map_report_versions", security_report=report
+            ).count()
+            == 1
+        )
+
+    def test_map_versions_refuses_without_a_project(self, client: Client) -> None:
+        report = SecurityReportFactory(project=None)
+        with patch(
+            "franktheunicorn.config.loader.get_operator_config",
+            return_value=self._config(enabled=True),
+        ):
+            response = client.post(f"/security/{report.pk}/map-versions/")
+        assert b"isn't attached" in response.content or b"no repository" in response.content
 
 
 @pytest.mark.django_db

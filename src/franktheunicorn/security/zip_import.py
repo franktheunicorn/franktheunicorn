@@ -180,9 +180,13 @@ class ZipImportResult:
     queued_triage: int = 0
     #: Deep-verification runs queued by this import (``auto_verify``).
     queued_verifications: int = 0
+    #: Cheap version-mapping runs queued by this import (``auto_verify_versions``).
+    queued_version_maps: int = 0
     #: Why an explicitly requested verification didn't happen. Same reasoning as
     #: ``triage_skipped_reason``: the caller asked, so silence is a wrong answer.
     verify_skipped_reason: str = ""
+    #: Why an explicitly requested version-map didn't happen.
+    version_map_skipped_reason: str = ""
     error: str = ""
     #: Why an explicitly requested triage didn't happen. Carried explicitly so
     #: callers don't have to guess a cause from ``queued_triage == 0`` and blame
@@ -233,6 +237,8 @@ class ZipImportResult:
             parts.append(f"{self.queued_triage} queued for triage")
         if self.queued_verifications:
             parts.append(f"{self.queued_verifications} queued for verification")
+        if self.queued_version_maps:
+            parts.append(f"{self.queued_version_maps} queued for version mapping")
         parts.extend(self.warnings)
         if self.error:
             # A cap tripped mid-walk after rows were already committed. Saying
@@ -247,6 +253,7 @@ def import_reports_from_zip(
     project: Project | None = None,
     auto_triage: bool = False,
     auto_verify: bool = False,
+    auto_verify_versions: bool = False,
     require_security_content: bool = True,
     max_entries: int = MAX_ENTRIES,
     archive_label: str = "",
@@ -287,6 +294,11 @@ def import_reports_from_zip(
     it, because a verification needs nothing from the per-entry loop and threading
     a second flag through five functions to arrive at the same place is how the
     two get out of step.
+
+    ``auto_verify_versions`` queues the cheap version-mapper instead (or as well):
+    git ls-tree of cited files, plus ``git apply --check`` of any proposed
+    patch, on every shipping branch. No agent, no 25-report cap, no branch cap.
+    That is the box to tick on a 143-report archive.
 
     ``max_entries`` lets a caller ask for a tighter bound than ``MAX_ENTRIES``.
     Neither door does any more — the dashboard used to, on the grounds that the
@@ -366,6 +378,8 @@ def import_reports_from_zip(
         # rolled back is a foreign key to nothing, and the failure mode is the
         # worker picking up work for a report the operator never got.
         _queue_verifications(result)
+    if auto_verify_versions:
+        _queue_version_maps(result)
     return result
 
 
@@ -464,6 +478,68 @@ def _queue_verifications(result: ZipImportResult) -> None:
     logger.info(
         "Queued %d verification(s) from this import%s",
         result.queued_verifications,
+        f" ({unattached} skipped for having no project)" if unattached else "",
+    )
+
+
+def _queue_version_maps(result: ZipImportResult) -> None:
+    """Queue cheap version mapping for everything that imported.
+
+    No report cap: this is git ls-tree, not an agent run per branch. The 25-report
+    wall on the deep verifier is exactly why this door exists.
+    """
+    ids = [entry.report_id for entry in result.entries if entry.outcome == "imported"]
+    ids = [report_id for report_id in ids if report_id]
+    if not ids:
+        return
+    try:
+        from franktheunicorn.config.loader import get_operator_config
+
+        operator_config = get_operator_config()
+        verifier = operator_config.security_triage.verifier
+    except Exception as exc:
+        logger.warning("Could not load operator config; importing unmapped", exc_info=True)
+        result.version_map_skipped_reason = (
+            f"could not read the operator config ({str(exc) or exc.__class__.__name__})"
+        )
+        return
+    if not verifier.enabled:
+        logger.info("security_triage.verifier.enabled is false; importing unmapped")
+        result.version_map_skipped_reason = (
+            "security_triage.verifier.enabled is false in operator.yaml — it defaults "
+            "true, so either something set it or the config failed to load and took "
+            "every other setting with it (`manage.py show_config` tells those apart)"
+        )
+        return
+    from franktheunicorn.security.verifier import resolve_verifier_reviewer
+
+    if resolve_verifier_reviewer(operator_config, verifier) is None:
+        have = ", ".join(rc.name for rc in operator_config.agent_cli_reviewers) or "none"
+        result.version_map_skipped_reason = (
+            f"no agent_cli_reviewers entry named {verifier.reviewer!r} (configured: "
+            f"{have}), so there is no checkout to map versions against"
+        )
+        return
+
+    from franktheunicorn.core.models import SecurityReport
+    from franktheunicorn.security.queue import PRIORITY_BULK, queue_version_map
+
+    verifiable = list(SecurityReport.objects.filter(pk__in=ids).select_related("project"))
+    unattached = 0
+    for report in verifiable:
+        if report.project_id is None:
+            unattached += 1
+            continue
+        if queue_version_map(report, priority=PRIORITY_BULK):
+            result.queued_version_maps += 1
+    if unattached:
+        result.version_map_skipped_reason = (
+            f"{unattached} report(s) have no project, so there is no repo to map "
+            "versions against — re-import with a project selected"
+        )
+    logger.info(
+        "Queued %d version-map run(s) from this import%s",
+        result.queued_version_maps,
         f" ({unattached} skipped for having no project)" if unattached else "",
     )
 

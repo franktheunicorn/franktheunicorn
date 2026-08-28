@@ -85,6 +85,7 @@ testpaths = ["tests"]
 addopts = "--strict-markers -v --tb=short"
 markers = [
     "integration: marks tests as integration tests",
+    "respect_yaml_projects: do not treat every DB Project row as configured",
 ]
 
 [tool.ruff]

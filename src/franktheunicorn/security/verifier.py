@@ -394,11 +394,16 @@ def select_branches(
     executor: ToolExecutor,
     cwd: str,
     verifier: SecurityVerifierConfig,
+    *,
+    unlimited: bool = False,
 ) -> list[str]:
     """The default branch plus recently-active named version branches.
 
     Ordered default-first, then most-recently-committed. The cap counts the
     version branches only — the default branch is never the thing dropped.
+    ``unlimited=True`` drops the count cap (activity cutoff and name patterns
+    still apply): the cheap version-mapper walks every shipping line, which is
+    the point of not running an agent on each one.
 
     Reads ``refs/remotes/origin`` rather than local heads: the checkout is
     maintained by fetch, so local branches may not exist at all.
@@ -442,7 +447,7 @@ def select_branches(
         if not any(p.match(name) for p in patterns):
             continue
         chosen.append(name)
-        if len(chosen) >= verifier.max_branches + (1 if default else 0):
+        if not unlimited and len(chosen) >= verifier.max_branches + (1 if default else 0):
             break
     return chosen
 

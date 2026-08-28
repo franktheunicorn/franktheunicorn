@@ -9,6 +9,7 @@ import pytest
 from franktheunicorn.config.models import OperatorConfig, SecurityTriageConfig
 from franktheunicorn.core.models import WorkerCommand
 from franktheunicorn.security.queue import (
+    cancel_pending_for_reports,
     queue_triage,
     queue_triage_if_enabled,
     queue_triage_on_request,
@@ -131,3 +132,28 @@ class TestQueueTriageOnRequest:
         assert queue_triage_on_request(report) is True
         assert queue_triage_on_request(report) is False
         assert WorkerCommand.objects.filter(security_report=report).count() == 1
+
+
+@pytest.mark.django_db
+class TestCancelPendingForReports:
+    def test_drops_pending_triage_verify_and_version_map(self) -> None:
+        doomed = SecurityReportFactory()
+        keeper = SecurityReportFactory()
+        WorkerCommand.objects.create(command="run_security_triage", security_report=doomed)
+        WorkerCommand.objects.create(command="map_report_versions", security_report=doomed)
+        WorkerCommand.objects.create(command="verify_security_report", security_report=doomed)
+        running = WorkerCommand.objects.create(
+            command="run_security_sandbox", security_report=doomed, status="running"
+        )
+        keep = WorkerCommand.objects.create(command="run_security_triage", security_report=keeper)
+
+        assert cancel_pending_for_reports([doomed.pk]) == 3
+        remaining = set(WorkerCommand.objects.values_list("pk", flat=True))
+        assert remaining == {running.pk, keep.pk}
+
+    def test_empty_list_is_a_no_op(self) -> None:
+        report = SecurityReportFactory()
+        WorkerCommand.objects.create(command="run_security_triage", security_report=report)
+
+        assert cancel_pending_for_reports([]) == 0
+        assert WorkerCommand.objects.count() == 1

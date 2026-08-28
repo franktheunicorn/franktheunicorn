@@ -119,6 +119,11 @@ class TestSearchPrsAuthoredBy:
 class TestScanOperatorPrs:
     """Two searches per forge, deduped, own-PRs first."""
 
+    _CONFIGS = [ProjectConfig(owner="apache", repo="spark")]
+
+    def _scan(self, clients: dict[str, Any], username: str = "holdenk") -> None:
+        runner._scan_operator_prs(clients, username, None, self._CONFIGS)
+
     def _client(
         self,
         authored: list[dict[str, Any]],
@@ -135,7 +140,7 @@ class TestScanOperatorPrs:
         client = self._client([_item("apache", "spark", 1)], [_item("apache", "spark", 2)])
 
         with patch("franktheunicorn.backends.poller.ingest_single_pr") as ingest:
-            runner._scan_operator_prs({"github": client}, "holdenk", None)
+            self._scan({"github": client})
 
         client.search_prs_authored_by.assert_called_once_with("holdenk")
         client.search_prs_involving.assert_called_once_with("holdenk")
@@ -151,7 +156,7 @@ class TestScanOperatorPrs:
         )
 
         with patch("franktheunicorn.backends.poller.ingest_single_pr") as ingest:
-            runner._scan_operator_prs({"github": client}, "holdenk", None)
+            self._scan({"github": client})
 
         assert [call.args[2] for call in ingest.call_args_list] == [9, 5, 3]
 
@@ -161,7 +166,7 @@ class TestScanOperatorPrs:
         client = self._client([], [], reviewed=[_item("apache", "spark", 5)])
 
         with patch("franktheunicorn.backends.poller.ingest_single_pr") as ingest:
-            runner._scan_operator_prs({"github": client}, "holdenk", None)
+            self._scan({"github": client})
 
         client.search_prs_reviewed_by.assert_called_once_with("holdenk")
         assert [call.args[2] for call in ingest.call_args_list] == [5]
@@ -172,7 +177,7 @@ class TestScanOperatorPrs:
         client = self._client(both, list(both))
 
         with patch("franktheunicorn.backends.poller.ingest_single_pr") as ingest:
-            runner._scan_operator_prs({"github": client}, "holdenk", None)
+            self._scan({"github": client})
 
         assert ingest.call_count == 1
 
@@ -180,7 +185,7 @@ class TestScanOperatorPrs:
         bare = MagicMock(spec=[])  # no search methods at all
 
         with patch("franktheunicorn.backends.poller.ingest_single_pr") as ingest:
-            runner._scan_operator_prs({"gitea": bare}, "holdenk", None)
+            self._scan({"gitea": bare})
 
         assert ingest.call_count == 0
 
@@ -197,7 +202,7 @@ class TestScanOperatorPrs:
             ) as ingest,
             caplog.at_level(logging.INFO),
         ):
-            runner._scan_operator_prs({"github": client}, "holdenk", None)
+            self._scan({"github": client})
 
         assert ingest.call_count == 2
         # WARNING, not DEBUG: a PR that failed to ingest is a PR the operator
@@ -209,7 +214,7 @@ class TestScanOperatorPrs:
         client = self._client([issue], [])
 
         with patch("franktheunicorn.backends.poller.ingest_single_pr") as ingest:
-            runner._scan_operator_prs({"github": client}, "holdenk", None)
+            self._scan({"github": client})
 
         assert ingest.call_count == 0
 
@@ -219,9 +224,29 @@ class TestScanOperatorPrs:
         client.search_prs_involving.return_value = [_item("apache", "spark", 4)]
 
         with patch("franktheunicorn.backends.poller.ingest_single_pr") as ingest:
-            runner._scan_operator_prs({"github": client}, "holdenk", None)
+            self._scan({"github": client})
 
         assert [call.args[2] for call in ingest.call_args_list] == [4]
+
+    def test_a_hit_in_an_unconfigured_repo_is_not_ingested(self) -> None:
+        """GitHub's search is account-wide; YAML is the allow-list."""
+        client = self._client(
+            [_item("holdenk", "some-fork", 9), _item("apache", "spark", 1)],
+            [_item("random-org", "drive-by", 3)],
+        )
+
+        with patch("franktheunicorn.backends.poller.ingest_single_pr") as ingest:
+            self._scan({"github": client})
+
+        assert [call.args[:3] for call in ingest.call_args_list] == [("apache", "spark", 1)]
+
+    def test_yaml_owner_repo_match_is_case_insensitive(self) -> None:
+        client = self._client([_item("Apache", "Spark", 1)], [])
+
+        with patch("franktheunicorn.backends.poller.ingest_single_pr") as ingest:
+            self._scan({"github": client})
+
+        assert [call.args[:3] for call in ingest.call_args_list] == [("Apache", "Spark", 1)]
 
 
 class TestCycleSummary:

@@ -13,6 +13,27 @@ from franktheunicorn.review.backends.base import PRContext
 from tests.factories import ProjectFactory, PullRequestFactory, ReviewDraftFactory
 
 
+@pytest.fixture(autouse=True)
+def _db_projects_count_as_configured(
+    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
+    """Tests create Project rows without writing YAML.
+
+    Production treats the projects directory as the allow-list. Tests that
+    need that rule use ``@pytest.mark.respect_yaml_projects``.
+    """
+    if request.node.get_closest_marker("respect_yaml_projects"):
+        return
+
+    def _from_db() -> frozenset[tuple[str, str]]:
+        return frozenset(Project.objects.values_list("owner", "repo"))
+
+    monkeypatch.setattr(
+        "franktheunicorn.config.loader.configured_owner_repos",
+        _from_db,
+    )
+
+
 @pytest.fixture
 def operator_config() -> OperatorConfig:
     return OperatorConfig(

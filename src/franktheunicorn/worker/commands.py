@@ -12,6 +12,8 @@ Commands supported:
 - ``verify_security_report``: put a coding agent in a checkout and have it read
   the code, once per active branch, to say whether the reported vulnerability is
   actually there. The long one — see ``STUCK_COMMAND_TIMEOUT_SECONDS``.
+- ``map_report_versions``: cheap version mapping — git ls-tree of cited files
+  on every shipping branch, no agent. Minutes for a backlog, not hours.
 - ``run_agents``: force-run the review pipeline on a PR (no trusted-author
   gate, no dedup against existing drafts).
 """
@@ -257,6 +259,7 @@ def _dispatch(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
         "run_security_sandbox": _run_security_sandbox,
         "run_security_triage": _run_security_triage,
         "verify_security_report": _verify_security_report,
+        "map_report_versions": _map_report_versions,
         "run_agents": _run_agents,
     }
     handler = handlers.get(cmd.command)
@@ -376,6 +379,25 @@ def _verify_security_report(cmd: WorkerCommand, operator_config: OperatorConfig)
         # for `enabled: false`, which sends the operator hunting for a bug.
         logger.info(
             "Verification for report #%s did not run: %s", cmd.security_report.pk, run.error
+        )
+
+
+def _map_report_versions(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
+    """Map cited files onto every shipping branch. Git only, no agent."""
+    if cmd.security_report is None:
+        msg = "map_report_versions requires a security_report target"
+        raise ValueError(msg)
+
+    from franktheunicorn.security.version_map import map_report_versions
+
+    run = map_report_versions(cmd.security_report, operator_config)
+    lines = [run.summary()]
+    for result in run.results:
+        lines.append(f"  {result.branch}: {result.verdict} ({result.agent})")
+    cmd.log = "\n".join(lines)
+    if run.error:
+        logger.info(
+            "Version mapping for report #%s did not run: %s", cmd.security_report.pk, run.error
         )
 
 

@@ -505,6 +505,7 @@ thead th { border-bottom: 2px solid var(--border); }
 .verdict-unclear { background: var(--orange-bg); color: var(--orange); }
 .verdict-error { background: var(--card); color: var(--muted); }
 .verify-btn { color: var(--orange); border-color: var(--orange); }
+.verify-actions { display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: flex-start; }
 .verify-result { margin: 0.4rem 0 0; font-size: 0.8rem; }
 
 /* Release lines, above the branch table: a branch name is not something you can

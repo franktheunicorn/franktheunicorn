@@ -997,6 +997,30 @@ class TestProjectFilters:
         context = response.context
         assert context["queue_counts"]["review"] == 1
 
+    @pytest.mark.respect_yaml_projects
+    def test_unconfigured_projects_are_not_active(
+        self, client: Client, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A mention-scan leftover must not show up as a project we monitor."""
+        from tests.factories import ProjectFactory
+
+        spark = ProjectFactory(owner="apache", repo="spark", enabled=True)
+        stray = ProjectFactory(owner="holdenk", repo="some-fork", enabled=True)
+        PullRequestFactory(project=spark, title="Configured PR", state="open", queue="review")
+        PullRequestFactory(project=stray, title="Drive-by PR", state="open", queue="review")
+        monkeypatch.setattr(
+            "franktheunicorn.config.loader.configured_owner_repos",
+            lambda: frozenset({("apache", "spark")}),
+        )
+
+        response = client.get("/")
+
+        names = [f"{p['owner']}/{p['repo']}" for p in response.context["available_projects"]]
+        assert "apache/spark" in names
+        assert "holdenk/some-fork" not in names
+        assert b"Configured PR" in response.content
+        assert b"Drive-by PR" not in response.content
+
     def test_filter_bar_rendered_in_html(self, client: Client) -> None:
         from tests.factories import ProjectFactory
 

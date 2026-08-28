@@ -867,11 +867,16 @@ def ingest_single_pr(
     entry = get_forge_entry(operator_config, forge_name)
     client = make_client(entry, pace_requests=pace_requests)
 
-    project, _ = Project.objects.update_or_create(
+    project, created = Project.objects.update_or_create(
         owner=owner,
         repo=repo,
-        defaults={"review_context": getattr(project_config, "review_context", "") or ""},
+        defaults={
+            "review_context": getattr(project_config, "review_context", "") or "",
+        },
     )
+    if project_config is None and created:
+        project.enabled = False
+        project.save(update_fields=["enabled"])
 
     pr_data = client.get_pull_request(owner, repo, pr_number)
     changed_files: list[str] | None

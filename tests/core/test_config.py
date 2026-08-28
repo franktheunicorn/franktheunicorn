@@ -9,6 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from franktheunicorn.config.loader import (
+    configured_owner_repos,
     get_operator_config,
     get_project_config,
     load_operator_config,
@@ -350,6 +351,15 @@ class TestConfigLoader:
         configs = load_project_configs(tmp_path / "nonexistent")
         assert configs == []
 
+    def test_load_project_configs_missing_dir_warns(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The dashboard's whole project allow-list runs through this now — a
+        typo'd FRANK_PROJECTS_DIR must not blank every queue with no trace."""
+        with caplog.at_level(logging.WARNING):
+            load_project_configs(tmp_path / "nonexistent")
+        assert "does not exist" in caplog.text
+
     def test_load_project_configs_normalizes_legacy_merge_queue_keys(self, tmp_path: Path) -> None:
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
@@ -437,6 +447,24 @@ class TestConvenienceFunctions:
         settings.FRANK_PROJECTS_DIR = str(tmp_config_dir / "projects")  # type: ignore[attr-defined]
         config = get_project_config("nonexistent")
         assert config is None
+
+    def test_get_project_config_is_case_insensitive(
+        self, tmp_config_dir: Path, settings: object
+    ) -> None:
+        """A GitHub search result or a pasted PR URL doesn't promise the YAML's
+        casing. configured_owner_repos() matches case-insensitively; this must
+        too, or a mismatched-case hit looks unconfigured and gets disabled."""
+        settings.FRANK_PROJECTS_DIR = str(tmp_config_dir / "projects")  # type: ignore[attr-defined]
+        config = get_project_config("TestOrg/TestRepo")
+        assert config is not None
+        assert config.owner == "testorg"
+
+    @pytest.mark.respect_yaml_projects
+    def test_configured_owner_repos_is_the_yaml_allow_list(
+        self, tmp_config_dir: Path, settings: object
+    ) -> None:
+        settings.FRANK_PROJECTS_DIR = str(tmp_config_dir / "projects")  # type: ignore[attr-defined]
+        assert configured_owner_repos() == frozenset({("testorg", "testrepo")})
 
 
 class TestValidateYamlFile:

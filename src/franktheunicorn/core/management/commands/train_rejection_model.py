@@ -51,7 +51,7 @@ class Command(BaseCommand):
         self._train_single(project, force=force)
 
     def _train_all(self, *, force: bool = False) -> None:
-        projects = Project.objects.filter(enabled=True)
+        projects = Project.objects.filter(enabled=True).filter(Project.configured_q())
         if not projects.exists():
             self.stdout.write("No enabled projects found.")
             return

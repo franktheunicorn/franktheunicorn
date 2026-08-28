@@ -38,8 +38,12 @@
         {# every other command, so a big archive drains in order rather than #}
         {# starting hundreds of agents at once. #}
         <label class="zip-import-triage"
-               title="Off by default and expensive: one coding-agent run per report per active branch. Needs security_triage.verifier.enabled.">
+               title="Off by default and expensive: one coding-agent run per report per active branch. Capped at 25 reports. Needs security_triage.verifier.enabled.">
             <input type="checkbox" name="auto_verify"> Verify against the code
+        </label>
+        <label class="zip-import-triage"
+               title="Cheap: git ls-tree of cited files, plus git apply --check of any proposed patch, on every shipping branch. No agent, no 25-report cap, no branch cap. The box for a 143-report archive.">
+            <input type="checkbox" name="auto_verify_versions"> Verify versions
         </label>
         <button type="submit" class="action-btn post">📦 Upload &amp; Import</button>
     </form>
@@ -54,7 +58,8 @@
     <pre class="zip-import-cmd"><code>{{ zip_import_command }}</code></pre>
     <p class="zip-import-hint">
         Add <code>--project owner/repo</code> to attach a project,
-        <code>--triage</code> to queue triage runs.
+        <code>--triage</code> to queue triage,
+        <code>--verify-versions</code> to map cited files and whether the proposed patch applies onto every shipping branch.
     </p>
 
     {# Imported archives, with the undo. A scanner bundle is one archive's worth #}

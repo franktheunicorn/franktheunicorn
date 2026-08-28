@@ -1,0 +1,13 @@
+{# Answer to the Verify versions button. Same honesty as the deep-verify fragment. #}
+{% if blocked %}
+<div class="verify-result error-note">{{ blocked }}</div>
+{% elif created %}
+<div class="verify-result queued-note">
+    Version mapping queued. Git will check cited files on every shipping
+    branch — no agent, no branch cap. Reload to see the release lines.
+</div>
+{% else %}
+<div class="verify-result queued-note">
+    A version-map run is already queued for this report. Reload to see it land.
+</div>
+{% endif %}

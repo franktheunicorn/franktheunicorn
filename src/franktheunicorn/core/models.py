@@ -50,6 +50,21 @@ class Project(models.Model):
     def full_name(self) -> str:
         return f"{self.owner}/{self.repo}"
 
+    @staticmethod
+    def configured_q(*, lookup: str = "") -> Q:
+        """Match rows whose owner/repo has an enabled YAML config."""
+        from franktheunicorn.config.loader import configured_owner_repos
+
+        keys = configured_owner_repos()
+        owner = f"{lookup}__owner" if lookup else "owner"
+        repo = f"{lookup}__repo" if lookup else "repo"
+        if not keys:
+            return Q(pk__in=())
+        clause = Q()
+        for owner_name, repo_name in keys:
+            clause |= Q(**{f"{owner}__iexact": owner_name, f"{repo}__iexact": repo_name})
+        return clause
+
 
 class PullRequest(models.Model):
     """A pull request ingested from GitHub."""

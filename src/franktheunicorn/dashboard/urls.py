@@ -92,6 +92,11 @@ urlpatterns = [
         name="security_verify",
     ),
     path(
+        "security/<int:report_id>/map-versions/",
+        views.security_report_map_versions,
+        name="security_map_versions",
+    ),
+    path(
         "security/<int:report_id>/cve-check/",
         views.security_report_cve_check,
         name="security_cve_check",

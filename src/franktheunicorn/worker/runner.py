@@ -1552,10 +1552,8 @@ def _run_cycle(
     if operator_config is not None:
         _poll_security_emails(operator_config)
 
-    # Mention scan: ingest open PRs where the operator is involved but that
-    # aren't in a configured project (mentioned, assigned, review-requested).
     if operator_username:
-        _scan_operator_prs(clients, operator_username, operator_config)
+        _scan_operator_prs(clients, operator_username, operator_config, project_configs)
 
     # The mention scan can be 100 ingests and the backfill can be many LLM
     # reviews; don't make a queued triage wait behind either.
@@ -1638,6 +1636,7 @@ def _scan_operator_prs(
     clients: Mapping[str, object],
     operator_username: str,
     operator_config: OperatorConfig | None,
+    project_configs: Sequence[object] | None = None,
 ) -> None:
     """Ingest the operator's own open PRs, the ones they reviewed, and the rest.
 
@@ -1655,6 +1654,8 @@ def _scan_operator_prs(
     ingested first, so if anything downstream gives up part-way they are the part
     that landed.
 
+    The searches are account-wide; only enabled project YAML is ingested.
+
     Each found PR is ingested via ``ingest_single_pr``, which is an idempotent
     upsert *including* a per-PR detail fetch — so this refreshes mergeable state
     on a PR the project poll didn't list, which is the other half of the problem:
@@ -1664,8 +1665,23 @@ def _scan_operator_prs(
     Failures per-PR are caught individually so one bad PR doesn't stop the rest.
     """
     from franktheunicorn.backends.poller import ingest_single_pr
+    from franktheunicorn.config.loader import configured_owner_repos
+    from franktheunicorn.config.models import ProjectConfig
+
+    if project_configs is None:
+        allowed = frozenset((o.lower(), r.lower()) for o, r in configured_owner_repos())
+    else:
+        allowed = frozenset(
+            (pc.owner.lower(), pc.repo.lower())
+            for pc in project_configs
+            if isinstance(pc, ProjectConfig) and pc.enabled
+        )
+    if not allowed:
+        logger.info("Own/involved PR scan skipped: no configured projects")
+        return
 
     total_ingested = 0
+    skipped_unconfigured = 0
     # Deduped across the two searches and across forges: an authored PR that also
     # mentions the operator would otherwise be ingested twice, at one detail
     # fetch plus one files fetch each.
@@ -1715,6 +1731,9 @@ def _scan_operator_prs(
                 if key in seen:
                     continue
                 seen.add(key)
+                if (owner.lower(), repo.lower()) not in allowed:
+                    skipped_unconfigured += 1
+                    continue
 
                 try:
                     ingest_single_pr(owner, repo, pr_number)
@@ -1732,9 +1751,11 @@ def _scan_operator_prs(
 
     if seen or operator_username:
         logger.info(
-            "Own/involved PR scan: %d distinct PR(s) found, %d ingested or refreshed.",
+            "Own/involved PR scan: %d distinct PR(s) found, %d ingested or refreshed, "
+            "%d skipped (not a configured project).",
             len(seen),
             total_ingested,
+            skipped_unconfigured,
         )
 
 

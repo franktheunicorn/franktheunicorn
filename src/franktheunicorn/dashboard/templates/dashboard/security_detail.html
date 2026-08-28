@@ -186,6 +186,11 @@
         <p class="verify-versions-caveat muted">
             Line granularity: everything released on an affected line is assumed
             affected. Close enough to act on, not a per-release audit.
+            {% if has_version_map %}
+            Rows tagged <code>version-map</code> are file-presence / patch-apply
+            only — not a code read. Use Verify against the code for a real look
+            on the ones that matter.
+            {% endif %}
         </p>
     </div>
     {% endif %}
@@ -229,15 +234,28 @@
     </table>
     {% endif %}
 
-    <div id="verify-area">
-        <button class="action-btn verify-btn"
-                hx-post="{% url 'dashboard:security_verify' report.pk %}"
-                hx-target="#verify-area"
-                hx-swap="innerHTML"
-                hx-confirm="Run the deep verifier? This runs a coding agent over a checkout once per active branch — minutes each.">
-            🔍 {% if verifications %}Re-verify{% else %}Verify against the code{% endif %}
-        </button>
+    <div class="verify-actions">
+        <div>
+            <button class="action-btn verify-btn"
+                    hx-post="{% url 'dashboard:security_verify' report.pk %}"
+                    hx-target="#verify-result"
+                    hx-swap="innerHTML"
+                    hx-confirm="Run the deep verifier? This runs a coding agent over a checkout once per active branch — minutes each.">
+                🔍 {% if verifications %}Re-verify{% else %}Verify against the code{% endif %}
+            </button>
+        </div>
+        <div>
+            <button class="action-btn"
+                    hx-post="{% url 'dashboard:security_map_versions' report.pk %}"
+                    hx-target="#version-map-result"
+                    hx-swap="innerHTML"
+                    hx-confirm="Map cited files and whether the proposed patch applies onto every shipping branch? Git only — no agent, no branch cap. Does not overwrite a deep-verifier verdict.">
+                Verify versions
+            </button>
+        </div>
     </div>
+    <div id="verify-result"></div>
+    <div id="version-map-result"></div>
 </section>
 
 <!-- Operator Verdict -->

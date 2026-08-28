@@ -77,6 +77,36 @@ def queue_verification(report: SecurityReport, *, priority: int = PRIORITY_BULK)
     return queue_command("verify_security_report", report=report, priority=priority)
 
 
+def queue_version_map(report: SecurityReport, *, priority: int = PRIORITY_BULK) -> bool:
+    """Queue the cheap version-mapper: cited files and whether the patch applies.
+
+    Git only — no agent — so a 143-report archive is minutes, not thousands of
+    hours. Still goes through this door so a double-click is one run.
+    """
+    return queue_command("map_report_versions", report=report, priority=priority)
+
+
+def cancel_pending_for_reports(report_ids: list[int]) -> int:
+    """Drop pending worker jobs for *report_ids* before the reports themselves go.
+
+    CASCADE on report delete would get them eventually, but a worker can claim a
+    pending row in the gap and then spend an NVD lookup or an agent run on a
+    report that no longer exists. Deleting the pending rows first is the cancel.
+    Running ones are already claimed — those finish or fail on the missing row.
+
+    Returns how many command rows were deleted.
+    """
+    if not report_ids:
+        return 0
+    deleted, _ = WorkerCommand.objects.filter(
+        security_report_id__in=report_ids,
+        status="pending",
+    ).delete()
+    if deleted:
+        logger.info("Cancelled %d pending worker command(s) for dropped report(s)", deleted)
+    return deleted
+
+
 def queue_command(
     command: str,
     report: SecurityReport | None = None,

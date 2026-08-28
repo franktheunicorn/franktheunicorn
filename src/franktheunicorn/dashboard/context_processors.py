@@ -12,7 +12,10 @@ from franktheunicorn.core.models import Project
 def nav_projects(request: HttpRequest) -> dict[str, Any]:
     return {
         "nav_projects": list(
-            Project.objects.filter(enabled=True).order_by("owner", "repo").values("owner", "repo")
+            Project.objects.filter(enabled=True)
+            .filter(Project.configured_q())
+            .order_by("owner", "repo")
+            .values("owner", "repo")
         )
     }
 

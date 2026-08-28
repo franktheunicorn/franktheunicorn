@@ -167,6 +167,7 @@ def load_project_configs(directory: str | Path) -> list[ProjectConfig]:
         return []
     d = Path(directory)
     if not d.is_dir():
+        logger.warning("Project config directory %s does not exist; no projects loaded.", d)
         return []
     configs: list[ProjectConfig] = []
     for yaml_file in sorted(f for f in d.iterdir() if f.suffix in {".yaml", ".yml"}):
@@ -192,12 +193,29 @@ def get_project_config(name: str) -> ProjectConfig | None:
     """Look up a project config by name.
 
     Matches against the filename stem convention ("owner-repo") or
-    the full name ("owner/repo").
+    the full name ("owner/repo"), case-insensitively — GitHub's search results
+    and a pasted PR URL don't promise the same casing as the YAML file, and
+    the allow-list this feeds (``configured_owner_repos``, ``Project.configured_q``)
+    already matches case-insensitively. A mismatch here means a configured
+    project's own casing variant looks unconfigured and gets a stray disabled
+    ``Project`` row.
 
     Returns None if no matching config is found.
     """
     configs = load_project_configs(getattr(settings, "FRANK_PROJECTS_DIR", ""))
+    lowered = name.lower()
     for config in configs:
-        if name in (f"{config.owner}-{config.repo}", config.full_name):
+        if lowered in (f"{config.owner}-{config.repo}".lower(), config.full_name.lower()):
             return config
     return None
+
+
+def configured_owner_repos() -> frozenset[tuple[str, str]]:
+    """``(owner, repo)`` pairs from enabled project YAML.
+
+    This is the allow-list. A GitHub search will happily return every repo the
+    operator has ever touched; those are not projects we monitor unless there
+    is a file in the projects directory saying so.
+    """
+    configs = load_project_configs(getattr(settings, "FRANK_PROJECTS_DIR", ""))
+    return frozenset((c.owner, c.repo) for c in configs if c.enabled)

@@ -103,6 +103,21 @@ class TestImportSecurityZipCommand:
 
         assert WorkerCommand.objects.filter(command="run_security_triage").count() == 2
 
+    def test_verify_versions_flag_queues_without_the_deep_verify_cap(
+        self, archive: Path, triage_on: Any
+    ) -> None:
+        ProjectFactory(owner="apache", repo="spark")
+        call_command(
+            "import_security_zip",
+            str(archive),
+            "--project",
+            "apache/spark",
+            "--verify-versions",
+            stdout=io.StringIO(),
+        )
+        assert WorkerCommand.objects.filter(command="map_report_versions").count() == 2
+        assert WorkerCommand.objects.filter(command="verify_security_report").count() == 0
+
     def test_missing_file_is_a_command_error(self, tmp_path: Path) -> None:
         with pytest.raises(CommandError, match="No such file"):
             call_command("import_security_zip", str(tmp_path / "nope.zip"))
