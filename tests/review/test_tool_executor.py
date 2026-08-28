@@ -7,6 +7,7 @@ import logging
 import os
 import select
 import shlex
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -1199,7 +1200,17 @@ class TestStdinFramingUnderAPty:
                 writable = [master] if pending else []
                 readable, ready, _ = select.select([master], writable, [], 0.2)
                 if ready:
-                    written = os.write(master, pending[:2048])
+                    try:
+                        written = os.write(master, pending[:2048])
+                    except OSError:
+                        # EIO: the shell exited while input was still pending, which
+                        # is exactly what the over-long-line cases provoke. Guarded
+                        # like the read below, because unguarded it escaped into the
+                        # mocked subprocess.run, got swallowed by _spawn's own
+                        # `except OSError`, and the test then failed as
+                        # "assert result is not None" instead of naming the pump.
+                        pending = b""
+                        continue
                     pending = pending[written:]
                 if not readable:
                     if proc.poll() is not None and not pending:
@@ -1212,9 +1223,14 @@ class TestStdinFramingUnderAPty:
                 if not data:
                     break
                 chunks.append(data)
+            timed_out = time.monotonic() >= deadline
             if proc.poll() is None:
                 proc.kill()
             proc.wait(timeout=10)
+            # Asserted, not silently fallen out of. The deadline exists so a hung
+            # shell names itself; without this it still surfaced as an unrelated
+            # assertion further down.
+            assert not timed_out, "pty session did not finish within 30s"
         finally:
             os.close(master)
 
@@ -1458,9 +1474,11 @@ class TestMissingBase64OnTheRemote:
             result = executor.run_script("echo IMPORTANT_DIFF_LINE", timeout=60, label="probe")
 
         assert result is None
-        assert "base64(1)" in caplog.text
-        # And it names both ways out.
-        assert "coreutils" in caplog.text
+        # Names the whole retrieval pipeline, not just base64: `head -c` or `tr`
+        # missing produces the identical observation, and telling the operator to
+        # install coreutils when `head` is the problem is the opposite of a
+        # diagnostic.
+        assert "head -c | base64 | tr -d" in caplog.text
         assert "command_mode" in caplog.text
 
 
@@ -1564,3 +1582,143 @@ class TestLocalIsolatedCheckout:
 
         assert cwd is None
         assert "isolated worktree" in caplog.text
+
+
+class TestWorktreeSelfHealing:
+    """The `.git`-exists fast path was wrong in two ways that both end in a
+    permanently dead tree, and the docstring claimed it self-healed."""
+
+    @staticmethod
+    def _repo(tmp_path: Path) -> Path:
+        repo = tmp_path / "repos" / "apache" / "spark"
+        repo.mkdir(parents=True)
+        env = {
+            **os.environ,
+            "HOME": str(tmp_path),
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@e",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@e",
+        }
+        for argv in (
+            ["git", "init", "-q", "-b", "master"],
+            ["git", "commit", "-q", "--allow-empty", "-m", "first"],
+        ):
+            subprocess.run(argv, cwd=repo, check=True, capture_output=True, env=env)
+        return repo
+
+    def test_the_isolation_root_matches_the_remote_layout(self, tmp_path: Path) -> None:
+        """`local_path.parent` nested it inside the owner namespace —
+        `<repos>/apache/security-verify/apache/spark` — which diverges from the
+        remote's `<workspace>/security-verify/<owner>/<repo>` and collides with a
+        project literally named `apache/security-verify`."""
+        repo = self._repo(tmp_path)
+
+        cwd = LocalExecutor().prepare_repo(
+            "apache", "spark", local_path=repo, workspace_subdir="security-verify"
+        )
+
+        assert cwd is not None
+        assert Path(cwd) == tmp_path / "repos" / "security-verify" / "apache" / "spark"
+
+    def test_a_pruned_worktree_is_rebuilt_not_handed_back_dead(self, tmp_path: Path) -> None:
+        """git gc --auto runs `worktree prune`. The .git file survives, so the old
+        fast path returned a tree where every command answered
+        `fatal: not a git repository: (null)` — forever."""
+        repo = self._repo(tmp_path)
+        env = {**os.environ, "HOME": str(tmp_path)}
+        cwd = LocalExecutor().prepare_repo(
+            "apache", "spark", local_path=repo, workspace_subdir="security-verify"
+        )
+        assert cwd is not None
+        # Simulate the prune: drop the admin dir, leave the .git file behind.
+        shutil.rmtree(repo / ".git" / "worktrees")
+        assert (Path(cwd) / ".git").exists()
+
+        again = LocalExecutor().prepare_repo(
+            "apache", "spark", local_path=repo, workspace_subdir="security-verify"
+        )
+
+        assert again is not None
+        probe = subprocess.run(
+            ["git", "rev-parse", "--git-dir"], cwd=again, capture_output=True, text=True, env=env
+        )
+        assert probe.returncode == 0, f"handed back a dead worktree: {probe.stderr}"
+
+    def test_a_relocated_worktree_is_rebuilt(self, tmp_path: Path) -> None:
+        """A worktree's .git records an ABSOLUTE gitdir, and this project runs the
+        same data/ tree at two prefixes (docker compose /app vs host)."""
+        repo = self._repo(tmp_path)
+        env = {**os.environ, "HOME": str(tmp_path)}
+        cwd = LocalExecutor().prepare_repo(
+            "apache", "spark", local_path=repo, workspace_subdir="security-verify"
+        )
+        assert cwd is not None
+        # Point the .git file at a gitdir that doesn't exist, as a moved prefix does.
+        (Path(cwd) / ".git").write_text("gitdir: /nonexistent/elsewhere/.git/worktrees/spark\n")
+
+        again = LocalExecutor().prepare_repo(
+            "apache", "spark", local_path=repo, workspace_subdir="security-verify"
+        )
+
+        assert again is not None
+        probe = subprocess.run(
+            ["git", "rev-parse", "--git-dir"], cwd=again, capture_output=True, text=True, env=env
+        )
+        assert probe.returncode == 0, f"handed back a dead worktree: {probe.stderr}"
+
+    def test_a_healthy_worktree_is_reused_not_rebuilt(self, tmp_path: Path) -> None:
+        repo = self._repo(tmp_path)
+        first = LocalExecutor().prepare_repo(
+            "apache", "spark", local_path=repo, workspace_subdir="security-verify"
+        )
+        assert first is not None
+        marker = Path(first) / "marker.txt"
+        marker.write_text("still here")
+
+        second = LocalExecutor().prepare_repo(
+            "apache", "spark", local_path=repo, workspace_subdir="security-verify"
+        )
+
+        assert second == first
+        assert marker.read_text() == "still here", "a healthy worktree was rebuilt"
+
+
+class TestTruncatedOutputIsAnnounced:
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_hitting_the_output_cap_is_logged(self, mock_run: Any, caplog: Any) -> None:
+        """The remote declares its untruncated size precisely so this is detectable,
+        and the comparison was written into a docstring and never into the code — so
+        a 4 MB-plus payload came back silently short and the verifier's verdict JSON
+        was cut off the end."""
+        mock_run.side_effect = TestStdinFramingUnderAPty._pty_wrapper
+        executor = RemoteSSHExecutor(
+            config=RemoteExecutionConfig(mode="ssh", ssh_command=["sf", "workspace", "ssh"])
+        )
+
+        with (
+            patch("franktheunicorn.review.tool_executor._MAX_REMOTE_OUTPUT_BYTES", 100),
+            caplog.at_level(logging.WARNING),
+        ):
+            result = executor.run_script("printf '%5000s' x", timeout=60, label="big")
+
+        assert result is not None
+        assert len(result.stdout) == 100
+        assert "truncated" in caplog.text
+        assert "5000" in caplog.text
+
+
+class TestDeliveryProbeWithoutBase64:
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_a_base64_less_remote_still_resolves_to_stdin(self, mock_run: Any) -> None:
+        """The refusal for un-retrievable output also killed the capability probe, so
+        such a remote resolved to argv — a mode the wrapper cannot use — and left the
+        result uncached, re-probing twice per command forever."""
+        mock_run.side_effect = TestMissingBase64OnTheRemote._wrapper_without_base64
+        config = RemoteExecutionConfig(mode="ssh", ssh_command=["sf", "workspace", "ssh"])
+        executor = RemoteSSHExecutor(config=config)
+
+        mode = executor._delivery_mode(timeout=60)
+
+        assert mode == "stdin"
+        assert config._resolved_command_mode == "stdin", "the mode was not cached"

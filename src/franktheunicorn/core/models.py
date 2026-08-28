@@ -741,6 +741,14 @@ class SecurityVerification(models.Model):
     #: Which agent and model produced this, because the answer is only as good as
     #: its source and that changes between runs.
     agent = models.CharField(max_length=100, blank=True, default="")
+    #: Position in the run's branch order, default branch first. Persisted because
+    #: the *verifier* already resolves the real default from
+    #: ``git symbolic-ref refs/remotes/origin/HEAD`` — "not a guess between master
+    #: and main", per its own docstring — and a view that re-guesses
+    #: ("main","master","trunk") sorts the default row last for any project on
+    #: `develop`, `2.x` or `release`, which is precisely the complaint that
+    #: replaced the old bare order_by("branch").
+    branch_order = models.IntegerField(default=0)
     #: Raw output, kept when parsing found no structured verdict. The fallback
     #: that stops an unparseable run looking like a clean "unclear".
     raw_output = models.TextField(blank=True, default="")

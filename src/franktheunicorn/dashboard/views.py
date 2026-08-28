@@ -983,6 +983,8 @@ def security_report_list(request: HttpRequest) -> HttpResponse:
 
     all_reports = SecurityReport.objects.all()
     all_count = all_reports.count()
+    # Bound once: this was two identical COUNT(*) in the same dict literal below.
+    filtered_count = reports.count()
     tabs_with_counts: list[dict[str, str | int]] = []
     for tab in SECURITY_STATUS_TABS:
         count = all_count if tab["key"] == "all" else all_reports.filter(status=tab["key"]).count()
@@ -1007,8 +1009,8 @@ def security_report_list(request: HttpRequest) -> HttpResponse:
             # with 40 in "new" showed "the export stops at 2000" on a tab that
             # exports 40.
             "export_cap": MAX_SECURITY_CSV_EXPORT_ROWS,
-            "export_total": reports.count(),
-            "export_capped": reports.count() > MAX_SECURITY_CSV_EXPORT_ROWS,
+            "export_total": filtered_count,
+            "export_capped": filtered_count > MAX_SECURITY_CSV_EXPORT_ROWS,
         },
     )
 
@@ -1592,15 +1594,12 @@ def security_report_detail(request: HttpRequest, report_id: int) -> HttpResponse
         .first()
     )
 
-    # Not by created_at: a run writes every branch's row with the same timestamp,
-    # so ordering by it leaves the table in whatever order the database felt like.
-    # And not a bare order_by("branch") either, which the comment here used to claim
-    # was default-branch-first while actually sorting `master` *after* every
-    # `branch-*` — the row a maintainer looks at first, last.
-    verifications = sorted(
-        report.verifications.all(),
-        key=lambda v: (v.branch not in ("main", "master", "trunk"), v.branch),
-    )
+    # branch_order, recorded by the run. Not created_at (every row of a run shares
+    # a timestamp, so the database picks), not order_by("branch") (sorts `master`
+    # after every `branch-*`), and not a ("main","master","trunk") guess in here —
+    # the verifier already resolved the real default from origin/HEAD, so guessing
+    # again would sort the default row last for any project on `develop` or `2.x`.
+    verifications = list(report.verifications.order_by("branch_order", "branch"))
 
     return render(
         request,
@@ -1790,9 +1789,23 @@ def security_report_verdict(request: HttpRequest, report_id: int) -> HttpRespons
     # hits Save Verdict without touching a thing, and the reference is gone,
     # including out of the next export. Guarded on presence rather than read with
     # a default, so a POST that doesn't carry the field can't blank it either.
+    # Did the operator *change* the value, or did the form just echo back what was
+    # already there? That is the real distinction, and testing field presence got
+    # it wrong twice in opposite directions.
+    #
+    # Blanking unconditionally after the assignment deleted a CVE typed in the same
+    # submission ("distinct valid bug, related to CVE-2026-2222" saved with an empty
+    # reference). Making it an `elif` on presence then made it dead code, because
+    # _security_verdict.html always renders the input — so *every* dashboard POST
+    # carries the field, the drop never fired, and a duplicate's CVE stuck to a
+    # report just ruled valid and rendered as a badge on the list page. The test
+    # covering that branch posted a shape the UI never produces, so the suite was
+    # green on a path nothing reached.
+    previous_cve = report.matched_cve_id
+    submitted_cve = previous_cve
     if "matched_cve_id" in request.POST:
         # Validated with sheet_sync's own pattern, not a looser one: this column
-        # now has two writers and they must agree about what fits in it. Bounded
+        # has two writers and they must agree about what fits in it. Bounded
         # because the field is CharField(max_length=50) and SQLite doesn't enforce
         # that — a 309-character "CVE" persisted here and would be a DataError,
         # i.e. an unhandled 500 losing the status and notes in the same save(), on
@@ -1802,19 +1815,17 @@ def security_report_verdict(request: HttpRequest, report_id: int) -> HttpRespons
         candidate = request.POST["matched_cve_id"].strip()
         if candidate and not looks_like_cve(candidate):
             return HttpResponse("That doesn't look like a CVE id (CVE-2026-1234).", status=400)
-        report.matched_cve_id = candidate.upper()
+        submitted_cve = candidate.upper()
+
+    if submitted_cve != previous_cve:
+        # The operator said something. Honour it, whatever the status.
+        report.matched_cve_id = submitted_cve
     elif was_duplicate and new_status != "duplicate":
-        # Only when the form didn't carry the field, which is the whole condition.
-        # Blanking after the assignment above deleted a CVE the operator had just
-        # typed *in the same submission*: "this is a distinct valid bug, related to
-        # CVE-2026-2222" saved as valid with an empty reference and nothing said.
-        # That is the same silent deletion the comment above was written to fix.
-        #
-        # When the field IS submitted it already says what the operator wants,
-        # including empty — so there is nothing left for this rule to decide. It
-        # survives for the no-field POST, where "actually valid" still means the
-        # CVE this duplicated no longer describes it.
+        # Untouched, and no longer a duplicate: "actually valid" means the CVE this
+        # duplicated no longer describes it.
         report.matched_cve_id = ""
+    else:
+        report.matched_cve_id = submitted_cve
     report.save(update_fields=["status", "operator_notes", "matched_cve_id", "updated_at"])
 
     return render(request, "dashboard/_security_verdict.html", {"report": report})

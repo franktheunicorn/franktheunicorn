@@ -493,8 +493,12 @@ table, which invites being trusted more than it has earned.
   verifier ran `git checkout --detach --force` onto release branches **inside the review
   pipeline's own clone**, left it detached on the last branch checked, and — because commands
   drain mid-cycle — the rest of that poll cycle read blame and copy-pasta context from the
-  wrong branch. If isolation can't be established the executor now returns `None` rather than
-  handing back the shared tree.
+  wrong branch. If isolation can't be established the executor returns `None` rather than
+  handing back the shared tree. The local worktree is *validated* on every call
+  (`git rev-parse --git-dir` inside it) and rebuilt when it fails, because a worktree keeps its
+  `.git` file after a `worktree prune` and records an **absolute** `gitdir:` — so a pruned one,
+  or the same `data/` tree seen at a different prefix under `docker compose` versus a host
+  `make worker`, would otherwise be handed back dead forever while looking fine.
 - **Detached HEAD checkouts**, so nothing accumulates local branches that drift from origin.
 - **The verdict is presented as a model's opinion**, with the agent and model named, the commit
   recorded, and the confidence shown separately from the verdict — and an unparseable answer is

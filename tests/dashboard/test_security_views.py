@@ -1461,9 +1461,28 @@ class TestVerdictCvePreservation:
         assert report.status == "valid"
         assert report.matched_cve_id == "CVE-2026-2222"
 
+    def test_the_form_echoing_the_cve_back_unchanged_still_drops_it(self, client: Client) -> None:
+        """The case the real UI produces, and the one the previous test missed.
+
+        _security_verdict.html always renders the CVE input, so every dashboard POST
+        carries the field. Keying the drop on field *presence* therefore made it dead
+        code, and a duplicate's CVE stuck to a report just ruled valid — badge and
+        all. The question is whether the operator CHANGED it, not whether the form
+        sent it.
+        """
+        report = SecurityReportFactory(status="duplicate", matched_cve_id="CVE-2026-1111")
+
+        # Exactly what the browser submits: the value the template rendered.
+        client.post(
+            f"/security/{report.pk}/verdict/",
+            {"status": "valid", "operator_notes": "", "matched_cve_id": "CVE-2026-1111"},
+        )
+
+        report.refresh_from_db()
+        assert report.matched_cve_id == ""
+
     def test_leaving_duplicate_without_the_field_still_drops_it(self, client: Client) -> None:
-        """The rule survives for the POST that doesn't carry the field, which is the
-        case it was written for."""
+        """A POST with no CVE field at all (an htmx partial, a script)."""
         report = SecurityReportFactory(status="duplicate", matched_cve_id="CVE-2026-1111")
 
         client.post(f"/security/{report.pk}/verdict/", {"status": "valid"})

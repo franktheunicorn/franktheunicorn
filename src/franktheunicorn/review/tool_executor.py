@@ -16,6 +16,7 @@ import binascii
 import logging
 import re
 import shlex
+import shutil
 import subprocess
 import time
 import uuid
@@ -218,9 +219,8 @@ class LocalExecutor:
             return self._isolated_worktree(local_path, workspace_subdir, owner, repo)
         return str(local_path)
 
-    @staticmethod
     def _isolated_worktree(
-        local_path: Path, workspace_subdir: str, owner: str, repo: str
+        self, local_path: Path, workspace_subdir: str, owner: str, repo: str
     ) -> str | None:
         """A checkout of ``local_path`` that a caller may mutate freely, or None.
 
@@ -236,21 +236,67 @@ class LocalExecutor:
 
         A linked worktree rather than a second clone: it shares the object store,
         so it costs a checkout rather than a fetch of something Spark-sized, and
-        git keeps the two trees' HEADs genuinely independent. Pruned and re-added
-        if a previous run left it in a bad state, because a half-registered
-        worktree is otherwise unrecoverable without a shell.
+        git keeps the two trees' HEADs genuinely independent.
+
+        **Validated, not assumed.** Testing ``(target / ".git").exists()`` and
+        returning was wrong in two ways that both end in a permanently dead tree:
+
+        * A worktree whose admin directory has been pruned — ``git gc --auto`` runs
+          ``worktree prune``, and any window where the directory was unreachable
+          triggers it — still has its ``.git`` file, so the fast path handed it
+          back and every git command inside answered ``fatal: not a git
+          repository: (null)``. Every verification then failed, forever.
+        * A worktree's ``.git`` records an **absolute** ``gitdir:``, and this
+          project is documented to run the same ``data/`` tree at two prefixes
+          (``docker compose`` at ``/app`` with ``./data`` bind-mounted, and host
+          ``make worker``). A worktree created in the container is dead on the
+          host and vice versa.
+
+        So the check is "does git actually work in there", and a tree that fails it
+        is removed and rebuilt. ``prune`` before ``add`` because git refuses to
+        register a path it still has a stale record for, and the directory is
+        removed first because ``add`` refuses a non-empty target.
         """
-        target = local_path.parent / workspace_subdir / owner / repo
-        if (target / ".git").exists():
+        # Sibling of the repos root, not of the owner directory. `local_path.parent`
+        # is `<repos>/<owner>`, so that nested the isolation root *inside* the owner
+        # namespace: `<repos>/apache/security-verify/apache/spark`, which both
+        # diverges from the remote layout (`<workspace>/security-verify/...`) and
+        # collides head-on with a project literally named `apache/security-verify`.
+        target = local_path.parent.parent / workspace_subdir / owner / repo
+        if self._worktree_is_usable(target):
             return str(target)
+
+        if target.exists():
+            shutil.rmtree(target, ignore_errors=True)
         target.parent.mkdir(parents=True, exist_ok=True)
         for argv in (
             ["git", "worktree", "prune"],
             ["git", "worktree", "add", "--detach", "--force", str(target), "HEAD"],
         ):
-            done = subprocess.run(
-                argv, cwd=str(local_path), capture_output=True, text=True, timeout=300, check=False
-            )
+            try:
+                done = subprocess.run(
+                    argv,
+                    cwd=str(local_path),
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                # This function's contract — and prepare_repo's docstring — is
+                # "returns None on failure". A checkout of something Spark-sized on
+                # a cold cache can outrun any timeout, and letting that escape gave
+                # the operator a traceback and a failed WorkerCommand instead of the
+                # warning that names the setting.
+                logger.warning(
+                    "Could not create an isolated worktree at %s for %s/%s (%s: %s)",
+                    target,
+                    owner,
+                    repo,
+                    type(exc).__name__,
+                    exc,
+                )
+                return None
             if done.returncode != 0 and argv[2] == "add":
                 # WARNING, not debug: the caller asked for isolation and is not
                 # getting it, and the alternative to saying so is handing back the
@@ -266,6 +312,36 @@ class LocalExecutor:
                 )
                 return None
         return str(target)
+
+    @staticmethod
+    def _worktree_is_usable(target: Path) -> bool:
+        """Whether git commands actually work inside *target*.
+
+        The question the ``.git``-exists check was standing in for. A pruned or
+        relocated worktree keeps its ``.git`` file and fails every command, so
+        presence proves nothing.
+        """
+        if not (target / ".git").exists():
+            return False
+        try:
+            done = subprocess.run(
+                ["git", "rev-parse", "--git-dir"],
+                cwd=str(target),
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        if done.returncode == 0:
+            return True
+        logger.info(
+            "Rebuilding the isolated worktree at %s: git does not work there (%s)",
+            target,
+            (done.stderr or done.stdout).strip()[:200],
+        )
+        return False
 
     def run(
         self,
@@ -739,7 +815,49 @@ class RemoteSSHExecutor:
         """``ssh host 'cd … && cmd'`` — the command as a trailing argument."""
         return self._spawn([*self._ssh_command(), remote_invocation], label, timeout, stdin)
 
-    def _run_via_stdin(self, remote_invocation: str, label: str, timeout: int) -> ExecResult | None:
+    def _stdin_delivery_runs(self, invocation: str, timeout: int) -> bool:
+        """Does this wrapper run a command piped into the shell it opens?
+
+        A capability question, and deliberately not answered through
+        ``_run_via_stdin``. That path refuses when the payload cannot be
+        *retrieved* — no usable ``base64`` on the remote — which is right for a
+        caller that wants output and wrong for a probe that only needs to know
+        whether the shell ran anything. Conflating them took a base64-less
+        stdin-only remote from degraded-but-working to completely dead, and left
+        the mode uncached so it re-probed twice per command forever.
+
+        So this sends its own minimal script: the sentinel goes straight to the
+        terminal with no redirect and no encoding, bracketed by nonce'd markers.
+        Both are required, in order, because a hostile or confused wrapper may
+        quote our command back at us — the split sentinel stops it *assembling*
+        one, but a wrapper that echoes the assembled form (an error message
+        naming it) would otherwise read as success. It cannot fabricate our
+        nonce.
+        """
+        nonce = uuid.uuid4().hex[:12]
+        begin, end = f"{_FRAME_BEGIN}{nonce}", f"{_FRAME_END}{nonce}"
+        result = self._spawn(
+            self._ssh_command(),
+            "delivery probe",
+            timeout,
+            f"echo {begin}\n{invocation}\necho {end}\nexit\n",
+        )
+        if result is None:
+            return False
+        at_begin = result.stdout.find(begin)
+        if at_begin < 0:
+            return False
+        at_sentinel = result.stdout.find(_DELIVERY_SENTINEL, at_begin + len(begin))
+        if at_sentinel < 0:
+            return False
+        return result.stdout.find(end, at_sentinel) >= 0
+
+    def _run_via_stdin(
+        self,
+        remote_invocation: str,
+        label: str,
+        timeout: int,
+    ) -> ExecResult | None:
         """Pipe the command into the shell the wrapper opens.
 
         For a wrapper with no remote-command form. Two things make this usable
@@ -847,7 +965,13 @@ class RemoteSSHExecutor:
                 f'printf "%s%s%s%s%s\\n" "$__frank_e" "$__frank_n" '
                 f'"$(head -c {_MAX_REMOTE_OUTPUT_BYTES} < "$__frank_s" | base64 | tr -d "\\n")" '
                 f'"$__frank_t" "$__frank_n"',
-                'rm -f "$__frank_o" "$__frank_s"',
+                # All four, not just the output pair. _stage_invocation also
+                # mktemps the base64 and the decoded script, and for the verifier
+                # that decoded script *is* the prompt — the reporter's raw_text and
+                # POC. Leaving it behind accumulated unfixed vulnerability details
+                # in a shared remote's /tmp, one pair per verification per branch.
+                # ${TMPDIR:-/tmp} is 0644 by default in most images.
+                'rm -f "$__frank_o" "$__frank_s" "$__frank_c" "$__frank_x"',
                 f'echo "{end}:$__frank_rc"',
                 "exit",
                 "",
@@ -965,6 +1089,26 @@ class RemoteSSHExecutor:
         # encoder was indistinguishable from a command that printed nothing, and
         # that reads downstream as a clean repo or an empty diff.
         declared = _declared_length(stdout, len_head, b64_tail) if len_head else None
+        if (
+            decoded_out
+            and declared
+            and declared > _MAX_REMOTE_OUTPUT_BYTES
+            and len(decoded_out.encode("utf-8", errors="replace")) >= _MAX_REMOTE_OUTPUT_BYTES
+        ):
+            # The cap fired. Said out loud, because the whole reason the remote
+            # declares its untruncated size is to make this detectable — and it was
+            # computed and then never compared, so a 4 MB-plus payload came back
+            # silently short. For the verifier that means the verdict JSON is cut
+            # off the end and the row records "unclear", the one direction that
+            # module must not fail in; per CLAUDE.md a truncated read must not look
+            # like a short one.
+            logger.warning(
+                "Remote output for %s was %d bytes and has been truncated to %d — the "
+                "tail is gone. Anything parsing this output is seeing a fragment.",
+                label or "(script)",
+                declared,
+                _MAX_REMOTE_OUTPUT_BYTES,
+            )
         if decoded_out == "" and declared:
             # None, not a fallback. The command's stdout goes to a file on the
             # remote and is only ever retrieved by base64, so with no encoder there
@@ -973,10 +1117,12 @@ class RemoteSSHExecutor:
             # git diff that produced 22 bytes as a clean repo, which is the failure
             # this whole framing exists to prevent.
             logger.warning(
-                "Remote said stdout was %d byte(s) for %s but the base64 payload is "
-                "empty: the remote has no usable base64(1), so the output cannot be "
-                "retrieved. Install coreutils there, or set remote.command_mode: argv "
-                "if the wrapper accepts a trailing command.",
+                "Remote said stdout was %d byte(s) for %s but the payload came back "
+                "empty, so the output cannot be retrieved. The retrieval pipeline is "
+                "`head -c | base64 | tr -d`, and any member of it missing or lacking "
+                "these flags produces exactly this — check all three on the remote "
+                "rather than base64 alone, or set remote.command_mode: argv if the "
+                "wrapper accepts a trailing command.",
                 declared,
                 label or "(script)",
             )
@@ -1135,15 +1281,14 @@ class RemoteSSHExecutor:
             return _DELIVERY_ARGV
         note(_DELIVERY_ARGV, argv_probe)
 
-        stdin_probe = self._run_via_stdin(invocation, "echo", probe_timeout)
-        if accepted(stdin_probe):
+        if self._stdin_delivery_runs(invocation, probe_timeout):
             logger.info(
                 "Remote %r takes no remote-command argument; driving it over stdin.",
                 " ".join(self.config.ssh_command),
             )
             self.config._resolved_command_mode = _DELIVERY_STDIN
             return _DELIVERY_STDIN
-        note(_DELIVERY_STDIN, stdin_probe)
+        note(_DELIVERY_STDIN, None)
 
         # Neither worked. Fall back to argv so the failure surfaces as the
         # wrapper's own error message rather than as framing noise, and don't

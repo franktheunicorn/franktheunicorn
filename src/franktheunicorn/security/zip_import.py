@@ -381,26 +381,6 @@ def _queue_verifications(result: ZipImportResult) -> None:
     ids = [report_id for report_id in ids if report_id]
     if not ids:
         return
-    if len(ids) > MAX_AUTO_VERIFY:
-        # Refused rather than truncated. One tick of a checkbox could otherwise
-        # enqueue MAX_ENTRIES=2000 reports x (max_branches+1) agent runs at up to
-        # 1800s each — on the order of thousands of hours of paid agent time,
-        # serialised through a single worker that stops polling PRs while it grinds
-        # through them. Verifying an arbitrary 50 of a 2000-report archive would be
-        # its own kind of wrong, so the operator gets told to narrow it instead.
-        result.verify_skipped_reason = (
-            f"{len(ids)} reports is over the {MAX_AUTO_VERIFY}-report verification "
-            "limit — that would be thousands of hours of agent time from one "
-            "checkbox. Import without it and verify the ones that matter, or import "
-            "in smaller archives"
-        )
-        logger.warning(
-            "Refusing to auto-verify %d imported report(s); the cap is %d.",
-            len(ids),
-            MAX_AUTO_VERIFY,
-        )
-        return
-
     try:
         from franktheunicorn.config.loader import get_operator_config
 
@@ -419,8 +399,38 @@ def _queue_verifications(result: ZipImportResult) -> None:
     from franktheunicorn.core.models import SecurityReport
     from franktheunicorn.security.queue import PRIORITY_BULK, queue_verification
 
+    # Counted after the enabled gate and against the reports that would *actually*
+    # be queued. Checking it first meant an operator with verifier.enabled=false
+    # was told "100 reports is over the 25-report limit — thousands of hours of
+    # agent time", split the archive into four, retried, and only then discovered
+    # the setting. Same for an archive whose reports have no project: it would have
+    # queued nothing and was refused for its fan-out.
+    verifiable = [
+        report for report in SecurityReport.objects.filter(pk__in=ids).select_related("project")
+    ]
+    queueable = [report for report in verifiable if report.project_id is not None]
+    if len(queueable) > MAX_AUTO_VERIFY:
+        # Refused rather than truncated. One tick could otherwise enqueue
+        # MAX_ENTRIES=2000 reports x (max_branches+1) agent runs at up to 1800s
+        # each — thousands of hours of paid agent time, serialised through a single
+        # worker that stops polling PRs while it grinds through them. Verifying an
+        # arbitrary 25 of a 200-report archive would be its own kind of wrong, so
+        # the operator is told to narrow it instead.
+        result.verify_skipped_reason = (
+            f"{len(queueable)} reports is over the {MAX_AUTO_VERIFY}-report "
+            "verification limit — that would be thousands of hours of agent time "
+            "from one checkbox. Import without it and verify the ones that matter, "
+            "or import in smaller archives"
+        )
+        logger.warning(
+            "Refusing to auto-verify %d imported report(s); the cap is %d.",
+            len(queueable),
+            MAX_AUTO_VERIFY,
+        )
+        return
+
     unattached = 0
-    for report in SecurityReport.objects.filter(pk__in=ids).select_related("project"):
+    for report in verifiable:
         if report.project_id is None:
             # No repo to check against. Counted rather than queued, because the
             # worker would only reach the same conclusion minutes later, once per
