@@ -20,6 +20,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from franktheunicorn.config.loader import load_operator_config
 
 
@@ -161,3 +163,56 @@ class TestSecurityDefaults:
         triage = OperatorConfig().security_triage
         assert triage.sandbox_enabled is False
         assert triage.email.enabled is False
+
+
+class TestNonMappingConfig:
+    """Valid YAML of the wrong shape. `OperatorConfig(**data)` raises TypeError for a
+    list/str/int, which is not one of the exceptions the loader catches — so it
+    escaped the degrade-to-defaults contract the docstring promises, and took
+    `manage.py show_config` down with a traceback on exactly the configs that
+    command exists to diagnose."""
+
+    @pytest.mark.parametrize(
+        ("label", "text"),
+        [
+            ("a list", "- security_triage\n- llm_backends\n"),
+            ("a bare string", "just some prose someone left here\n"),
+            ("a number", "42\n"),
+        ],
+    )
+    def test_it_degrades_instead_of_raising(
+        self, tmp_path: Path, caplog: Any, label: str, text: str
+    ) -> None:
+        config = tmp_path / "operator.yaml"
+        config.write_text(text)
+
+        with caplog.at_level(logging.ERROR):
+            loaded = load_operator_config(config)
+
+        assert loaded.security_triage.enabled is True  # i.e. defaults, not a crash
+        assert "not a mapping of settings" in caplog.text
+        assert str(config) in caplog.text
+
+    def test_the_message_names_the_likely_cause(self, tmp_path: Path, caplog: Any) -> None:
+        """A leading "- " on the first line is how a hand-edited config becomes a
+        list, and it is not obvious from the symptom."""
+        config = tmp_path / "operator.yaml"
+        config.write_text("- github_username: holdenk\n")
+
+        with caplog.at_level(logging.ERROR):
+            load_operator_config(config)
+
+        assert "leading `- `" in caplog.text
+
+    def test_show_config_survives_it(self, tmp_path: Path) -> None:
+        import io
+
+        from django.core.management import call_command
+
+        config = tmp_path / "operator.yaml"
+        config.write_text("- one\n- two\n")
+
+        out = io.StringIO()
+        call_command("show_config", "--path", str(config), stdout=out, stderr=out)
+
+        assert "not a mapping" in out.getvalue()

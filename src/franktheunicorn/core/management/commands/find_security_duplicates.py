@@ -64,18 +64,29 @@ class Command(BaseCommand):
     def handle(self, *args: object, **options: object) -> None:
         config = get_operator_config().security_triage.duplicates
         if options.get("threshold") is not None:
-            config = config.model_copy(update={"threshold": float(options["threshold"])})  # type: ignore[arg-type]
+            # model_validate, not model_copy: model_copy does NOT run validators in
+            # Pydantic v2, so `--threshold -1` was accepted — and since find_duplicate
+            # only skips on `score < threshold`, a negative one matches every pair and
+            # `--apply` would link every report in the project.
+            try:
+                config = config.model_validate(
+                    {**config.model_dump(), "threshold": float(options["threshold"])}  # type: ignore[arg-type]
+                )
+            except ValueError as exc:
+                self.stderr.write(self.style.ERROR(f"Bad --threshold: {exc}"))
+                return
 
-        if not config.enabled and not options.get("apply"):
-            # Reported rather than obeyed: an operator running this command by hand
-            # has asked for it, and the config flag describes the automatic path.
+        if not config.enabled:
+            # Unconditional, and that is the fix rather than a tidy-up: this was
+            # suppressed on --apply, i.e. on the one run that writes to the database.
+            # Reported rather than obeyed, because an operator running this by hand has
+            # asked for it and the config flag describes the automatic path.
             self.stdout.write(
                 self.style.WARNING(
                     "security_triage.duplicates.enabled is false, which turns this off "
                     "during triage. Running anyway because you asked directly."
                 )
             )
-        config = config.model_copy(update={"enabled": True})
 
         reports = SecurityReport.objects.all()
         project_name = options.get("project")
@@ -97,9 +108,15 @@ class Command(BaseCommand):
             reports = reports.filter(project=project)
 
         if not options.get("relink"):
-            # duplicate_confidence is what marks a link as *ours*. A link with the
-            # field null was set by hand and is a decision, not a guess to redo.
-            reports = reports.filter(duplicate_confidence__isnull=True)
+            # Skip anything already linked, so a second run doesn't churn links you
+            # have read. This filtered on `duplicate_confidence__isnull=True`, which
+            # is inverted: that field is NULL for unlinked reports *and* for
+            # hand-linked ones, and non-NULL only for detected links — so the default
+            # run fed every hand-set link back through detection and excluded exactly
+            # the detected ones it meant to skip. `link_duplicate` now refuses to
+            # overwrite a hand-set link regardless, but the filter should still say
+            # what it means.
+            reports = reports.filter(duplicate_of__isnull=True)
 
         candidates = list(reports.select_related("project", "duplicate_of"))
         if not candidates:

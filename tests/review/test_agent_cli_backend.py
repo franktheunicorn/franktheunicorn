@@ -233,14 +233,39 @@ class TestWorkingDirectory:
 
         assert all(cmd[:1] != ["git"] for cmd, _, _ in executor.calls)
 
-    def test_local_mode_runs_in_the_workers_own_directory(self) -> None:
+    def test_local_mode_does_not_run_the_agent_in_franks_own_directory(self) -> None:
+        """This returned "." — the worker's cwd, which holds config/active/*.yaml,
+        .env and the SQLite database. Worse than the checkout the module docstring
+        argues against handing over, and the prompt on this path may be a security
+        report a stranger emailed. A steered agent could read the keys out of the
+        directory it was started in."""
         executor = _FakeExecutor(ExecResult(returncode=0, stdout="ok", stderr=""))
         backend = AgentCLIBackend(LLMBackendConfig(provider="agent-cli", reviewer="cursor-agent"))
 
         _run(backend, executor, _operator(remote=RemoteExecutionConfig(mode="local")))
 
-        assert all(cmd[:1] != ["mkdir"] for cmd, _, _ in executor.calls)
-        assert executor.calls[0][1] == "."
+        cwd = executor.calls[0][1]
+        assert cwd not in (".", "", None)
+        assert "llm-scratch" in cwd or "frank-llm-scratch" in cwd
+
+    def test_the_local_scratch_dir_exists_and_holds_no_credentials(self) -> None:
+        """An empty directory is the whole point; a path that doesn't exist would make
+        the CLI fail in a way that reads like the CLI being broken."""
+        import os
+
+        scratch = AgentCLIBackend._local_scratch()
+
+        assert scratch is not None
+        assert os.path.isdir(scratch)
+        assert not any(name in os.listdir(scratch) for name in (".env", "config", "frank.sqlite3"))
+
+    def test_it_refuses_rather_than_falling_back_to_the_cwd(self) -> None:
+        """Returning "." on failure would defeat the entire point of the change."""
+        with (
+            patch("pathlib.Path.mkdir", side_effect=OSError("read-only file system")),
+            patch("tempfile.mkdtemp", side_effect=OSError("no space")),
+        ):
+            assert AgentCLIBackend._local_scratch() is None
 
 
 class TestFailureHandling:
@@ -414,3 +439,139 @@ class TestTriageBackendSelection:
             _get_triage_backend(config)
 
         assert "security_triage.llm_backend" in caplog.text
+
+
+class TestReviewRegressions:
+    """One test per finding from the max code review on this feature."""
+
+    def test_the_worker_preflight_does_not_disable_a_keyless_provider(self) -> None:
+        """The worst of the set: `_check_backends` exempted only ("stub", "ollama"),
+        so agent-cli fell through to the missing-key check and was DISABLED — an
+        operator copying the example config got zero findings forever, told to fix a
+        key the backend is documented as not needing. claude-code, llama-cpp, vllm and
+        rlm were caught by the same hardcoded pair."""
+        from franktheunicorn.worker.runner import _check_backends
+
+        config = OperatorConfig()
+        config.llm_backends = [LLMBackendConfig(provider="agent-cli", reviewer="cursor-agent")]
+
+        assert _check_backends(config) == frozenset()
+
+    @pytest.mark.parametrize(
+        "provider", ["stub", "ollama", "agent-cli", "claude-code", "rlm", "llama-cpp", "vllm"]
+    )
+    def test_keyless_providers_are_derived_not_listed(self, provider: str) -> None:
+        from franktheunicorn.worker.runner import _provider_needs_api_key
+
+        assert _provider_needs_api_key(provider) is False
+
+    @pytest.mark.parametrize("provider", ["claude", "openai", "gemini"])
+    def test_the_real_api_providers_still_need_a_key(self, provider: str) -> None:
+        """The check has to keep working, or it stops catching the thing it exists for."""
+        from franktheunicorn.worker.runner import _provider_needs_api_key
+
+        assert _provider_needs_api_key(provider) is True
+
+    def test_an_override_only_config_is_not_reported_as_having_no_backend(
+        self, caplog: Any
+    ) -> None:
+        """`llm_backends: []` with security_triage.llm_backend set is a shape this
+        codebase documents and tests as supported, and the preflight called it an
+        ERROR ("Every agent run will finish with nothing to show")."""
+        import logging
+
+        from franktheunicorn.worker.runner import _check_backends
+
+        config = OperatorConfig()
+        config.llm_backends = []
+        config.security_triage.llm_backend = LLMBackendConfig(provider="stub")
+
+        with caplog.at_level(logging.ERROR):
+            _check_backends(config)
+
+        assert "Every agent run will finish with nothing" not in caplog.text
+
+    def test_no_backends_and_no_override_is_still_an_error(self, caplog: Any) -> None:
+        """The other half of the previous test: relaxing the message for an
+        override-only config must not relax it for a genuinely unconfigured one."""
+        import logging
+
+        from franktheunicorn.worker.runner import _check_backends
+
+        config = OperatorConfig()
+        config.llm_backends = []
+        config.security_triage.llm_backend = None
+
+        with caplog.at_level(logging.ERROR):
+            _check_backends(config)
+
+        assert "No llm_backends configured" in caplog.text
+
+    def test_the_triage_backend_key_is_checked_at_startup(self, caplog: Any) -> None:
+        """A missing key on the nested override used to surface at the first security
+        report instead of at startup."""
+        import logging
+
+        from franktheunicorn.worker.runner import _check_backends
+
+        config = OperatorConfig()
+        config.llm_backends = [LLMBackendConfig(provider="stub")]
+        config.security_triage.llm_backend = LLMBackendConfig(
+            provider="openai", api_key_env="DEFINITELY_NOT_SET_ANYWHERE"
+        )
+
+        with caplog.at_level(logging.WARNING):
+            _check_backends(config)
+
+        assert "security_triage.llm_backend" in caplog.text
+        assert "DEFINITELY_NOT_SET_ANYWHERE" in caplog.text
+
+    def test_a_keyless_triage_override_is_reported_without_complaint(self, caplog: Any) -> None:
+        import logging
+
+        from franktheunicorn.worker.runner import _check_backends
+
+        config = OperatorConfig()
+        config.llm_backends = [LLMBackendConfig(provider="stub")]
+        config.security_triage.llm_backend = LLMBackendConfig(
+            provider="agent-cli", reviewer="cursor-agent"
+        )
+
+        with caplog.at_level(logging.INFO):
+            _check_backends(config)
+
+        assert "no API key needed" in caplog.text
+
+    def test_an_unset_cli_timeout_falls_back_to_the_reviewer_entry(self) -> None:
+        """`or reviewer.timeout_seconds` was dead: cli_timeout_seconds defaults to 300,
+        so it is always truthy. An operator setting timeout_seconds: 1800 for long runs
+        got their agent killed at 300s while the example config said the fallback
+        worked."""
+        executor = _FakeExecutor(ExecResult(returncode=0, stdout="ok", stderr=""))
+        backend = AgentCLIBackend(LLMBackendConfig(provider="agent-cli", reviewer="cursor-agent"))
+
+        _run(backend, executor, _operator(timeout_seconds=1800))
+
+        assert executor.calls[-1][2] == 1800
+
+    def test_an_explicit_cli_timeout_still_wins(self) -> None:
+        executor = _FakeExecutor(ExecResult(returncode=0, stdout="ok", stderr=""))
+        backend = AgentCLIBackend(
+            LLMBackendConfig(provider="agent-cli", reviewer="cursor-agent", cli_timeout_seconds=45)
+        )
+
+        _run(backend, executor, _operator(timeout_seconds=1800))
+
+        assert executor.calls[-1][2] == 45
+
+    def test_an_explicit_300_is_honoured_rather_than_read_as_unset(self) -> None:
+        """model_fields_set is what distinguishes the two, and the distinction is the
+        whole fix."""
+        executor = _FakeExecutor(ExecResult(returncode=0, stdout="ok", stderr=""))
+        backend = AgentCLIBackend(
+            LLMBackendConfig(provider="agent-cli", reviewer="cursor-agent", cli_timeout_seconds=300)
+        )
+
+        _run(backend, executor, _operator(timeout_seconds=1800))
+
+        assert executor.calls[-1][2] == 300

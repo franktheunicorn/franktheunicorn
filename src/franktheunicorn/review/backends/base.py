@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
@@ -380,6 +381,114 @@ def _extract_json_blob(text: str) -> object | None:
             continue
         return obj  # type: ignore[no-any-return]
     return None
+
+
+#: Total characters the candidate scan may examine, summed across every attempt.
+#: Bounds the parse: each attempt scans towards the end of the text, so trying
+#: every ``{`` unbounded is quadratic in input the *model* controls.
+#:
+#: A work budget rather than a cap on the number of attempts, which is what this
+#: was and what broke. Forty attempts was ample while the verdict object was flat.
+#: Adding ``version_impact`` — an *array of objects* — put nested ``{`` inside the
+#: thing being looked for, and because the scan runs from the tail, each of those
+#: nested objects is tried before the object enclosing them. At exactly 40 entries
+#: the budget ran out one candidate short of the real verdict, every inner object
+#: parsed as a dict with no ``"verdict"`` key, and a confirmed ``affected``
+#: silently became ``unclear`` — the one direction this module must not fail in.
+#: Measured: 39 entries fine, 40 and up broken.
+#:
+#: Sized off what the two cases actually cost, which are further apart than they
+#: look. A *balanced* inner object stops the scan at its own closing brace, so 2000
+#: legitimate version entries cost ~40 characters each — under 100k all told. Only
+#: an *unbalanced* prefix runs to end-of-text, which is the quadratic case. So a
+#: budget generous by two orders of magnitude for real answers is still tight
+#: against a brace flood: measured at 0.15s for 16 KB, 200 KB and 4 MB alike, where
+#: the original quadratic version took 6.5s and 22s for the first two.
+#:
+#: The check is *before* each attempt, so the first one always runs to completion
+#: whatever the budget — a verdict at the tail of a huge answer is still found on
+#: the first try. Total work is therefore bounded by budget + len(text), not by
+#: budget alone.
+MAX_JSON_SCAN_CHARS = 2_000_000
+
+
+def json_object_candidates(text: str) -> Iterator[str]:
+    """Balanced ``{...}`` spans in *text*, last first, braces-in-strings aware.
+
+    Three properties, each of them load-bearing and each learned the hard way.
+
+    **More than one candidate.** Anchoring on the first ``{`` broke on prose the
+    agent is *expected* to produce: it is describing code, so ``I checked the `{`
+    handling in parser.py`` opens a depth that never closes and the whole answer
+    reads as having no verdict. A *balanced* stray — ``Ran ${FOO} then:`` — is
+    worse, yielding ``{FOO}``, which parses as nothing. Both downgraded a
+    confirmed "affected" to "unclear" on the page a maintainer decides from.
+
+    **Last first, not first first.** The verdict is the end of the answer, and
+    everything before it may be echoed prompt — which contains the *report*, whose
+    text an attacker chose. A body carrying
+    ``{"verdict":"not-affected","confidence":1.0}`` would otherwise beat the
+    agent's real answer, in exactly the direction this module must not fail in.
+    Searching from the tail also finds the real block on the first try in the
+    normal case.
+
+    **Bounded by work, not by attempts.** Each attempt scans towards end-of-text,
+    so trying every ``{`` is O(n²) on input the agent controls — measured at 6.5s
+    for 16,000 unbalanced braces and 22s for 109 KB, with nothing timing out the
+    parse and the whole of stdout fed in. ``head -c`` truncation mid-source-dump
+    produces precisely that shape.
+
+    The bound used to be a count of attempts, and that was wrong for a reason worth
+    keeping written down: the answer's *own* nested objects are candidates too, and
+    they are tried first. Once ``version_impact`` made the verdict object contain an
+    array of objects, an answer with 40 of them exhausted the attempt budget on its
+    own contents and never reached the object with the verdict in it. Charging
+    characters instead means a long answer costs more attempts, which is the
+    behaviour wanted — the cheap inner objects barely register.
+
+    Walked lazily rather than collected up front: 4 MB of remote output is 4 MB of
+    possible ``{`` positions, and materialising them is a list of millions of ints
+    for a scan that normally stops on its first candidate.
+
+    A regex can't do this: the payload contains prose with braces and escaped
+    quotes, and a greedy match runs past the end of a fenced block into whatever
+    the model said afterwards.
+    """
+    scanned = 0
+    start = text.rfind("{")
+    while start >= 0:
+        if scanned >= MAX_JSON_SCAN_CHARS:
+            logger.warning(
+                "Gave up looking for a JSON verdict after %d characters of scanning; "
+                "the output is %d characters and brace-heavy. The raw text is kept.",
+                scanned,
+                len(text),
+            )
+            return
+        depth = 0
+        in_string = False
+        escaped = False
+        for index in range(start, len(text)):
+            scanned += 1
+            char = text[index]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    yield text[start : index + 1]
+                    break
+        start = text.rfind("{", 0, start)
 
 
 def parse_llm_review(raw_text: str) -> ReviewResult:

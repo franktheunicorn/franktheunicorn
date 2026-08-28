@@ -486,23 +486,36 @@ def _check_duplicates(report: SecurityReport, operator_config: OperatorConfig) -
     (500 reports is 125,000 pairs, and a model call per pair is a bill rather than
     a feature).
 
-    Clears a previous link when a re-triage finds nothing, for the same reason
-    ``_check_cves`` always saves: a stale link from an earlier run presented as this
-    run's answer is worse than no link, because the operator has no way to tell it's
-    stale. The exception is a link the *operator* set by hand, which is a decision
-    and not ours to revoke — detection only ever overwrites its own work, which is
-    what a non-null ``duplicate_confidence`` marks.
+    Clears a previous link when a re-triage genuinely finds nothing, for the same
+    reason ``_check_cves`` always saves: a stale link from an earlier run presented
+    as this run's answer is worse than no link, because the operator has no way to
+    tell it's stale.
+
+    Two things are never cleared. A link the *operator* set by hand — marked by a
+    NULL ``duplicate_confidence``, since detection always records a score — because
+    that is a decision and not ours to revoke. And anything at all when the check
+    **declined to run**: switching the feature off used to delete every existing
+    link on the next re-triage, and report it as "found no match above the
+    threshold", which is a negative result invented by a check that never happened.
+    ``Detection.ran`` is what tells those apart.
     """
     from franktheunicorn.security.duplicates import detect_for_report
 
     config = operator_config.security_triage.duplicates
-    match = detect_for_report(report, config)
-    if match is not None:
+    outcome = detect_for_report(report, config)
+    if not outcome.ran:
+        logger.debug(
+            "Duplicate detection did not run for report #%d (%s); leaving any existing link alone.",
+            report.pk,
+            outcome.declined or "no reason given",
+        )
+        return
+    if outcome.match is not None:
         return
     if report.duplicate_of_id is not None and report.duplicate_confidence is not None:
         logger.info(
-            "Clearing report #%d's previous duplicate link to #%s: this run found no "
-            "match above the threshold (%.2f).",
+            "Clearing report #%d's previous duplicate link to #%s: this run compared it "
+            "and found no match above the threshold (%.2f).",
             report.pk,
             report.duplicate_of_id,
             config.threshold,
@@ -510,7 +523,14 @@ def _check_duplicates(report: SecurityReport, operator_config: OperatorConfig) -
         report.duplicate_of = None
         report.duplicate_confidence = None
         report.duplicate_reason = ""
-        report.save(update_fields=["duplicate_of", "duplicate_confidence", "duplicate_reason"])
+        report.save(
+            update_fields=[
+                "duplicate_of",
+                "duplicate_confidence",
+                "duplicate_reason",
+                "updated_at",
+            ]
+        )
 
 
 def _read_file(path: Path, max_chars: int = 5000) -> str | None:
@@ -684,9 +704,9 @@ def _safe_json_parse(raw_text: str) -> dict[str, object] | None:
         if isinstance(data, dict):
             return data
 
-    from franktheunicorn.security.verifier import _json_object_candidates
+    from franktheunicorn.review.backends.base import json_object_candidates
 
-    for blob in _json_object_candidates(raw_text):
+    for blob in json_object_candidates(raw_text):
         try:
             data = json.loads(blob)
         except (json.JSONDecodeError, ValueError):

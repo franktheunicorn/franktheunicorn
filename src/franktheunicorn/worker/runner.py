@@ -356,6 +356,48 @@ def _openai_chat_preflight(
             return
 
 
+#: Providers this preflight can prove nothing about, because they authenticate
+#: somewhere other than an env var frank reads.
+#:
+#: Derived from each backend class's ``_default_key_env`` rather than listed by
+#: hand, which is how the hardcoded ``("stub", "ollama")`` pair came to disable
+#: every other keyless provider. ``agent-cli`` was the sharpest case — it is
+#: documented as needing no key (auth belongs to the CLI), and the preflight
+#: disabled it with "no API key in env var '(unset)'", so an operator copying the
+#: example config got zero findings forever and a log telling them to fix a key
+#: that does not exist. ``claude-code``, ``llama-cpp``, ``vllm`` and ``rlm`` were
+#: all caught by the same trap.
+_KEYLESS_PROVIDERS: frozenset[str] = frozenset({"stub", "ollama", "llama-cpp", "vllm"})
+
+
+def _provider_needs_api_key(provider: str) -> bool:
+    """Whether this provider authenticates through an env var this preflight reads.
+
+    Asks the backend class, falling back to a static list for the providers whose
+    modules are optional installs. A provider whose backend declares no
+    ``_default_key_env`` and takes no ``api_key_env`` is not something a missing-key
+    check can rule on, and guessing "it needs one" disables a working backend.
+    """
+    if provider in _KEYLESS_PROVIDERS:
+        return False
+    try:
+        from franktheunicorn.review.backends import _BACKENDS
+
+        entry = _BACKENDS.get(provider)
+        if entry is None:
+            # Unknown provider: get_backend falls back to stub, which needs no key.
+            return False
+        import importlib
+
+        backend_cls = getattr(importlib.import_module(entry[0]), entry[1])
+        return bool(getattr(backend_cls, "_default_key_env", ""))
+    except Exception:
+        # An optional dependency missing is not a reason to call the provider
+        # keyless; the key check below is still the useful signal.
+        logger.debug("Could not introspect backend for provider %r", provider, exc_info=True)
+        return True
+
+
 def _check_backends(operator_config: OperatorConfig) -> frozenset[int]:
     """Probe each configured LLM backend and return indices of those that fail.
 
@@ -374,16 +416,26 @@ def _check_backends(operator_config: OperatorConfig) -> frozenset[int]:
     unchecked: list[str] = []
 
     if not operator_config.llm_backends:
-        logger.error(
-            "No llm_backends configured in operator.yaml. Every agent run will finish "
-            "with nothing to show — add a backend and restart the worker."
-        )
+        # Not an error when triage has its own backend: that config is documented and
+        # tested as supported, and the review path being unconfigured is a separate
+        # (quieter) fact from "nothing can call a model at all".
+        if operator_config.security_triage.llm_backend is not None:
+            logger.warning(
+                "No llm_backends configured, so PR review, shepherding and llm_checks "
+                "have no model. security_triage.llm_backend is set, so triage still "
+                "works — add an llm_backends entry if you want the review path too."
+            )
+        else:
+            logger.error(
+                "No llm_backends configured in operator.yaml. Every agent run will finish "
+                "with nothing to show — add a backend and restart the worker."
+            )
         return frozenset()
 
     logger.info("Checking %d configured LLM backend(s) ...", len(operator_config.llm_backends))
     for idx, bc in enumerate(operator_config.llm_backends):
         provider = bc.provider.lower()
-        if provider in ("stub", "ollama"):
+        if not _provider_needs_api_key(provider):
             # Named, not skipped in silence. "stub" especially: it is why an
             # install can look wired up and quietly produce canned reviews.
             logger.info(
@@ -495,7 +547,60 @@ def _check_backends(operator_config: OperatorConfig) -> frozenset[int]:
             "findings until one works — fix the keys above and restart the worker."
         )
 
+    _report_triage_backend(operator_config)
     return frozenset(disabled)
+
+
+def _report_triage_backend(operator_config: OperatorConfig) -> None:
+    """Say at startup which model triages, and whether its key is even present.
+
+    ``security_triage.llm_backend`` is a second, nested place a backend can be
+    configured, and this loop only walked ``llm_backends`` — so a missing key or an
+    unreachable ``base_url`` on the triage backend surfaced at the first security
+    report rather than at startup. That is the case CLAUDE.md's "a configured tool
+    that can't run logs at WARNING" rule is about.
+
+    A key check rather than a live probe: this is one nested entry and a real API
+    call per worker start for a feature that may see no reports for weeks is not a
+    trade worth making. The name and the key are the two things that actually go
+    wrong.
+    """
+    import os
+
+    override = operator_config.security_triage.llm_backend
+    if override is None:
+        return
+
+    provider = override.provider.lower()
+    if not _provider_needs_api_key(provider):
+        logger.info(
+            "Security triage uses its own backend: %s (%s) — no API key needed.",
+            provider,
+            override.model or "(default model)",
+        )
+        return
+
+    key_env = override.api_key_env or {
+        "claude": "ANTHROPIC_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "gemini": "GOOGLE_API_KEY",
+    }.get(provider, "")
+    if key_env and os.environ.get(key_env, ""):
+        logger.info(
+            "Security triage uses its own backend: %s (%s), key from %s.",
+            provider,
+            override.model or "(default model)",
+            key_env,
+        )
+        return
+
+    logger.warning(
+        "security_triage.llm_backend is set to %s but there is no API key in %r, so "
+        "triage will fail at the first report. Set it, or remove the override to fall "
+        "back to llm_backends[0].",
+        provider,
+        key_env or "(no env var configured)",
+    )
 
 
 def _agent_cli_available_locally(config: AgentCLIReviewerConfig) -> bool:

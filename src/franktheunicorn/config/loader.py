@@ -78,8 +78,22 @@ def load_operator_config(path: str | Path) -> OperatorConfig:
         with p.open(encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
         data = _expand_env_vars(data)
-        if isinstance(data, dict):
-            _warn_unknown_keys(data, p)
+        if not isinstance(data, dict):
+            # Valid YAML, wrong shape: a list, a bare string, a number. Caught here
+            # rather than left to ``OperatorConfig(**data)``, which raises TypeError —
+            # not one of the exceptions below, so it escaped the whole
+            # degrade-to-defaults contract this function documents. `show_config`
+            # calls straight into here, so the command written to diagnose a broken
+            # config died with a traceback on exactly the configs it exists for.
+            logger.error(
+                "%s parsed as %s, not a mapping of settings, so EVERY setting is at its "
+                "built-in default. The file should be top-level `key: value` pairs — a "
+                "leading `- ` on the first line makes the whole document a list.",
+                p,
+                type(data).__name__,
+            )
+            return OperatorConfig()
+        _warn_unknown_keys(data, p)
         return OperatorConfig(**data)
     except FileNotFoundError:
         logger.debug("Operator config not found at %s, using defaults", p)

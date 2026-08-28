@@ -10,6 +10,7 @@ repeatedly over a backlog.
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -25,6 +26,15 @@ from franktheunicorn.security.duplicates import (
     would_create_cycle,
 )
 from tests.factories import ProjectFactory, SecurityReportFactory
+
+
+def OperatorConfigStub() -> Any:  # noqa: N802 - reads as a constructor at the call site
+    """An OperatorConfig with duplicate detection switched off."""
+    from franktheunicorn.config.models import OperatorConfig
+
+    oc = OperatorConfig()
+    oc.security_triage.duplicates = SecurityDuplicateConfig(enabled=False)
+    return oc
 
 
 def _config(**overrides: Any) -> SecurityDuplicateConfig:
@@ -223,7 +233,7 @@ class TestLinking:
         first = SecurityReportFactory(project=project, **_RPC_REPORT)
         second = SecurityReportFactory(project=project, **_RPC_REPORT)
 
-        assert detect_for_report(second, _config()) is not None
+        assert detect_for_report(second, _config()).match is not None
 
         second.refresh_from_db()
         assert second.duplicate_of_id == first.pk
@@ -250,7 +260,9 @@ class TestLinking:
         SecurityReportFactory(project=spark, **_RPC_REPORT)
         elsewhere = SecurityReportFactory(project=kafka, **_RPC_REPORT)
 
-        assert detect_for_report(elsewhere, _config()) is None
+        outcome = detect_for_report(elsewhere, _config())
+
+        assert outcome.match is None
         elsewhere.refresh_from_db()
         assert elsewhere.duplicate_of_id is None
 
@@ -261,8 +273,13 @@ class TestLinking:
         orphan = SecurityReportFactory(project=None, **_RPC_REPORT)
 
         with caplog.at_level(logging.INFO):
-            assert detect_for_report(orphan, _config()) is None
+            outcome = detect_for_report(orphan, _config())
 
+        # Declined, not "compared and found nothing" — the distinction the caller
+        # needs before it considers clearing an existing link.
+        assert outcome.ran is False
+        assert outcome.match is None
+        assert "no project" in outcome.declined
         assert "no project" in caplog.text
 
     def test_finding_nothing_is_logged_as_explicitly_as_finding_something(
@@ -279,8 +296,10 @@ class TestLinking:
         )
 
         with caplog.at_level(logging.INFO):
-            assert detect_for_report(subject, _config()) is None
+            outcome = detect_for_report(subject, _config())
 
+        assert outcome.ran is True  # it really did compare
+        assert outcome.match is None
         assert "No duplicate found" in caplog.text
         assert "threshold" in caplog.text
 
@@ -301,8 +320,10 @@ class TestLinking:
         # that keeps per-PR review detail at DEBUG, where INFO would be 900 lines a
         # cycle on Spark. It still names the setting.
         with caplog.at_level(logging.DEBUG, logger="franktheunicorn.security.duplicates"):
-            assert detect_for_report(second, _config(enabled=False)) is None
+            outcome = detect_for_report(second, _config(enabled=False))
 
+        assert outcome.ran is False
+        assert "enabled is false" in outcome.declined
         second.refresh_from_db()
         assert second.duplicate_of_id is None
         assert "duplicates.enabled" in caplog.text
@@ -355,11 +376,11 @@ class TestLinking:
         SecurityReportFactory(project=project, **_RPC_REPORT)
         second = SecurityReportFactory(project=project, **_RPC_REPORT)
 
-        match = detect_for_report(second, _config())
-        assert match is not None
+        outcome = detect_for_report(second, _config())
+        assert outcome.match is not None
         second.refresh_from_db()
 
-        assert link_duplicate(second, match) is False
+        assert link_duplicate(second, outcome.match) is False
 
     def test_deleting_the_original_does_not_delete_its_duplicates(self) -> None:
         """They would be the only remaining record of the finding."""
@@ -653,3 +674,197 @@ class TestBackfillCommand:
 
     def test_an_empty_backlog_says_so_rather_than_crashing(self) -> None:
         assert "No reports to consider" in self._call()
+
+
+@pytest.mark.django_db
+class TestReviewRegressions:
+    """One test per finding from the max code review, so none of them can come back
+    quietly. Each was verified against the real code before being fixed."""
+
+    def test_switching_the_feature_off_does_not_delete_existing_links(self) -> None:
+        """The worst of the set: `enabled: false` made the next re-triage DELETE every
+        link, and log it as "found no match above the threshold (0.62)" — a negative
+        result invented by a check that never ran. `Detection.ran` is the fix."""
+        from franktheunicorn.config.models import OperatorConfig
+        from franktheunicorn.security.triage import _check_duplicates
+
+        project = ProjectFactory(owner="apache", repo="spark")
+        a = SecurityReportFactory(project=project, **_RPC_REPORT)
+        b = SecurityReportFactory(
+            project=project, duplicate_of=a, duplicate_confidence=0.9, **_RPC_REPORT
+        )
+        oc = OperatorConfig()
+        oc.security_triage.duplicates = _config(enabled=False)
+
+        _check_duplicates(b, oc)
+
+        b.refresh_from_db()
+        assert b.duplicate_of_id == a.pk
+        assert b.duplicate_confidence == 0.9
+
+    def test_a_report_with_no_project_does_not_lose_its_link_either(self) -> None:
+        """Same conflation, the other branch of it."""
+        from franktheunicorn.config.models import OperatorConfig
+        from franktheunicorn.security.triage import _check_duplicates
+
+        target = SecurityReportFactory(project=None, title="t", raw_text="b")
+        orphan = SecurityReportFactory(
+            project=None, duplicate_of=target, duplicate_confidence=0.7, title="t2", raw_text="b2"
+        )
+
+        _check_duplicates(orphan, OperatorConfig())
+
+        orphan.refresh_from_db()
+        assert orphan.duplicate_of_id == target.pk
+
+    def test_a_hand_set_link_is_never_overwritten(self) -> None:
+        """A NULL duplicate_confidence marks somebody's decision — detection always
+        records a score. Two other docstrings asserted this invariant while nothing
+        enforced it, and a hand-linked report was silently repointed at confidence
+        1.0."""
+        project = ProjectFactory(owner="apache", repo="spark")
+        unrelated = SecurityReportFactory(
+            project=project, title="unrelated thing", raw_text="nothing alike at all"
+        )
+        obvious = SecurityReportFactory(project=project, **_RPC_REPORT)
+        subject = SecurityReportFactory(
+            project=project, duplicate_of=unrelated, duplicate_confidence=None, **_RPC_REPORT
+        )
+
+        match = find_duplicate(subject, [obvious], _config())
+        assert match is not None  # it really would have linked it
+
+        assert link_duplicate(subject, match) is False
+        subject.refresh_from_db()
+        assert subject.duplicate_of_id == unrelated.pk
+        assert subject.duplicate_confidence is None
+
+    def test_trust_identical_title_off_still_uses_the_path_signal(self) -> None:
+        """It returned raw body overlap, which is not "stop treating an identical title
+        as certainty" — it is "ignore the title and path weights entirely". Two reports
+        with the same title AND the same file scored on body alone."""
+        project = ProjectFactory(owner="apache", repo="spark")
+        shared_path = "core/src/main/scala/org/apache/spark/rpc/NettyRpcEnv.scala"
+        a = SecurityReportFactory(
+            project=project, title="Templated Scanner Title", raw_text=f"alpha {shared_path}"
+        )
+        b = SecurityReportFactory(
+            project=project, title="Templated Scanner Title", raw_text=f"beta {shared_path}"
+        )
+        cfg = _config(trust_identical_title=False)
+
+        scored = score_pair(build_signature(b), build_signature(a), cfg)
+
+        assert scored.score < 1.0  # no longer certainty
+        assert any("shares" in r for r in scored.reasons)  # but the path still counts
+        assert any("title overlap" in r for r in scored.reasons)
+
+    def test_only_earlier_reports_are_compared(self) -> None:
+        """The window was "the newest N reports", which could point an older report at
+        a newer one and, past max_candidates, excluded the genuine original precisely
+        because it was old. The bound was trimming the wrong end."""
+        project = ProjectFactory(owner="apache", repo="spark")
+        original = SecurityReportFactory(project=project, **_RPC_REPORT)
+        middle = SecurityReportFactory(project=project, **_RPC_REPORT)
+        newest = SecurityReportFactory(project=project, **_RPC_REPORT)
+
+        assert detect_for_report(middle, _config()).match is not None
+
+        middle.refresh_from_db()
+        newest.refresh_from_db()
+        assert middle.duplicate_of_id == original.pk
+        assert newest.pk not in (middle.duplicate_of_id,)
+
+    def test_the_earliest_report_is_compared_against_nothing(self) -> None:
+        project = ProjectFactory(owner="apache", repo="spark")
+        first = SecurityReportFactory(project=project, **_RPC_REPORT)
+        SecurityReportFactory(project=project, **_RPC_REPORT)
+
+        outcome = detect_for_report(first, _config())
+
+        assert outcome.match is None
+        first.refresh_from_db()
+        assert first.duplicate_of_id is None
+
+    def test_a_link_bumps_updated_at(self) -> None:
+        """auto_now only fires for fields named in update_fields. sheet_sync refuses
+        "a row whose report changed after the export", so without this a duplicate
+        link is invisible to it and a stale spreadsheet edit wins over it."""
+        project = ProjectFactory(owner="apache", repo="spark")
+        a = SecurityReportFactory(project=project, **_RPC_REPORT)
+        b = SecurityReportFactory(project=project, **_RPC_REPORT)
+        b.refresh_from_db()
+        before = b.updated_at
+
+        match = find_duplicate(b, [a], _config())
+        assert match is not None
+        link_duplicate(b, match)
+
+        b.refresh_from_db()
+        assert b.updated_at > before
+
+    def test_a_threshold_override_is_validated(self) -> None:
+        """model_copy does not run validators in Pydantic v2, so `--threshold -1` was
+        accepted — and since find_duplicate only skips on `score < threshold`, a
+        negative one matches every pair and --apply would link every report."""
+        import io
+
+        from django.core.management import call_command
+
+        project = ProjectFactory(owner="apache", repo="spark")
+        SecurityReportFactory(project=project, title="alpha", raw_text="nothing in common")
+        subject = SecurityReportFactory(project=project, title="beta", raw_text="totally different")
+
+        out = io.StringIO()
+        call_command(
+            "find_security_duplicates", "--threshold", "-1", "--apply", stdout=out, stderr=out
+        )
+
+        assert "Bad --threshold" in out.getvalue()
+        subject.refresh_from_db()
+        assert subject.duplicate_of_id is None
+
+    def test_apply_still_warns_when_the_feature_is_switched_off(self) -> None:
+        """The warning was suppressed on --apply, i.e. on the one run that writes."""
+        import io
+
+        from django.core.management import call_command
+
+        project = ProjectFactory(owner="apache", repo="spark")
+        SecurityReportFactory(project=project, **_RPC_REPORT)
+        SecurityReportFactory(project=project, **_RPC_REPORT)
+        oc = OperatorConfigStub()
+
+        with patch(
+            "franktheunicorn.core.management.commands.find_security_duplicates.get_operator_config",
+            return_value=oc,
+        ):
+            out = io.StringIO()
+            call_command("find_security_duplicates", "--apply", stdout=out, stderr=out)
+
+        assert "enabled is false" in out.getvalue()
+
+    def test_the_default_run_skips_already_linked_reports(self) -> None:
+        """The filter was `duplicate_confidence__isnull=True`, which is inverted: that
+        is NULL for unlinked reports *and* hand-linked ones, and non-NULL only for
+        detected links. So the default run fed every hand-set link back through
+        detection and excluded exactly the detected ones it meant to skip."""
+        import io
+
+        from django.core.management import call_command
+
+        project = ProjectFactory(owner="apache", repo="spark")
+        first = SecurityReportFactory(project=project, **_RPC_REPORT)
+        detected = SecurityReportFactory(
+            project=project, duplicate_of=first, duplicate_confidence=0.9, **_RPC_REPORT
+        )
+        hand = SecurityReportFactory(
+            project=project, duplicate_of=first, duplicate_confidence=None, **_RPC_REPORT
+        )
+
+        out = io.StringIO()
+        call_command("find_security_duplicates", stdout=out, stderr=out)
+
+        text = out.getvalue()
+        assert f"#{detected.pk} ->" not in text
+        assert f"#{hand.pk} ->" not in text

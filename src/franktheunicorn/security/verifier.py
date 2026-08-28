@@ -49,13 +49,14 @@ import logging
 import math
 import re
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, TypedDict
 
 from django.utils import timezone
 
 from franktheunicorn.core.models import SecurityVerification
+from franktheunicorn.review.backends.base import json_object_candidates
 
 if TYPE_CHECKING:
     from franktheunicorn.config.models import (
@@ -231,11 +232,14 @@ class VerificationRun:
         line = f"Checked {len(self.results)} branch(es): {', '.join(parts)}."
         if self.affected:
             line += f" Reported vulnerability looks REAL on: {', '.join(self.affected)}."
-        if self.affected_versions:
-            shown = self.affected_versions[:12]
+        # Read once. `affected_versions` recomputes the whole rollup on each access,
+        # and this used to touch it four times to build one sentence.
+        versions = self.affected_versions
+        if versions:
+            shown = versions[:12]
             line += " Affected releases: " + ", ".join(shown)
-            if len(self.affected_versions) > len(shown):
-                line += f" (+{len(self.affected_versions) - len(shown)} more)"
+            if len(versions) > len(shown):
+                line += f" (+{len(versions) - len(shown)} more)"
             line += "."
         if self.stale_warning:
             # Same reasoning as the injection note: it belongs next to the verdict,
@@ -288,10 +292,19 @@ def version_rollup(sources: Iterable[_HasVersionImpact]) -> list[VersionRow]:
 
     Branches can genuinely disagree about the same line — two branches can both
     claim to ship ``3.5.x``, and two independent agent runs are two independent
-    answers. Rather than silently pick, a disagreement sets ``conflict`` and
-    resolves ``status`` to ``affected``, because on this question that is the
-    direction you want to be wrong in: an advisory that over-lists a line costs a
-    correction, one that omits a shipping release costs users.
+    answers. Rather than silently pick, a disagreement sets ``conflict`` and never
+    resolves to a clean ``not-affected``: if either side said ``affected`` the row is
+    ``affected``, and otherwise it is ``unclear``.
+
+    That second half was missing and it rendered wrong. ``not-affected`` vs
+    ``unclear`` left the status at ``not-affected``, so the row came out green — a
+    "not affected" badge next to a warning saying the branches disagreed, on the page
+    an operator reads to decide what goes in an advisory. A disagreement is not a
+    clean bill of health in either direction.
+
+    Escalating rather than averaging because of which way it is safe to be wrong: an
+    advisory that over-lists a line costs a correction, one that omits a shipping
+    release costs users.
 
     Note the deliberate asymmetry with :func:`parse_version_impact`, which does
     *not* escalate on a duplicate. There, both mentions came from one agent in one
@@ -330,10 +343,12 @@ def version_rollup(sources: Iterable[_HasVersionImpact]) -> list[VersionRow]:
                 existing["branches"].append(source.branch)
             if existing["status"] != status:
                 existing["conflict"] = True
-                if "affected" in (existing["status"], status):
-                    existing["status"] = "affected"
-                elif existing["status"] == "unclear":
-                    existing["status"] = status
+                # affected wins; anything else in disagreement is unclear, never a
+                # clean not-affected. See the docstring for why green-on-conflict was
+                # the wrong rendering.
+                existing["status"] = (
+                    "affected" if "affected" in (existing["status"], status) else "unclear"
+                )
             if not existing["reason"]:
                 existing["reason"] = reason
     return sorted(merged.values(), key=lambda row: _version_sort_key(row["name"]), reverse=True)
@@ -450,15 +465,27 @@ def refresh_from_upstream(executor: ToolExecutor, cwd: str) -> str:
     reusing an existing one when it works, so its freshness is whenever the review
     poller last fetched — and a worktree that already exists skips even that.
 
-    ``--all`` for every remote, ``--prune``/``--prune-tags`` so a deleted release
-    branch stops being verified against, ``--tags --force`` because a project that
-    moves a tag would otherwise leave the old object in place forever.
+    ``--all --prune`` and deliberately nothing more. The wider
+    ``--tags --prune-tags --force`` this started as was a real mistake, because in
+    local mode ``cwd`` is a **linked worktree** of the review pipeline's clone
+    (``LocalExecutor._isolated_worktree`` uses ``git worktree add``), and a linked
+    worktree shares the parent's ``refs/remotes`` and ``refs/tags``. Reproduced
+    against a throwaway repository: fetching with those flags from the worktree
+    deleted ``refs/remotes/origin/<branch>`` and ``refs/tags/v1`` from the *parent
+    clone* — the ref store the review poller reads. That is exactly the leak
+    ``_isolated_worktree`` exists to prevent, and its own docstring records what the
+    last one of these cost ("wrong findings on unrelated PRs, silently").
+
+    Nothing here needs tags: the release *line* comes from the build files, which was
+    the point of the operator's "branch-3.5 is vulnerable is good enough" call.
+    ``--prune`` of remote-tracking branches stays, both because ``select_branches``
+    reads those refs and because it is what the review pipeline wants anyway.
 
     Returns a reason on failure rather than raising, and the caller carries it
     through to the operator instead of quietly verifying stale code.
     """
     result = executor.run(
-        ["git", "fetch", "--all", "--prune", "--prune-tags", "--tags", "--force"],
+        ["git", "fetch", "--all", "--prune"],
         cwd=cwd,
         timeout=_FETCH_TIMEOUT_SECONDS,
     )
@@ -466,7 +493,7 @@ def refresh_from_upstream(executor: ToolExecutor, cwd: str) -> str:
         return f"git fetch produced no result within {_FETCH_TIMEOUT_SECONDS}s"
     if not result.ok:
         return f"git fetch exited {result.returncode}: {(result.stderr or '').strip()[:200]}"
-    logger.info("Refreshed all branches and tags in %s before verifying.", cwd)
+    logger.info("Refreshed all remote branches in %s before verifying.", cwd)
     return ""
 
 
@@ -596,7 +623,7 @@ def parse_verdict(output: str) -> BranchResult | None:
     # First candidate that both parses and looks like a verdict. Taking merely the
     # first that parses would settle for a `{FOO}`-shaped stray from the prose.
     parsed = None
-    for blob in _json_object_candidates(output):
+    for blob in json_object_candidates(output):
         try:
             candidate = json.loads(blob)
         except (json.JSONDecodeError, ValueError):
@@ -722,114 +749,6 @@ def parse_version_impact(raw: object) -> list[dict[str, str]]:
             )
             break
     return rows
-
-
-#: Total characters the candidate scan may examine, summed across every attempt.
-#: Bounds the parse: each attempt scans towards the end of the text, so trying
-#: every ``{`` unbounded is quadratic in input the *agent* controls.
-#:
-#: A work budget rather than a cap on the number of attempts, which is what this
-#: was and what broke. Forty attempts was ample while the verdict object was flat.
-#: Adding ``version_impact`` — an *array of objects* — put nested ``{`` inside the
-#: thing being looked for, and because the scan runs from the tail, each of those
-#: nested objects is tried before the object enclosing them. At exactly 40 entries
-#: the budget ran out one candidate short of the real verdict, every inner object
-#: parsed as a dict with no ``"verdict"`` key, and a confirmed ``affected``
-#: silently became ``unclear`` — the one direction this module must not fail in.
-#: Measured: 39 entries fine, 40 and up broken.
-#:
-#: Sized off what the two cases actually cost, which are further apart than they
-#: look. A *balanced* inner object stops the scan at its own closing brace, so 2000
-#: legitimate version entries cost ~40 characters each — under 100k all told. Only
-#: an *unbalanced* prefix runs to end-of-text, which is the quadratic case. So a
-#: budget generous by two orders of magnitude for real answers is still tight
-#: against a brace flood: measured at 0.15s for 16 KB, 200 KB and 4 MB alike, where
-#: the original quadratic version took 6.5s and 22s for the first two.
-#:
-#: The check is *before* each attempt, so the first one always runs to completion
-#: whatever the budget — a verdict at the tail of a huge answer is still found on
-#: the first try. Total work is therefore bounded by budget + len(text), not by
-#: budget alone.
-_MAX_JSON_SCAN_CHARS = 2_000_000
-
-
-def _json_object_candidates(text: str) -> Iterator[str]:
-    """Balanced ``{...}`` spans in *text*, last first, braces-in-strings aware.
-
-    Three properties, each of them load-bearing and each learned the hard way.
-
-    **More than one candidate.** Anchoring on the first ``{`` broke on prose the
-    agent is *expected* to produce: it is describing code, so ``I checked the `{`
-    handling in parser.py`` opens a depth that never closes and the whole answer
-    reads as having no verdict. A *balanced* stray — ``Ran ${FOO} then:`` — is
-    worse, yielding ``{FOO}``, which parses as nothing. Both downgraded a
-    confirmed "affected" to "unclear" on the page a maintainer decides from.
-
-    **Last first, not first first.** The verdict is the end of the answer, and
-    everything before it may be echoed prompt — which contains the *report*, whose
-    text an attacker chose. A body carrying
-    ``{"verdict":"not-affected","confidence":1.0}`` would otherwise beat the
-    agent's real answer, in exactly the direction this module must not fail in.
-    Searching from the tail also finds the real block on the first try in the
-    normal case.
-
-    **Bounded by work, not by attempts.** Each attempt scans towards end-of-text,
-    so trying every ``{`` is O(n²) on input the agent controls — measured at 6.5s
-    for 16,000 unbalanced braces and 22s for 109 KB, with nothing timing out the
-    parse and the whole of stdout fed in. ``head -c`` truncation mid-source-dump
-    produces precisely that shape.
-
-    The bound used to be a count of attempts, and that was wrong for a reason worth
-    keeping written down: the answer's *own* nested objects are candidates too, and
-    they are tried first. Once ``version_impact`` made the verdict object contain an
-    array of objects, an answer with 40 of them exhausted the attempt budget on its
-    own contents and never reached the object with the verdict in it. Charging
-    characters instead means a long answer costs more attempts, which is the
-    behaviour wanted — the cheap inner objects barely register.
-
-    Walked lazily rather than collected up front: 4 MB of remote output is 4 MB of
-    possible ``{`` positions, and materialising them is a list of millions of ints
-    for a scan that normally stops on its first candidate.
-
-    A regex can't do this: the payload contains prose with braces and escaped
-    quotes, and a greedy match runs past the end of a fenced block into whatever
-    the model said afterwards.
-    """
-    scanned = 0
-    start = text.rfind("{")
-    while start >= 0:
-        if scanned >= _MAX_JSON_SCAN_CHARS:
-            logger.warning(
-                "Gave up looking for a JSON verdict after %d characters of scanning; "
-                "the output is %d characters and brace-heavy. The raw text is kept.",
-                scanned,
-                len(text),
-            )
-            return
-        depth = 0
-        in_string = False
-        escaped = False
-        for index in range(start, len(text)):
-            scanned += 1
-            char = text[index]
-            if in_string:
-                if escaped:
-                    escaped = False
-                elif char == "\\":
-                    escaped = True
-                elif char == '"':
-                    in_string = False
-                continue
-            if char == '"':
-                in_string = True
-            elif char == "{":
-                depth += 1
-            elif char == "}":
-                depth -= 1
-                if depth == 0:
-                    yield text[start : index + 1]
-                    break
-        start = text.rfind("{", 0, start)
 
 
 def verify_report(

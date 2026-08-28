@@ -121,13 +121,21 @@ class AgentCLIBackend(BaseLLMBackend):
         shell-capable agent a repo to answer it would be a bigger grant than the job
         requires.
 
-        In local mode the CLI simply runs in the current working directory, which is
-        the worker's own and already trusted. Remotely we ``mkdir -p`` a scratch path
-        under the configured workspace dir, because a CLI invoked with a ``cd`` to a
-        path that doesn't exist fails in a way that reads like the CLI being broken.
+        **Local mode gets a scratch directory too, not the worker's cwd.** Returning
+        ``"."`` was worse than the checkout this docstring argues against: frank's
+        working directory holds ``config/active/*.yaml``, ``.env`` and the SQLite
+        database — every credential it has. When this backend serves
+        ``security_triage.llm_backend`` the prompt contains a report a stranger
+        emailed, which ``docs/security-design.md`` calls the sharpest input-trust
+        problem in the codebase, and a steered agent with tool access could read the
+        keys out of the directory it was started in.
+
+        Remotely, ``mkdir -p`` under the configured workspace dir, because a CLI
+        invoked with a ``cd`` to a path that doesn't exist fails in a way that reads
+        like the CLI being broken.
         """
         if reviewer.remote.mode != "ssh":
-            return "."
+            return self._local_scratch()
 
         scratch = f"{reviewer.remote.remote_workspace_dir.rstrip('/')}/{_SCRATCH_SUBDIR}"
         made = executor.run(["mkdir", "-p", scratch], cwd=".", timeout=60)
@@ -142,6 +150,51 @@ class AgentCLIBackend(BaseLLMBackend):
             )
             return None
         return scratch
+
+    @staticmethod
+    def _local_scratch() -> str | None:
+        """An empty directory under the data root for the local agent to run in.
+
+        Beside ``FRANK_REPOS_DIR`` rather than in ``tempfile.mkdtemp()`` so it is one
+        stable path an operator can inspect, and so it lands wherever they already
+        keep frank's state (including a bind mount under ``docker compose``). Falls
+        back to a temp directory when that is unset — anywhere is better than the
+        directory holding ``.env``.
+
+        Not a sandbox, and worth being exact about what it does and doesn't buy. It
+        moves the agent out of the directory holding ``.env`` and
+        ``config/active/*.yaml``, which is where the credentials are. It resolves to
+        ``data/llm-scratch``, so ``data/frank.sqlite3`` is still one level up — an
+        agent that has been successfully steered can reach the report database. That
+        is a smaller prize than the API keys and it is not nothing; containing it
+        properly needs the tool policy on the ``agent_cli_reviewers`` entry (a
+        read-only mode such as cursor-agent's ``--mode ask``), which is the actual
+        boundary here. Recorded in ``docs/security-design.md`` §4.10 as a gap.
+        """
+        from pathlib import Path
+
+        from django.conf import settings
+
+        repos_dir = str(getattr(settings, "FRANK_REPOS_DIR", "") or "").strip()
+        try:
+            if repos_dir:
+                # Sibling of the repos root, not inside it: everything under there is
+                # laid out as <owner>/<repo> and a stray directory in that namespace
+                # collides with a project of the same name.
+                target = Path(repos_dir).parent / _SCRATCH_SUBDIR
+                target.mkdir(parents=True, exist_ok=True)
+                return str(target)
+            import tempfile
+
+            return tempfile.mkdtemp(prefix="frank-llm-scratch-")
+        except OSError:
+            # Deliberately not falling back to ".": that is the directory this exists
+            # to keep the agent out of.
+            logger.exception(
+                "Could not create a scratch directory for the agent-cli backend; "
+                "refusing to run the agent in frank's own working directory."
+            )
+            return None
 
     def _call_api(self, system_prompt: str, user_message: str, api_key: str) -> str:
         """Run the agent and return its stdout.
@@ -177,7 +230,17 @@ class AgentCLIBackend(BaseLLMBackend):
             return ""
 
         argv = [*borrowed.cli_argv, *borrowed.build_invocation(prompt)]
-        timeout = self._config.cli_timeout_seconds or reviewer.timeout_seconds
+        # `or reviewer.timeout_seconds` was dead: cli_timeout_seconds defaults to 300,
+        # so it is always truthy and the borrowed value was unreachable unless someone
+        # wrote a literal 0. An operator setting timeout_seconds: 1800 on the reviewer
+        # entry for long runs got their agent killed at 300s with no explanation, while
+        # the example config told them the fallback worked. model_fields_set is what
+        # distinguishes "explicitly 300" from "never mentioned it".
+        timeout = (
+            self._config.cli_timeout_seconds
+            if "cli_timeout_seconds" in self._config.model_fields_set
+            else reviewer.timeout_seconds
+        )
         result = executor.run(argv, cwd=cwd, timeout=timeout)
 
         if result is None:
@@ -261,12 +324,12 @@ class AgentCLIBackend(BaseLLMBackend):
         Falls through to the original text when nothing balanced is found, so
         ``parse_llm_review`` still gets its own go at it.
         """
-        from franktheunicorn.security.verifier import _json_object_candidates
+        from franktheunicorn.review.backends.base import json_object_candidates
 
-        for candidate in _json_object_candidates(raw_text):
+        for candidate in json_object_candidates(raw_text):
             # "findings" or "overall_vibe" — the keys parse_llm_review wants. Checked
             # as substrings before parsing so a `${FOO}`-shaped stray from the prose
             # doesn't win by being syntactically valid and semantically empty.
             if '"findings"' in candidate or '"overall_vibe"' in candidate:
-                return candidate
+                return str(candidate)
         return raw_text

@@ -177,7 +177,7 @@
                 <code>{{ row.name }}</code>
                 <span class="muted">from {{ row.branches|join:", " }}</span>
                 {% if row.conflict %}
-                <span class="verify-conflict" title="Branches disagreed about this line; shown as affected, which is the safe direction to be wrong in.">⚠ branches disagreed</span>
+                <span class="verify-conflict" title="Branches disagreed about this line. If either said affected it is shown as affected; otherwise as unclear. A disagreement is never shown as a clean 'not affected'.">⚠ branches disagreed</span>
                 {% endif %}
                 {% if row.reason %}<div class="verify-version-reason">{{ row.reason }}</div>{% endif %}
             </li>

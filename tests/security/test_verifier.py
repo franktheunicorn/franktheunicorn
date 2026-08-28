@@ -1036,17 +1036,24 @@ class TestVersionRollup:
         assert rows[0]["status"] == "affected"
         assert rows[0]["conflict"] is True
 
-    def test_unclear_yields_to_a_definite_answer(self) -> None:
+    @pytest.mark.parametrize("statuses", [("unclear", "not-affected"), ("not-affected", "unclear")])
+    def test_a_disagreement_is_never_rendered_as_a_clean_not_affected(
+        self, statuses: tuple[str, str]
+    ) -> None:
+        """This used to leave the status at not-affected, so the row came out *green*
+        beside a warning saying the branches disagreed — on the page an operator reads
+        to decide what goes in an advisory. A disagreement is not a clean bill of
+        health, in either order of arrival."""
         from franktheunicorn.security.verifier import version_rollup
 
         rows = version_rollup(
             [
-                self._source("a", [{"name": "3.5.x", "status": "unclear"}]),
-                self._source("b", [{"name": "3.5.x", "status": "not-affected"}]),
+                self._source("a", [{"name": "3.5.x", "status": statuses[0]}]),
+                self._source("b", [{"name": "3.5.x", "status": statuses[1]}]),
             ]
         )
 
-        assert rows[0]["status"] == "not-affected"
+        assert rows[0]["status"] == "unclear"
         assert rows[0]["conflict"] is True
 
     def test_a_row_written_before_the_field_existed_is_skipped_not_fatal(self) -> None:
@@ -1235,18 +1242,35 @@ class TestUpstreamRefresh:
         with patch("franktheunicorn.review.tool_executor.make_executor", return_value=executor):
             return report, verify_report(report, config)
 
-    def test_every_branch_and_tag_is_fetched_before_verifying(self) -> None:
+    def test_every_remote_branch_is_fetched_before_verifying(self) -> None:
         executor = self._executor()
         self._run(executor)
 
         fetches = [c for c in executor.calls if c[:2] == ["git", "fetch"]]
         assert len(fetches) == 1
         assert "--all" in fetches[0]
+        # A deleted release branch must stop being verified against, and
+        # select_branches reads these refs.
         assert "--prune" in fetches[0]
-        # A deleted release branch must stop being verified against, and a moved tag
-        # must not leave the old object in place.
-        assert "--prune-tags" in fetches[0]
-        assert "--tags" in fetches[0]
+
+    def test_it_does_not_touch_tags_because_the_tree_shares_them(self) -> None:
+        """In local mode `cwd` is a linked worktree of the review pipeline's clone, and
+        a linked worktree shares the parent's refs/tags and refs/remotes. Reproduced
+        against a throwaway repo: `--tags --prune-tags --force` from the worktree
+        deleted refs/tags/v1 and refs/remotes/origin/<branch> from the *parent clone*
+        — the ref store the review poller reads, which is the exact leak
+        _isolated_worktree exists to prevent.
+
+        Nothing here needs tags anyway: the release line comes from the build files.
+        """
+        executor = self._executor()
+        self._run(executor)
+
+        fetch = next(c for c in executor.calls if c[:2] == ["git", "fetch"])
+
+        assert "--tags" not in fetch
+        assert "--prune-tags" not in fetch
+        assert "--force" not in fetch
 
     def test_the_fetch_happens_before_the_branch_list_is_read(self) -> None:
         """The branch list itself comes off origin refs, so a stale tree gets the
@@ -1442,3 +1466,28 @@ class TestFreshWorktree:
 
         assert len(fetches) == 1
         assert "--all" in fetches[0]
+
+
+@pytest.mark.django_db
+class TestPromptAddendumOrderingIsNotAccidental:
+    """The addendum's position relative to the report block is a security property,
+    so it gets a test that would fail if someone "tidied" the template."""
+
+    def test_the_addendum_cannot_be_read_as_part_of_the_report(self) -> None:
+        from franktheunicorn.security.verifier import _build_prompt
+
+        report = SecurityReportFactory(
+            project=ProjectFactory(owner="apache", repo="spark"),
+            title="t",
+            raw_text="REPORT-BODY-MARKER",
+        )
+        prompt = _build_prompt(report, "master", _verifier(prompt_addendum="OPERATOR-TEXT-MARKER"))
+
+        body = prompt.index("REPORT-BODY-MARKER")
+        end = prompt.index("--- END REPORT ---")
+        operator = prompt.index("OPERATOR-TEXT-MARKER")
+
+        assert body < end < operator
+        # And the agent is told which is which, or the label does no work.
+        assert prompt.index("UNTRUSTED DATA") < body
+        assert "FROM YOUR OPERATOR" in prompt[end:operator]

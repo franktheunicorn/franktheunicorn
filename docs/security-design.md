@@ -566,6 +566,14 @@ table, which invites being trusted more than it has earned.
   report a stranger wrote and lands in a `JSONField` a template renders. What it cannot do is
   tell whether `3.5.x` is the right answer. A wrong line name propagates into whatever the
   operator publishes, and the branch column next to it is the only cross-check.
+- **The `agent-cli` LLM backend runs an agent in a scratch directory, not a sandbox.** When it
+  serves `security_triage.llm_backend` the prompt is a report a stranger wrote, and the agent has
+  whatever tool access its `agent_cli_reviewers` entry allows. `_local_scratch` moves it out of
+  frank's working directory — which holds `.env` and `config/active/*.yaml`, i.e. every credential
+  — and into `data/llm-scratch`. That leaves `data/frank.sqlite3` one level up, reachable by a
+  steered agent. Smaller prize than the API keys, still a real one. The boundary that actually
+  contains this is the tool policy on the reviewer entry (a read-only mode such as cursor-agent's
+  `--mode ask`), which is config and not enforced here — the same gap as the verifier's, below.
 - **"Every release on an affected line is affected" is an approximation the operator asked for**,
   and it will sometimes over-state: a line whose early releases predate the vulnerable code gets
   listed anyway. The trade was made knowingly — the alternative is per-tag verification, which is

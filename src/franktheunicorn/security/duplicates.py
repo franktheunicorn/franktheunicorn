@@ -208,13 +208,16 @@ def score_pair(a: Signature, b: Signature, config: SecurityDuplicateConfig) -> M
     title = _jaccard(a.title_tokens, b.title_tokens)
     paths = _jaccard(a.paths, b.paths)
 
-    if a.title_tokens and a.title_tokens == b.title_tokens:
-        return Match(
-            report_id=b.report_id,
-            score=max(1.0 if config.trust_identical_title else 0.0, body),
-            reasons=["identical title"] if config.trust_identical_title else [f"body {body:.2f}"],
-        )
+    if a.title_tokens and a.title_tokens == b.title_tokens and config.trust_identical_title:
+        return Match(report_id=b.report_id, score=1.0, reasons=["identical title"])
 
+    # ``trust_identical_title: false`` falls through to the weighted blend below
+    # rather than short-circuiting to something else. It used to return raw ``body``,
+    # which is not "stop treating an identical title as certainty" — it is "ignore the
+    # title and path weights entirely". Measured: two reports with identical titles
+    # *and* an identical source path scored on body alone, so they could come out
+    # below a pair sharing only 0.67 of their titles. Discarding the path signal on a
+    # flag about titles is not what the setting says it does.
     score = config.title_weight * title + config.body_weight * body + config.path_weight * paths
     total = config.title_weight + config.body_weight + config.path_weight
     score = score / total if total else 0.0
@@ -318,8 +321,24 @@ def link_duplicate(subject: SecurityReport, match: Match) -> bool:
     Writes three fields and deliberately not ``status``: marking a report
     ``duplicate`` is a verdict, and a heuristic making verdicts is a heuristic that
     hides vulnerabilities. The link is a pointer for the operator to check.
+
+    **Never overwrites a link the operator made.** A ``duplicate_of`` with a NULL
+    ``duplicate_confidence`` is somebody's decision — detection always records a
+    score — and this used to walk straight over it: a hand-linked report was
+    silently repointed at whatever scored highest, at confidence 1.0. Two other
+    places in the codebase already asserted this invariant in their own docstrings
+    (``triage._check_duplicates`` and the ``--relink`` help text) while nothing
+    enforced it, which is how it went unnoticed.
     """
     from franktheunicorn.core.models import SecurityReport as Report
+
+    if subject.duplicate_of_id is not None and subject.duplicate_confidence is None:
+        logger.debug(
+            "Leaving report #%s's hand-set duplicate link to #%s alone.",
+            subject.pk,
+            subject.duplicate_of_id,
+        )
+        return False
 
     target = Report.objects.filter(pk=match.report_id).first()
     if target is None or target.pk == subject.pk:
@@ -343,7 +362,15 @@ def link_duplicate(subject: SecurityReport, match: Match) -> bool:
     subject.duplicate_of = target
     subject.duplicate_confidence = match.score
     subject.duplicate_reason = match.reason[:500]
-    subject.save(update_fields=["duplicate_of", "duplicate_confidence", "duplicate_reason"])
+    # updated_at is auto_now, and Django only applies that to fields named in
+    # update_fields — so omitting it leaves the timestamp stale. That is not
+    # cosmetic here: sheet_sync's staleness guard refuses "a row whose report
+    # changed after the export", and without this a duplicate link is invisible to
+    # it, so a stale spreadsheet edit wins over it. _check_cves next door already
+    # gets this right.
+    subject.save(
+        update_fields=["duplicate_of", "duplicate_confidence", "duplicate_reason", "updated_at"]
+    )
     logger.info(
         "Report #%s looks like a duplicate of #%s (score %.2f: %s)",
         subject.pk,
@@ -354,22 +381,45 @@ def link_duplicate(subject: SecurityReport, match: Match) -> bool:
     return True
 
 
+@dataclass
+class Detection:
+    """What a detection attempt did, as three distinguishable outcomes.
+
+    A bare ``Match | None`` conflated "the check ran and found nothing" with "the
+    check never ran", and the caller acts differently on each: the first is grounds
+    to clear a stale link, the second is not. Collapsing them meant switching the
+    feature *off* deleted every existing link on the next re-triage — and logged it
+    as "this run found no match above the threshold (0.62)", a negative result
+    reported by a check that never happened.
+    """
+
+    #: True only when reports were actually compared.
+    ran: bool = False
+    match: Match | None = None
+    #: Why it didn't run. Empty when it did.
+    declined: str = ""
+
+
 def detect_for_report(
     report: SecurityReport,
     config: SecurityDuplicateConfig,
-) -> Match | None:
+) -> Detection:
     """Find and record a duplicate link for one report. Never raises.
 
-    The triage-path entry point. Compares only against reports in the same project,
-    newest-first up to ``max_candidates`` — a bound rather than the whole table
-    because this runs inside triage, and an unbounded scan would make a single
-    report's triage cost grow with the size of the backlog it landed in.
+    The triage-path entry point. Compares only against reports in the same project
+    and only against **earlier** ones, nearest-first, up to ``max_candidates``.
+
+    Both halves of that matter. Earlier-only keeps links pointing backwards in time,
+    at the report carrying the accumulated triage — without it the window was simply
+    "the newest N reports", which could point an older report at a newer one and, on
+    a backlog past ``max_candidates``, excluded the genuine original precisely
+    because it was old. The bound was trimming the wrong end.
     """
     from franktheunicorn.core.models import SecurityReport as Report
 
     if not config.enabled:
         logger.debug("Duplicate detection is off (security_triage.duplicates.enabled)")
-        return None
+        return Detection(declined="security_triage.duplicates.enabled is false")
     if report.project_id is None:
         # Not scoped to anything. Comparing against every report of every project
         # would produce links across unrelated codebases.
@@ -378,36 +428,37 @@ def detect_for_report(
             "a comparison to; skipping.",
             report.pk,
         )
-        return None
+        return Detection(declined="the report has no project")
 
     candidates = list(
-        Report.objects.filter(project_id=report.project_id)
+        Report.objects.filter(project_id=report.project_id, created_at__lt=report.created_at)
         .exclude(pk=report.pk)
         .order_by("-created_at")[: config.max_candidates]
     )
     if not candidates:
-        logger.debug("Report #%s is the only one in its project; nothing to compare.", report.pk)
-        return None
+        logger.debug("Report #%s is the earliest in its project; nothing to compare.", report.pk)
+        # Ran, in the sense that matters to the caller: there was nothing to match
+        # against, so a link from a previous run is stale and should go.
+        return Detection(ran=True)
 
     match = find_duplicate(report, candidates, config)
     if match is None:
         # Logged as explicitly as a hit: "no duplicate found" and "the check never
         # ran" must not look the same, per the rule in CLAUDE.md.
         logger.info(
-            "No duplicate found for report #%s among %d report(s) in the same project "
-            "(threshold %.2f).",
+            "No duplicate found for report #%s among %d earlier report(s) in the same "
+            "project (threshold %.2f).",
             report.pk,
             len(candidates),
             config.threshold,
         )
-        return None
+        return Detection(ran=True)
 
-    # The match is returned whether or not the write happened. A refusal from
-    # link_duplicate means "already recorded" or "that would close a cycle", and
-    # neither is the caller's cue to clear an existing link — which is the only
-    # thing it does with a None.
+    # The match is reported whether or not the write happened. A refusal from
+    # link_duplicate means "already recorded", "that would close a cycle", or "the
+    # operator set this by hand" — none of which is a reason to clear anything.
     link_duplicate(report, match)
-    return match
+    return Detection(ran=True, match=match)
 
 
 def detect_across_backlog(

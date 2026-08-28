@@ -68,8 +68,20 @@ class Command(BaseCommand):
                 )
             )
             return
-        if isinstance(data, dict):
-            self.stdout.write(f"  top-level keys: {', '.join(sorted(data)) or '(none)'}")
+        if not isinstance(data, dict):
+            # Valid YAML, wrong shape. Printed rather than left to the loader's log
+            # line, because this command's whole job is telling somebody what is wrong
+            # with their file and they are reading stdout, not the worker log.
+            self.stdout.write(
+                self.style.ERROR(
+                    f"  This file is valid YAML but parses as {type(data).__name__}, not a "
+                    "mapping of settings, so every setting is at its built-in default. It "
+                    "should be top-level `key: value` pairs — a leading `- ` on the first "
+                    "line makes the whole document a list."
+                )
+            )
+            return
+        self.stdout.write(f"  top-level keys: {', '.join(sorted(data)) or '(none)'}")
 
         # Through the real loader, so anything it warns about is printed here too.
         config = load_operator_config(path)
@@ -86,9 +98,12 @@ class Command(BaseCommand):
             ("llm_backends", f"{len(config.llm_backends)} configured"),
             ("agent_cli_reviewers", f"{len(config.agent_cli_reviewers)} configured"),
         ):
+            # "(unset)" belongs in the not-OK set: this is the one command whose job
+            # is spotting a setting that isn't there, and it was painting an unset
+            # verifier.reviewer green.
             flag = (
                 self.style.SUCCESS
-                if value not in (False, 0, "0 configured")
+                if value not in (False, 0, "0 configured", "(unset)", "")
                 else self.style.WARNING
             )
             self.stdout.write(f"  {label:38} {flag(str(value))}")
