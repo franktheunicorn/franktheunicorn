@@ -11,6 +11,8 @@ tool wrappers don't have to know which one they're using.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import logging
 import re
 import shlex
@@ -40,9 +42,54 @@ _DELIVERY_PROBE_TIMEOUT_SECONDS = 60
 _FRAME_BEGIN = "__frank_out_begin__"
 _FRAME_END = "__frank_out_end__"
 
+#: Markers bracketing the base64 payloads. The command's stdout and stderr are
+#: written to files on the remote and base64'd between these, because a PTY
+#: session interleaves prompts, bracketed-paste escapes and the shell's echo of
+#: our own script with the output — see ``_run_via_stdin``. Base64 shares no
+#: characters with any of that, so the payload survives whatever the session says.
+_B64_OUT = "__frank_b64out__"
+_B64_ERR = "__frank_b64err__"
+_B64_END = "__frank_b64end__"
+
+#: Anything a base64 payload cannot contain. Stripped before decoding, because a
+#: wrapper is free to fold a long line or inject a CR into the middle of one.
+_NON_B64 = re.compile(r"[^A-Za-z0-9+/=]")
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_SECONDS = 120
+
+
+def _decode_b64_payload(stdout: str, head: str, tail: str) -> str | None:
+    """Pull one base64 payload out of a PTY session transcript and decode it.
+
+    ``None`` when there isn't one to find, or when what's there doesn't decode —
+    both mean "fall back", and neither should raise: this runs on whatever a
+    remote shell happened to print.
+
+    ``rfind`` for the head for the same reason the frame markers use it, plus the
+    script assembles these markers from two shell variables so the echo of the
+    script line can't contain a whole one. The payload is stripped of everything
+    outside the base64 alphabet before decoding, because a wrapper is free to
+    inject a carriage return or a line-wrap into the middle of a long line and
+    several do.
+    """
+    at_head = stdout.rfind(head)
+    if at_head < 0:
+        return None
+    start = at_head + len(head)
+    at_tail = stdout.find(tail, start)
+    if at_tail < 0:
+        return None
+    payload = _NON_B64.sub("", stdout[start:at_tail])
+    if not payload:
+        # An empty payload is a real answer: the command printed nothing. Only
+        # distinguishable from "no payload" because the markers were both found.
+        return ""
+    try:
+        return base64.b64decode(payload, validate=True).decode("utf-8", errors="replace")
+    except (binascii.Error, ValueError):
+        return None
 
 
 def _git_verbosity_flag(attempt: int) -> str:
@@ -584,25 +631,103 @@ class RemoteSSHExecutor:
         The markers carry a per-invocation nonce. Without one, a ``git diff`` that
         happens to touch *this file* contains the literal end marker, and the body
         got cut at the diff's own text with the exit code misread as a failure.
+
+        **The output is base64'd on the remote, not read raw between markers.**
+        Markers alone got the exit code right and the *output* wrong: these
+        wrappers open an interactive session on a PTY, so the shell echoes every
+        line it is fed and prints a prompt before each one. Feeding the framed
+        script to a real PTY-attached ``sh -i`` and running the old parser over
+        the result returned, as the command's stdout::
+
+            'sh: _direnv_hook: command not found\\r\\n\\x1b[?2004hsh-5.1$ echo
+             REAL_OUTPUT_LINE_1...\\x1b[?2004l\\rREAL_OUTPUT_LINE_1\\r\\n...
+             sh-5.1$ __frank_rc=$?\\r\\n...'
+
+        — the real output, wrapped in prompts, bracketed-paste escapes, the echo
+        of our own script lines and whatever the login shell's hooks had to say.
+        Nothing downstream stripped any of it. The caller that hurt was
+        ``claude_code_backend._parse_output``, which does ``json.loads`` and falls
+        back to returning stdout verbatim: so the "model response" fed into the
+        review pipeline was a shell transcript, ``is_error`` was never checked, and
+        token accounting silently recorded zero.
+
+        Base64 has no overlap with prompts, escape sequences or shell chatter, so
+        the payload is unambiguous however noisy the session is. It also buys
+        genuine stdout/stderr separation, which the raw form never had — both were
+        interleaved on the one PTY.
+
+        ``base64 | tr -d '\\n'`` rather than ``base64 -w0``: ``-w`` is a GNU
+        extension and the BSD/macOS ``base64`` rejects it.
         """
         nonce = uuid.uuid4().hex[:12]
         begin, end = f"{_FRAME_BEGIN}{nonce}", f"{_FRAME_END}{nonce}"
-        script = (
-            f'echo {begin}\n{remote_invocation}\n__frank_rc=$?\necho "{end}:$__frank_rc"\nexit\n'
+        # One tail marker for both payloads: each is found by searching forward
+        # from its own head, so they don't need distinct terminators.
+        out_head, out_tail = f"{_B64_OUT}{nonce}", f"{_B64_END}{nonce}"
+        err_head = f"{_B64_ERR}{nonce}"
+        # Assembled from two halves at run time so the shell's echo of these lines
+        # cannot contain a complete marker — only the executed `echo` can. Same
+        # trick as _DELIVERY_SENTINEL, and it means the parser doesn't have to
+        # guess which occurrence is real.
+        script = "\n".join(
+            [
+                f"__frank_h='{out_head[:-4]}'",
+                f"__frank_e='{err_head[:-4]}'",
+                f"__frank_t='{out_tail[:-4]}'",
+                f"__frank_n='{nonce[-4:]}'",
+                f"echo {begin}",
+                "__frank_o=$(mktemp) && __frank_s=$(mktemp)",
+                # A subshell, not a { } group. A group runs in the current shell, so
+                # a command that ends in `exit` — or a tool that helpfully calls it —
+                # terminated the session before any framing was printed, and the whole
+                # run came back as "cannot be confirmed to have run at all". In a
+                # subshell that exit sets $? and the framing still gets out.
+                f'( {remote_invocation} ) > "$__frank_o" 2> "$__frank_s"',
+                "__frank_rc=$?",
+                # Marker, payload and marker in ONE printf, so they land contiguously.
+                # Emitting them as three commands looked tidier and did not work: an
+                # interactive shell prints a prompt and echoes the next line between
+                # each one, and that echo contains base64-alphabet characters
+                # ("base64", "printf", "tr"), so filtering the span down to the
+                # base64 alphabet left the command names spliced into the payload.
+                'printf "%s%s%s%s%s\\n" "$__frank_h" "$__frank_n" '
+                '"$(base64 < "$__frank_o" | tr -d "\\n")" "$__frank_t" "$__frank_n"',
+                'printf "%s%s%s%s%s\\n" "$__frank_e" "$__frank_n" '
+                '"$(base64 < "$__frank_s" | tr -d "\\n")" "$__frank_t" "$__frank_n"',
+                'rm -f "$__frank_o" "$__frank_s"',
+                f'echo "{end}:$__frank_rc"',
+                "exit",
+                "",
+            ]
         )
         result = self._spawn(self._ssh_command(), label, timeout, script)
         if result is None:
             return None
-        return self._unframe(result, label, begin, end)
+        return self._unframe(result, label, begin, end, out_head, err_head, out_tail)
 
     @staticmethod
-    def _unframe(result: ExecResult, label: str, begin: str, end: str) -> ExecResult | None:
+    def _unframe(
+        result: ExecResult,
+        label: str,
+        begin: str,
+        end: str,
+        out_head: str = "",
+        err_head: str = "",
+        b64_tail: str = "",
+    ) -> ExecResult | None:
         """Cut the command's own output and exit code out of a framed session.
 
         ``rfind`` for the begin marker and the *last* end marker after it, not the
         first of each. A shell attached to a PTY echoes the script it is fed, so the
         markers appear twice — once in the echo, once for real — and taking the
         first occurrence returned the script itself as the command's output.
+
+        The exit code comes from the ``<end>:<rc>`` line; the output comes from the
+        base64 payloads when they're present, because on a PTY the span between the
+        markers is a session transcript rather than the command's stdout. See
+        ``_run_via_stdin``. The raw-span path is kept as the fallback for a session
+        that produced framing but no payload (a remote without ``base64``, most
+        likely), and says so rather than pretending.
         """
         stdout = result.stdout
         at_begin = stdout.rfind(begin)
@@ -625,8 +750,31 @@ class RemoteSSHExecutor:
                 (result.stdout or result.stderr or "").strip()[:200] or "nothing",
             )
             return None
-        body_start = stdout.find("\n", at_begin)
-        body = stdout[body_start + 1 : at_end] if 0 <= body_start < at_end else ""
+        decoded_out = _decode_b64_payload(stdout, out_head, b64_tail) if out_head else None
+        decoded_err = _decode_b64_payload(stdout, err_head, b64_tail) if err_head else None
+        if decoded_out is None:
+            body_start = stdout.find("\n", at_begin)
+            body = stdout[body_start + 1 : at_end] if 0 <= body_start < at_end else ""
+            if out_head:
+                # Asked for a payload and didn't get one. The body below is the
+                # session transcript, prompts and all, so a caller parsing it is
+                # going to have a bad time — better it hears why from here than
+                # discovers it as unparseable JSON three frames up.
+                logger.warning(
+                    "Remote stdin session for %s produced no base64 payload; falling back to "
+                    "the raw session text, which on a PTY includes prompts and shell chatter. "
+                    "Does the remote have base64(1)?",
+                    label or "(script)",
+                )
+            stderr = result.stderr
+        else:
+            body = decoded_out
+            # The remote command's own stderr, separated for the first time. The
+            # wrapper's stderr is appended rather than dropped: a wrapper
+            # complaint ("Workspace not found") is the whole diagnosis when the
+            # remote side never ran, and it arrives on that channel.
+            stderr = "\n".join(part for part in (decoded_err, result.stderr) if part)
+
         # "<end>:<rc>", possibly with a closing banner on the same line, so take
         # the leading integer only. Anything unparseable means we cannot claim to
         # know the exit status, and 0 would be the dangerous guess.
@@ -638,8 +786,8 @@ class RemoteSSHExecutor:
                 label or "(script)",
                 tail.split("\n", 1)[0][:80],
             )
-            return ExecResult(returncode=1, stdout=body, stderr=result.stderr)
-        return ExecResult(returncode=int(match.group(1)), stdout=body, stderr=result.stderr)
+            return ExecResult(returncode=1, stdout=body, stderr=stderr)
+        return ExecResult(returncode=int(match.group(1)), stdout=body, stderr=stderr)
 
     def _spawn(
         self, argv: list[str], label: str, timeout: int, stdin: str | None
@@ -648,7 +796,15 @@ class RemoteSSHExecutor:
             result = subprocess.run(
                 argv,
                 capture_output=True,
-                text=True,
+                # errors="replace" rather than strict. A remote tool is entitled to
+                # emit bytes that aren't UTF-8 — a git diff of a binary file, a
+                # Latin-1 log line — and with the default strict decoding that came
+                # back as an uncaught UnicodeDecodeError from inside subprocess,
+                # crashing the caller instead of returning a result. Mangling a
+                # byte in the middle of a diff is a far better outcome than losing
+                # the whole review to a traceback.
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout,
                 input=stdin,
             )
@@ -656,6 +812,29 @@ class RemoteSSHExecutor:
             logger.warning(
                 "ssh binary %r not on PATH; remote execution unavailable",
                 self.config.ssh_command[0],
+            )
+            return None
+        except PermissionError:
+            # A wrapper script that isn't chmod +x, or an ssh_command pointing at a
+            # directory. Both are ordinary misconfigurations and both used to
+            # escape as an uncaught PermissionError, skipping the "SSH may be
+            # misconfigured" diagnostic this path exists to produce.
+            logger.warning(
+                "ssh command %r is not executable (a wrapper missing chmod +x, or a "
+                "path to a directory); remote execution unavailable",
+                self.config.ssh_command[0],
+            )
+            return None
+        except OSError as exc:
+            # Everything else the OS can refuse at exec time — E2BIG on a very long
+            # argv, ENOEXEC on a script with no shebang, ENOMEM. Caught as a group
+            # because the list is long, platform-dependent, and every member means
+            # the same thing to a caller: the command did not run.
+            logger.warning(
+                "Could not run ssh command %r (%s: %s); remote execution unavailable",
+                self.config.ssh_command[0],
+                type(exc).__name__,
+                exc,
             )
             return None
         except subprocess.TimeoutExpired:

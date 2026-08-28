@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
+from datetime import timedelta
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+from django.utils import timezone
 
 from franktheunicorn.core.models import PullRequest, SecurityReport, WorkerCommand
 from franktheunicorn.worker.commands import process_pending_commands
@@ -515,10 +518,13 @@ class TestMidCycleDrain:
     "within seconds".
     """
 
+    @pytest.mark.django_db
     def test_drains_pending_commands(self) -> None:
         from franktheunicorn.worker import runner
 
         operator_config = MagicMock()
+        # django_db because the drain now also sweeps commands stuck in 'running'
+        # before claiming new ones, which is a real query.
         with patch(
             "franktheunicorn.worker.commands.process_pending_commands",
             return_value=2,
@@ -526,6 +532,24 @@ class TestMidCycleDrain:
             runner._drain_worker_commands(operator_config)
 
         mock_process.assert_called_once_with(operator_config)
+
+    @pytest.mark.django_db
+    def test_the_drain_sweeps_stuck_commands_before_claiming_new_ones(self) -> None:
+        """Order matters: a row stuck in 'running' dedups every retry of that
+        command, so it has to be cleared before the queue is asked for work."""
+        from franktheunicorn.worker import runner
+
+        with (
+            patch("franktheunicorn.worker.commands.fail_stuck_commands") as mock_sweep,
+            patch(
+                "franktheunicorn.worker.commands.process_pending_commands", return_value=0
+            ) as mock_process,
+        ):
+            runner._drain_worker_commands(MagicMock())
+
+        mock_sweep.assert_called_once()
+        assert mock_sweep.call_count == 1
+        mock_process.assert_called_once()
 
     def test_no_operator_config_is_a_noop(self) -> None:
         from franktheunicorn.worker import runner
@@ -604,3 +628,101 @@ class TestBackfillEligibility:
             )
 
         assert seen == [pr.pk]
+
+
+@pytest.mark.django_db
+class TestStuckCommands:
+    """The gap requeue_interrupted_commands leaves.
+
+    That one clears rows orphaned by a *crash*, and only at startup. A handler that
+    hangs in a worker that stays up left its row 'running' forever, and the
+    in-flight constraint then deduped every retry of that command — the operator was
+    told "Reused in-flight" for a run that would never finish. started_at was
+    already recorded and nothing read it.
+    """
+
+    def _running(self, *, age_seconds: int) -> WorkerCommand:
+        report = SecurityReportFactory()
+        cmd = WorkerCommand.objects.create(
+            command="run_security_triage", security_report=report, status="running"
+        )
+        WorkerCommand.objects.filter(pk=cmd.pk).update(
+            started_at=timezone.now() - timedelta(seconds=age_seconds)
+        )
+        cmd.refresh_from_db()
+        return cmd
+
+    def test_a_command_running_past_the_timeout_is_failed(self) -> None:
+        from franktheunicorn.worker.commands import (
+            STUCK_COMMAND_TIMEOUT_SECONDS,
+            fail_stuck_commands,
+        )
+
+        cmd = self._running(age_seconds=STUCK_COMMAND_TIMEOUT_SECONDS + 60)
+
+        assert fail_stuck_commands() == 1
+
+        cmd.refresh_from_db()
+        assert cmd.status == "failed"
+        assert "gave up" in cmd.error
+        assert cmd.finished_at is not None
+
+    def test_a_command_inside_the_timeout_is_left_alone(self) -> None:
+        from franktheunicorn.worker.commands import (
+            STUCK_COMMAND_TIMEOUT_SECONDS,
+            fail_stuck_commands,
+        )
+
+        cmd = self._running(age_seconds=STUCK_COMMAND_TIMEOUT_SECONDS - 60)
+
+        assert fail_stuck_commands() == 0
+
+        cmd.refresh_from_db()
+        assert cmd.status == "running"
+
+    def test_failing_it_frees_the_button_again(self) -> None:
+        """The point of the whole thing: the in-flight constraint dedups against
+        pending/running, so until that row moves the operator's click does nothing."""
+        from franktheunicorn.security import queue
+        from franktheunicorn.worker.commands import (
+            STUCK_COMMAND_TIMEOUT_SECONDS,
+            fail_stuck_commands,
+        )
+
+        cmd = self._running(age_seconds=STUCK_COMMAND_TIMEOUT_SECONDS + 60)
+        report = cmd.security_report
+        assert report is not None
+        assert queue.queue_triage(report) is False  # deduped against the hung row
+
+        fail_stuck_commands()
+
+        assert queue.queue_triage(report) is True
+
+    def test_a_row_with_no_started_at_is_not_swept(self) -> None:
+        """Belt and braces: requeue_interrupted_commands nulls started_at when it
+        requeues, and a pending row is not this function's business."""
+        from franktheunicorn.worker.commands import fail_stuck_commands
+
+        report = SecurityReportFactory()
+        cmd = WorkerCommand.objects.create(
+            command="run_security_triage", security_report=report, status="running"
+        )
+        WorkerCommand.objects.filter(pk=cmd.pk).update(started_at=None)
+
+        assert fail_stuck_commands() == 0
+
+    def test_it_names_the_target_in_the_log(self, caplog: Any) -> None:
+        """The queryset is empty afterwards, so the log line is the only record of
+        which target got abandoned."""
+        from franktheunicorn.worker.commands import (
+            STUCK_COMMAND_TIMEOUT_SECONDS,
+            fail_stuck_commands,
+        )
+
+        cmd = self._running(age_seconds=STUCK_COMMAND_TIMEOUT_SECONDS + 60)
+
+        with caplog.at_level(logging.WARNING):
+            fail_stuck_commands()
+
+        assert f"#{cmd.pk}" in caplog.text
+        assert "run_security_triage" in caplog.text

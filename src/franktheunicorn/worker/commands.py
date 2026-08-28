@@ -16,6 +16,7 @@ Commands supported:
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -159,6 +160,60 @@ def requeue_interrupted_commands() -> int:
     count = stale.update(status="pending", started_at=None)
     if count:
         logger.info("Requeued %d WorkerCommand row(s) orphaned by a previous worker.", count)
+    return count
+
+
+#: How long a command may sit in ``running`` before this worker calls it hung.
+#: Well past the longest legitimate handler — an agent-CLI review on a large PR
+#: with its clone, fetch and model call — because the cost of being wrong in this
+#: direction is failing a run that was about to succeed.
+STUCK_COMMAND_TIMEOUT_SECONDS = 3 * 60 * 60
+
+
+def fail_stuck_commands(now: datetime | None = None) -> int:
+    """Fail commands still ``running`` long past any plausible handler.
+
+    The gap ``requeue_interrupted_commands`` leaves. That one reasons — correctly
+    — that a ``running`` row at *startup* was orphaned by a crash, and it is the
+    only thing that clears one. So a handler that hangs rather than crashing, in a
+    worker that stays up, leaves its row ``running`` forever: the in-flight
+    constraint then dedups every later click on that target, the operator is told
+    "Reused in-flight" each time, and nothing will ever finish it. ``started_at``
+    was already being recorded and nothing read it.
+
+    Failed rather than requeued, deliberately. Requeueing would hand the same
+    command straight back to the same handler that just hung on it and dedup would
+    hide the loop; a failed row clears the constraint, shows the operator an error
+    they can act on, and leaves re-running it their decision.
+    """
+    cutoff = (now or timezone.now()) - timedelta(seconds=STUCK_COMMAND_TIMEOUT_SECONDS)
+    stuck = WorkerCommand.objects.filter(
+        status="running", started_at__isnull=False, started_at__lt=cutoff
+    )
+    # Named before the update, because afterwards the queryset is empty and the
+    # log line is the only record of which target was abandoned.
+    doomed = [(cmd.pk, cmd.command, _target_label(cmd)) for cmd in stuck]
+    if not doomed:
+        return 0
+    hours = STUCK_COMMAND_TIMEOUT_SECONDS // 3600
+    count = stuck.update(
+        status="failed",
+        error=(
+            f"No result after {hours}h — the worker gave up on it. "
+            "The handler hung rather than failing; re-run it if you still want it."
+        ),
+        finished_at=timezone.now(),
+    )
+    for pk, command, target in doomed:
+        logger.warning(
+            "WorkerCommand #%d (%s for %s) sat in 'running' for over %dh and has been "
+            "failed. Until now that row would have deduped every retry of the same "
+            "command, silently.",
+            pk,
+            command,
+            target,
+            hours,
+        )
     return count
 
 

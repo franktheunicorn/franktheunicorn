@@ -1217,8 +1217,15 @@ def _drain_worker_commands(operator_config: OperatorConfig | None) -> None:
     if operator_config is None:
         return
     try:
-        from franktheunicorn.worker.commands import process_pending_commands
+        from franktheunicorn.worker.commands import fail_stuck_commands, process_pending_commands
 
+        # Before claiming anything new. A row left in `running` by a handler that
+        # hung rather than crashed is only cleared at worker startup, so in a
+        # long-lived worker it deduped every retry of that command forever — the
+        # operator kept being told "Reused in-flight" for a run that would never
+        # finish. Swept every cycle because that is how often the situation can
+        # arise, and it is one indexed query.
+        fail_stuck_commands()
         processed = process_pending_commands(operator_config)
         if processed:
             logger.info("Drained %d worker command(s) mid-cycle", processed)

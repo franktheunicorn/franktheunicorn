@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import logging
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -1135,3 +1138,191 @@ class TestDeliveryHardening:
             RemoteSSHExecutor(config=config).run(["cat"], cwd="/tmp", stdin="payload")
 
         assert "Ignoring a stdin payload" in caplog.text
+
+
+class TestStdinFramingUnderAPty:
+    """The stdin path against a real PTY-attached shell, which is what the
+    wrappers this exists for actually open.
+
+    Markers alone got the exit code right and the output wrong: a PTY echoes every
+    line fed to it and prints a prompt before each, so the span between the markers
+    was a session transcript. The caller that hurt was
+    ``claude_code_backend._parse_output``, whose json.loads falls back to returning
+    stdout verbatim — so the "model response" was a shell transcript, ``is_error``
+    went unchecked and token accounting recorded zero.
+    """
+
+    @staticmethod
+    def _pty_wrapper(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        """A wrapper that opens an interactive shell on a PTY, like the real ones.
+
+        ``os.openpty`` + ``Popen``, not ``pty.spawn``: the latter calls
+        ``os.forkpty``, and under the full suite something has already started a
+        thread, so Python warns that forking a multi-threaded process may deadlock
+        in the child. This shape never forks the interpreter — the child is
+        exec'd straight away — and gives the same real terminal.
+
+        ``subprocess.run`` is patched in these tests; ``Popen`` is not, which is
+        what makes calling it here safe.
+        """
+        script = kwargs.get("input")
+        if script is None:
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+
+        master, slave = os.openpty()
+        chunks: list[bytes] = []
+        try:
+            proc = subprocess.Popen(
+                ["/bin/sh", "-i"],
+                stdin=slave,
+                stdout=slave,
+                stderr=slave,
+                start_new_session=True,
+            )
+            # Closed in the parent so the read below sees EOF when the shell exits.
+            os.close(slave)
+            os.write(master, script.encode())
+            while True:
+                try:
+                    data = os.read(master, 4096)
+                except OSError:
+                    break  # EIO — the far end of the pty went away
+                if not data:
+                    break
+                chunks.append(data)
+            proc.wait(timeout=30)
+        finally:
+            os.close(master)
+
+        banner = "Running: ssh 10.66.76.234\r\nLast login: Wed Aug 26 17:42:39 2026\r\n"
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=0,
+            stdout=banner + b"".join(chunks).decode(errors="replace"),
+            stderr="",
+        )
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_stdout_is_the_commands_output_not_the_session(self, mock_run: Any) -> None:
+        mock_run.side_effect = self._pty_wrapper
+        executor = RemoteSSHExecutor(
+            config=RemoteExecutionConfig(mode="ssh", ssh_command=["sf", "workspace", "ssh"])
+        )
+
+        result = executor.run_script("echo REAL_ONE; echo REAL_TWO", timeout=30, label="probe")
+
+        assert result is not None
+        assert result.returncode == 0
+        assert result.stdout == "REAL_ONE\nREAL_TWO\n"
+        # The things that used to come back inside stdout.
+        assert "sh-5.1$" not in result.stdout
+        assert "\x1b[" not in result.stdout
+        assert "__frank_rc" not in result.stdout
+        assert "Last login" not in result.stdout
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_json_output_survives_the_round_trip(self, mock_run: Any) -> None:
+        """The concrete regression: claude_code_backend json.loads()es this."""
+        mock_run.side_effect = self._pty_wrapper
+        executor = RemoteSSHExecutor(
+            config=RemoteExecutionConfig(mode="ssh", ssh_command=["sf", "workspace", "ssh"])
+        )
+        payload = '{"result": "looks fine to me", "is_error": false}'
+
+        result = executor.run_script(f"printf '%s' '{payload}'", timeout=30, label="probe")
+
+        assert result is not None
+        assert json.loads(result.stdout) == {"result": "looks fine to me", "is_error": False}
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_stderr_is_separated_from_stdout(self, mock_run: Any) -> None:
+        """Both were interleaved on the one PTY before; nothing could tell them apart."""
+        mock_run.side_effect = self._pty_wrapper
+        executor = RemoteSSHExecutor(
+            config=RemoteExecutionConfig(mode="ssh", ssh_command=["sf", "workspace", "ssh"])
+        )
+
+        result = executor.run_script(
+            "echo to-stdout; echo to-stderr 1>&2", timeout=30, label="probe"
+        )
+
+        assert result is not None
+        assert result.stdout == "to-stdout\n"
+        assert "to-stderr" in result.stderr
+        assert "to-stderr" not in result.stdout
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_the_real_exit_code_still_comes_back(self, mock_run: Any) -> None:
+        mock_run.side_effect = self._pty_wrapper
+        executor = RemoteSSHExecutor(
+            config=RemoteExecutionConfig(mode="ssh", ssh_command=["sf", "workspace", "ssh"])
+        )
+
+        result = executor.run_script("echo nope 1>&2; exit 3", timeout=30, label="probe")
+
+        assert result is not None
+        assert result.returncode == 3
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_a_command_that_prints_the_frame_markers_is_not_confused(self, mock_run: Any) -> None:
+        """A git diff touching this very file contains the marker literals."""
+        mock_run.side_effect = self._pty_wrapper
+        executor = RemoteSSHExecutor(
+            config=RemoteExecutionConfig(mode="ssh", ssh_command=["sf", "workspace", "ssh"])
+        )
+
+        result = executor.run_script(
+            "echo __frank_out_end__deadbeef:99; echo after", timeout=30, label="probe"
+        )
+
+        assert result is not None
+        assert result.returncode == 0
+        assert result.stdout == "__frank_out_end__deadbeef:99\nafter\n"
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_binary_output_does_not_crash_the_executor(self, mock_run: Any) -> None:
+        """A diff of a binary file. Strict decoding raised UnicodeDecodeError out of
+        subprocess and took the caller with it."""
+        mock_run.side_effect = self._pty_wrapper
+        executor = RemoteSSHExecutor(
+            config=RemoteExecutionConfig(mode="ssh", ssh_command=["sf", "workspace", "ssh"])
+        )
+
+        result = executor.run_script(r"printf 'a\377\376b'", timeout=30, label="probe")
+
+        assert result is not None
+        assert result.returncode == 0
+        assert "a" in result.stdout and "b" in result.stdout
+
+
+class TestSpawnFailureModes:
+    """What the OS can refuse, and whether it reaches the caller as a diagnosis."""
+
+    @staticmethod
+    def _config(command: list[str]) -> RemoteExecutionConfig:
+        return RemoteExecutionConfig(mode="ssh", ssh_command=command)
+
+    def test_a_wrapper_missing_chmod_x_is_a_warning_not_a_traceback(
+        self, tmp_path: Any, caplog: Any
+    ) -> None:
+        wrapper = tmp_path / "sf-wrapper"
+        wrapper.write_text("#!/bin/sh\necho hi\n")
+        wrapper.chmod(0o644)
+        executor = RemoteSSHExecutor(config=self._config([str(wrapper)]))
+
+        with caplog.at_level(logging.WARNING):
+            result = executor.run(["echo", "hi"], cwd="/tmp", timeout=5)
+
+        assert result is None
+        assert "not executable" in caplog.text
+
+    def test_an_ssh_command_pointing_at_a_directory_is_handled(
+        self, tmp_path: Any, caplog: Any
+    ) -> None:
+        executor = RemoteSSHExecutor(config=self._config([str(tmp_path)]))
+
+        with caplog.at_level(logging.WARNING):
+            result = executor.run(["echo", "hi"], cwd="/tmp", timeout=5)
+
+        assert result is None
+        assert "not executable" in caplog.text or "Could not run" in caplog.text
