@@ -98,6 +98,18 @@
         <div id="run-agents-result"></div>
     </div>
     <div>
+        <button class="action-btn reject"
+                hx-post="{% url 'dashboard:regenerate_findings' pr.pk %}"
+                hx-target="#regenerate-findings-result"
+                hx-swap="innerHTML"
+                hx-indicator="#regenerate-findings-spinner"
+                hx-confirm="Delete all findings except rejected ones and re-run agents? Use this after a big PR update. Rejected findings stay — they're used for learning. Comments already posted to the forge are not recalled.">
+            Delete Findings &amp; Regenerate
+        </button>
+        <span id="regenerate-findings-spinner" class="htmx-indicator run-agents-spinner" aria-label="Clearing..."></span>
+        <div id="regenerate-findings-result"></div>
+    </div>
+    <div>
         <button class="action-btn"
                 hx-post="{% url 'dashboard:run_dual_tests' pr.pk %}"
                 hx-target="#run-tests-result"

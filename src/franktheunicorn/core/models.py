@@ -268,6 +268,17 @@ class ReviewDraft(models.Model):
             status__in=cls.LINE_FINDING_STATUSES,
         )
 
+    @classmethod
+    def wipe_for_regenerate(cls, pull_request: PullRequest) -> int:
+        """Delete non-rejected drafts on *pull_request*; return how many went.
+
+        Rejected stays for learning. Posted forge comments are not recalled.
+        """
+        deleted, _ = (
+            cls.objects.filter(pull_request=pull_request).exclude(status="rejected").delete()
+        )
+        return deleted
+
     # Forge posting state. The ID is whatever the source forge returned —
     # GitHub review-comment ID, Gitea pull-comment ID, GitLab note ID.
     forge_comment_id = models.BigIntegerField(null=True, blank=True)

@@ -2117,6 +2117,63 @@ def run_agents(request: HttpRequest, pr_id: int) -> HttpResponse:
 
 
 @require_POST
+def regenerate_findings(request: HttpRequest, pr_id: int) -> HttpResponse:
+    """Wipe stale drafts (keep rejected) and queue a fresh agent run (htmx).
+
+    Refuses to wipe while a run is already *running* — that run may have
+    already written drafts, and the in-flight dedup would not queue a
+    replacement. A *pending* run is fine: wipe first, it hasn't started.
+    """
+    pr = get_object_or_404(PullRequest.objects.select_related("project"), pk=pr_id)
+    from franktheunicorn.config.loader import get_project_config
+
+    project_config = get_project_config(pr.project.full_name)
+    if not project_config:
+        return HttpResponse(
+            '<div class="run-agents-result error-note">No project config found for this repo.</div>'
+        )
+
+    from franktheunicorn.security.queue import PRIORITY_INTERACTIVE, queue_command
+
+    running = WorkerCommand.objects.filter(
+        command="run_agents", pull_request=pr, status="running"
+    ).exists()
+    if running:
+        return HttpResponse(
+            '<div class="run-agents-result queued-note">'
+            "An agent run for this PR is already in progress — "
+            "wait for it to finish before regenerating, or you would "
+            "wipe findings it just wrote and get no replacement run.</div>"
+        )
+
+    kept = ReviewDraft.objects.filter(pull_request=pr, status="rejected").count()
+    deleted = ReviewDraft.wipe_for_regenerate(pr)
+    vibe_deleted, _ = AgentVibe.objects.filter(pull_request=pr).delete()
+    logger.info(
+        "Regenerate: deleted %d non-rejected draft(s) and %d vibe(s) on %s #%s; "
+        "rejected drafts kept",
+        deleted,
+        vibe_deleted,
+        pr.project.full_name,
+        pr.number,
+    )
+
+    created = queue_command("run_agents", pull_request=pr, priority=PRIORITY_INTERACTIVE)
+    kept_note = f" Kept {kept} rejected." if kept else ""
+    follow = (
+        "An agent run for this PR is already queued — reload to see it land."
+        if not created
+        else (
+            "Agent run queued at the front of the worker queue. "
+            "Reload this page in a minute or two to see updated findings."
+        )
+    )
+    return HttpResponse(
+        f'<div class="run-agents-result queued-note">Deleted {deleted} finding(s).{kept_note} {follow}</div>'
+    )
+
+
+@require_POST
 def run_dual_tests(request: HttpRequest, pr_id: int) -> HttpResponse:
     """Queue a manual differential test run for the worker (htmx).
 

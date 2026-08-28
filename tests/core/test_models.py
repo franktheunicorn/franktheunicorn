@@ -185,6 +185,20 @@ class TestReviewDraftModel:
         assert db_pr.review_drafts.filter(status="pending").count() == 1
         assert db_pr.review_drafts.filter(status="accepted").count() == 1
 
+    def test_wipe_for_regenerate_keeps_rejected(self, db_pr: PullRequest) -> None:
+        other = PullRequestFactory()
+        rejected = ReviewDraftFactory(pull_request=db_pr, status="rejected")
+        for status in ("pending", "accepted", "edited", "posted", "recalled"):
+            ReviewDraftFactory(pull_request=db_pr, status=status)
+        other_draft = ReviewDraftFactory(pull_request=other, status="pending")
+
+        deleted = ReviewDraft.wipe_for_regenerate(db_pr)
+
+        remaining = list(ReviewDraft.objects.filter(pull_request=db_pr))
+        assert deleted == 5
+        assert remaining == [rejected]
+        assert ReviewDraft.objects.filter(pk=other_draft.pk).exists()
+
     def test_confidence_validation_too_high(self) -> None:
         draft = ReviewDraftFactory.build(confidence=1.5)
         with pytest.raises(ValidationError):

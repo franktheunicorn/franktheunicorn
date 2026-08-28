@@ -44,6 +44,7 @@ class TestDashboardViews:
         assert response.status_code == 200
         assert b"Fix flaky test" in response.content
         assert b"Score Breakdown" in response.content
+        assert b"Delete Findings &amp; Regenerate" in response.content
 
     def test_pr_detail_with_drafts(
         self, client: Client, db_pr: PullRequest, review_draft: ReviewDraft
@@ -308,6 +309,81 @@ class TestWorkerCommandQueueing:
         assert response.status_code == 200
         assert b"No project config" in response.content
         assert not WorkerCommand.objects.filter(pull_request=db_pr).exists()
+
+    def test_regenerate_findings_wipes_stale_drafts_and_enqueues(
+        self, client: Client, db_pr: PullRequest
+    ) -> None:
+        from unittest.mock import MagicMock, patch
+
+        from franktheunicorn.core.models import AgentVibe
+
+        rejected = ReviewDraftFactory(pull_request=db_pr, status="rejected")
+        pending = ReviewDraftFactory(pull_request=db_pr, status="pending")
+        accepted = ReviewDraftFactory(pull_request=db_pr, status="accepted")
+        AgentVibe.objects.create(pull_request=db_pr, backend="agent/sonnet", vibe_text="old take")
+
+        mock_pc = MagicMock()
+        with patch("franktheunicorn.config.loader.get_project_config", return_value=mock_pc):
+            response = client.post(f"/pr/{db_pr.pk}/regenerate-findings/")
+        assert response.status_code == 200
+        assert b"Deleted 2 finding" in response.content
+        assert b"Kept 1 rejected" in response.content
+        assert b"queued" in response.content.lower()
+        assert ReviewDraft.objects.filter(pk=rejected.pk, status="rejected").exists()
+        assert not ReviewDraft.objects.filter(pk__in=[pending.pk, accepted.pk]).exists()
+        assert not AgentVibe.objects.filter(pull_request=db_pr).exists()
+        cmd = WorkerCommand.objects.get(command="run_agents", pull_request=db_pr)
+        assert cmd.status == "pending"
+
+    def test_regenerate_findings_does_not_wipe_when_no_project_config(
+        self, client: Client, db_pr: PullRequest
+    ) -> None:
+        from unittest.mock import patch
+
+        draft = ReviewDraftFactory(pull_request=db_pr, status="pending")
+        with patch("franktheunicorn.config.loader.get_project_config", return_value=None):
+            response = client.post(f"/pr/{db_pr.pk}/regenerate-findings/")
+        assert response.status_code == 200
+        assert b"No project config" in response.content
+        assert ReviewDraft.objects.filter(pk=draft.pk).exists()
+        assert not WorkerCommand.objects.filter(pull_request=db_pr).exists()
+
+    def test_regenerate_findings_still_wipes_when_run_already_queued(
+        self, client: Client, db_pr: PullRequest
+    ) -> None:
+        from unittest.mock import MagicMock, patch
+
+        ReviewDraftFactory(pull_request=db_pr, status="pending")
+        ReviewDraftFactory(pull_request=db_pr, status="rejected")
+        WorkerCommand.objects.create(
+            command="run_agents", pull_request=db_pr, status="pending", priority=100
+        )
+        mock_pc = MagicMock()
+        with patch("franktheunicorn.config.loader.get_project_config", return_value=mock_pc):
+            response = client.post(f"/pr/{db_pr.pk}/regenerate-findings/")
+        assert response.status_code == 200
+        assert b"Deleted 1 finding" in response.content
+        assert b"already queued" in response.content
+        assert ReviewDraft.objects.filter(pull_request=db_pr).count() == 1
+        assert ReviewDraft.objects.get(pull_request=db_pr).status == "rejected"
+        assert WorkerCommand.objects.filter(command="run_agents", pull_request=db_pr).count() == 1
+
+    def test_regenerate_findings_refuses_wipe_while_run_in_progress(
+        self, client: Client, db_pr: PullRequest
+    ) -> None:
+        from unittest.mock import MagicMock, patch
+
+        pending = ReviewDraftFactory(pull_request=db_pr, status="pending")
+        WorkerCommand.objects.create(
+            command="run_agents", pull_request=db_pr, status="running", priority=100
+        )
+        mock_pc = MagicMock()
+        with patch("franktheunicorn.config.loader.get_project_config", return_value=mock_pc):
+            response = client.post(f"/pr/{db_pr.pk}/regenerate-findings/")
+        assert response.status_code == 200
+        assert b"already in progress" in response.content
+        assert ReviewDraft.objects.filter(pk=pending.pk).exists()
+        assert WorkerCommand.objects.filter(command="run_agents", pull_request=db_pr).count() == 1
 
     def test_run_dual_tests_rejects_when_tests_disabled(
         self, client: Client, db_pr: PullRequest
