@@ -466,14 +466,25 @@ table, which invites being trusted more than it has earned.
 
 **Current mitigations:**
 
-- **Injection patterns are a hard refusal, not a sanitisation.** Before the report reaches the
-  agent, `injection_hits` runs the regex stage of `security/malicious_prompt.py` over the
-  title, body and parsed POC — the same patterns that exist for the mirror-image case of a PR
-  trying to manipulate the reviewer, covering invisible Unicode tags, bidi controls and
-  entity-obfuscated payloads. Any hit and the run is refused with the pattern named. Refused
-  rather than scrubbed because there is no version of the text with the instructions removed
-  that is still the report, and the operator is better served by "this contains X, read it
-  yourself" than by a silently-edited run.
+- **The agent is told the report is data, not instructions.** The prompt says so explicitly,
+  names the specific things a report might ask for (run a command, fetch a URL, ignore these
+  instructions, reveal configuration), tells the agent to disregard them and to report what was
+  attempted in its summary. This is the mitigation that is always on, and on an intake with
+  humans in it, it is the main one.
+- **Injection patterns are scanned for and reported, not blocked by default.**
+  `injection_hits` runs the regex stage of `security/malicious_prompt.py` over the title, body
+  and parsed POC — the same patterns that exist for the mirror-image case of a PR trying to
+  manipulate the reviewer, covering invisible Unicode tags, bidi controls and
+  entity-obfuscated payloads. A hit is surfaced in the run summary next to the verdict and
+  logged at WARNING; `verifier.refuse_on_injection` turns it into a hard refusal.
+
+  Default-off is a deliberate call about a specific false positive. **A report about a
+  prompt-injection vulnerability quotes the payload it is reporting** — so the detector fires
+  on exactly the reports an ML project most needs verified, and blocking would refuse the ones
+  that matter. Set against that, the ASF intake path already has three humans in it: the report
+  arrives at `security@`, the security team reads it, and the maintainer reads it again before
+  pasting it in. Turn the refusal on for an intake without that: unattended email ingest, or a
+  bulk import of somebody else's scanner output.
 - **Off by default**, and even when on, never automatic: it takes a button press or an explicit
   per-import opt-in.
 - **A distinct checkout** (`workspace_subdir`), so an agent poking around cannot disturb the
@@ -485,11 +496,17 @@ table, which invites being trusted more than it has earned.
 
 **Remaining gaps:**
 
-- **The regex pre-filter is a filter, not a proof.** `malicious_prompt.py`'s own comments say
-  the patterns are "tolerant to whitespace and case but not exhaustive — the LLM stage is the
-  safety net for novel phrasings", and the verifier deliberately skips that LLM stage to avoid
-  a model call per verification. A novel phrasing gets through. The real containment has to be
-  the agent's own permissions.
+- **The regex pre-filter is a filter, not a proof**, and by default it doesn't block anyway.
+  `malicious_prompt.py`'s own comments say the patterns are "tolerant to whitespace and case
+  but not exhaustive — the LLM stage is the safety net for novel phrasings", and the verifier
+  skips that LLM stage to avoid a model call per verification. A novel phrasing gets through
+  the scan, and with `refuse_on_injection` off it would not have been stopped regardless. The
+  real containment is the humans upstream and the agent's own permissions.
+- **The design assumes a reviewed intake.** That assumption is the operator's to hold, and
+  nothing in the code checks it: a report pasted straight from an unattended mailbox gets the
+  same treatment as one three people have read. `refuse_on_injection` is the knob, and it is
+  off by default, so an install that ingests reports automatically is running the weaker
+  configuration unless somebody changed it.
 - **Nothing here constrains what the agent may do.** The tool policy is whatever the operator's
   `agent_cli_reviewers` entry sets. A read-only mode should arguably be enforced rather than
   left to config, and the config example should say so louder than it does.

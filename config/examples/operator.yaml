@@ -303,14 +303,20 @@ digest_enabled: false
 #   # report per branch. Even with this on, nothing verifies automatically —
 #   # it takes the Verify button on a report, or --verify / the "Verify against
 #   # the code" checkbox at import.
-#   # SECURITY: the agent is handed report text a stranger emailed you, and it
-#   # has whatever tool access the reviewer entry gives it. Reports carrying
-#   # prompt-injection patterns are refused outright before they reach it, but
-#   # that filter is not exhaustive — so point `reviewer` at an entry running in
-#   # a read-only mode (e.g. the cursor-agent entry's `--mode ask`) if you can.
-#   # See docs/security-design.md section 4.10.
+#   # SECURITY: the agent is handed report text somebody else wrote, and it has
+#   # whatever tool access the reviewer entry gives it. The prompt tells it the
+#   # report is data rather than instructions, and injection patterns are scanned
+#   # for and flagged next to the verdict — but not blocked by default, because a
+#   # report *about* prompt injection quotes the payload it is reporting, and
+#   # refusing those would refuse the reports you most want checked. That default
+#   # assumes a human reads the report first (on an ASF project, security@ and
+#   # then you). If reports reach this unattended, set refuse_on_injection: true.
+#   # Either way, point `reviewer` at an entry in a read-only mode if you can
+#   # (e.g. the cursor-agent entry's `--mode ask`) — that, and the humans
+#   # upstream, are the real containment. See docs/security-design.md 4.10.
 #   verifier:
 #     enabled: false
+#     refuse_on_injection: false
 #     # Which agent_cli_reviewers entry to borrow the CLI path, argv shape and
 #     # (for a remote setup) the whole `remote:` block from. One description of
 #     # how to reach the box the agent runs on, not two.

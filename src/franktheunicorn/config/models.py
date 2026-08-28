@@ -1194,6 +1194,24 @@ class SecurityVerifierConfig(BaseModel):
     #: How much of the report to hand the agent. A scanner archive's raw entry can
     #: be enormous and the prompt has to leave room for the agent to work.
     max_report_chars: int = 12_000
+    #: Refuse to verify a report whose text trips the prompt-injection patterns,
+    #: rather than running it and saying so.
+    #:
+    #: Off by default, because blocking assumes an intake this tool doesn't have.
+    #: On an ASF project a report reaches the operator through security@, gets
+    #: read by the security team, and gets read again by the maintainer before it
+    #: is pasted in — three humans ahead of the agent. Against that, a hard
+    #: refusal buys little and costs a specific, likely case: a report *about* a
+    #: prompt-injection vulnerability quotes the payload it is reporting, so the
+    #: detector fires on precisely the reports an ML project most needs to
+    #: verify, and the feature refuses the ones that matter.
+    #:
+    #: Turn it on if reports reach the verifier without a human in between — an
+    #: unattended email ingest, or a bulk import of somebody else's scanner
+    #: output. The patterns are still scanned and still reported either way; this
+    #: only decides whether a hit stops the run.
+    refuse_on_injection: bool = False
+
     #: Where the verification checkout lives, under the remote workspace dir. Kept
     #: separate from the review pipeline's clone on purpose: this one gets checked
     #: out onto arbitrary release branches and left there, and doing that to the
