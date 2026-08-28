@@ -1191,6 +1191,25 @@ class SecurityVerifierConfig(BaseModel):
     branch_patterns: list[str] = Field(
         default_factory=lambda: [r"^branch-\d", r"^release[-/]", r"^v?\d+\.\d+$", r"^stable[-/]"]
     )
+
+    @field_validator("branch_patterns")
+    @classmethod
+    def patterns_must_compile(cls, v: list[str]) -> list[str]:
+        """Reject an unparseable regex here, where the operator can see it.
+
+        Otherwise one typo escaped as a bare ``re.error`` out of
+        ``select_branches`` — a function documented "never raises" — killing the
+        WorkerCommand with a message about character sets and none of the
+        name-the-setting diagnostics every other gate in that module produces.
+        """
+        for pattern in v:
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                msg = f"branch_patterns entry {pattern!r} is not a valid regex: {exc}"
+                raise ValueError(msg) from exc
+        return v
+
     #: How much of the report to hand the agent. A scanner archive's raw entry can
     #: be enormous and the prompt has to leave room for the agent to work.
     max_report_chars: int = 12_000

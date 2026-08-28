@@ -40,6 +40,7 @@ import json
 import logging
 import re
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -337,14 +338,20 @@ def parse_verdict(output: str) -> BranchResult | None:
     raw text and records ``unclear``, because an unparseable answer must not
     round down to a clean verdict.
     """
-    blob = _first_json_object(output)
-    if blob is None:
-        return None
-    try:
-        parsed = json.loads(blob)
-    except (json.JSONDecodeError, ValueError):
-        return None
-    if not isinstance(parsed, dict):
+    # First candidate that both parses and looks like a verdict. Taking merely the
+    # first that parses would settle for a `{FOO}`-shaped stray from the prose.
+    parsed = None
+    for blob in _json_object_candidates(output):
+        try:
+            candidate = json.loads(blob)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(candidate, dict) and "verdict" in candidate:
+            parsed = candidate
+            break
+        if isinstance(candidate, dict) and parsed is None:
+            parsed = candidate  # fall back to the first object, verdict or not
+    if parsed is None:
         return None
 
     verdict = str(parsed.get("verdict", "")).strip().lower()
@@ -356,7 +363,11 @@ def parse_verdict(output: str) -> BranchResult | None:
 
     confidence: float | None = None
     raw_confidence = parsed.get("confidence")
-    if isinstance(raw_confidence, (int, float)):
+    # `not isinstance(bool)` because bool subclasses int in CPython, so an agent
+    # answering `"confidence": true` was being recorded as 1.00 — maximum certainty
+    # invented out of a type error, rendered next to a security verdict. `false`
+    # read as 0.0, i.e. "certain it wasn't sure".
+    if isinstance(raw_confidence, (int, float)) and not isinstance(raw_confidence, bool):
         confidence = max(0.0, min(1.0, float(raw_confidence)))
 
     evidence = parsed.get("evidence")
@@ -380,38 +391,49 @@ def parse_verdict(output: str) -> BranchResult | None:
     )
 
 
-def _first_json_object(text: str) -> str | None:
-    """The outermost balanced ``{...}`` in *text*, ignoring braces in strings.
+def _json_object_candidates(text: str) -> Iterator[str]:
+    """Every balanced ``{...}`` span in *text*, in order, braces-in-strings aware.
+
+    Yields rather than returning the first one, and that matters. Anchoring on the
+    first ``{`` and giving up broke on prose the agent is *expected* to produce:
+    it is describing code, so ``I checked the `{` handling in parser.py`` comes
+    before the JSON block, opens a depth that never closes, and the whole answer
+    reads as having no verdict. A *balanced* stray — ``Ran ${FOO} then:`` — is
+    worse, because it yields ``{FOO}``, which parses as nothing.
+
+    Both cases downgraded a confirmed "affected" to "unclear" on the page a
+    maintainer makes a decision from, which is the one direction this module's
+    docstring says it must not fail in.
 
     A regex can't do this: the payload contains prose with braces and escaped
     quotes, and a greedy match runs past the end of a fenced block into whatever
     the model said afterwards.
     """
     start = text.find("{")
-    if start < 0:
-        return None
-    depth = 0
-    in_string = False
-    escaped = False
-    for index in range(start, len(text)):
-        char = text[index]
-        if in_string:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                in_string = False
-            continue
-        if char == '"':
-            in_string = True
-        elif char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start : index + 1]
-    return None
+    while start >= 0:
+        depth = 0
+        in_string = False
+        escaped = False
+        for index in range(start, len(text)):
+            char = text[index]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    yield text[start : index + 1]
+                    break
+        start = text.find("{", start + 1)
 
 
 def verify_report(

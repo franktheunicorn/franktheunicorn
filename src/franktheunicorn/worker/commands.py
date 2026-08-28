@@ -197,7 +197,8 @@ def fail_stuck_commands(now: datetime | None = None) -> int:
     hide the loop; a failed row clears the constraint, shows the operator an error
     they can act on, and leaves re-running it their decision.
     """
-    cutoff = (now or timezone.now()) - timedelta(seconds=STUCK_COMMAND_TIMEOUT_SECONDS)
+    reference = now or timezone.now()
+    cutoff = reference - timedelta(seconds=STUCK_COMMAND_TIMEOUT_SECONDS)
     stuck = WorkerCommand.objects.filter(
         status="running", started_at__isnull=False, started_at__lt=cutoff
     )
@@ -213,7 +214,10 @@ def fail_stuck_commands(now: datetime | None = None) -> int:
             f"No result after {hours}h — the worker gave up on it. "
             "The handler hung rather than failing; re-run it if you still want it."
         ),
-        finished_at=timezone.now(),
+        # `reference`, not a fresh now(): the parameter exists so a caller (a test,
+        # a backfill) can pin the clock, and reading it for the cutoff while
+        # stamping from the real clock made it half-honoured.
+        finished_at=reference,
     )
     for pk, command, target in doomed:
         logger.warning(

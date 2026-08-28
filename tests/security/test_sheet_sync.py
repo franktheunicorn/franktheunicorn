@@ -808,3 +808,23 @@ class TestSelection:
         assert "-new-" in export_filename(status="new")
         assert "-full" in export_filename(full=True)
         assert "-new-" not in export_filename()
+
+
+@pytest.mark.django_db
+class TestForcedCountIsNotDerivedFromProse:
+    def test_rewording_the_detail_cannot_zero_the_count(self) -> None:
+        """It was re-derived with detail.startswith("forced"), so rewording an
+        operator-facing message silently zeroed the tally of rows that destroyed
+        somebody's work. Counted where it happens now."""
+        report = SecurityReportFactory(status="new")
+        text = _edit(_export([report]), report.pk, "status", "invalid")
+        report.status = "valid"
+        report.save()
+
+        result = _apply(text, force=True)
+
+        assert result.forced == 1
+        assert result.forced_count == 1
+        # Independent of the wording: blanking the detail must not change the count.
+        object.__setattr__(result.rows[0], "detail", "")
+        assert result.forced == 1

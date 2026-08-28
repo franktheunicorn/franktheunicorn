@@ -416,6 +416,11 @@ class SheetImportResult:
     #: Things the operator should know that aren't failures.
     warnings: list[str] = field(default_factory=list)
     dry_run: bool = False
+    #: How many rows overwrote a state newer than the sheet. Counted as it happens
+    #: rather than re-derived by string-matching ``detail``, which meant rewording
+    #: an operator-facing message silently zeroed the count of rows that destroyed
+    #: somebody's work.
+    forced_count: int = 0
     #: Rows that were applied with no staleness guard to check them against,
     #: because the sheet had no `check` column. Counted separately from clean
     #: applies: it's the same write with less confidence behind it.
@@ -444,7 +449,7 @@ class SheetImportResult:
         destroys work somebody had already done, and the summary line was
         reporting it as an ordinary "applied 1".
         """
-        return sum(1 for row in self.rows if row.detail.startswith("forced"))
+        return self.forced_count
 
     @property
     def failed(self) -> int:
@@ -800,6 +805,7 @@ def import_reports_csv(
             # the number in a message is the number in the reviewer's window.
             result.rows.append(importer.apply(raw_row, offset + 2))
     result.unguarded = importer.unguarded
+    result.forced_count = importer.forced
 
     logger.info(
         "Security sheet import: %d applied, %d unchanged, %d conflicts, %d rejected%s",
@@ -825,6 +831,7 @@ class _Importer:
         self.force = force
         self.dry_run = dry_run
         self.unguarded = 0
+        self.forced = 0
         self._seen: set[int] = set()
         self._reports: dict[int, SecurityReport] = {}
 
@@ -918,6 +925,9 @@ class _Importer:
         if warning := _row_warnings(report, changes):
             parts.append(warning)
         if forced:
+            # Counted here, where it happens. Re-deriving it later by matching this
+            # message's own wording meant a reword silently zeroed the tally.
+            self.forced += 1
             # First, because it's the one that overwrote somebody's work.
             parts.insert(0, "forced over a newer state")
         note = "; ".join(parts)

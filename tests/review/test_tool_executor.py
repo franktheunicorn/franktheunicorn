@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import select
+import shlex
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -1181,8 +1184,27 @@ class TestStdinFramingUnderAPty:
             )
             # Closed in the parent so the read below sees EOF when the shell exits.
             os.close(slave)
-            os.write(master, script.encode())
-            while True:
+            # Written incrementally while reading, not all at once. A pty's input
+            # buffer is a few KB, so a single blocking write of a large script
+            # deadlocks: the buffer fills, we never get to the read, and the shell
+            # never gets the rest. subprocess.run(input=...) pumps both directions
+            # for the same reason, which is why production doesn't hit this.
+            #
+            # Deadline rather than read-until-EOF, too: a shell that never exits —
+            # exactly what an over-long line causes — otherwise hangs the whole
+            # suite with no indication which test did it.
+            pending = script.encode()
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                writable = [master] if pending else []
+                readable, ready, _ = select.select([master], writable, [], 0.2)
+                if ready:
+                    written = os.write(master, pending[:2048])
+                    pending = pending[written:]
+                if not readable:
+                    if proc.poll() is not None and not pending:
+                        break
+                    continue
                 try:
                     data = os.read(master, 4096)
                 except OSError:
@@ -1190,7 +1212,9 @@ class TestStdinFramingUnderAPty:
                 if not data:
                     break
                 chunks.append(data)
-            proc.wait(timeout=30)
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=10)
         finally:
             os.close(master)
 
@@ -1326,3 +1350,217 @@ class TestSpawnFailureModes:
 
         assert result is None
         assert "not executable" in caplog.text or "Could not run" in caplog.text
+
+
+class TestLongCommandsOverAPty:
+    """A pty in canonical mode will not take a line at or over MAX_CANON (4096 on
+    Linux), and the failure is not truncation — measured here, a 4,090-byte line is
+    discarded entirely and the shell hangs waiting for a newline it never gets,
+    while ~14,000 bytes runs the command on a corrupted fragment.
+
+    Not a corner case: the verifier's prompt is ~13.8 KB at the default
+    max_report_chars and an agent-CLI review carries up to max_diff_chars=60,000,
+    so every long remote command over a stdin-only wrapper was landing in there.
+    """
+
+    @staticmethod
+    def _wrapper(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return TestStdinFramingUnderAPty._pty_wrapper(argv, **kwargs)
+
+    def _executor(self) -> RemoteSSHExecutor:
+        return RemoteSSHExecutor(
+            config=RemoteExecutionConfig(mode="ssh", ssh_command=["sf", "workspace", "ssh"])
+        )
+
+    @pytest.mark.parametrize("size", [4_090, 8_000, 14_000, 60_000])
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_a_long_command_still_runs_and_returns_its_output(
+        self, mock_run: Any, size: int
+    ) -> None:
+        mock_run.side_effect = self._wrapper
+        # A payload of exactly `size` bytes inside the command, echoed back out.
+        payload = "P" * size
+        result = self._executor().run_script(
+            f"printf '%s' '{payload}' | wc -c | tr -d ' '", timeout=60, label="long"
+        )
+
+        assert result is not None, f"{size}-byte command produced no result at all"
+        assert result.returncode == 0
+        assert result.stdout.strip() == str(size)
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_a_long_command_is_staged_rather_than_typed(self, mock_run: Any) -> None:
+        """The executed line has to be short regardless of how long the command is."""
+        mock_run.side_effect = self._wrapper
+        self._executor().run_script("echo " + "z" * 9_000, timeout=60, label="long")
+
+        script = mock_run.call_args.kwargs["input"]
+        longest = max(len(line) for line in script.splitlines())
+        assert longest < 2100, f"a {longest}-byte line would be eaten by the pty"
+        assert "FRANK_EOF_" in script  # staged via a quoted heredoc
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_a_short_command_is_not_staged(self, mock_run: Any) -> None:
+        """Staging costs two temp files and a decode; most calls here are
+        `git rev-parse`-sized."""
+        mock_run.side_effect = self._wrapper
+        self._executor().run_script("echo hi", timeout=60, label="short")
+
+        assert "FRANK_EOF_" not in mock_run.call_args.kwargs["input"]
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_a_staged_command_keeps_its_quoting_and_newlines(self, mock_run: Any) -> None:
+        """base64 inside a quoted heredoc, so a payload full of single quotes,
+        newlines and shell metacharacters survives verbatim."""
+        mock_run.side_effect = self._wrapper
+        nasty = 'it\'s "quoted" $HOME `backtick` \\ end'
+        result = self._executor().run_script(
+            f"printf '%s' {shlex.quote(nasty)}; echo; echo {'x' * 5000} > /dev/null",
+            timeout=60,
+            label="nasty",
+        )
+
+        assert result is not None
+        assert result.stdout.splitlines()[0] == nasty
+
+
+class TestMissingBase64OnTheRemote:
+    """Without base64 the framing still printed both payload markers around an
+    empty span, so "the encoder is missing" and "the command printed nothing" were
+    the same observation — and downstream, a git diff with no output is
+    indistinguishable from a clean repo."""
+
+    @staticmethod
+    def _wrapper_without_base64(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        script = kwargs.get("input")
+        if script is None:
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+        # Shadow base64 with a failing stub, the way a stripped-down remote behaves.
+        shimmed = "base64() { return 127; }\nunalias base64 2>/dev/null\n" + script
+        return TestStdinFramingUnderAPty._pty_wrapper(argv, input=shimmed)
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_it_refuses_rather_than_reporting_empty_output(
+        self, mock_run: Any, caplog: Any
+    ) -> None:
+        """None, not rc=0 with empty stdout. The command's output goes to a file on
+        the remote and only base64 retrieves it, so with no encoder the output
+        exists and is unreachable — and "no output" would read downstream as a
+        clean repo or an empty diff."""
+        mock_run.side_effect = self._wrapper_without_base64
+        executor = RemoteSSHExecutor(
+            config=RemoteExecutionConfig(
+                mode="ssh", ssh_command=["sf", "workspace", "ssh"], command_mode="stdin"
+            )
+        )
+
+        with caplog.at_level(logging.WARNING):
+            result = executor.run_script("echo IMPORTANT_DIFF_LINE", timeout=60, label="probe")
+
+        assert result is None
+        assert "base64(1)" in caplog.text
+        # And it names both ways out.
+        assert "coreutils" in caplog.text
+        assert "command_mode" in caplog.text
+
+
+class TestLocalIsolatedCheckout:
+    """`workspace_subdir` was accepted and ignored in local mode, so the security
+    verifier — which asks for isolation precisely because it runs
+    `git checkout --detach --force` onto arbitrary release branches — was handed
+    the review pipeline's own clone. Every run left it detached on the last branch
+    looked at, and commands drain mid-cycle, so the rest of that poll cycle read
+    blame and copy-pasta context from the wrong branch."""
+
+    @staticmethod
+    def _repo(tmp_path: Path) -> Path:
+        repo = tmp_path / "repos" / "apache" / "spark"
+        repo.mkdir(parents=True)
+        env = {
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@e",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@e",
+            "HOME": str(tmp_path),
+        }
+        for argv in (
+            ["git", "init", "-q", "-b", "master"],
+            ["git", "commit", "-q", "--allow-empty", "-m", "first"],
+        ):
+            subprocess.run(
+                argv, cwd=repo, check=True, capture_output=True, env={**os.environ, **env}
+            )
+        return repo
+
+    def test_a_subdir_request_gets_a_tree_of_its_own(self, tmp_path: Path) -> None:
+        repo = self._repo(tmp_path)
+
+        cwd = LocalExecutor().prepare_repo(
+            "apache", "spark", local_path=repo, workspace_subdir="security-verify"
+        )
+
+        assert cwd is not None
+        assert cwd != str(repo)
+        assert "security-verify" in cwd
+        assert (Path(cwd) / ".git").exists()
+
+    def test_detaching_the_isolated_tree_leaves_the_shared_one_alone(self, tmp_path: Path) -> None:
+        """The actual harm: the verifier checks out a release branch and the review
+        pipeline then reads source from it."""
+        repo = self._repo(tmp_path)
+        env = {**os.environ, "HOME": str(tmp_path)}
+        subprocess.run(
+            ["git", "branch", "branch-3.5"], cwd=repo, check=True, capture_output=True, env=env
+        )
+        cwd = LocalExecutor().prepare_repo(
+            "apache", "spark", local_path=repo, workspace_subdir="security-verify"
+        )
+        assert cwd is not None
+
+        subprocess.run(
+            ["git", "checkout", "--detach", "--force", "branch-3.5"],
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            env=env,
+        )
+
+        shared_head = subprocess.run(
+            ["git", "symbolic-ref", "--short", "HEAD"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert shared_head.returncode == 0
+        assert shared_head.stdout.strip() == "master"
+
+    def test_no_subdir_still_returns_the_shared_clone(self, tmp_path: Path) -> None:
+        repo = self._repo(tmp_path)
+        assert LocalExecutor().prepare_repo("apache", "spark", local_path=repo) == str(repo)
+
+    def test_a_second_call_reuses_the_worktree(self, tmp_path: Path) -> None:
+        repo = self._repo(tmp_path)
+        first = LocalExecutor().prepare_repo(
+            "apache", "spark", local_path=repo, workspace_subdir="security-verify"
+        )
+        second = LocalExecutor().prepare_repo(
+            "apache", "spark", local_path=repo, workspace_subdir="security-verify"
+        )
+        assert first == second
+
+    def test_it_refuses_rather_than_handing_back_the_shared_clone(
+        self, tmp_path: Path, caplog: Any
+    ) -> None:
+        """If isolation can't be had, the caller must not silently get the tree it
+        was trying to avoid touching."""
+        not_a_repo = tmp_path / "repos" / "apache" / "spark"
+        not_a_repo.mkdir(parents=True)
+
+        with caplog.at_level(logging.WARNING):
+            cwd = LocalExecutor().prepare_repo(
+                "apache", "spark", local_path=not_a_repo, workspace_subdir="security-verify"
+            )
+
+        assert cwd is None
+        assert "isolated worktree" in caplog.text

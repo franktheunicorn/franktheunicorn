@@ -59,6 +59,13 @@ logger = logging.getLogger(__name__)
 # these bounds is a mistake or an attack, and either way the operator wants to
 # be told rather than have the box swap itself to death.
 MAX_ENTRIES = 2_000
+
+#: How many reports one import may queue for deep verification. Far below
+#: MAX_ENTRIES on purpose: a verification is (max_branches + 1) agent runs at up to
+#: timeout_seconds each, so the whole-archive case is thousands of hours of agent
+#: time from one checkbox, serialised through a worker that stops polling PRs
+#: meanwhile. A review bound, like the CSV export's row cap — not a memory one.
+MAX_AUTO_VERIFY = 25
 MAX_ENTRY_BYTES = 4 * 1024 * 1024  # 4 MiB of text is a very long report
 MAX_TOTAL_BYTES = 128 * 1024 * 1024
 
@@ -373,6 +380,25 @@ def _queue_verifications(result: ZipImportResult) -> None:
     ids = [entry.report_id for entry in result.entries if entry.outcome == "imported"]
     ids = [report_id for report_id in ids if report_id]
     if not ids:
+        return
+    if len(ids) > MAX_AUTO_VERIFY:
+        # Refused rather than truncated. One tick of a checkbox could otherwise
+        # enqueue MAX_ENTRIES=2000 reports x (max_branches+1) agent runs at up to
+        # 1800s each — on the order of thousands of hours of paid agent time,
+        # serialised through a single worker that stops polling PRs while it grinds
+        # through them. Verifying an arbitrary 50 of a 2000-report archive would be
+        # its own kind of wrong, so the operator gets told to narrow it instead.
+        result.verify_skipped_reason = (
+            f"{len(ids)} reports is over the {MAX_AUTO_VERIFY}-report verification "
+            "limit — that would be thousands of hours of agent time from one "
+            "checkbox. Import without it and verify the ones that matter, or import "
+            "in smaller archives"
+        )
+        logger.warning(
+            "Refusing to auto-verify %d imported report(s); the cap is %d.",
+            len(ids),
+            MAX_AUTO_VERIFY,
+        )
         return
 
     try:

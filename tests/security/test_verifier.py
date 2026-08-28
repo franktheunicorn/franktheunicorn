@@ -635,3 +635,94 @@ class TestInjectionHandling:
 
         assert run.injection_hits == []
         assert "prompt-injection" not in run.summary()
+
+
+class TestVerdictParsingRegressions:
+    """Both of these downgraded a confirmed verdict to "unclear" on the page a
+    maintainer decides from — the one direction this module must not fail in."""
+
+    def test_a_stray_brace_in_the_prose_does_not_lose_the_verdict(self) -> None:
+        """The agent is describing code, so braces before the JSON are expected."""
+        result = parse_verdict(
+            "I checked the `{` handling in parser.py, answer:\n"
+            '```json\n{"verdict":"affected","confidence":0.9,"summary":"real"}\n```'
+        )
+
+        assert result is not None
+        assert result.verdict == "affected"
+        assert result.confidence == 0.9
+
+    def test_a_balanced_stray_pair_does_not_win_over_the_real_object(self) -> None:
+        result = parse_verdict(
+            'Ran ${FOO} then:\n{"verdict":"not-affected","confidence":0.8,"summary":"fixed"}'
+        )
+
+        assert result is not None
+        assert result.verdict == "not-affected"
+
+    def test_several_strays_before_the_verdict(self) -> None:
+        result = parse_verdict(
+            "Looked at {a}, then {b: 1}, and the template {{x}}.\n"
+            '{"verdict":"unclear","summary":"too vague"}'
+        )
+        assert result is not None
+        assert result.verdict == "unclear"
+        assert result.summary == "too vague"
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [("true", None), ("false", None), ("0.5", 0.5), ("1", 1.0), ("null", None)],
+    )
+    def test_a_boolean_confidence_is_not_a_number(self, raw: str, expected: Any) -> None:
+        """bool subclasses int in CPython, so `"confidence": true` was being recorded
+        as 1.00 — maximum certainty invented from a type error, rendered next to a
+        security verdict. `false` read as "certain it wasn't sure"."""
+        result = parse_verdict(f'{{"verdict":"affected","confidence":{raw},"summary":"s"}}')
+        assert result is not None
+        assert result.confidence == expected
+
+
+class TestBranchPatternValidation:
+    def test_a_bad_regex_is_rejected_at_config_time(self) -> None:
+        """Not as a bare re.error out of a function documented "never raises"."""
+        with pytest.raises(ValueError, match="not a valid regex"):
+            SecurityVerifierConfig(branch_patterns=["^branch-["])
+
+    def test_a_good_regex_is_accepted(self) -> None:
+        assert SecurityVerifierConfig(branch_patterns=[r"^branch-\d"]).branch_patterns
+
+
+@pytest.mark.django_db
+class TestAutoVerifyFanOutCap:
+    def test_a_huge_archive_is_refused_rather_than_queueing_thousands(self) -> None:
+        """One tick could otherwise enqueue MAX_ENTRIES reports x (max_branches+1)
+        agent runs at up to 1800s each, serialised through a worker that stops
+        polling PRs meanwhile. Refused, not truncated: verifying an arbitrary 25 of
+        a 200-report archive would be its own kind of wrong."""
+        from franktheunicorn.core.models import WorkerCommand
+        from franktheunicorn.security.zip_import import MAX_AUTO_VERIFY
+
+        project = ProjectFactory(owner="apache", repo="spark")
+        result = TestAutoVerifyOnImport()._import(
+            enabled=True, project=project, count=MAX_AUTO_VERIFY + 1
+        )
+
+        assert result.imported == MAX_AUTO_VERIFY + 1
+        assert result.queued_verifications == 0
+        assert str(MAX_AUTO_VERIFY) in result.verify_skipped_reason
+        assert WorkerCommand.objects.filter(command="verify_security_report").count() == 0
+
+    def test_an_archive_inside_the_cap_still_queues(self) -> None:
+        from franktheunicorn.core.models import WorkerCommand
+        from franktheunicorn.security.zip_import import MAX_AUTO_VERIFY
+
+        project = ProjectFactory(owner="apache", repo="spark")
+        result = TestAutoVerifyOnImport()._import(
+            enabled=True, project=project, count=MAX_AUTO_VERIFY
+        )
+
+        assert result.queued_verifications == MAX_AUTO_VERIFY
+        assert (
+            WorkerCommand.objects.filter(command="verify_security_report").count()
+            == MAX_AUTO_VERIFY
+        )

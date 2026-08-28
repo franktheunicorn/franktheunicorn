@@ -1178,15 +1178,23 @@ class TestSecurityCsvRoundTrip:
         report.refresh_from_db()
         assert report.matched_cve_id == ""
 
-    def test_flipping_away_from_duplicate_still_drops_the_reference(self, client: Client) -> None:
-        """The one case where dropping it is right, and why the old blanket rule
-        existed: "actually valid" means the CVE it duplicated no longer describes
-        it. Kept working — see test_clearing_duplicate_clears_cve_id."""
+    def test_flipping_away_from_duplicate_drops_a_reference_nobody_resubmitted(
+        self, client: Client
+    ) -> None:
+        """ "Actually valid" means the CVE it duplicated no longer describes it — but
+        only when the operator didn't say otherwise in the same POST.
+
+        This test used to submit the CVE field and still expect it cleared, which
+        encoded the data loss a review caught: an operator typing "distinct bug,
+        related to CVE-2026-2222" had it deleted on save, because the blanking rule
+        ran after the assignment. Submitting the field is the operator's answer; the
+        auto-drop is for the POST that carries none.
+        """
         report = SecurityReportFactory(status="duplicate", matched_cve_id="CVE-2026-1234")
 
         client.post(
             f"/security/{report.pk}/verdict/",
-            {"status": "valid", "operator_notes": "", "matched_cve_id": "CVE-2026-1234"},
+            {"status": "valid", "operator_notes": ""},
         )
 
         report.refresh_from_db()
@@ -1430,3 +1438,46 @@ class TestSecurityVerifyButton:
         body = client.get("/security/").content.decode()
         assert 'name="auto_verify"' in body
         assert "Verify against the code" in body
+
+
+@pytest.mark.django_db
+class TestVerdictCvePreservation:
+    """The blanking rule ran after the form's own assignment, so a CVE typed in the
+    same submission was deleted when the operator flipped a report off duplicate."""
+
+    def test_a_cve_typed_while_leaving_duplicate_survives(self, client: Client) -> None:
+        report = SecurityReportFactory(status="duplicate", matched_cve_id="CVE-2026-1111")
+
+        client.post(
+            f"/security/{report.pk}/verdict/",
+            {
+                "status": "valid",
+                "operator_notes": "distinct bug, related to the other one",
+                "matched_cve_id": "CVE-2026-2222",
+            },
+        )
+
+        report.refresh_from_db()
+        assert report.status == "valid"
+        assert report.matched_cve_id == "CVE-2026-2222"
+
+    def test_leaving_duplicate_without_the_field_still_drops_it(self, client: Client) -> None:
+        """The rule survives for the POST that doesn't carry the field, which is the
+        case it was written for."""
+        report = SecurityReportFactory(status="duplicate", matched_cve_id="CVE-2026-1111")
+
+        client.post(f"/security/{report.pk}/verdict/", {"status": "valid"})
+
+        report.refresh_from_db()
+        assert report.matched_cve_id == ""
+
+    def test_emptying_the_field_deliberately_still_works(self, client: Client) -> None:
+        report = SecurityReportFactory(status="duplicate", matched_cve_id="CVE-2026-1111")
+
+        client.post(
+            f"/security/{report.pk}/verdict/",
+            {"status": "valid", "matched_cve_id": ""},
+        )
+
+        report.refresh_from_db()
+        assert report.matched_cve_id == ""

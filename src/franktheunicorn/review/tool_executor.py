@@ -50,6 +50,27 @@ _FRAME_END = "__frank_out_end__"
 _B64_OUT = "__frank_b64out__"
 _B64_ERR = "__frank_b64err__"
 _B64_END = "__frank_b64end__"
+#: The command's stdout size in bytes, emitted before base64 runs. Lets an absent
+#: base64(1) be told apart from a command that genuinely printed nothing — see
+#: ``_unframe``.
+_B64_LEN = "__frank_b64len__"
+
+#: Longest line we will write into a pty. MAX_CANON is 4096 on Linux and a line
+#: at or over it is silently discarded (and hangs the shell) rather than
+#: truncated, so this leaves generous headroom. See ``_stage_invocation``.
+_MAX_TTY_LINE = 2000
+
+#: Column width for the staged-command base64. Well under _MAX_TTY_LINE, since
+#: each of these is its own heredoc line through the same tty.
+_B64_WRAP = 900
+
+#: Cap on how much of a remote command's output we bring back, applied on the
+#: remote with ``head -c`` where the file already is. Generous against a git diff
+#: and far under what a verbose agent can emit: 10 MB of output became ~50 MB live
+#: on the worker across the transcript, the span copy, the alphabet filter and the
+#: decode, for text the verifier then truncates to 20,000 chars. The declared byte
+#: count is the untruncated size, so a capped payload is detectable.
+_MAX_REMOTE_OUTPUT_BYTES = 4 * 1024 * 1024
 
 #: Anything a base64 payload cannot contain. Stripped before decoding, because a
 #: wrapper is free to fold a long line or inject a CR into the middle of one.
@@ -89,6 +110,26 @@ def _decode_b64_payload(stdout: str, head: str, tail: str) -> str | None:
     try:
         return base64.b64decode(payload, validate=True).decode("utf-8", errors="replace")
     except (binascii.Error, ValueError):
+        return None
+
+
+def _declared_length(stdout: str, head: str, tail: str) -> int | None:
+    """The byte count the remote reported for its stdout, or None if it didn't.
+
+    Separate from the payload so "the encoder failed" and "there was nothing to
+    encode" stop being the same observation.
+    """
+    at_head = stdout.rfind(head)
+    if at_head < 0:
+        return None
+    start = at_head + len(head)
+    at_tail = stdout.find(tail, start)
+    if at_tail < 0:
+        return None
+    digits = re.sub(r"\D", "", stdout[start:at_tail])
+    try:
+        return int(digits) if digits else None
+    except ValueError:  # pragma: no cover - re guarantees digits only
         return None
 
 
@@ -173,7 +214,58 @@ class LocalExecutor:
         if not local_path.exists():
             logger.debug("LocalExecutor: local_path missing for %s/%s: %s", owner, repo, local_path)
             return None
+        if workspace_subdir:
+            return self._isolated_worktree(local_path, workspace_subdir, owner, repo)
         return str(local_path)
+
+    @staticmethod
+    def _isolated_worktree(
+        local_path: Path, workspace_subdir: str, owner: str, repo: str
+    ) -> str | None:
+        """A checkout of ``local_path`` that a caller may mutate freely, or None.
+
+        Honouring ``workspace_subdir`` here is a correctness requirement, not a
+        nicety. It was accepted and ignored, so the security verifier — which asks
+        for an isolated tree precisely because it runs ``git checkout --detach
+        --force`` onto arbitrary release branches — was handed the review
+        pipeline's own clone. Every verification left that tree detached on the
+        last branch it looked at, and because commands drain *mid-cycle*, the rest
+        of that poll cycle read blame and copy-pasta context from ``branch-3.5``
+        while reviewing PRs against ``master``. Wrong findings on unrelated PRs,
+        silently, plus ``--force`` discarding whatever was in the working tree.
+
+        A linked worktree rather than a second clone: it shares the object store,
+        so it costs a checkout rather than a fetch of something Spark-sized, and
+        git keeps the two trees' HEADs genuinely independent. Pruned and re-added
+        if a previous run left it in a bad state, because a half-registered
+        worktree is otherwise unrecoverable without a shell.
+        """
+        target = local_path.parent / workspace_subdir / owner / repo
+        if (target / ".git").exists():
+            return str(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        for argv in (
+            ["git", "worktree", "prune"],
+            ["git", "worktree", "add", "--detach", "--force", str(target), "HEAD"],
+        ):
+            done = subprocess.run(
+                argv, cwd=str(local_path), capture_output=True, text=True, timeout=300, check=False
+            )
+            if done.returncode != 0 and argv[2] == "add":
+                # WARNING, not debug: the caller asked for isolation and is not
+                # getting it, and the alternative to saying so is handing back the
+                # shared clone for something to detach.
+                logger.warning(
+                    "Could not create an isolated worktree at %s for %s/%s (%s). "
+                    "Refusing to hand back the shared checkout — work needing "
+                    "isolation will be skipped rather than corrupt it.",
+                    target,
+                    owner,
+                    repo,
+                    (done.stderr or done.stdout).strip()[:300],
+                )
+                return None
+        return str(target)
 
     def run(
         self,
@@ -292,7 +384,23 @@ class RemoteSSHExecutor:
         a loop.
         """
         try:
-            result = self.run_script("true", timeout=15, label="ssh probe")
+            if self.wraps_openssh():
+                # Real ssh: ask it directly, with ConnectTimeout. Routing this
+                # through run_script cost the diagnosis — ssh's own "Connection
+                # timed out" / "No route to host" on stderr, which the lines below
+                # exist to log — because without ConnectTimeout the 15s subprocess
+                # timeout killed it first and the operator got a generic "timed
+                # out" with the cause discarded. A real ssh client also needs no
+                # delivery-mode detection: it takes a trailing command by
+                # definition, which is what wraps_openssh() establishes.
+                result = self._spawn(
+                    [*self._ssh_command(), "-o", "ConnectTimeout=10", "true"],
+                    "ssh probe",
+                    15,
+                    None,
+                )
+            else:
+                result = self.run_script("true", timeout=15, label="ssh probe")
         except Exception:
             logger.warning(
                 "SSH probe raised for %s", " ".join(self.config.ssh_command), exc_info=True
@@ -386,6 +494,10 @@ class RemoteSSHExecutor:
         op_name = "clone/fetch"
         result = None
         all_ssh_unreachable = True
+        # Assigned each attempt from what was actually delivered. Declared-and-never-
+        # written meant every failure diagnostic below logged an empty `cmd:` — the
+        # one field those lines exist to supply, on the path where knowing the
+        # delivered command is the whole diagnosis.
         ssh_argv: list[str] = []
         for attempt, _sentinel in enumerate((*backoff_delays, None)):
             # Build the script per-attempt so git verbosity can escalate:
@@ -435,6 +547,14 @@ class RemoteSSHExecutor:
             # meant a stdin-only wrapper silently ignored the clone script, exited
             # 0 with no output, and had us return a path to a directory that was
             # never created — with every later step then running in it.
+            # Recorded per attempt from what is actually being delivered. Declared
+            # and never written, this left every failure diagnostic below logging an
+            # empty `cmd:` — the one field those lines exist to supply, on the path
+            # where knowing the delivered command is the whole diagnosis.
+            ssh_argv = [
+                *self._ssh_command(),
+                f"<{self._delivery_mode(timeout=self.config.prepare_timeout_seconds)} delivery>",
+            ]
             result = self.run_script(
                 script,
                 timeout=self.config.prepare_timeout_seconds,
@@ -670,6 +790,8 @@ class RemoteSSHExecutor:
         # from its own head, so they don't need distinct terminators.
         out_head, out_tail = f"{_B64_OUT}{nonce}", f"{_B64_END}{nonce}"
         err_head = f"{_B64_ERR}{nonce}"
+        len_head = f"{_B64_LEN}{nonce}"
+        stage_lines, run_body = self._stage_invocation(remote_invocation, nonce)
         # Assembled from two halves at run time so the shell's echo of these lines
         # cannot contain a complete marker — only the executed `echo` can. Same
         # trick as _DELIVERY_SENTINEL, and it means the parser doesn't have to
@@ -679,26 +801,52 @@ class RemoteSSHExecutor:
                 f"__frank_h='{out_head[:-4]}'",
                 f"__frank_e='{err_head[:-4]}'",
                 f"__frank_t='{out_tail[:-4]}'",
+                f"__frank_l='{len_head[:-4]}'",
                 f"__frank_n='{nonce[-4:]}'",
                 f"echo {begin}",
-                "__frank_o=$(mktemp) && __frank_s=$(mktemp)",
+                # mktemp with a template. Bare `mktemp` is a usage error on
+                # BSD/macOS, where it wants one — and because the `&&` chain
+                # short-circuits, the second temp file was then never assigned, both
+                # redirections pointed at the empty filename, and the command never
+                # ran: rc=1, no stdout, no stderr, no explanation. Same portability
+                # care as using `base64 | tr -d` rather than GNU-only `base64 -w0`.
+                '__frank_o=$(mktemp "${TMPDIR:-/tmp}/frank.XXXXXX") && '
+                '__frank_s=$(mktemp "${TMPDIR:-/tmp}/frank.XXXXXX")',
+                *stage_lines,
                 # A subshell, not a { } group. A group runs in the current shell, so
                 # a command that ends in `exit` — or a tool that helpfully calls it —
                 # terminated the session before any framing was printed, and the whole
                 # run came back as "cannot be confirmed to have run at all". In a
                 # subshell that exit sets $? and the framing still gets out.
-                f'( {remote_invocation} ) > "$__frank_o" 2> "$__frank_s"',
+                f'( {run_body} ) > "$__frank_o" 2> "$__frank_s"',
                 "__frank_rc=$?",
+                # The byte count, before base64 gets a chance to fail. Without it,
+                # a remote with no base64(1) still printed both payload markers
+                # around an empty span, so "the command printed nothing" and "the
+                # encoder is missing" were the same observation — and a `git diff`
+                # with no output is indistinguishable from a clean repo, which is
+                # the exact failure this framing exists to prevent.
+                'printf "%s%s%s%s%s\\n" "$__frank_l" "$__frank_n" '
+                '"$(wc -c < "$__frank_o" | tr -d " ")" "$__frank_t" "$__frank_n"',
                 # Marker, payload and marker in ONE printf, so they land contiguously.
                 # Emitting them as three commands looked tidier and did not work: an
                 # interactive shell prints a prompt and echoes the next line between
                 # each one, and that echo contains base64-alphabet characters
                 # ("base64", "printf", "tr"), so filtering the span down to the
                 # base64 alphabet left the command names spliced into the payload.
-                'printf "%s%s%s%s%s\\n" "$__frank_h" "$__frank_n" '
-                '"$(base64 < "$__frank_o" | tr -d "\\n")" "$__frank_t" "$__frank_n"',
-                'printf "%s%s%s%s%s\\n" "$__frank_e" "$__frank_n" '
-                '"$(base64 < "$__frank_s" | tr -d "\\n")" "$__frank_t" "$__frank_n"',
+                # head -c on the remote, where the file already is. Without a bound,
+                # a verbose agent printing 10 MB became ~13.3 MB of base64 and about
+                # 50 MB live on the worker across the transcript, the span copy, the
+                # alphabet filter and the decode — for output the verifier truncates
+                # to 20,000 chars anyway. The declared byte count above is the
+                # *untruncated* size, so a capped payload is visible rather than
+                # passing for a short one.
+                f'printf "%s%s%s%s%s\\n" "$__frank_h" "$__frank_n" '
+                f'"$(head -c {_MAX_REMOTE_OUTPUT_BYTES} < "$__frank_o" | base64 | tr -d "\\n")" '
+                f'"$__frank_t" "$__frank_n"',
+                f'printf "%s%s%s%s%s\\n" "$__frank_e" "$__frank_n" '
+                f'"$(head -c {_MAX_REMOTE_OUTPUT_BYTES} < "$__frank_s" | base64 | tr -d "\\n")" '
+                f'"$__frank_t" "$__frank_n"',
                 'rm -f "$__frank_o" "$__frank_s"',
                 f'echo "{end}:$__frank_rc"',
                 "exit",
@@ -708,7 +856,59 @@ class RemoteSSHExecutor:
         result = self._spawn(self._ssh_command(), label, timeout, script)
         if result is None:
             return None
-        return self._unframe(result, label, begin, end, out_head, err_head, out_tail)
+        return self._unframe(result, label, begin, end, out_head, err_head, out_tail, len_head)
+
+    @staticmethod
+    def _stage_invocation(remote_invocation: str, nonce: str) -> tuple[list[str], str]:
+        """Keep every line we feed the tty short. Returns (extra lines, what to run).
+
+        A pty in canonical mode buffers input a line at a time and will not accept
+        a line at or over ``MAX_CANON`` — 4096 bytes on Linux. Past that the
+        behaviour is not "truncated with a warning", it is one of two silent
+        disasters, both measured on a real pty here:
+
+        * 4090 to 8000 bytes: the line is **discarded and the shell hangs**,
+          because it never receives the newline it is waiting for. The session
+          then dies on the subprocess timeout with no framing and no output.
+        * ~14000 bytes: the shell runs the command on a **corrupted fragment** —
+          a 14,000-byte line produced a 6,319-byte result.
+
+        This is not a corner case for this codebase. The verifier's prompt is
+        ~13.8 KB at the default ``max_report_chars``, and an agent-CLI review
+        carries up to ``max_diff_chars`` = 60,000, so *every* long remote command
+        over a stdin-only wrapper was landing in there.
+
+        So: anything long is staged into a file on the remote and run with ``sh``,
+        which makes the executed line a fixed ~40 bytes regardless. The transfer
+        is base64 wrapped at :data:`_B64_WRAP` columns inside a quoted heredoc —
+        base64 because it sidesteps every quoting question about a payload that
+        contains single quotes, newlines and shell metacharacters, and a *quoted*
+        heredoc because it passes bytes through without expansion. The delimiter
+        contains ``_``, which is not in the base64 alphabet, so it cannot appear
+        in the payload and end the heredoc early.
+
+        Short commands are left inline: staging costs two temp files and a decode,
+        and the overwhelming majority of calls here are ``git rev-parse``-sized.
+        """
+        if len(remote_invocation) <= _MAX_TTY_LINE:
+            return [], remote_invocation
+
+        encoded = base64.b64encode(remote_invocation.encode("utf-8")).decode("ascii")
+        delimiter = f"FRANK_EOF_{nonce}"
+        wrapped = [encoded[i : i + _B64_WRAP] for i in range(0, len(encoded), _B64_WRAP)]
+        lines = [
+            '__frank_c=$(mktemp "${TMPDIR:-/tmp}/frank.XXXXXX") && '
+            '__frank_x=$(mktemp "${TMPDIR:-/tmp}/frank.XXXXXX")',
+            f"cat > \"$__frank_c\" <<'{delimiter}'",
+            *wrapped,
+            delimiter,
+            # -d and --decode both exist somewhere: GNU coreutils takes either,
+            # BSD/macOS base64 wants -D on older releases and accepts -d on newer.
+            'base64 -d "$__frank_c" > "$__frank_x" 2>/dev/null '
+            '|| base64 -D "$__frank_c" > "$__frank_x" 2>/dev/null '
+            '|| base64 --decode "$__frank_c" > "$__frank_x"',
+        ]
+        return lines, 'sh "$__frank_x"'
 
     @staticmethod
     def _unframe(
@@ -719,6 +919,7 @@ class RemoteSSHExecutor:
         out_head: str = "",
         err_head: str = "",
         b64_tail: str = "",
+        len_head: str = "",
     ) -> ExecResult | None:
         """Cut the command's own output and exit code out of a framed session.
 
@@ -757,6 +958,29 @@ class RemoteSSHExecutor:
             return None
         decoded_out = _decode_b64_payload(stdout, out_head, b64_tail) if out_head else None
         decoded_err = _decode_b64_payload(stdout, err_head, b64_tail) if err_head else None
+        # An empty payload where the remote said it had bytes means the encoder
+        # didn't run — no base64(1) on the far side. Treated as "no payload" so the
+        # raw-span fallback and its warning are actually reachable: without the
+        # count, both markers still printed around an empty span, so a missing
+        # encoder was indistinguishable from a command that printed nothing, and
+        # that reads downstream as a clean repo or an empty diff.
+        declared = _declared_length(stdout, len_head, b64_tail) if len_head else None
+        if decoded_out == "" and declared:
+            # None, not a fallback. The command's stdout goes to a file on the
+            # remote and is only ever retrieved by base64, so with no encoder there
+            # is nothing in the session text to fall back *to* — the output exists
+            # and is unreachable. Returning rc=0 with empty stdout would report a
+            # git diff that produced 22 bytes as a clean repo, which is the failure
+            # this whole framing exists to prevent.
+            logger.warning(
+                "Remote said stdout was %d byte(s) for %s but the base64 payload is "
+                "empty: the remote has no usable base64(1), so the output cannot be "
+                "retrieved. Install coreutils there, or set remote.command_mode: argv "
+                "if the wrapper accepts a trailing command.",
+                declared,
+                label or "(script)",
+            )
+            return None
         if decoded_out is None:
             body_start = stdout.find("\n", at_begin)
             body = stdout[body_start + 1 : at_end] if 0 <= body_start < at_end else ""

@@ -487,8 +487,14 @@ table, which invites being trusted more than it has earned.
   bulk import of somebody else's scanner output.
 - **Off by default**, and even when on, never automatic: it takes a button press or an explicit
   per-import opt-in.
-- **A distinct checkout** (`workspace_subdir`), so an agent poking around cannot disturb the
-  tree the review pipeline is mid-diff on.
+- **A distinct checkout** (`workspace_subdir`) in both execution modes — a separate clone on a
+  remote, a linked `git worktree` locally. This was claimed here before it was true:
+  `LocalExecutor.prepare_repo` accepted the argument and ignored it, so in local mode the
+  verifier ran `git checkout --detach --force` onto release branches **inside the review
+  pipeline's own clone**, left it detached on the last branch checked, and — because commands
+  drain mid-cycle — the rest of that poll cycle read blame and copy-pasta context from the
+  wrong branch. If isolation can't be established the executor now returns `None` rather than
+  handing back the shared tree.
 - **Detached HEAD checkouts**, so nothing accumulates local branches that drift from origin.
 - **The verdict is presented as a model's opinion**, with the agent and model named, the commit
   recorded, and the confidence shown separately from the verdict — and an unparseable answer is

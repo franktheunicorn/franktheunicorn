@@ -1002,9 +1002,13 @@ def security_report_list(request: HttpRequest) -> HttpResponse:
             "zip_import_command": _zip_import_command(),
             # So the page can say the CSV export is capped *before* the operator
             # shares a sheet that quietly stops short of the backlog.
+            # Counted against the *filtered* set, not the whole backlog. Using the
+            # unfiltered count cried wolf on every status tab: 3,000 reports total
+            # with 40 in "new" showed "the export stops at 2000" on a tab that
+            # exports 40.
             "export_cap": MAX_SECURITY_CSV_EXPORT_ROWS,
-            "export_total": all_count,
-            "export_capped": all_count > MAX_SECURITY_CSV_EXPORT_ROWS,
+            "export_total": reports.count(),
+            "export_capped": reports.count() > MAX_SECURITY_CSV_EXPORT_ROWS,
         },
     )
 
@@ -1588,10 +1592,15 @@ def security_report_detail(request: HttpRequest, report_id: int) -> HttpResponse
         .first()
     )
 
-    # Default branch first, then the rest alphabetically — not by created_at.
-    # A run writes every branch's row with the same timestamp, so ordering by it
-    # leaves the table in whatever order the database felt like.
-    verifications = list(report.verifications.order_by("branch"))
+    # Not by created_at: a run writes every branch's row with the same timestamp,
+    # so ordering by it leaves the table in whatever order the database felt like.
+    # And not a bare order_by("branch") either, which the comment here used to claim
+    # was default-branch-first while actually sorting `master` *after* every
+    # `branch-*` — the row a maintainer looks at first, last.
+    verifications = sorted(
+        report.verifications.all(),
+        key=lambda v: (v.branch not in ("main", "master", "trunk"), v.branch),
+    )
 
     return render(
         request,
@@ -1794,11 +1803,17 @@ def security_report_verdict(request: HttpRequest, report_id: int) -> HttpRespons
         if candidate and not looks_like_cve(candidate):
             return HttpResponse("That doesn't look like a CVE id (CVE-2026-1234).", status=400)
         report.matched_cve_id = candidate.upper()
-    if was_duplicate and new_status != "duplicate":
-        # The one case where dropping it is right, and the original intent behind
-        # the old rule: "actually valid" means the CVE this was a duplicate of no
-        # longer describes it. Ruling on a report that was never a duplicate
-        # leaves the reference alone.
+    elif was_duplicate and new_status != "duplicate":
+        # Only when the form didn't carry the field, which is the whole condition.
+        # Blanking after the assignment above deleted a CVE the operator had just
+        # typed *in the same submission*: "this is a distinct valid bug, related to
+        # CVE-2026-2222" saved as valid with an empty reference and nothing said.
+        # That is the same silent deletion the comment above was written to fix.
+        #
+        # When the field IS submitted it already says what the operator wants,
+        # including empty — so there is nothing left for this rule to decide. It
+        # survives for the no-field POST, where "actually valid" still means the
+        # CVE this duplicated no longer describes it.
         report.matched_cve_id = ""
     report.save(update_fields=["status", "operator_notes", "matched_cve_id", "updated_at"])
 
