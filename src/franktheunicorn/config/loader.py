@@ -55,22 +55,81 @@ def _normalize_project_config(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def load_operator_config(path: str | Path) -> OperatorConfig:
-    """Load operator config from a YAML file. Returns defaults if file doesn't exist."""
+    """Load operator config from a YAML file. Returns defaults if file doesn't exist.
+
+    Every failure here degrades to :class:`OperatorConfig` defaults, and that is a
+    much bigger event than it looks: the defaults have *every* optional feature
+    off, so one bad key anywhere turns the whole file into "nothing is enabled".
+    An operator then reads "security_triage.enabled is false in operator.yaml"
+    while looking at a file that plainly says ``enabled: true``, and there is
+    nothing to connect the two.
+
+    So the failures are logged at ERROR, name the file, name the specific fields,
+    and say outright that everything fell back to defaults — the same standard
+    CLAUDE.md sets for a gate that stops configured work.
+    """
     p = Path(path)
     try:
         with p.open(encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
         data = _expand_env_vars(data)
+        if isinstance(data, dict):
+            _warn_unknown_keys(data, p)
         return OperatorConfig(**data)
     except FileNotFoundError:
         logger.debug("Operator config not found at %s, using defaults", p)
         return OperatorConfig()
-    except yaml.YAMLError:
-        logger.exception("Invalid YAML in operator config: %s", p)
+    except yaml.YAMLError as exc:
+        # error(), not exception(): the traceback points at yaml internals and
+        # buries the one line that matters, which is what fell back to what.
+        logger.error(
+            "Could not parse %s as YAML, so EVERY setting in it has been ignored and "
+            "the built-in defaults are in force — which means every optional feature "
+            "is off, whatever the file says. %s",
+            p,
+            exc,
+        )
         return OperatorConfig()
-    except ValidationError:
-        logger.exception("Validation error in operator config: %s", p)
+    except ValidationError as exc:
+        fields = "; ".join(
+            f"{'.'.join(str(part) for part in err['loc']) or '(top level)'}: {err['msg']}"
+            for err in exc.errors()[:10]
+        )
+        logger.error(
+            "%s failed validation, so EVERY setting in it has been ignored and the "
+            "built-in defaults are in force — every optional feature is off, whatever "
+            "the file says. Fix these and restart: %s",
+            p,
+            fields,
+        )
         return OperatorConfig()
+
+
+def _warn_unknown_keys(data: dict[str, Any], path: Path) -> None:
+    """Name top-level keys the model will silently drop.
+
+    Pydantic's default is ``extra="ignore"``, so a misspelled or misnested block
+    vanishes without a word and the feature it configures stays at its default.
+    Putting ``verifier:`` at the top level instead of under ``security_triage:``
+    is the obvious way to get there, and the only symptom is a feature that
+    refuses to turn on.
+
+    A warning rather than a hard error: an older config carrying a key this
+    version dropped should still boot.
+    """
+    known = set(OperatorConfig.model_fields) | {
+        field.alias for field in OperatorConfig.model_fields.values() if field.alias
+    }
+    unknown = sorted(set(data) - known)
+    if unknown:
+        logger.warning(
+            "Ignoring unrecognised top-level key(s) in %s: %s. These configure nothing "
+            "— check the spelling and the indentation (a block nested one level too "
+            "shallow lands here). Known keys: %s",
+            path,
+            ", ".join(unknown),
+            ", ".join(sorted(known)),
+        )
 
 
 def load_project_configs(directory: str | Path) -> list[ProjectConfig]:
