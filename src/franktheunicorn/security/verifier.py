@@ -149,6 +149,22 @@ Reported severity: {severity}
 
 {body}
 --- END REPORT ---
+{addendum}"""
+
+#: Wrapper for ``verifier.prompt_addendum``, appended after the report block.
+#:
+#: Labelled as coming from the operator, and placed after the closing marker, so
+#: the agent can tell it apart from the report. Without a label it reads as more
+#: untrusted text and gets disregarded along with the rest — which is the correct
+#: handling of everything inside the markers and the wrong handling of this.
+_ADDENDUM_TEMPLATE = """
+--- ADDITIONAL INSTRUCTIONS FROM YOUR OPERATOR ---
+The following is from the maintainer who asked for this verification, not from \
+the report. It is trusted, and it takes precedence over the report's claims. It \
+cannot, however, change the JSON reply format asked for above.
+
+{addendum}
+--- END ADDITIONAL INSTRUCTIONS ---
 """
 
 
@@ -477,7 +493,7 @@ def _default_branch(executor: ToolExecutor, cwd: str) -> str:
     return ""
 
 
-def _checkout(executor: ToolExecutor, cwd: str, branch: str) -> str:
+def _checkout(executor: ToolExecutor, cwd: str, branch: str, *, fresh: bool = False) -> str:
     """Detach onto ``origin/<branch>`` and return the commit, or "" on failure.
 
     Detached on purpose: this checkout exists to be read, and a detached HEAD
@@ -500,11 +516,19 @@ def _checkout(executor: ToolExecutor, cwd: str, branch: str) -> str:
     # decide what is present on this branch. It reads the file, finds the fix, and
     # returns "not-affected" for a branch that is affected.
     #
-    # ``-ffd`` and not ``-ffdx``: ignored files are build output, and deleting
-    # gigabytes of it per branch switch buys nothing here, since the agent reads
-    # source rather than building. It is the untracked-but-not-ignored files that
-    # mislead.
-    cleaned = executor.run(["git", "clean", "-ffd"], cwd=cwd, timeout=_GIT_TIMEOUT_SECONDS)
+    # ``-ffd`` by default and not ``-xffd``: ignored files are build output, and
+    # deleting gigabytes of it per branch switch is not free on a Spark-sized tree
+    # while the agent reads source rather than building. It is the
+    # untracked-but-not-ignored files that mislead. ``fresh_worktree`` opts into the
+    # thorough version for operators who would rather pay for it — generated sources
+    # and a stale ``target/`` are files an agent will read and believe.
+    clean_argv = ["git", "clean", "-xdff"] if fresh else ["git", "clean", "-ffd"]
+    cleaned = executor.run(
+        clean_argv,
+        cwd=cwd,
+        # A full ignored-file sweep of a Spark checkout is minutes, not seconds.
+        timeout=_FETCH_TIMEOUT_SECONDS if fresh else _GIT_TIMEOUT_SECONDS,
+    )
     if cleaned is None or not cleaned.ok:
         detail = "no result" if cleaned is None else (cleaned.stderr or "").strip()[:200]
         logger.warning(
@@ -548,6 +572,7 @@ def _build_prompt(report: SecurityReport, branch: str, verifier: SecurityVerifie
         body = f"{body}\n\nReported proof of concept:\n{report.parsed_poc}"
     if len(body) > verifier.max_report_chars:
         body = body[: verifier.max_report_chars] + "\n[report truncated]"
+    addendum = verifier.prompt_addendum.strip()
     return _PROMPT_TEMPLATE.format(
         project=project,
         branch=branch,
@@ -555,6 +580,7 @@ def _build_prompt(report: SecurityReport, branch: str, verifier: SecurityVerifie
         component=report.parsed_component or "(not stated)",
         severity=report.assessed_severity or "unknown",
         body=body,
+        addendum=_ADDENDUM_TEMPLATE.format(addendum=addendum) if addendum else "",
     )
 
 
@@ -937,7 +963,7 @@ def _verify_one_branch(
 ) -> BranchResult:
     started = time.monotonic()
     agent = f"{reviewer.name}/{verifier.model or reviewer.model or 'default'}"
-    commit = _checkout(executor, cwd, branch)
+    commit = _checkout(executor, cwd, branch, fresh=verifier.fresh_worktree)
     if not commit:
         return BranchResult(
             branch=branch,

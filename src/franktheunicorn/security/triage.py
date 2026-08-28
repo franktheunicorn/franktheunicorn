@@ -215,14 +215,38 @@ def _restore_untriaged_status(report: SecurityReport) -> None:
 
 
 def _get_triage_backend(operator_config: OperatorConfig) -> BaseLLMBackend | None:
-    """Get the first configured LLM backend for triage."""
-    if not operator_config.llm_backends:
-        return None
+    """The backend triage should use: its own if configured, else ``llm_backends[0]``.
 
+    ``llm_backends[0]`` is shared by three unrelated consumers — triage,
+    ``review/shepherding.py`` and the ``llm_checks`` path — so "which model does
+    triage use" was not separately expressible, and picking one for triage picked it
+    for the other two. That is a real bind rather than a tidiness complaint: triage
+    reads security reports and wants the strongest model available, while the
+    per-PR check paths run on every PR and want the cheap local one. Putting Cortex
+    first to get good triage silently moved shepherding and ``llm_checks`` onto it
+    too.
+
+    So ``security_triage.llm_backend`` overrides, and unset keeps the old behaviour
+    exactly. Logged when it's in force, because a second place a model can come from
+    is a second place to look when the answer is surprising.
+    """
     from franktheunicorn.review.backends import get_backend
     from franktheunicorn.review.backends.base import BaseLLMBackend
 
-    backend = get_backend(operator_config.llm_backends[0])
+    override = operator_config.security_triage.llm_backend
+    if override is not None:
+        logger.info(
+            "Triage is using security_triage.llm_backend (%s/%s), not llm_backends[0].",
+            override.provider,
+            override.model or "default model",
+        )
+        chosen = override
+    elif operator_config.llm_backends:
+        chosen = operator_config.llm_backends[0]
+    else:
+        return None
+
+    backend = get_backend(chosen)
     if not isinstance(backend, BaseLLMBackend):
         return None
     return backend
@@ -625,7 +649,24 @@ def _load_project_context(
 
 
 def _safe_json_parse(raw_text: str) -> dict[str, object] | None:
-    """Parse JSON from LLM response, stripping code fences if present."""
+    """Parse JSON from an LLM response, tolerating prose around it.
+
+    Two stages, because a fence is not the only way a model wraps its answer.
+    Stripping the fence and calling ``json.loads`` handles the well-behaved case;
+    when there is no fence it doesn't, and "Here's my assessment: {...} Hope that
+    helps!" fails outright.
+
+    That used to be tolerable and isn't any more. The ``agent-cli`` backend runs a
+    coding-agent CLI, which narrates by default — and the local models people put in
+    ``llm_backends`` do too. A strict parse turns a perfectly good triage answer into
+    "the LLM response is not valid JSON", after the call has been paid for.
+
+    So the fallback scans for a balanced JSON object, reusing the verifier's scan
+    rather than writing a second one: it tries multiple candidates (a model
+    describing code emits braces in prose), searches **tail-first** so a JSON object
+    quoted in the *report* cannot outrank the model's real answer, and is bounded by
+    a work budget instead of being quadratic on model-controlled text.
+    """
     from franktheunicorn.review.backends.base import _CODE_FENCE_RE
 
     raw_text = raw_text.strip()
@@ -633,13 +674,29 @@ def _safe_json_parse(raw_text: str) -> dict[str, object] | None:
         return None
 
     fence_match = _CODE_FENCE_RE.search(raw_text)
-    if fence_match:
-        raw_text = fence_match.group(1)
+    candidate_text = fence_match.group(1) if fence_match else raw_text
 
     try:
-        data = json.loads(raw_text)
+        data = json.loads(candidate_text)
+    except json.JSONDecodeError:
+        pass
+    else:
         if isinstance(data, dict):
             return data
-    except json.JSONDecodeError:
-        logger.warning("LLM response is not valid JSON for security triage.")
+
+    from franktheunicorn.security.verifier import _json_object_candidates
+
+    for blob in _json_object_candidates(raw_text):
+        try:
+            data = json.loads(blob)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(data, dict) and data:
+            return data
+
+    logger.warning(
+        "No JSON object found in the LLM response for security triage (%d chars, starting %r).",
+        len(raw_text),
+        raw_text[:120],
+    )
     return None

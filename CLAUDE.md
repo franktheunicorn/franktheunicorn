@@ -37,6 +37,19 @@ src/franktheunicorn/
   personalities/     # Reviewer voice loader (markdown personalities)
   security/          # Security-report triage pipeline (CVE lookup,
                      #   malicious-prompt detection, sandboxed POC runs).
+                     #   duplicates.py answers the other dedup question: the CVE
+                     #   check asks whether the *public record* has this, that
+                     #   asks whether *your backlog* does — which is the one that
+                     #   bites at volume, since a scanner archive emits one
+                     #   finding per site and a missing check in a shared helper
+                     #   arrives as six findings against six callers. Local
+                     #   string comparison weighted across title/paths/body, no
+                     #   model calls (500 reports is 125,000 pairs). It writes a
+                     #   link plus the reasoning that produced it and never sets
+                     #   status="duplicate" — that is a verdict and verdicts are
+                     #   the operator's. `manage.py find_security_duplicates`
+                     #   backfills reports that predate the feature, dry-run by
+                     #   default.
                      #   queue.py is the only door onto WorkerCommand queueing,
                      #   for PR commands as well as triage — every path goes
                      #   through it, never straight to WorkerCommand. It owns

@@ -263,10 +263,16 @@ class AgentCLIReviewerConfig(BaseModel):
     prompt_arg: str = "-p"
     extra_args: list[str] = Field(default_factory=list)
     #: Flags that tell this CLI the working directory is one we meant to point it
-    #: at. Separate from ``extra_args`` because they are a property of the *CLI*,
-    #: not of the operator's taste, and because an operator setting ``extra_args``
-    #: replaces the seed outright — folding trust in there would mean anyone who
-    #: customised a flag silently lost it.
+    #: at. Separate from ``extra_args`` because it answers a different question:
+    #: ``extra_args`` is how the operator wants the agent to behave, this is what
+    #: the agent needs in order to run at all. Mixing them means the flag that makes
+    #: verification work sits in a list people edit for taste.
+    #:
+    #: (Registry merging is field-by-field, verified against a real config: an entry
+    #: overriding ``extra_args``, ``model``, ``enabled`` and ``remote`` still
+    #: inherits the seed's ``trust_args``. So a single list would in fact have
+    #: survived an override — the separation is for legibility, not to dodge a
+    #: clobber.)
     #:
     #: The problem is real and measured. Every checkout this codebase drives an
     #: agent in is one it created: the review clone, and the verifier's separate
@@ -388,8 +394,10 @@ def _default_agent_cli_reviewers() -> list[AgentCLIReviewerConfig]:
         # first invocation in each is in a workspace cursor-agent has never been
         # told to trust, and it refuses: exit 1, empty stdout, "⚠ Workspace Trust
         # Required" on stderr, advising you to "run 'agent' interactively to
-        # decide". A worker has no interactive anything. In ``trust_args`` rather
-        # than ``extra_args`` so an operator changing ``--mode`` doesn't drop it.
+        # decide". A worker has no interactive anything. Its own field rather than
+        # ``extra_args`` because it is what makes the agent run at all, not a
+        # preference — and because an operator editing ``--mode`` should not have to
+        # know it's carrying this around.
         AgentCLIReviewerConfig(
             name="cursor-agent",
             prompt_mode="flag",
@@ -652,7 +660,20 @@ class BackportConfig(BaseModel):
 
 
 KNOWN_LLM_PROVIDERS: frozenset[str] = frozenset(
-    {"stub", "claude", "claude-code", "openai", "gemini", "ollama", "llama-cpp", "vllm", "rlm"}
+    {
+        "stub",
+        "claude",
+        "claude-code",
+        "openai",
+        "gemini",
+        "ollama",
+        "llama-cpp",
+        "vllm",
+        "rlm",
+        # Not an API at all: shells out to a coding-agent CLI (possibly over SSH)
+        # and reads stdout. See review/backends/agent_cli_backend.py.
+        "agent-cli",
+    }
 )
 
 # Transports for the "claude-code" provider (see LLMBackendConfig.transport).
@@ -688,6 +709,16 @@ class LLMBackendConfig(BaseModel):
     cli_path: str = "claude"
     acp_command: str = ""
     cli_timeout_seconds: int = 300
+    #: Only consulted when ``provider == "agent-cli"``: names an entry in
+    #: ``agent_cli_reviewers`` to borrow the CLI path, argv shape, ``trust_args``,
+    #: ``extra_args`` and — the point of it for a remote setup — the whole ``remote``
+    #: block from. Same borrowing as ``security_triage.verifier.reviewer``, for the
+    #: same reason: one description of how to reach the box the agent runs on.
+    #:
+    #: ``model`` on this entry overrides the borrowed one, so a single
+    #: ``agent_cli_reviewers`` entry can serve PR review, verification and this
+    #: backend at three different models.
+    reviewer: str = ""
     # Recursive Language Model settings (v1.5). Only consulted when
     # ``provider == "rlm"``; ignored (with a warning) for other providers.
     rlm: RLMConfig | None = None
@@ -715,6 +746,35 @@ class LLMBackendConfig(BaseModel):
                 ", ".join(sorted(KNOWN_LLM_TRANSPORTS)),
             )
         return v
+
+    @model_validator(mode="after")
+    def agent_cli_needs_a_reviewer(self) -> LLMBackendConfig:
+        """``provider: agent-cli`` without ``reviewer`` cannot do anything.
+
+        A warning rather than an error, matching how this class treats an unknown
+        provider — a config that boots and complains beats one that refuses, since
+        this file also carries the credentials everything else needs. But it is said
+        at load time and names the field, rather than surfacing later as a backend
+        that returns nothing.
+
+        The reverse (``reviewer`` set on a non-agent-cli provider) is also worth a
+        word: it silently does nothing, and the likely cause is someone expecting it
+        to redirect an ``openai`` entry at a CLI.
+        """
+        if self.provider == "agent-cli" and not self.reviewer.strip():
+            logger.warning(
+                "An llm_backends entry has provider: agent-cli but no `reviewer`. It "
+                "must name an agent_cli_reviewers entry to borrow the CLI and remote "
+                "config from, e.g. `reviewer: cursor-agent`. This backend will not run."
+            )
+        elif self.reviewer.strip() and self.provider != "agent-cli":
+            logger.warning(
+                "An llm_backends entry sets `reviewer: %s` with provider: %s. `reviewer` "
+                "is only read for provider: agent-cli, so it is being ignored here.",
+                self.reviewer,
+                self.provider,
+            )
+        return self
 
     @field_validator("temperature")
     @classmethod
@@ -1267,6 +1327,36 @@ class SecurityVerifierConfig(BaseModel):
     #: How much of the report to hand the agent. A scanner archive's raw entry can
     #: be enormous and the prompt has to leave room for the agent to work.
     max_report_chars: int = 12_000
+
+    #: Extra instructions for the verifying agent, from the operator.
+    #:
+    #: ``extra_args`` reaches the CLI's argv, not the prompt, so there was no way to
+    #: tell the agent anything project-specific — "don't trust stale build output",
+    #: "the shaded jars under assembly/ are generated", "check the Python bindings
+    #: too". Those are exactly the things one maintainer knows and the prompt can't.
+    #:
+    #: Appended **after** the report block, and that ordering is the security
+    #: property rather than a formatting choice. Before it, operator text would sit
+    #: inside the region the prompt frames as untrusted, so the agent is being told
+    #: to disregard its instructions; worse, it would separate the "UNTRUSTED DATA"
+    #: framing from the data it describes, which is the sentence stopping a report
+    #: from steering an agent that has tool access.
+    prompt_addendum: str = ""
+
+    #: Whether each verification run gets a genuinely fresh tree.
+    #:
+    #: Off by default because on a Spark-sized repo it is not free, and the warm
+    #: tree is what most operators want. What it buys when on: ``git clean -xdff``
+    #: rather than the ordinary ``-ffd``, so ignored files go too — an accumulated
+    #: ``target/`` from a previous run, generated sources, anything a prior agent
+    #: wrote. That matters here more than it looks, because the agent's whole job is
+    #: to judge what is present on this branch, and a stale generated file is a file
+    #: it will read and believe.
+    #:
+    #: Not the same question as freshness of *history*, which is unconditional: see
+    #: ``verifier.refresh_from_upstream``, which fetches every branch and tag on
+    #: every run whatever this is set to.
+    fresh_worktree: bool = False
     #: Refuse to verify a report whose text trips the prompt-injection patterns,
     #: rather than running it and saying so.
     #:
@@ -1393,6 +1483,15 @@ class SecurityTriageConfig(BaseModel):
     enabled: bool = True
     email: SecurityEmailConfig = Field(default_factory=SecurityEmailConfig)
     nvd_api_key_env: str = ""  # optional, for higher NVD rate limits
+    #: Which model triages reports. Unset means ``llm_backends[0]``, which is the
+    #: old behaviour exactly.
+    #:
+    #: Exists because ``llm_backends[0]`` is shared by three consumers that want
+    #: different things: triage reads security reports and wants your strongest
+    #: model, while shepherding and the per-PR ``llm_checks`` path run constantly and
+    #: want the cheap local one. Without this, putting Cortex first to get good
+    #: triage silently moved the other two onto it as well.
+    llm_backend: LLMBackendConfig | None = None
     auto_triage: bool = True  # automatically run LLM triage on new reports
     #: Sandboxed POC execution. Stays off by default: this one runs code an
     #: attacker wrote. See the class docstring.

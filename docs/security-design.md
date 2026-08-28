@@ -522,6 +522,20 @@ table, which invites being trusted more than it has earned.
   or the same `data/` tree seen at a different prefix under `docker compose` versus a host
   `make worker`, would otherwise be handed back dead forever while looking fine.
 - **Detached HEAD checkouts**, so nothing accumulates local branches that drift from origin.
+- **The tree is refreshed and cleaned before every run.** `refresh_from_upstream` fetches every
+  branch and tag (`--all --prune --prune-tags --tags --force`) unconditionally, and each branch
+  checkout is followed by `git clean`. This is a correctness property rather than housekeeping:
+  the feature is used on a backlog worked through in batches with fixes landing in between, so a
+  stale checkout reports a hole as live on `branch-3.5` when it was patched on Tuesday — with a
+  confident summary and a file:line citation, which is the most convincing possible way to be
+  wrong. A fetch that fails does not abort the run but is recorded on it and surfaced next to the
+  verdicts. `verifier.fresh_worktree` upgrades the clean to `-xdff` (ignored files too) for
+  operators willing to pay for it on a Spark-sized tree.
+- **Operator prompt text is separated from report text.** `verifier.prompt_addendum` is appended
+  *after* the report block and labelled as coming from the operator. The ordering is the security
+  property: inside the markers it would sit in the region the prompt frames as untrusted (so the
+  agent is told to disregard its own operator), and it would separate the "UNTRUSTED DATA"
+  framing from the data it describes.
 - **The verdict is presented as a model's opinion**, with the agent and model named, the commit
   recorded, and the confidence shown separately from the verdict — and an unparseable answer is
   stored as `unclear` with the raw output kept, so it cannot pass for a considered judgement.

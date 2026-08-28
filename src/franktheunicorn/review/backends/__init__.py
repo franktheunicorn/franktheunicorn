@@ -21,6 +21,9 @@ _BACKENDS: dict[str, tuple[str, str]] = {
     "claude-code": ("franktheunicorn.review.backends.claude_code_backend", "ClaudeCodeBackend"),
     "stub": ("franktheunicorn.review.backends.stub_backend", "StubBackend"),
     "rlm": ("franktheunicorn.review.rlm.backend", "RLMBackend"),
+    # Borrows an agent_cli_reviewers entry and runs its CLI, rather than holding a
+    # key and calling a service.
+    "agent-cli": ("franktheunicorn.review.backends.agent_cli_backend", "AgentCLIBackend"),
 }
 
 
