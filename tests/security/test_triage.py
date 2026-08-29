@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -579,7 +580,7 @@ class TestSecurityModelThreading:
         _system, analyze_user = backend.calls[-1]
         assert "Data files are untrusted; loaded models are trusted." in analyze_user
 
-    @patch("franktheunicorn.security.triage._analyze_report")
+    @patch("franktheunicorn.security.triage._analyze_report", return_value=(True, ""))
     @patch("franktheunicorn.security.triage.search_cves", return_value=[])
     @patch("franktheunicorn.security.triage._get_triage_backend")
     def test_cve_lookup_runs_before_analysis(
@@ -606,9 +607,10 @@ class TestSecurityModelThreading:
         # When _analyze_report is called, cve_candidates must already be filled.
         captured: dict[str, Any] = {}
 
-        def _capture(*args: Any, **kwargs: Any) -> bool:
+        def _capture(*args: Any, **kwargs: Any) -> tuple[bool, str]:
             captured["cve_candidates"] = kwargs.get("cve_candidates")
-            return True  # _analyze_report reports whether it wrote a verdict
+            # (wrote_a_verdict, reason_it_did_not)
+            return True, ""
 
         mock_analyze.side_effect = _capture
 
@@ -875,3 +877,65 @@ class TestPartialFailureIsolation:
 
         report.refresh_from_db()
         assert report.status == "new"
+
+
+@pytest.mark.django_db
+class TestTriageSaysWhyItHadNoVerdict:
+    """ "Triage produced no verdict for report #2" named none of the three causes."""
+
+    def _report(self) -> Any:
+        from tests.factories import SecurityReportFactory
+
+        return SecurityReportFactory(raw_text="vuln", parsed_component="test.py", status="triaging")
+
+    def test_an_unreachable_backend_is_named_and_gets_no_traceback(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import httpx
+
+        from franktheunicorn.security.triage import _analyze_report
+
+        backend = _MockLLMBackend(responses=[])
+        try:
+            httpx.get("http://127.0.0.1:1/api/generate", timeout=2)
+        except Exception as exc:
+            backend._call_api = MagicMock(side_effect=exc)  # type: ignore[method-assign]
+
+        with caplog.at_level(logging.WARNING):
+            wrote, reason = _analyze_report(self._report(), backend, "")
+
+        assert wrote is False
+        assert "not reachable" in reason
+        record = next(r for r in caplog.records if "could not reach the LLM backend" in r.message)
+        assert record.levelno == logging.WARNING
+        assert record.exc_info is None
+
+    def test_a_reply_with_no_usable_fields_says_so(self) -> None:
+        import json
+
+        from franktheunicorn.security.triage import _analyze_report
+
+        backend = _MockLLMBackend(responses=[json.dumps({"totally": "unrelated"})])
+        wrote, reason = _analyze_report(self._report(), backend, "")
+
+        assert wrote is False
+        assert "without any of the fields triage reads" in reason
+
+    def test_the_reason_reaches_the_operator_visible_error(self) -> None:
+        from franktheunicorn.security.triage import TriageIncompleteError, triage_report
+
+        report = self._report()
+        config = OperatorConfig(
+            github_username="holdenk",
+            llm_backends=[LLMBackendConfig(provider="stub")],
+            security_triage=SecurityTriageConfig(enabled=True),
+        )
+        with (
+            patch(
+                "franktheunicorn.security.triage._analyze_report",
+                return_value=(False, "the LLM backend is not reachable (Connection refused)"),
+            ),
+            patch("franktheunicorn.security.triage.search_cves", return_value=[]),
+            pytest.raises(TriageIncompleteError, match="not reachable"),
+        ):
+            triage_report(report, None, config)

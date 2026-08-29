@@ -23,6 +23,7 @@ real look with a path check.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import time
@@ -281,22 +282,66 @@ def map_report_versions(report: SecurityReport, operator_config: OperatorConfig)
     return run
 
 
+#: Cap on a patch handed to ``git apply --check``. It travels inside the command
+#: script, and a scanner's proposed fix is kilobytes; something megabyte-sized is
+#: not a patch we are going to learn anything from.
+MAX_PATCH_CHARS = 400_000
+
+
+def _apply_check_script(patch: str) -> str | None:
+    """Shell to write *patch* to a temp file and ``git apply --check`` it.
+
+    Written to a file rather than piped, which was the ticket this module opened
+    against itself: a remote driven over stdin (``command_mode: stdin``) has that
+    channel occupied by the command script, so the payload was dropped with a
+    warning and *every* branch of *every* patch-carrying report came back
+    ``error`` — 5 of 7 on the first real archive. Inside the script instead, where
+    the executor's existing staging carries it: long commands already travel as
+    base64 in a quoted heredoc, so this needs nothing new.
+
+    The delimiter is derived from the patch's own digest, so a payload that ends
+    the heredoc early would have to contain a string derived from its own hash.
+    Checked anyway, and ``None`` means "don't try" rather than a wrong answer.
+    """
+    if len(patch) > MAX_PATCH_CHARS:
+        logger.info(
+            "Proposed patch is %d chars, over the %d cap; skipping the apply check.",
+            len(patch),
+            MAX_PATCH_CHARS,
+        )
+        return None
+    delimiter = f"FRANK_PATCH_{hashlib.sha256(patch.encode('utf-8')).hexdigest()[:16]}"
+    if delimiter in patch:
+        return None
+    body = patch.rstrip("\n")
+    return (
+        f'__frank_p="${{TMPDIR:-/tmp}}/{delimiter}.diff"\n'
+        f"cat > \"$__frank_p\" <<'{delimiter}'\n"
+        f"{body}\n"
+        f"{delimiter}\n"
+        f'git apply --check --whitespace=nowarn "$__frank_p"\n'
+        f"__frank_rc=$?\n"
+        f'rm -f "$__frank_p"\n'
+        f"exit $__frank_rc\n"
+    )
+
+
 def _patch_applies(executor: ToolExecutor, cwd: str, branch: str, patch: str) -> bool | None:
     """Whether ``git apply --check`` accepts *patch* on *branch*.
 
-    None if we could not even try (checkout failed or the executor died).
-    ``--check`` does not write the tree. Ticket we did not do: a remote
-    whose command channel is already stdin (``command_mode: stdin``) drops
-    this payload — those need the patch written to a file on the box.
+    None if we could not even try (checkout failed, the patch is too big, or the
+    executor died). ``--check`` does not write the tree.
     """
     commit = _checkout(executor, cwd, branch)
     if not commit:
         return None
+    script = _apply_check_script(patch)
+    if script is None:
+        return None
     result = executor.run(
-        ["git", "apply", "--check", "--whitespace=nowarn", "-"],
+        ["sh", "-c", script],
         cwd=cwd,
         timeout=_GIT_TIMEOUT_SECONDS,
-        stdin=patch,
     )
     if result is None:
         return None

@@ -142,9 +142,12 @@ class _PathExecutor(_FakeExecutor):
             return ExecResult(returncode=0, stdout="", stderr="")
         if cmd[:2] == ["git", "rev-parse"] and cmd[-1] == "HEAD":
             return ExecResult(returncode=0, stdout="abc123\n", stderr="")
-        if cmd[:3] == ["git", "apply", "--check"]:
-            self.apply_stdin.append(stdin or "")
-            assert cmd[-1] == "-"  # explicit stdin; a missing dash is "no patch"
+        if cmd[:2] == ["sh", "-c"] and "git apply --check" in cmd[2]:
+            # The patch travels inside the script, not on stdin: a remote driven
+            # over stdin drops a stdin payload and every branch came back "error".
+            assert stdin is None, "the patch must not be sent as a stdin payload"
+            assert "<<'FRANK_PATCH_" in cmd[2], "patch should be written to a file"
+            self.apply_stdin.append(cmd[2])
             ok = self.apply_ok.get(self.current_branch, False)
             return ExecResult(
                 returncode=0 if ok else 1,
@@ -244,9 +247,9 @@ class TestMapReportVersions:
         assert (
             "proposed patch does not apply" in by_branch["branch-3.5"].version_impact[0]["reason"]
         )
-        apply_calls = [c for c in executor.calls if c[:3] == ["git", "apply", "--check"]]
+        apply_calls = [c for c in executor.calls if c[:2] == ["sh", "-c"]]
         assert len(apply_calls) == 3
-        assert all(payload == report.proposed_patch for payload in executor.apply_stdin)
+        assert all(report.proposed_patch.rstrip("\n") in script for script in executor.apply_stdin)
 
     def test_no_patch_does_not_try_git_apply(self) -> None:
         report = self._report()
@@ -254,7 +257,7 @@ class TestMapReportVersions:
         with patch("franktheunicorn.review.tool_executor.make_executor", return_value=executor):
             map_report_versions(report, _operator())
 
-        assert not any(c[:3] == ["git", "apply", "--check"] for c in executor.calls)
+        assert not any(c[:2] == ["sh", "-c"] for c in executor.calls)
 
     def test_a_patch_without_cited_paths_is_enough_to_run(self) -> None:
         """A scanner patch that names no source files still has something git can try."""
@@ -298,7 +301,7 @@ class TestMapReportVersions:
         assert run.error == ""
         assert all(r.verdict == "error" for r in run.results)
         assert all("Could not try the proposed patch" in r.summary for r in run.results)
-        assert not any(c[:3] == ["git", "apply", "--check"] for c in executor.calls)
+        assert not any(c[:2] == ["sh", "-c"] for c in executor.calls)
 
     def test_a_failed_patch_check_is_an_error_even_when_the_files_were_missing(self) -> None:
         """Half the evidence never ran. A file-presence miss alone does not license
@@ -488,3 +491,36 @@ def test_a_repo_root_path_behind_a_diff_prefix_is_found_on_the_branch() -> None:
     by_branch = {r.branch: r for r in run.results}
     assert by_branch["master"].verdict == "affected"
     assert by_branch["branch-4.0"].verdict == "not-affected"
+
+
+class TestApplyCheckScript:
+    """The patch travels in the script, because a stdin-driven remote drops a
+    stdin payload — which made every branch of every patch-carrying report
+    "error": 5 of 7 on the first real archive."""
+
+    def test_the_patch_is_written_to_a_file_not_piped(self) -> None:
+        from franktheunicorn.security.version_map import _apply_check_script
+
+        script = _apply_check_script("--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n")
+        assert script is not None
+        assert "git apply --check --whitespace=nowarn" in script
+        assert '"$__frank_p"' in script
+        assert "-old" in script
+        # Cleaned up, and the real exit status survives the cleanup.
+        assert 'rm -f "$__frank_p"' in script
+        assert "exit $__frank_rc" in script
+
+    def test_the_delimiter_cannot_be_ended_early_by_the_patch(self) -> None:
+        """Quoted heredoc, delimiter derived from the patch's own digest."""
+        from franktheunicorn.security.version_map import _apply_check_script
+
+        script = _apply_check_script("--- a/x\n+++ b/x\n-FRANK_PATCH_deadbeef\n")
+        assert script is not None
+        delimiter = script.split("<<'")[1].split("'")[0]
+        body = script.split(f"<<'{delimiter}'\n", 1)[1].rsplit(f"\n{delimiter}\n", 1)[0]
+        assert delimiter not in body
+
+    def test_an_enormous_patch_is_declined_rather_than_shipped(self) -> None:
+        from franktheunicorn.security.version_map import MAX_PATCH_CHARS, _apply_check_script
+
+        assert _apply_check_script("x" * (MAX_PATCH_CHARS + 1)) is None

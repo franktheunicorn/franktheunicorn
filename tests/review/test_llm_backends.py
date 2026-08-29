@@ -765,7 +765,7 @@ class TestOfflineBackendLogging:
         """SDKs wrap: ollama's failure arrives as an httpx error inside their own."""
         import httpx
 
-        from franktheunicorn.review.backends.base import _looks_offline
+        from franktheunicorn.review.backends.base import looks_offline
 
         try:
             try:
@@ -774,9 +774,9 @@ class TestOfflineBackendLogging:
                 msg = "backend call failed"
                 raise RuntimeError(msg) from inner
         except RuntimeError as outer:
-            assert _looks_offline(outer)
+            assert looks_offline(outer)
 
     def test_a_401_is_not_treated_as_offline(self) -> None:
-        from franktheunicorn.review.backends.base import _looks_offline
+        from franktheunicorn.review.backends.base import looks_offline
 
-        assert not _looks_offline(Exception("invalid x-api-key"))
+        assert not looks_offline(Exception("invalid x-api-key"))

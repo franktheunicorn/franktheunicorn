@@ -146,7 +146,7 @@ def triage_report(
 
         learned_guidance = resolve_triage_guidance(report.project)
         logger.info("Analyzing report #%d via LLM", report.pk)
-        produced_verdict = _analyze_report(
+        produced_verdict, no_verdict_reason = _analyze_report(
             report,
             backend,
             project_context,
@@ -163,7 +163,9 @@ def triage_report(
         # the previous run's fields — so a silent return presented a stale
         # verdict as this run's answer, on the one page where being wrong about
         # a vulnerability matters most.
-        raise TriageIncompleteError(f"Triage produced no verdict for report #{report.pk}")
+        raise TriageIncompleteError(
+            f"Triage produced no verdict for report #{report.pk}: {no_verdict_reason}"
+        )
 
     logger.info(
         "Triage complete for report #%d: severity=%r status=%r poc_plausible=%s",
@@ -371,14 +373,18 @@ def _analyze_report(
     security_model: str = "",
     cve_candidates: list[object] | None = None,
     learned_guidance: str = "",
-) -> bool:
+) -> tuple[bool, str]:
     """Run triage analysis on parsed report.
 
-    Returns True if a verdict was written. Deliberately does not raise on an LLM
-    failure (callers rely on that), so the return value is the only way the
-    caller can tell "assessed" from "the model was unreachable" — and the
-    dashboard needs that distinction to avoid presenting a previous run's
-    verdict as this one's.
+    Returns ``(wrote_a_verdict, reason_it_did_not)``. Deliberately does not raise
+    on an LLM failure (callers rely on that), so the return value is the only way
+    the caller can tell "assessed" from "the model was unreachable" — and the
+    dashboard needs that distinction to avoid presenting a previous run's verdict
+    as this one's.
+
+    The reason is carried out rather than only logged, because the caller turns
+    this into the operator-visible error and "Triage produced no verdict" told
+    them nothing about which of the three causes it was.
     """
     system_prompt, user_message = build_triage_prompt(
         parsed_component=report.parsed_component,
@@ -400,9 +406,22 @@ def _analyze_report(
             action_type="security-triage",
             project_id=project_id,
         )
-    except Exception:
+    except Exception as exc:
+        from franktheunicorn.review.backends.base import looks_offline
+
+        if looks_offline(exc):
+            # The commonest cause by far, and it is a configuration state rather
+            # than a bug — so a warning naming it, not a traceback through httpx.
+            detail = str(exc).splitlines()[0][:200] if str(exc).strip() else type(exc).__name__
+            logger.warning(
+                "Triage of report #%d could not reach the LLM backend (%s). Start it, or "
+                "configure a backend that is up.",
+                report.pk,
+                detail,
+            )
+            return False, f"the LLM backend is not reachable ({detail})"
         logger.exception("Failed to analyze security report %d", report.pk)
-        return False
+        return False, f"the LLM call raised {type(exc).__name__}: {exc}"[:300]
 
     # "Did the model answer?", not "is the dict non-empty". A reply with none of
     # these keys — a wrong key name is entirely ordinary — used to count as a
@@ -458,8 +477,12 @@ def _analyze_report(
                 "updated_at",
             ]
         )
-        return True
-    return False
+        return True, ""
+    return False, (
+        "the model replied without any of the fields triage reads (poc_plausible, "
+        "poc_assessment, is_expected_behavior, expected_behavior_explanation, "
+        "triage_summary) — check the model is one that follows a JSON schema"
+    )
 
 
 def _check_cves(report: SecurityReport, operator_config: OperatorConfig) -> None:

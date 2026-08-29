@@ -152,7 +152,7 @@ def _log_backend_error(backend_name: str, exc: BaseException) -> None:
             exc,
             exc_info=True,
         )
-    elif _looks_offline(exc):
+    elif looks_offline(exc):
         # A local model that isn't running is a configuration state, not a crash,
         # and it happens every time the operator hasn't started ollama. Twenty
         # frames of httpx internals per backend per PR buried the one useful line.
@@ -198,7 +198,7 @@ _OFFLINE_MESSAGES = (
 )
 
 
-def _looks_offline(exc: BaseException) -> bool:
+def looks_offline(exc: BaseException) -> bool:
     """Whether *exc* is "nothing is listening" rather than an API rejecting us.
 
     Walks the cause chain, because SDKs wrap: ollama's connection failure arrives
