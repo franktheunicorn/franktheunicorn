@@ -49,9 +49,20 @@ class Command(BaseCommand):
             help=(
                 "Queue cheap version mapping for every imported report — git ls-tree "
                 "of cited files plus git apply --check of any proposed patch, on "
-                "every shipping branch. No agent, no 25-report cap. The box to tick "
+                "every active release branch. No agent, no 25-report cap. The box to tick "
                 "on a 143-report archive. Needs security_triage.verifier.enabled "
                 "(same checkout as --verify)."
+            ),
+        )
+        parser.add_argument(
+            "--find-introduction",
+            action="store_true",
+            help=(
+                "Queue git-history dating for every imported report — pickaxe the "
+                "proposed patch's removed lines to find the commit that introduced "
+                "them, then list the release tags containing it. No agent, no "
+                "25-report cap. Needs security_triage.verifier.enabled (same checkout "
+                "as --verify)."
             ),
         )
         parser.add_argument(
@@ -82,6 +93,7 @@ class Command(BaseCommand):
             auto_triage=bool(options.get("triage")),
             auto_verify=bool(options.get("verify")),
             auto_verify_versions=bool(options.get("verify_versions")),
+            auto_find_introduction=bool(options.get("find_introduction")),
             require_security_content=not options.get("no_filter"),
         )
 
@@ -117,6 +129,10 @@ class Command(BaseCommand):
         if options.get("verify_versions") and result.version_map_skipped_reason:
             self.stdout.write(
                 self.style.WARNING(f"  Versions not mapped: {result.version_map_skipped_reason}.")
+            )
+        if options.get("find_introduction") and result.introduction_skipped_reason:
+            self.stdout.write(
+                self.style.WARNING(f"  Not dated: {result.introduction_skipped_reason}.")
             )
         if result.imported and not result.queued_triage:
             if result.triage_skipped_reason:

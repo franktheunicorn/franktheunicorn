@@ -86,6 +86,15 @@ def queue_version_map(report: SecurityReport, *, priority: int = PRIORITY_BULK) 
     return queue_command("map_report_versions", report=report, priority=priority)
 
 
+def queue_introduction_scan(report: SecurityReport, *, priority: int = PRIORITY_BULK) -> bool:
+    """Queue the git-history dating pass: which commit, and which releases have it.
+
+    Git only, like the version mapper — a pickaxe walk per cited path rather than
+    an agent. Same door, so a double-click is one run.
+    """
+    return queue_command("find_report_introduction", report=report, priority=priority)
+
+
 def cancel_pending_for_reports(report_ids: list[int]) -> int:
     """Drop pending worker jobs for *report_ids* before the reports themselves go.
 

@@ -33,6 +33,7 @@ import codecs
 import hashlib
 import logging
 import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import PurePath
 from typing import IO, TYPE_CHECKING
@@ -180,6 +181,11 @@ class ZipImportResult:
     queued_triage: int = 0
     #: Deep-verification runs queued by this import (``auto_verify``).
     queued_verifications: int = 0
+    #: Git-history dating runs queued by this import (``auto_find_introduction``).
+    queued_introduction_scans: int = 0
+    #: Why none were queued, when the caller asked for them.
+    introduction_skipped_reason: str = ""
+
     #: Cheap version-mapping runs queued by this import (``auto_verify_versions``).
     queued_version_maps: int = 0
     #: Why an explicitly requested verification didn't happen. Same reasoning as
@@ -239,6 +245,8 @@ class ZipImportResult:
             parts.append(f"{self.queued_verifications} queued for verification")
         if self.queued_version_maps:
             parts.append(f"{self.queued_version_maps} queued for version mapping")
+        if self.queued_introduction_scans:
+            parts.append(f"{self.queued_introduction_scans} queued for introduction dating")
         parts.extend(self.warnings)
         if self.error:
             # A cap tripped mid-walk after rows were already committed. Saying
@@ -254,6 +262,7 @@ def import_reports_from_zip(
     auto_triage: bool = False,
     auto_verify: bool = False,
     auto_verify_versions: bool = False,
+    auto_find_introduction: bool = False,
     require_security_content: bool = True,
     max_entries: int = MAX_ENTRIES,
     archive_label: str = "",
@@ -297,7 +306,8 @@ def import_reports_from_zip(
 
     ``auto_verify_versions`` queues the cheap version-mapper instead (or as well):
     git ls-tree of cited files, plus ``git apply --check`` of any proposed
-    patch, on every shipping branch. No agent, no 25-report cap, no branch cap.
+    patch, on every active release branch. No agent, no 25-report cap, no branch
+    count cap (branch_active_within_days still applies).
     That is the box to tick on a 143-report archive.
 
     ``max_entries`` lets a caller ask for a tighter bound than ``MAX_ENTRIES``.
@@ -380,6 +390,8 @@ def import_reports_from_zip(
         _queue_verifications(result)
     if auto_verify_versions:
         _queue_version_maps(result)
+    if auto_find_introduction:
+        _queue_introduction_scans(result)
     return result
 
 
@@ -488,60 +500,91 @@ def _queue_version_maps(result: ZipImportResult) -> None:
     No report cap: this is git ls-tree, not an agent run per branch. The 25-report
     wall on the deep verifier is exactly why this door exists.
     """
+    from franktheunicorn.security.queue import queue_version_map
+
+    result.queued_version_maps, result.version_map_skipped_reason = _queue_git_scan(
+        result, queue_version_map, "map versions against", "version-map"
+    )
+
+
+def _queue_introduction_scans(result: ZipImportResult) -> None:
+    """Queue git-history dating for everything that imported.
+
+    Same shape and same reason as version mapping: git only, so no report cap.
+    """
+    from franktheunicorn.security.queue import queue_introduction_scan
+
+    result.queued_introduction_scans, result.introduction_skipped_reason = _queue_git_scan(
+        result, queue_introduction_scan, "search history in", "introduction"
+    )
+
+
+def _queue_git_scan(
+    result: ZipImportResult,
+    queue: Callable[..., bool],
+    needs: str,
+    label: str,
+) -> tuple[int, str]:
+    """Queue a git-only scan per imported report. Returns ``(queued, reason)``.
+
+    Version mapping and introduction dating share the verifier's checkout and its
+    ``enabled`` gate, so they are stopped by exactly the same three things and the
+    messages differ only in what the checkout was wanted *for*. Honours
+    ``verifier.enabled`` and says so when it declines: a skipped step that logs
+    nothing is the failure mode this codebase keeps rediscovering.
+    """
     ids = [entry.report_id for entry in result.entries if entry.outcome == "imported"]
     ids = [report_id for report_id in ids if report_id]
     if not ids:
-        return
+        return 0, ""
     try:
         from franktheunicorn.config.loader import get_operator_config
 
         operator_config = get_operator_config()
         verifier = operator_config.security_triage.verifier
     except Exception as exc:
-        logger.warning("Could not load operator config; importing unmapped", exc_info=True)
-        result.version_map_skipped_reason = (
-            f"could not read the operator config ({str(exc) or exc.__class__.__name__})"
-        )
-        return
+        logger.warning("Could not load operator config; importing without %s", label, exc_info=True)
+        return 0, f"could not read the operator config ({str(exc) or exc.__class__.__name__})"
     if not verifier.enabled:
-        logger.info("security_triage.verifier.enabled is false; importing unmapped")
-        result.version_map_skipped_reason = (
+        logger.info("security_triage.verifier.enabled is false; importing without %s", label)
+        return 0, (
             "security_triage.verifier.enabled is false in operator.yaml — it defaults "
             "true, so either something set it or the config failed to load and took "
             "every other setting with it (`manage.py show_config` tells those apart)"
         )
-        return
     from franktheunicorn.security.verifier import resolve_verifier_reviewer
 
     if resolve_verifier_reviewer(operator_config, verifier) is None:
         have = ", ".join(rc.name for rc in operator_config.agent_cli_reviewers) or "none"
-        result.version_map_skipped_reason = (
+        return 0, (
             f"no agent_cli_reviewers entry named {verifier.reviewer!r} (configured: "
-            f"{have}), so there is no checkout to map versions against"
+            f"{have}), so there is no checkout to {needs}"
         )
-        return
 
     from franktheunicorn.core.models import SecurityReport
-    from franktheunicorn.security.queue import PRIORITY_BULK, queue_version_map
+    from franktheunicorn.security.queue import PRIORITY_BULK
 
-    verifiable = list(SecurityReport.objects.filter(pk__in=ids).select_related("project"))
+    queued = 0
     unattached = 0
-    for report in verifiable:
+    for report in SecurityReport.objects.filter(pk__in=ids).select_related("project"):
         if report.project_id is None:
             unattached += 1
             continue
-        if queue_version_map(report, priority=PRIORITY_BULK):
-            result.queued_version_maps += 1
+        if queue(report, priority=PRIORITY_BULK):
+            queued += 1
+    reason = ""
     if unattached:
-        result.version_map_skipped_reason = (
-            f"{unattached} report(s) have no project, so there is no repo to map "
-            "versions against — re-import with a project selected"
+        reason = (
+            f"{unattached} report(s) have no project, so there is no repo to {needs} "
+            "— re-import with a project selected"
         )
     logger.info(
-        "Queued %d version-map run(s) from this import%s",
-        result.queued_version_maps,
+        "Queued %d %s run(s) from this import%s",
+        queued,
+        label,
         f" ({unattached} skipped for having no project)" if unattached else "",
     )
+    return queued, reason
 
 
 def _discard_uncommitted_outcomes(result: ZipImportResult) -> None:

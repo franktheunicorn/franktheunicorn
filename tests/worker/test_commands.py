@@ -726,3 +726,81 @@ class TestStuckCommands:
 
         assert f"#{cmd.pk}" in caplog.text
         assert "run_security_triage" in caplog.text
+
+
+@pytest.mark.django_db
+class TestInteractiveDrain:
+    """The interactive thread must not get stuck behind the bulk backlog."""
+
+    def test_min_priority_skips_bulk_rows(self, db_pr: PullRequest) -> None:
+        from franktheunicorn.security.queue import PRIORITY_BULK, PRIORITY_INTERACTIVE
+
+        # Separate PRs: the queue's in-flight dedup allows one pending row per
+        # (command, target), so both rows on one PR is not a reachable state.
+        bulk = WorkerCommand.objects.create(
+            command="run_dual_tests", pull_request=db_pr, priority=PRIORITY_BULK
+        )
+        interactive = WorkerCommand.objects.create(
+            command="run_dual_tests",
+            pull_request=PullRequestFactory(project=db_pr.project, number=db_pr.number + 1),
+            priority=PRIORITY_INTERACTIVE,
+        )
+
+        with patch("franktheunicorn.worker.commands._dispatch") as dispatch:
+            processed = process_pending_commands(MagicMock(), min_priority=PRIORITY_INTERACTIVE)
+
+        assert processed == 1
+        ran = [call.args[0].pk for call in dispatch.call_args_list]
+        assert ran == [interactive.pk]
+        bulk.refresh_from_db()
+        assert bulk.status == "pending"
+
+    def test_each_pass_closes_its_connection_then_the_event_stops_the_loop(self) -> None:
+        """A per-thread SQLite handle left open sits across the cycle's writes."""
+        import threading
+
+        from franktheunicorn.security.queue import PRIORITY_INTERACTIVE
+        from franktheunicorn.worker.runner import _interactive_drain_loop
+
+        stop = threading.Event()
+
+        def _once(*_a: Any, **_k: Any) -> int:
+            stop.set()
+            return 0
+
+        with (
+            patch(
+                "franktheunicorn.worker.commands.process_pending_commands", side_effect=_once
+            ) as drain,
+            patch("django.db.connection.close") as close,
+        ):
+            _interactive_drain_loop(MagicMock(), stop)
+
+        assert drain.call_count == 1
+        assert drain.call_args.kwargs["min_priority"] == PRIORITY_INTERACTIVE
+        assert close.call_count == 1
+
+    def test_a_failing_command_does_not_kill_the_thread(self) -> None:
+        """This thread dying silently is worse than the delay it exists to fix."""
+        import threading
+
+        from franktheunicorn.worker.runner import _interactive_drain_loop
+
+        stop = threading.Event()
+        calls: list[int] = []
+
+        def _boom(*_a: Any, **_k: Any) -> int:
+            calls.append(1)
+            if len(calls) >= 2:
+                stop.set()
+            msg = "database is locked"
+            raise RuntimeError(msg)
+
+        with (
+            patch("franktheunicorn.worker.commands.process_pending_commands", side_effect=_boom),
+            patch("franktheunicorn.worker.runner.INTERACTIVE_POLL_SECONDS", 0),
+            patch("django.db.connection.close"),
+        ):
+            _interactive_drain_loop(MagicMock(), stop)
+
+        assert len(calls) == 2

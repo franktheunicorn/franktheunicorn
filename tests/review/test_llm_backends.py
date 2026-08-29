@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -682,9 +683,22 @@ class TestLogBackendError:
         from franktheunicorn.review.backends.base import _log_backend_error
 
         with caplog.at_level("ERROR", logger="franktheunicorn"):
-            _log_backend_error("OllamaBackend", ValueError("connection refused"))
+            _log_backend_error("OllamaBackend", ValueError("malformed response body"))
 
         assert any(r.levelname == "ERROR" for r in caplog.records)
+
+    def test_a_refused_connection_is_a_warning_not_an_error(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Used to land in the catch-all and print twenty frames of httpx internals
+        every time the operator hadn't started ollama."""
+        from franktheunicorn.review.backends.base import _log_backend_error
+
+        with caplog.at_level("WARNING", logger="franktheunicorn"):
+            _log_backend_error("OllamaBackend", ValueError("connection refused"))
+
+        assert not any(r.levelname == "ERROR" for r in caplog.records)
+        assert any(r.levelname == "WARNING" for r in caplog.records)
 
     def test_generate_findings_logs_401_on_api_error(
         self, caplog: pytest.LogCaptureFixture
@@ -710,3 +724,59 @@ class TestLogBackendError:
         assert any(
             "401" in r.message and "authentication" in r.message.lower() for r in caplog.records
         )
+
+
+class TestOfflineBackendLogging:
+    """An offline local model is a configuration state, not a crash."""
+
+    def test_a_refused_connection_warns_without_a_traceback(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import httpx
+
+        from franktheunicorn.review.backends.base import _log_backend_error
+
+        try:
+            httpx.get("http://127.0.0.1:1/api/generate", timeout=2)
+        except Exception as exc:
+            with caplog.at_level(logging.WARNING):
+                _log_backend_error("ollama", exc)
+
+        record = next(r for r in caplog.records if "nothing is listening" in r.message)
+        assert record.levelno == logging.WARNING
+        assert record.exc_info is None
+
+    def test_an_http_500_still_gets_its_traceback(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Only reachability is downgraded; a real API fault is still a bug."""
+        from franktheunicorn.review.backends.base import _log_backend_error
+
+        class ServerFaultError(Exception):
+            status_code = 500
+
+        try:
+            raise ServerFaultError("kaboom")
+        except ServerFaultError as exc:
+            with caplog.at_level(logging.ERROR):
+                _log_backend_error("claude", exc)
+
+        assert any(r.exc_info is not None for r in caplog.records)
+
+    def test_a_wrapped_connection_error_is_still_recognised(self) -> None:
+        """SDKs wrap: ollama's failure arrives as an httpx error inside their own."""
+        import httpx
+
+        from franktheunicorn.review.backends.base import _looks_offline
+
+        try:
+            try:
+                httpx.get("http://127.0.0.1:1/", timeout=2)
+            except Exception as inner:
+                msg = "backend call failed"
+                raise RuntimeError(msg) from inner
+        except RuntimeError as outer:
+            assert _looks_offline(outer)
+
+    def test_a_401_is_not_treated_as_offline(self) -> None:
+        from franktheunicorn.review.backends.base import _looks_offline
+
+        assert not _looks_offline(Exception("invalid x-api-key"))

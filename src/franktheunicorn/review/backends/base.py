@@ -152,8 +152,67 @@ def _log_backend_error(backend_name: str, exc: BaseException) -> None:
             exc,
             exc_info=True,
         )
+    elif _looks_offline(exc):
+        # A local model that isn't running is a configuration state, not a crash,
+        # and it happens every time the operator hasn't started ollama. Twenty
+        # frames of httpx internals per backend per PR buried the one useful line.
+        logger.warning(
+            "%s: nothing is listening (%s) — skipping this backend for this cycle. "
+            "If it's a local model, start it; if you don't want it, take it out of "
+            "llm_backends. No traceback: this is a reachability problem, not a bug.",
+            backend_name,
+            str(exc).splitlines()[0][:200] if str(exc).strip() else type(exc).__name__,
+        )
     else:
         logger.exception("%s API call failed.", backend_name)
+
+
+#: Exception type names that mean "the endpoint never answered", across httpx,
+#: requests, urllib3 and the stdlib. Matched by name rather than by importing each
+#: SDK: this runs for every backend and must not care which one raised.
+_OFFLINE_EXC_NAMES = frozenset(
+    {
+        "ConnectError",
+        "ConnectTimeout",
+        "ConnectionError",
+        "ConnectionRefusedError",
+        "NewConnectionError",
+        "MaxRetryError",
+        "APIConnectionError",
+        "ClientConnectorError",
+        "ServerDisconnectedError",
+        "gaierror",
+    }
+)
+
+_OFFLINE_MESSAGES = (
+    "connection refused",
+    "connection error",
+    "failed to establish a new connection",
+    "all connection attempts failed",
+    "name or service not known",
+    "nodename nor servname",
+    "cannot connect to host",
+    "no route to host",
+    "temporary failure in name resolution",
+)
+
+
+def _looks_offline(exc: BaseException) -> bool:
+    """Whether *exc* is "nothing is listening" rather than an API rejecting us.
+
+    Walks the cause chain, because SDKs wrap: ollama's connection failure arrives
+    as an httpx ``ConnectError`` inside whatever the client raised.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if type(current).__name__ in _OFFLINE_EXC_NAMES:
+            return True
+        current = current.__cause__ or current.__context__
+    text = str(exc).lower()
+    return any(fragment in text for fragment in _OFFLINE_MESSAGES)
 
 
 class BaseLLMBackend:

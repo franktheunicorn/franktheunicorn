@@ -58,6 +58,42 @@ def test_extract_paths_prefers_patch_and_keeps_casing() -> None:
     assert extract_report_paths(report) == ["sql/core/Foo.scala"]
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # Alternation is first-match: "c" ahead of "cpp" truncated foo.cpp to foo.c,
+        # which then matched nothing on any branch and read as not-affected.
+        ("see src/foo/bar.cpp now", ["src/foo/bar.cpp"]),
+        ("see src/foo/bar.hpp now", ["src/foo/bar.hpp"]),
+        ("see src/foo/bar.cc now", ["src/foo/bar.cc"]),
+        # lstrip takes a character set, so it ate the leading dot.
+        ("see .github/workflows/ci.yml", [".github/workflows/ci.yml"]),
+        ("see ./sql/core/Foo.scala", ["sql/core/Foo.scala"]),
+        # Dense scanner output separates with commas and no space.
+        ("Affected: a/Foo.py,b/Bar.py", ["a/Foo.py", "b/Bar.py"]),
+        ("Affected: a/Foo.py;b/Bar.py", ["a/Foo.py", "b/Bar.py"]),
+        # An extension that *extends* a listed one. Ordering alone doesn't fix
+        # these — without a boundary after the alternation, .pyi captured as .py
+        # and .html as .h whatever the order.
+        ("see web/src/App.tsx", ["web/src/App.tsx"]),
+        ("see conf/app.json", ["conf/app.json"]),
+        ("see docs/index.html", ["docs/index.html"]),
+        ("see py/stubs/mod.pyi", ["py/stubs/mod.pyi"]),
+        ("see svc/A.cs", ["svc/A.cs"]),
+        ("see doc/guide.rst", ["doc/guide.rst"]),
+        # A line reference still terminates a path.
+        ("sql/core/Foo.scala:412 has it", ["sql/core/Foo.scala"]),
+    ],
+)
+def test_extract_paths_does_not_mangle_the_citation(text: str, expected: list[str]) -> None:
+    """Every case here used to yield a path that matches nothing on any branch,
+    and a path that matches nothing reads exactly like 'not affected'."""
+    report = SecurityReportFactory.build(
+        raw_text=text, proposed_patch="", parsed_component="", title="", parsed_poc=""
+    )
+    assert extract_report_paths(report) == expected
+
+
 @pytest.mark.django_db
 def test_extract_paths_uses_existing_verification_evidence() -> None:
     report = SecurityReportFactory(
@@ -263,6 +299,23 @@ class TestMapReportVersions:
         assert all(r.verdict == "error" for r in run.results)
         assert all("Could not try the proposed patch" in r.summary for r in run.results)
         assert not any(c[:3] == ["git", "apply", "--check"] for c in executor.calls)
+
+    def test_a_failed_patch_check_is_an_error_even_when_the_files_were_missing(self) -> None:
+        """Half the evidence never ran. A file-presence miss alone does not license
+        not-affected — the patch might well have applied."""
+        report = self._report()
+        report.proposed_patch = "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n"
+        report.save(update_fields=["proposed_patch"])
+        executor = _PathExecutor({"master": "unrelated/Other.scala\n"})
+
+        with (
+            patch("franktheunicorn.review.tool_executor.make_executor", return_value=executor),
+            patch("franktheunicorn.security.version_map._checkout", return_value=""),
+        ):
+            run = map_report_versions(report, _operator())
+
+        assert all(r.verdict == "error" for r in run.results)
+        assert all(r.confidence is None for r in run.results)
 
     def test_does_not_backfill_version_impact_that_contradicts_a_deep_verdict(
         self,

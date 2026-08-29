@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -169,19 +170,133 @@ def load_project_configs(directory: str | Path) -> list[ProjectConfig]:
     if not d.is_dir():
         logger.warning("Project config directory %s does not exist; no projects loaded.", d)
         return []
+    fingerprint = _fingerprint(d)
+    cached = _config_cache.get(str(d))
+    if cached is not None and fingerprint is not None and cached[0] == fingerprint:
+        return list(cached[1])
     configs: list[ProjectConfig] = []
+    rejected: list[str] = []
     for yaml_file in sorted(f for f in d.iterdir() if f.suffix in {".yaml", ".yml"}):
         try:
             with yaml_file.open(encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
             data = _expand_env_vars(data)
+            if not isinstance(data, dict):
+                # Valid YAML, wrong shape. A leading ``- `` makes the whole
+                # document a list, which dies in _normalize_project_config with
+                # an AttributeError — not one of the exceptions below, so it took
+                # out every *other* project config in the directory with it.
+                rejected.append(
+                    f"{yaml_file.name}: parsed as {type(data).__name__}, not a mapping of "
+                    "settings (a leading '- ' makes the whole document a list)"
+                )
+                continue
             data = _normalize_project_config(data)
             configs.append(ProjectConfig(**data))
-        except yaml.YAMLError:
-            logger.exception("Invalid YAML in project config: %s", yaml_file)
-        except ValidationError:
-            logger.exception("Validation error in project config: %s", yaml_file)
-    return configs
+        except yaml.YAMLError as exc:
+            rejected.append(f"{yaml_file.name}: not valid YAML ({str(exc).splitlines()[0]})")
+        except ValidationError as exc:
+            rejected.append(f"{yaml_file.name}: {_validation_fields(exc)}")
+        except Exception as exc:
+            # One bad file must never take out the others, and since CoreConfig.ready
+            # calls this, an escape here aborts app load — `manage.py check`, migrate,
+            # runserver and the worker all die on a traceback. Three real ways to get
+            # here, none of them a YAMLError or a ValidationError: a non-string key
+            # (`1: oops`) is a TypeError out of ``ProjectConfig(**data)``, a latin-1
+            # byte is a UnicodeDecodeError, and mode 000 is a PermissionError.
+            rejected.append(f"{yaml_file.name}: {type(exc).__name__}: {exc}")
+    _log_project_summary(d, configs, rejected)
+    if fingerprint is not None and _has_settled(fingerprint):
+        _config_cache[str(d)] = (fingerprint, configs)
+    else:
+        # Never cache a just-written directory: see CACHE_SETTLE_SECONDS.
+        _config_cache.pop(str(d), None)
+    return list(configs)
+
+
+#: Directory -> ``(fingerprint, configs)``. The nav context processor reads
+#: project config on every page render and ``index()`` reads it three more times,
+#: so uncached this was four directory walks and four pydantic passes per page.
+#: Invalidated by file mtime and size rather than a TTL, so an operator editing a
+#: config is picked up on the next read with no restart — which is also how the
+#: worker sees a project added mid-run.
+_config_cache: dict[str, tuple[tuple[tuple[str, int, int], ...] | None, list[ProjectConfig]]] = {}
+
+
+#: How old the newest config file must be before the directory is cached.
+#:
+#: Filesystem mtime granularity is much coarser than nanoseconds — measured at
+#: ~10 ms on this box, and 1 s on ext3/HFS+ — so a *same-size* edit inside one
+#: tick leaves ``st_mtime_ns`` unchanged and the fingerprint sees nothing. A typo
+#: fix of equal length, a case change, or a scripted write-then-read all land
+#: there. Waiting for the file to settle closes the window, and the cost is
+#: re-reading a directory that just changed, which is when you want a re-read.
+CACHE_SETTLE_SECONDS = 2.0
+
+
+def _has_settled(fingerprint: tuple[tuple[str, int, int], ...]) -> bool:
+    if not fingerprint:
+        return True
+    newest = max(mtime for _name, mtime, _size in fingerprint)
+    return time.time_ns() - newest > CACHE_SETTLE_SECONDS * 1e9
+
+
+def _fingerprint(d: Path) -> tuple[tuple[str, int, int], ...] | None:
+    """Name, mtime and size of every YAML file in *d*. None if it can't be read."""
+    try:
+        out: list[tuple[str, int, int]] = []
+        for f in sorted(d.iterdir()):
+            if f.suffix in {".yaml", ".yml"}:
+                st = f.stat()
+                out.append((f.name, st.st_mtime_ns, st.st_size))
+        return tuple(out)
+    except OSError:
+        return None
+
+
+def _validation_fields(exc: ValidationError) -> str:
+    return "; ".join(
+        f"{'.'.join(str(part) for part in err['loc']) or '(top level)'}: {err['msg']}"
+        for err in exc.errors()[:10]
+    )
+
+
+#: Last ``(directory, loaded, rejected)`` triple logged. Six call sites read
+#: project config and one of them is the nav context processor, so an
+#: unconditional summary is a log line per page view. Re-logs when a file is
+#: added, fixed, or newly broken.
+_last_summary: tuple[str, tuple[str, ...], tuple[str, ...]] | None = None
+
+
+def _log_project_summary(
+    directory: Path, configs: list[ProjectConfig], rejected: list[str]
+) -> None:
+    """Name what loaded and what was thrown out.
+
+    A rejected file used to log a pydantic traceback and nothing else, so the
+    only way to notice a typo'd project was that its repo quietly behaved as
+    unconfigured — no dashboard row, no nav entry, no polling.
+    """
+    global _last_summary
+    loaded = tuple(f"{c.owner}/{c.repo}{'' if c.enabled else ' (disabled)'}" for c in configs)
+    summary = (str(directory), loaded, tuple(rejected))
+    if summary == _last_summary:
+        return
+    _last_summary = summary
+    logger.info(
+        "Loaded %d project config(s) from %s: %s",
+        len(configs),
+        directory,
+        ", ".join(loaded) or "(none)",
+    )
+    if rejected:
+        logger.warning(
+            "Ignored %d file(s) in %s: %s. These configure nothing — their repos are "
+            "unconfigured, so they get no dashboard row, no nav entry and no polling.",
+            len(rejected),
+            directory,
+            "; ".join(rejected),
+        )
 
 
 def get_operator_config() -> OperatorConfig:

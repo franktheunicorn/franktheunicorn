@@ -20,6 +20,9 @@ import shutil
 import subprocess
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path, PurePath
 from typing import Protocol
@@ -244,6 +247,50 @@ class ToolExecutor(Protocol):
         """
 
 
+#: Which concurrent user of the checkouts we are. Set by the worker's interactive
+#: thread so a force-run's ``git checkout --detach`` cannot land in the tree the
+#: poll cycle is reading a diff out of — the same class of bug the mid-cycle drain
+#: caused before ``_isolated_worktree`` existed, except now genuinely simultaneous
+#: rather than merely interleaved.
+#:
+#: A ContextVar rather than a global: it is per-thread by construction, which is
+#: exactly the scope of the problem.
+_workspace_lane: ContextVar[str] = ContextVar("frank_workspace_lane", default="")
+
+
+def set_workspace_lane(name: str) -> None:
+    """Name this thread's checkout lane. Call once, at the top of the thread."""
+    _workspace_lane.set(name)
+
+
+@contextmanager
+def workspace_lane(name: str) -> Iterator[None]:
+    """Run the body in checkout lane *name*, restoring the previous lane after.
+
+    Scoped rather than sticky because a ContextVar set in the main thread outlives
+    the call: setting it unscoped from a test leaked the lane into every later test
+    in the session, which moved eleven unrelated checkouts into ``force-run/``.
+    """
+    token = _workspace_lane.set(name)
+    try:
+        yield
+    finally:
+        _workspace_lane.reset(token)
+
+
+def lane_subdir(workspace_subdir: str) -> str:
+    """*workspace_subdir* widened to this thread's lane.
+
+    Returns the lane itself when the caller wanted no isolation at all: the review
+    pipeline reads the main clone directly, and that is precisely the tree a
+    concurrent force-run must not be checking branches out of.
+    """
+    lane = _workspace_lane.get()
+    if not lane:
+        return workspace_subdir
+    return f"{workspace_subdir}-{lane}" if workspace_subdir else lane
+
+
 @dataclass
 class LocalExecutor:
     """Run commands in a local subprocess."""
@@ -262,8 +309,9 @@ class LocalExecutor:
         if not local_path.exists():
             logger.debug("LocalExecutor: local_path missing for %s/%s: %s", owner, repo, local_path)
             return None
-        if workspace_subdir:
-            return self._isolated_worktree(local_path, workspace_subdir, owner, repo)
+        subdir = lane_subdir(workspace_subdir)
+        if subdir:
+            return self._isolated_worktree(local_path, subdir, owner, repo)
         return str(local_path)
 
     def _isolated_worktree(
@@ -606,7 +654,7 @@ class RemoteSSHExecutor:
         https_fallback = self._https_fallback_url(clone_url)
         ssh_fallback = self._ssh_fallback_url(clone_url)
 
-        remote_dir = self._remote_repo_path(owner, repo, workspace_subdir)
+        remote_dir = self._remote_repo_path(owner, repo, lane_subdir(workspace_subdir))
         parent_dir = remote_dir.rsplit("/", 1)[0]
 
         quoted_parent = self._quote_remote_path(parent_dir)

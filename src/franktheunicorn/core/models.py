@@ -713,6 +713,23 @@ class SecurityReport(models.Model):
     proposed_patch = models.TextField(blank=True, default="")
     proposed_patch_path = models.CharField(max_length=500, blank=True, default="")
 
+    # When the vulnerable code was introduced, from git history alone. One answer
+    # per report rather than per branch — unlike "is it there", "when did it get
+    # there" has a single answer, and the release tags containing that commit are
+    # a definitive affected-versions list where file presence is circumstantial.
+    introduced_commit = models.CharField(max_length=64, blank=True, default="")
+    introduced_at = models.DateTimeField(null=True, blank=True)
+    #: ``patch-line`` (pickaxed the removed lines, a real answer) or
+    #: ``file-added`` (only when the file appeared, a floor). Kept because the
+    #: two are worth very different amounts and collapsing them hides which.
+    introduced_method = models.CharField(max_length=20, blank=True, default="")
+    #: Release tags containing :attr:`introduced_commit`, oldest first, capped —
+    #: a 2014 Spark commit is in 86 releases and the list is not the answer.
+    introduced_releases = models.JSONField(default=list, blank=True)
+    #: How many releases contain it, before that cap.
+    introduced_release_count = models.IntegerField(default=0)
+    introduced_summary = models.TextField(blank=True, default="")
+
     # How far up the queue this report belongs, higher first. Read off a scanner
     # archive's own ranking at import (severity tier, triage-panel verdict, panel
     # confidence, CVSS overlay) — see security.scan_archive._priority. Zero for

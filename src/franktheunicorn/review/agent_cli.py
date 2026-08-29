@@ -18,6 +18,7 @@ never raises.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -177,21 +178,42 @@ def run_agent_cli_review(
         timeout,
         len(diff),
     )
+    started = time.monotonic()
     result = executor.run(cmd, cwd=cwd, timeout=timeout)
+    elapsed = time.monotonic() - started
     if result is None:
         # The single loudest silent failure on this path: for a RemoteSSHExecutor
         # this is "the ssh_command did not come back" — a bad `ssh_command`, an
         # unreachable workspace, or the CLI hanging past the timeout — and it
         # returned an empty list with no log line whatsoever.
-        logger.error(
-            "%s review failed: the executor returned no result for %s. "
-            "For remote.mode: ssh check that ssh_command works from this host and "
-            "that %s exists on the remote; the call may also have exceeded the %ds timeout.",
-            config.name,
-            cmd[0],
-            cwd,
-            timeout,
-        )
+        #
+        # The elapsed time tells those apart, which the old message could only
+        # list as three guesses: a run that used its whole budget timed out, and
+        # one that came back in two seconds never reached the agent at all.
+        if elapsed >= timeout * 0.95:
+            logger.error(
+                "%s review timed out: %s used its whole %ds budget in %s and was killed. "
+                "A real review of a large diff can take longer — raise "
+                "agent_cli_reviewers[%s].timeout_seconds, or cut max_diff_chars.",
+                config.name,
+                cmd[0],
+                timeout,
+                cwd,
+                config.name,
+            )
+        else:
+            logger.error(
+                "%s review failed after only %.1fs of a %ds budget, so %s never ran: the "
+                "executor returned nothing. For remote.mode: ssh this is ssh_command "
+                "failing or %s missing on the remote — the worker checks both at startup, "
+                "so look for the 'Agent CLI %r' preflight lines above.",
+                config.name,
+                elapsed,
+                timeout,
+                cmd[0],
+                cwd,
+                config.name,
+            )
         return []
     if not result.ok:
         from franktheunicorn.review.tool_executor import (

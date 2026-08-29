@@ -249,13 +249,48 @@
                     hx-post="{% url 'dashboard:security_map_versions' report.pk %}"
                     hx-target="#version-map-result"
                     hx-swap="innerHTML"
-                    hx-confirm="Map cited files and whether the proposed patch applies onto every shipping branch? Git only — no agent, no branch cap. Does not overwrite a deep-verifier verdict.">
-                Verify versions
+                    hx-confirm="Map cited files and whether the proposed patch applies onto every active release branch? Git only — no agent, no count cap, though branch_active_within_days still applies. Does not overwrite a deep-verifier verdict.">
+                Verify versions patch applies against
+            </button>
+        </div>
+        <div>
+            <button class="action-btn"
+                    hx-post="{% url 'dashboard:security_find_introduction' report.pk %}"
+                    hx-target="#introduction-result"
+                    hx-swap="innerHTML"
+                    hx-confirm="Date this from git history? Pickaxes the proposed patch's removed lines to find the commit that introduced them, then lists the release tags containing it. Git only — no agent.">
+                Verify likely introduction from git history
             </button>
         </div>
     </div>
     <div id="verify-result"></div>
     <div id="version-map-result"></div>
+    <div id="introduction-result"></div>
+
+    {% if report.introduced_commit %}
+    <div class="introduction-summary">
+        <h3>Likely introduction</h3>
+        <p>
+            <code>{{ report.introduced_commit|slice:":12" }}</code>
+            {% if report.introduced_at %}({{ report.introduced_at|date:"Y-m-d" }}){% endif %}
+            {% if report.introduced_method == "file-added" %}
+            <span class="badge badge-warning" title="Only the file's creation date — no patch to pickaxe, so this is a floor rather than an answer.">file-added (a floor)</span>
+            {% else %}
+            <span class="badge" title="Pickaxed the patch's removed lines: this is the commit that introduced that exact code.">pickaxed</span>
+            {% endif %}
+        </p>
+        {% if report.introduced_releases %}
+        <p>
+            Present in {{ report.introduced_release_count }} release(s), from
+            <code>{{ report.introduced_releases.0 }}</code> onwards:
+            {% for tag in report.introduced_releases %}<code>{{ tag }}</code>{% if not forloop.last %}, {% endif %}{% endfor %}{% if report.introduced_release_count > report.introduced_releases|length %} …{% endif %}
+        </p>
+        {% else %}
+        <p>No released tag contains it — unreleased so far.</p>
+        {% endif %}
+        <pre class="introduction-detail">{{ report.introduced_summary }}</pre>
+    </div>
+    {% endif %}
 </section>
 
 <!-- Operator Verdict -->

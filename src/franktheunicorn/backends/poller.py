@@ -75,16 +75,33 @@ def poll_project(
     seen" need that — the review backfill would otherwise review every skipped
     PR, and the shepherding / dependency-changelog passes would ignore them.
     """
+    shared = {
+        "review_context": project_config.review_context,
+        # Sync the dashboard's type filter from YAML governance — nothing
+        # else ever wrote this field, so the filter was dead on arrival.
+        "project_type": _GOVERNANCE_TO_PROJECT_TYPE.get(project_config.governance, "personal"),
+    }
     project, _created = Project.objects.update_or_create(
         owner=project_config.owner,
         repo=project_config.repo,
-        defaults={
-            "review_context": project_config.review_context,
-            # Sync the dashboard's type filter from YAML governance — nothing
-            # else ever wrote this field, so the filter was dead on arrival.
-            "project_type": _GOVERNANCE_TO_PROJECT_TYPE.get(project_config.governance, "personal"),
-        },
+        # ``enabled`` in create_defaults, not defaults: Django applies defaults on
+        # update too, so putting it there re-enabled the row on every cycle and
+        # made the admin's own toggle write-only. A row created here is enabled
+        # because a config exists for it; a row an operator switched off stays off.
+        create_defaults={**shared, "enabled": True},
+        defaults=shared,
     )
+    if not project.enabled:
+        # Configured and disabled is a legitimate state, and also invisible: every
+        # view gates on enabled AND configured. Said out loud, because the way this
+        # is usually reached is an ad-hoc ingest creating the row before the config
+        # existed, and then there is no symptom at all.
+        logger.warning(
+            "%s/%s has a config but its Project row is disabled, so it stays off the "
+            "dashboard. Re-enable it in the admin or run manage.py add_project.",
+            project_config.owner,
+            project_config.repo,
+        )
 
     logger.debug("Listing pull requests for %s/%s ...", project_config.owner, project_config.repo)
     raw_prs = client.list_pull_requests(project_config.owner, project_config.repo)
@@ -863,6 +880,12 @@ def ingest_single_pr(
 
     operator_config = get_operator_config()
     project_config = get_project_config(f"{owner}/{repo}")
+    if project_config is not None:
+        # The config lookup is case-insensitive; the (owner, repo) unique
+        # constraint is not. Take the config's casing or a mention-scan hit for
+        # "Apache/Spark" gets a second, separately-enabled row for a repo already
+        # polled as "apache/spark". Forges are case-insensitive about this too.
+        owner, repo = project_config.owner, project_config.repo
     forge_name = getattr(project_config, "forge", None) or "github"
     entry = get_forge_entry(operator_config, forge_name)
     client = make_client(entry, pace_requests=pace_requests)
@@ -877,6 +900,12 @@ def ingest_single_pr(
     if project_config is None and created:
         project.enabled = False
         project.save(update_fields=["enabled"])
+        logger.info(
+            "Created %s/%s disabled: no enabled config in the projects directory, so it "
+            "stays off the dashboard. Write one (manage.py add_project) to turn it on.",
+            owner,
+            repo,
+        )
 
     pr_data = client.get_pull_request(owner, repo, pr_number)
     changed_files: list[str] | None

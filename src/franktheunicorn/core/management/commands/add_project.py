@@ -70,6 +70,13 @@ class Command(BaseCommand):
         )
         if created:
             self.stdout.write(self.style.SUCCESS(f"Registered project {owner}/{repo_name}"))
+        elif not _project.enabled:
+            # get_or_create's defaults don't apply to an existing row. An ad-hoc
+            # ingest may have created this one disabled because no config matched;
+            # writing the config is the operator saying otherwise.
+            _project.enabled = True
+            _project.save(update_fields=["enabled"])
+            self.stdout.write(self.style.SUCCESS(f"Re-enabled project {owner}/{repo_name}"))
 
         self.stdout.write(
             f"Run 'python manage.py analyze_repo --repo {repo}' "

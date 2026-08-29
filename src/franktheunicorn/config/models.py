@@ -294,7 +294,12 @@ class AgentCLIReviewerConfig(BaseModel):
     #: directory absent from ``~/.claude.json``'s project map — exit 0, and no
     #: entry added.
     trust_args: list[str] = Field(default_factory=list)
-    timeout_seconds: int = 300
+    #: A headless agent reviewing a real diff reads files, greps, and thinks; five
+    #: minutes was optimistic and the symptom was indistinguishable from a broken
+    #: ssh_command, because a timeout and an unreachable host both come back as
+    #: "no result". Raised to 25 minutes on the operator's measurement that a real
+    #: review wants at least 5x the old budget.
+    timeout_seconds: int = 1_500
     max_diff_chars: int = 60_000
     deduplicate: bool = True
     remote: RemoteExecutionConfig = Field(default_factory=RemoteExecutionConfig)

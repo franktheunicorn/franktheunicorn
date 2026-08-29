@@ -42,8 +42,12 @@
             <input type="checkbox" name="auto_verify"> Verify against the code
         </label>
         <label class="zip-import-triage"
-               title="Cheap: git ls-tree of cited files, plus git apply --check of any proposed patch, on every shipping branch. No agent, no 25-report cap, no branch cap. The box for a 143-report archive.">
-            <input type="checkbox" name="auto_verify_versions"> Verify versions
+               title="Cheap: git ls-tree of cited files, plus git apply --check of any proposed patch, on every active release branch. No agent, no 25-report cap, no branch count cap (branch_active_within_days still applies). The box for a 143-report archive.">
+            <input type="checkbox" name="auto_verify_versions"> Verify versions patch applies against
+        </label>
+        <label class="zip-import-triage"
+               title="Cheap: pickaxes the proposed patch's removed lines through git history to find the commit that introduced them, then lists the release tags containing it. No agent, no 25-report cap.">
+            <input type="checkbox" name="auto_find_introduction"> Verify likely introduction from git history
         </label>
         <button type="submit" class="action-btn post">📦 Upload &amp; Import</button>
     </form>
@@ -59,7 +63,8 @@
     <p class="zip-import-hint">
         Add <code>--project owner/repo</code> to attach a project,
         <code>--triage</code> to queue triage,
-        <code>--verify-versions</code> to map cited files and whether the proposed patch applies onto every shipping branch.
+        <code>--verify-versions</code> to map cited files and whether the proposed patch applies onto every active release branch,
+        <code>--find-introduction</code> to date the vulnerable code and list the releases containing it.
     </p>
 
     {# Imported archives, with the undo. A scanner bundle is one archive's worth #}

@@ -129,6 +129,10 @@ MAX_ATTACHMENT_CHARS = 20_000
 #: rollups shouldn't produce a fifty-section report.
 MAX_ATTACHMENTS = 12
 
+#: Cap on the provenance document. It lands on every finding, so its size is
+#: multiplied by the finding count and goes straight into every triage prompt.
+MAX_PROVENANCE_CHARS = 4_000
+
 
 @dataclass
 class Attachment:
@@ -275,6 +279,13 @@ def expand_scan_archive(archive: zipfile.ZipFile, read_entry: Any) -> ScanArchiv
     # residual and then drop it with the finding, so the only copy in the archive
     # would go missing. Left uncut, it stays in the overview report.
     rollups = _split_rollups(archive, read_entry, set(order[:MAX_FINDINGS]), index, result)
+
+    # After the rollup split, deliberately. A PROVENANCE that turns out to anchor
+    # findings is a rollup and gets cut up like one; taking it first pasted the
+    # whole thing — every finding's section — onto every finding.
+    provenance = _provenance(archive, read_entry, result)
+    if provenance:
+        context["provenance"] = provenance
 
     for fid in order[:MAX_FINDINGS]:
         fields = merged[fid]
@@ -616,6 +627,63 @@ def _finding_id(raw: dict[str, Any]) -> str:
         value = raw.get(key)
         if value not in (None, ""):
             return str(value)[:100]
+    return ""
+
+
+def _provenance(archive: zipfile.ZipFile, read_entry: Any, result: ScanArchive) -> str:
+    """The archive's PROVENANCE document, to de-normalise onto every finding.
+
+    It is the same class of thing as ``_CONTEXT_KEYS`` — which repo, which branch,
+    which pinned commit — for archives that record it in a file rather than in a
+    manifest field. And it is the whole answer to "3.5 of what, exactly", which
+    matters most for the branch a finding is mapped against.
+
+    It usually has no security keywords of its own, so the generic walk was
+    rejecting it as "not-a-report" and dropping the only copy of which commit was
+    scanned. Consumed here instead — except when it is too long to attach whole,
+    where the full text is left as a residual so nothing goes missing.
+    """
+    # Shallowest path first: a scanner ships PATCHES/bug_01/provenance.txt about
+    # one patch, and plain name-sort put that ahead of the archive's own
+    # PROVENANCE.md — the top-level document, which is the one that names the
+    # branch, then never got attached at all.
+    candidates = sorted(
+        (
+            info
+            for info in archive.infolist()
+            if not info.is_dir()
+            and _suffix(info.filename) in _ROLLUP_SUFFIXES
+            and info.filename.rsplit("/", 1)[-1].rsplit(".", 1)[0].lower() == "provenance"
+        ),
+        key=lambda i: (i.filename.count("/"), i.filename),
+    )
+    for info in candidates:
+        if info.filename in result.consumed or info.filename in result.residuals:
+            # The rollup splitter already claimed it, so it anchors findings and is
+            # a rollup rather than run-level context. Its sections are attached.
+            continue
+        raw = read_entry(info)
+        if raw is None:
+            continue
+        text: str = raw.decode("utf-8", errors="replace").strip()
+        if not text:
+            continue
+        if len(text) > MAX_PROVENANCE_CHARS:
+            # Attached truncated, kept whole. Silently dropping the rest would lose
+            # bytes the operator had before this function existed, and with no
+            # per-entry outcome to notice it by.
+            result.residuals[info.filename] = text
+            logger.info(
+                "Scan archive: %s is %d chars; attaching the first %d as scan context "
+                "and importing the whole thing as its own report.",
+                info.filename,
+                len(text),
+                MAX_PROVENANCE_CHARS,
+            )
+            return f"{text[:MAX_PROVENANCE_CHARS]}\n(truncated — full text imported separately)"
+        result.consumed.add(info.filename)
+        logger.info("Scan archive: %s attached to every finding as scan context", info.filename)
+        return text
     return ""
 
 

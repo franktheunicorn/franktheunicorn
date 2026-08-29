@@ -424,6 +424,119 @@ class TestYAMLErrorHandling:
         assert len(configs) == 1
         assert configs[0].owner == "apache"
 
+    def test_load_project_configs_logs_what_loaded_and_what_did_not(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A rejected file used to log only a pydantic traceback, so the sole
+        symptom of a typo'd project was a repo quietly behaving as unconfigured."""
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        (projects_dir / "good.yaml").write_text("owner: apache\nrepo: spark\n")
+        (projects_dir / "off.yaml").write_text("owner: holdenk\nrepo: spark\nenabled: false\n")
+        (projects_dir / "broken.yaml").write_text("owner: ''\nrepo: spark\n")
+
+        with caplog.at_level(logging.INFO):
+            load_project_configs(projects_dir)
+
+        assert "Loaded 2 project config(s)" in caplog.text
+        assert "apache/spark" in caplog.text
+        assert "holdenk/spark (disabled)" in caplog.text
+        assert "broken.yaml" in caplog.text
+        assert "owner" in caplog.text
+
+    def test_load_project_configs_summary_is_not_logged_per_call(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The nav context processor reads this on every page view."""
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        (projects_dir / "good.yaml").write_text("owner: apache\nrepo: spark\n")
+
+        with caplog.at_level(logging.INFO):
+            load_project_configs(projects_dir)
+            caplog.clear()
+            load_project_configs(projects_dir)
+
+        assert "Loaded" not in caplog.text
+
+    def test_load_project_configs_rejects_a_document_that_is_not_a_mapping(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A leading ``- `` makes the whole file a list, which used to raise
+        AttributeError out of the normalizer and take every other config with it."""
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        (projects_dir / "listy.yaml").write_text("- owner: apache\n- repo: spark\n")
+        (projects_dir / "zz-good.yaml").write_text("owner: apache\nrepo: spark\n")
+
+        with caplog.at_level(logging.WARNING):
+            configs = load_project_configs(projects_dir)
+
+        assert [c.full_name for c in configs] == ["apache/spark"]
+        assert "listy.yaml: parsed as list, not a mapping of settings" in caplog.text
+
+    @pytest.mark.parametrize(
+        ("name", "content"),
+        [
+            # TypeError out of ProjectConfig(**data) — not a ValidationError.
+            ("badkey.yaml", b"1: oops\n"),
+            # UnicodeDecodeError out of Path.open(encoding="utf-8").
+            ("latin.yaml", b"owner: caf\xe9\nrepo: spark\n"),
+        ],
+    )
+    def test_one_unreadable_file_does_not_take_out_the_others(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture, name: str, content: bytes
+    ) -> None:
+        """CoreConfig.ready() calls this, so an escape here aborts app load — check,
+        migrate, runserver and the worker all die on a traceback."""
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        (projects_dir / name).write_bytes(content)
+        (projects_dir / "zz-good.yaml").write_text("owner: apache\nrepo: spark\n")
+
+        with caplog.at_level(logging.WARNING):
+            configs = load_project_configs(projects_dir)
+
+        assert [c.full_name for c in configs] == ["apache/spark"]
+        assert name in caplog.text
+
+    def test_an_unreadable_file_is_named_not_raised(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        locked = projects_dir / "locked.yaml"
+        locked.write_text("owner: apache\nrepo: spark\n")
+        locked.chmod(0o000)
+        try:
+            with caplog.at_level(logging.WARNING):
+                assert load_project_configs(projects_dir) == []
+            assert "locked.yaml" in caplog.text
+        finally:
+            locked.chmod(0o644)
+
+    def test_an_edit_is_picked_up_despite_the_cache(self, tmp_path: Path) -> None:
+        """Same-size rewrites inside one filesystem mtime tick were invisible."""
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        config = projects_dir / "p.yaml"
+        config.write_text("owner: apache\nrepo: aaaaa\n")
+        assert load_project_configs(projects_dir)[0].repo == "aaaaa"
+
+        # Same length on purpose: that is the case the mtime fingerprint missed.
+        config.write_text("owner: apache\nrepo: bbbbb\n")
+        assert load_project_configs(projects_dir)[0].repo == "bbbbb"
+
+    def test_a_deleted_file_drops_out(self, tmp_path: Path) -> None:
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        (projects_dir / "a.yaml").write_text("owner: apache\nrepo: spark\n")
+        (projects_dir / "b.yaml").write_text("owner: holdenk\nrepo: spark\n")
+        assert len(load_project_configs(projects_dir)) == 2
+
+        (projects_dir / "b.yaml").unlink()
+        assert [c.owner for c in load_project_configs(projects_dir)] == ["apache"]
+
 
 class TestConvenienceFunctions:
     def test_get_operator_config(self, tmp_config_dir: Path, settings: object) -> None:

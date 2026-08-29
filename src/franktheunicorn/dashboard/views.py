@@ -1225,6 +1225,7 @@ def security_report_upload(request: HttpRequest) -> HttpResponse:
     # per report per active branch, not two LLM calls.
     auto_verify = request.POST.get("auto_verify") == "on"
     auto_verify_versions = request.POST.get("auto_verify_versions") == "on"
+    auto_find_introduction = request.POST.get("auto_find_introduction") == "on"
 
     # Not gated on the file name: the importer decides by content and reports a
     # non-zip as an error, so a ".ZIP" or an extensionless export still works.
@@ -1242,6 +1243,7 @@ def security_report_upload(request: HttpRequest) -> HttpResponse:
         auto_triage=auto_triage,
         auto_verify=auto_verify,
         auto_verify_versions=auto_verify_versions,
+        auto_find_introduction=auto_find_introduction,
         # The filename is the only provenance a browser upload carries, and two
         # scans of one repo share entry paths, so without it the list has pairs of
         # identically-titled reports from different archives.
@@ -1280,6 +1282,8 @@ def security_report_upload(request: HttpRequest) -> HttpResponse:
             messages.warning(request, f"Not verified: {result.verify_skipped_reason}.")
         if auto_verify_versions and result.version_map_skipped_reason:
             messages.warning(request, f"Versions not mapped: {result.version_map_skipped_reason}.")
+        if auto_find_introduction and result.introduction_skipped_reason:
+            messages.warning(request, f"Not dated: {result.introduction_skipped_reason}.")
     elif result.duplicates and not result.failed:
         # The hint above the button advertises re-import as safe, so the case it
         # invites must not come back as a warning-coloured "nothing imported".
@@ -2025,64 +2029,92 @@ def security_report_verify(request: HttpRequest, report_id: int) -> HttpResponse
     )
 
 
-@require_POST
-def security_report_map_versions(request: HttpRequest, report_id: int) -> HttpResponse:
-    """Queue cheap version mapping: cited files vs every shipping branch (htmx).
+def _git_scan_blocker(report: SecurityReport, what: str, needs: str) -> str:
+    """Why a git-only scan of *report* can't run, or "" if it can.
 
-    Not the deep verifier. Git ls-tree only, no agent, no branch cap. The box
-    you want on a 143-report archive.
+    Shared by version mapping and introduction dating: both want the verifier's
+    checkout and neither wants an agent, so both are stopped by exactly the same
+    three things. *what* names the feature and *needs* what the checkout is for,
+    since a message that doesn't say which button you pressed is no better than
+    a silent no-op.
     """
-    report = get_object_or_404(SecurityReport.objects.select_related("project"), pk=report_id)
-
     from franktheunicorn.config.loader import get_operator_config
-    from franktheunicorn.security.queue import PRIORITY_INTERACTIVE, queue_version_map
     from franktheunicorn.security.verifier import resolve_verifier_reviewer
 
     operator_config = get_operator_config()
     verifier = operator_config.security_triage.verifier
     if not verifier.enabled:
-        return render(
-            request,
-            "dashboard/_security_version_map_queued.html",
-            {
-                "report": report,
-                "blocked": (
-                    "Version mapping has been switched off with the rest of verification. "
-                    "security_triage.verifier.enabled is false in operator.yaml."
-                ),
-            },
+        return (
+            f"{what} has been switched off with the rest of verification. "
+            "security_triage.verifier.enabled is false in operator.yaml."
         )
     if resolve_verifier_reviewer(operator_config, verifier) is None:
         have = ", ".join(rc.name for rc in operator_config.agent_cli_reviewers)
-        return render(
-            request,
-            "dashboard/_security_version_map_queued.html",
-            {
-                "report": report,
-                "blocked": (
-                    f"No agent_cli_reviewers entry named '{verifier.reviewer}', so there "
-                    "is no checkout to list branches in. "
-                    + (f"Configured entries: {have}." if have else "Add one to operator.yaml.")
-                ),
-            },
+        return (
+            f"No agent_cli_reviewers entry named '{verifier.reviewer}', so there is no "
+            f"checkout to {needs}. "
+            + (f"Configured entries: {have}." if have else "Add one to operator.yaml.")
         )
     if report.project is None:
+        return (
+            "This report isn't attached to a project, so there's no repository to "
+            f"{needs}. Set one and try again."
+        )
+    return ""
+
+
+@require_POST
+def security_report_map_versions(request: HttpRequest, report_id: int) -> HttpResponse:
+    """Queue cheap version mapping: cited files vs every active release branch (htmx).
+
+    Not the deep verifier. Git ls-tree only, no agent, no branch count cap. The box
+    you want on a 143-report archive.
+    """
+    report = get_object_or_404(SecurityReport.objects.select_related("project"), pk=report_id)
+
+    from franktheunicorn.security.queue import PRIORITY_INTERACTIVE, queue_version_map
+
+    blocked = _git_scan_blocker(report, "Version mapping", "list branches in")
+    if blocked:
         return render(
             request,
             "dashboard/_security_version_map_queued.html",
-            {
-                "report": report,
-                "blocked": (
-                    "This report isn't attached to a project, so there's no repository "
-                    "to map versions against. Set one and try again."
-                ),
-            },
+            {"report": report, "blocked": blocked},
         )
 
     created = queue_version_map(report, priority=PRIORITY_INTERACTIVE)
     return render(
         request,
         "dashboard/_security_version_map_queued.html",
+        {"report": report, "created": created},
+    )
+
+
+@require_POST
+def security_report_find_introduction(request: HttpRequest, report_id: int) -> HttpResponse:
+    """Queue git-history dating: which commit introduced this, which releases have it.
+
+    The other half of the version question. Version mapping asks whether the cited
+    files are *present* on a branch; this asks when the vulnerable code arrived and
+    which released tags contain that commit — which is the answer a maintainer
+    actually publishes. Git only, no agent.
+    """
+    report = get_object_or_404(SecurityReport.objects.select_related("project"), pk=report_id)
+
+    from franktheunicorn.security.queue import PRIORITY_INTERACTIVE, queue_introduction_scan
+
+    blocked = _git_scan_blocker(report, "Introduction dating", "search history in")
+    if blocked:
+        return render(
+            request,
+            "dashboard/_security_introduction_queued.html",
+            {"report": report, "blocked": blocked},
+        )
+
+    created = queue_introduction_scan(report, priority=PRIORITY_INTERACTIVE)
+    return render(
+        request,
+        "dashboard/_security_introduction_queued.html",
         {"report": report, "created": created},
     )
 

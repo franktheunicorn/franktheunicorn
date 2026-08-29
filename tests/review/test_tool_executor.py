@@ -1722,3 +1722,72 @@ class TestDeliveryProbeWithoutBase64:
 
         assert mode == "stdin"
         assert config._resolved_command_mode == "stdin", "the mode was not cached"
+
+
+class TestWorkspaceLane:
+    """Concurrent users of the checkouts must not share a tree."""
+
+    def teardown_method(self) -> None:
+        from franktheunicorn.review.tool_executor import set_workspace_lane
+
+        set_workspace_lane("")
+
+    def test_no_lane_leaves_the_subdir_alone(self) -> None:
+        from franktheunicorn.review.tool_executor import lane_subdir
+
+        assert lane_subdir("") == ""
+        assert lane_subdir("security-verify") == "security-verify"
+
+    def test_a_lane_isolates_even_when_the_caller_wanted_no_subdir(self) -> None:
+        """The review pipeline reads the main clone directly, and that is exactly
+        the tree a concurrent force-run must not detach HEAD in."""
+        from franktheunicorn.review.tool_executor import lane_subdir, set_workspace_lane
+
+        set_workspace_lane("force-run")
+        assert lane_subdir("") == "force-run"
+        assert lane_subdir("security-verify") == "security-verify-force-run"
+
+    def test_the_lane_does_not_leak_between_threads(self) -> None:
+        import threading
+
+        from franktheunicorn.review.tool_executor import lane_subdir, set_workspace_lane
+
+        seen: list[str] = []
+
+        def _worker() -> None:
+            set_workspace_lane("force-run")
+            seen.append(lane_subdir("security-verify"))
+
+        thread = threading.Thread(target=_worker)
+        thread.start()
+        thread.join()
+
+        assert seen == ["security-verify-force-run"]
+        # The poll cycle's own thread is untouched.
+        assert lane_subdir("security-verify") == "security-verify"
+
+    def test_local_executor_puts_a_lane_in_its_own_worktree(self, tmp_path: Any) -> None:
+        import subprocess
+
+        from franktheunicorn.review.tool_executor import LocalExecutor, set_workspace_lane
+
+        repo = tmp_path / "repos" / "apache" / "spark"
+        repo.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        (repo / "f.txt").write_text("x")
+        subprocess.run(["git", "add", "."], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "c"],
+            cwd=repo,
+            check=True,
+        )
+
+        executor = LocalExecutor()
+        plain = executor.prepare_repo("apache", "spark", local_path=repo)
+        set_workspace_lane("force-run")
+        laned = executor.prepare_repo("apache", "spark", local_path=repo)
+
+        assert plain == str(repo)
+        assert laned is not None
+        assert laned != plain
+        assert "force-run" in laned

@@ -13,7 +13,9 @@ Commands supported:
   the code, once per active branch, to say whether the reported vulnerability is
   actually there. The long one — see ``STUCK_COMMAND_TIMEOUT_SECONDS``.
 - ``map_report_versions``: cheap version mapping — git ls-tree of cited files
-  on every shipping branch, no agent. Minutes for a backlog, not hours.
+  on every active release branch, no agent. Minutes for a backlog, not hours.
+- ``find_report_introduction``: date the vulnerable code with a git pickaxe walk
+  and list the release tags containing that commit. Git only, no agent.
 - ``run_agents``: force-run the review pipeline on a PR (no trusted-author
   gate, no dedup against existing drafts).
 """
@@ -71,12 +73,21 @@ def _forge_client_for(
 MAX_COMMANDS_PER_DRAIN = 20
 
 
-def process_pending_commands(operator_config: OperatorConfig, *, limit: int | None = None) -> int:
+def process_pending_commands(
+    operator_config: OperatorConfig,
+    *,
+    limit: int | None = None,
+    min_priority: int | None = None,
+) -> int:
     """Run pending WorkerCommands, best first, up to *limit* of them.
 
     Returns the number of commands processed (success or failure). Each command
     is claimed atomically by flipping ``pending → running`` inside a transaction
     so two workers can't double-run the same row.
+
+    *min_priority* skips anything below it. That is what makes the worker's
+    interactive thread worth having: it must not pick up a bulk row, because a
+    bulk row takes exactly as long as the poll cycle it is trying to jump.
 
     Re-queries between commands rather than taking one snapshot of the pending
     set up front, and that is the point: a snapshot fixes the running order at
@@ -89,12 +100,10 @@ def process_pending_commands(operator_config: OperatorConfig, *, limit: int | No
     budget = MAX_COMMANDS_PER_DRAIN if limit is None else limit
     processed = 0
     while processed < budget:
-        cmd_id = (
-            WorkerCommand.objects.filter(status="pending")
-            .order_by("-priority", "created_at")
-            .values_list("pk", flat=True)
-            .first()
-        )
+        pending = WorkerCommand.objects.filter(status="pending")
+        if min_priority is not None:
+            pending = pending.filter(priority__gte=min_priority)
+        cmd_id = pending.order_by("-priority", "created_at").values_list("pk", flat=True).first()
         if cmd_id is None:
             break
         cmd = _claim_command(cmd_id)
@@ -260,6 +269,7 @@ def _dispatch(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
         "run_security_triage": _run_security_triage,
         "verify_security_report": _verify_security_report,
         "map_report_versions": _map_report_versions,
+        "find_report_introduction": _find_report_introduction,
         "run_agents": _run_agents,
     }
     handler = handlers.get(cmd.command)
@@ -278,6 +288,38 @@ def _resolve_repo_path(owner: str, repo: str) -> Path | None:
         return None
     candidate = Path(repos_dir) / owner / repo
     return candidate if candidate.is_dir() else None
+
+
+def _ensure_fresh_repo(owner: str, repo: str) -> Path | None:
+    """Clone-or-fetch the local checkout, falling back to whatever is on disk.
+
+    A fetch failure is not a reason to abandon the run: a stale tree still gives
+    better blame and context than none. It says so, at WARNING, because a review
+    against a stale tree can report a finding the PR already fixed.
+    """
+    from django.conf import settings
+
+    repos_dir = getattr(settings, "FRANK_REPOS_DIR", "")
+    if not repos_dir:
+        return None
+    try:
+        from franktheunicorn.worker.repo_manager import ensure_repo
+
+        fresh = ensure_repo(Path(repos_dir), owner, repo)
+    except Exception:
+        logger.warning("Could not refresh the %s/%s clone (see DEBUG)", owner, repo, exc_info=True)
+        fresh = None
+    if fresh is not None:
+        return fresh
+    stale = _resolve_repo_path(owner, repo)
+    if stale is not None:
+        logger.warning(
+            "Using the existing %s/%s clone without a fresh fetch; findings may refer to "
+            "code the PR has already changed.",
+            owner,
+            repo,
+        )
+    return stale
 
 
 def _run_dual_tests(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
@@ -383,7 +425,7 @@ def _verify_security_report(cmd: WorkerCommand, operator_config: OperatorConfig)
 
 
 def _map_report_versions(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
-    """Map cited files onto every shipping branch. Git only, no agent."""
+    """Map cited files onto every active release branch. Git only, no agent."""
     if cmd.security_report is None:
         msg = "map_report_versions requires a security_report target"
         raise ValueError(msg)
@@ -398,6 +440,28 @@ def _map_report_versions(cmd: WorkerCommand, operator_config: OperatorConfig) ->
     if run.error:
         logger.info(
             "Version mapping for report #%s did not run: %s", cmd.security_report.pk, run.error
+        )
+
+
+def _find_report_introduction(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
+    """Date the vulnerable code from git history and list the releases with it."""
+    if cmd.security_report is None:
+        msg = "find_report_introduction requires a security_report target"
+        raise ValueError(msg)
+
+    from franktheunicorn.security.introduced import find_introduction, persist_introduction
+
+    run = find_introduction(cmd.security_report, operator_config)
+    persist_introduction(cmd.security_report, run)
+    lines = [run.summary()]
+    for origin in run.origins:
+        lines.append(f"  {origin.path}: {origin.error or origin.commit[:12]}")
+    cmd.log = "\n".join(lines)
+    if run.error:
+        logger.info(
+            "Introduction scan for report #%s did not run: %s",
+            cmd.security_report.pk,
+            run.error,
         )
 
 
@@ -418,7 +482,12 @@ def _run_agents(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
     # Pass the local clone like the scheduled path does — without it,
     # blame/repo context and local-mode CLI tools are silently skipped and
     # "Force Run Agents" produces a weaker review than the poll cycle.
-    repo_path = _resolve_repo_path(pr.project.owner, pr.project.repo)
+    #
+    # ensure_repo, not _resolve_repo_path: that one only checks the directory is
+    # there, so a force-run reviewed whatever the last poll happened to leave in
+    # the tree. The poll path fetches first and this is the path where freshness
+    # matters most — the operator clicked it because the PR just changed.
+    repo_path = _ensure_fresh_repo(pr.project.owner, pr.project.repo)
 
     # Build the project's ForgeClient so the diff is fetched from the
     # configured forge (matching the poll path), not hard-coded public GitHub.

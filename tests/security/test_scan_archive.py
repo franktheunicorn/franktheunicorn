@@ -786,3 +786,97 @@ class TestFindingDedupAcrossProjects:
         assert result.imported == 0
         assert result.duplicates == 2
         assert SecurityReport.objects.exclude(finding_id="").count() == 2
+
+
+class TestProvenance:
+    """PROVENANCE.md is run-level context, not a report."""
+
+    _TEXT = (
+        "# Provenance — apache/spark @ branch branch-3.5\n"
+        "- True repo: https://github.com/apache/spark — pinned commit a025e49a\n"
+    )
+
+    def test_provenance_lands_on_every_finding_and_is_consumed(self) -> None:
+        """It has no security keywords, so the generic walk rejected it as
+        not-a-report and dropped the only record of which commit was scanned."""
+        result = expand(
+            {
+                "VULN-FINDINGS.json": json.dumps(FINDINGS),
+                "PROVENANCE.md": self._TEXT,
+            }
+        )
+        assert len(result.findings) == 2
+        for finding in result.findings:
+            assert "pinned commit a025e49a" in finding.body
+            assert "branch-3.5" in finding.body
+        assert "PROVENANCE.md" in result.consumed
+
+    def test_a_huge_provenance_is_truncated(self) -> None:
+        """It is repeated per finding and goes into every triage prompt."""
+        from franktheunicorn.security.scan_archive import MAX_PROVENANCE_CHARS
+
+        result = expand(
+            {
+                "VULN-FINDINGS.json": json.dumps(FINDINGS),
+                "PROVENANCE.md": "commit a025e49a\n" + "x" * (MAX_PROVENANCE_CHARS * 2),
+            }
+        )
+        assert "(truncated" in result.findings[0].body
+        assert result.findings[0].body.count("x") <= MAX_PROVENANCE_CHARS
+
+    def test_no_provenance_entry_changes_nothing(self) -> None:
+        result = expand({"VULN-FINDINGS.json": json.dumps(FINDINGS)})
+        assert len(result.findings) == 2
+        assert "Provenance:" not in result.findings[0].body
+
+
+class TestProvenanceEdgeCases:
+    """The three cases the first round of provenance tests didn't cover."""
+
+    def test_a_provenance_that_anchors_findings_is_split_not_pasted_whole(self) -> None:
+        """Taking it before the rollup split put f002's and f003's detail on f001."""
+        rollup = (
+            "# Provenance\n"
+            "## f001 — first\nDetail for one.\n"
+            "## f002 — second\nDetail for two.\n"
+            "## f003 — third\nDetail for three.\n"
+        )
+        findings = {
+            "findings": [
+                {"id": "f001", "title": "one"},
+                {"id": "f002", "title": "two"},
+                {"id": "f003", "title": "three"},
+            ]
+        }
+        result = expand({"VULN-FINDINGS.json": json.dumps(findings), "PROVENANCE.md": rollup})
+        bodies = {f.finding_id: f.body for f in result.findings}
+        assert "Detail for one" in bodies["f001"]
+        assert "Detail for two" not in bodies["f001"]
+        assert "Detail for three" not in bodies["f001"]
+
+    def test_the_top_level_provenance_wins_over_a_nested_one(self) -> None:
+        """A per-patch provenance.txt sorts before PROVENANCE.md by plain name-sort,
+        so the document naming the branch was never attached."""
+        result = expand(
+            {
+                "VULN-FINDINGS.json": json.dumps(FINDINGS),
+                "PATCHES/bug_01/provenance.txt": "per-patch note, not the archive's",
+                "PROVENANCE.md": "the archive's own: branch-3.5, commit a025e49a",
+            }
+        )
+        body = result.findings[0].body
+        assert "commit a025e49a" in body
+        assert "per-patch note" not in body
+
+    def test_an_oversized_provenance_is_still_imported_whole(self) -> None:
+        """Truncating and consuming would silently lose bytes the operator had
+        before, with no per-entry outcome to notice it by."""
+        from franktheunicorn.security.scan_archive import MAX_PROVENANCE_CHARS
+
+        text = "commit a025e49a\n" + "x" * (MAX_PROVENANCE_CHARS * 2)
+        result = expand({"VULN-FINDINGS.json": json.dumps(FINDINGS), "PROVENANCE.md": text})
+
+        assert "(truncated" in result.findings[0].body
+        # Not consumed: the full text is left for the generic walk to import.
+        assert "PROVENANCE.md" not in result.consumed
+        assert result.residuals["PROVENANCE.md"] == text.strip()

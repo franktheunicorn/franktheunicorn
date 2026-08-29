@@ -19,6 +19,7 @@ import os
 import shutil
 import signal
 import sys
+import threading
 import time
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
@@ -205,12 +206,24 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
                 entry.type,
                 entry.base_url,
             )
-        if not clients:
+        if not clients and forge_names_used:
             logger.error(
-                "No usable forge clients. Configure operator.yaml::forges or set "
-                "FRANK_MOCK_MODE=true. Exiting."
+                "No usable forge clients for the configured forge(s) %s. Configure "
+                "operator.yaml::forges or set FRANK_MOCK_MODE=true. Exiting.",
+                ", ".join(sorted(forge_names_used)),
             )
             sys.exit(1)
+        if not clients:
+            # No *projects*, so no forge to build a client for — which is not a
+            # misconfiguration and must not exit: line 157 above promises the worker
+            # keeps running and checks again each cycle, and it exited instead. It
+            # still drains dashboard commands, and a project added to the projects
+            # directory is picked up by the per-cycle reload.
+            logger.warning(
+                "No enabled projects, so no forge clients were built. Staying up to serve "
+                "dashboard actions; add a project config and the next cycle will pick it "
+                "up (a new *forge* still needs a restart)."
+            )
 
     poll_interval = settings.FRANK_POLL_INTERVAL
     logger.info(
@@ -225,12 +238,35 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
 
     signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
 
+    stop_interactive = threading.Event()
+    interactive = threading.Thread(
+        target=_interactive_drain_loop,
+        args=(operator_config, stop_interactive),
+        name="interactive-commands",
+        daemon=True,
+    )
+    interactive.start()
+    logger.info(
+        "Interactive command thread started: dashboard buttons and imports run within "
+        "~%ds instead of waiting out the poll cycle.",
+        INTERACTIVE_POLL_SECONDS,
+    )
+
     try:
         while True:
             # A cycle failure (e.g. transient "database is locked" from the
             # shared SQLite file) must not kill the daemon — log and retry on
-            # the next poll.
+            # the next poll. The config re-read is inside the try for the same
+            # reason: outside it, one unreadable YAML file saved while the worker
+            # ran would take the daemon down at the top of the next cycle.
             try:
+                # Held from startup, a project added to the projects directory
+                # mid-run was silently filtered out of the mention scan's
+                # allow-list until a restart. A new *forge* still needs one — the
+                # clients were built above and _run_cycle warns per skipped
+                # project. Cached on file mtime, so a stat per file when nothing
+                # changed.
+                project_configs = load_project_configs(settings.FRANK_PROJECTS_DIR)
                 _run_cycle(
                     clients,
                     project_configs,
@@ -256,6 +292,16 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
     except KeyboardInterrupt:
         logger.info("Worker shutting down.")
     finally:
+        # Asked to stop, then given a moment — a command mid-run gets to finish
+        # rather than being abandoned in `running`, where it would dedupe every
+        # retry until fail_stuck_commands swept it.
+        stop_interactive.set()
+        interactive.join(timeout=INTERACTIVE_SHUTDOWN_SECONDS)
+        if interactive.is_alive():
+            logger.info(
+                "Interactive command still running at shutdown; leaving it to the "
+                "next worker's stuck-command sweep."
+            )
         # Close each unique client exactly once (mock mode reuses one instance).
         for c in {id(v): v for v in clients.values()}.values():
             try:
@@ -740,6 +786,22 @@ def _probe_remote_agent_cli(rc: AgentCLIReviewerConfig) -> None:
             (echo.stderr or "")[:200],
         )
         return
+
+    # Does the workspace actually exist there? The review's failure message used to
+    # tell the operator to go and check this by hand, which is a thing we can just
+    # do once, here, where a single line answers it for every PR afterwards.
+    listed = executor.run(["ls", "-d", workspace], cwd=".", timeout=60)
+    if listed is None or not listed.ok:
+        logger.warning(
+            "Agent CLI %r: remote_workspace_dir %s does not exist on the remote (or is "
+            "not readable): %s. prepare_repo will try to create it per project; if that "
+            "fails every review returns nothing.",
+            rc.name,
+            workspace,
+            "no result" if listed is None else (listed.stderr or "").strip()[:200],
+        )
+    else:
+        logger.info("Agent CLI %r: remote workspace %s exists", rc.name, workspace)
 
     # Only now is "is the CLI installed" a meaningful question — and it is asked
     # through the same invocation shape as the review. An earlier version wrapped
@@ -1336,6 +1398,63 @@ def _drain_worker_commands(operator_config: OperatorConfig | None) -> None:
             logger.info("Drained %d worker command(s) mid-cycle", processed)
     except Exception:
         logger.exception("Error draining worker commands mid-cycle")
+
+
+#: How often the interactive thread looks for a button-press to run.
+INTERACTIVE_POLL_SECONDS = 2
+
+#: Checkout lane for the interactive thread, so a Spark force-run works in
+#: ``<repos>/force-run/apache/spark`` rather than the tree the poll cycle is using.
+INTERACTIVE_LANE = "force-run"
+
+#: How long shutdown waits for an in-flight interactive command. Long enough for
+#: a triage or a version map, short enough that Ctrl-C still feels like Ctrl-C.
+INTERACTIVE_SHUTDOWN_SECONDS = 30
+
+
+def _interactive_drain_loop(operator_config: OperatorConfig, stop: threading.Event) -> None:
+    """Run dashboard-queued commands without waiting for the poll cycle.
+
+    The mid-cycle drains only get a turn *between* PRs and one PR's agent run is
+    minutes, so an import or a Force Run clicked at the wrong moment sat in
+    ``pending`` long enough to look like nothing happened at all. This thread
+    claims nothing below ``PRIORITY_INTERACTIVE``: a bulk row takes exactly as
+    long as the cycle it is trying to jump, so picking one up would put this
+    thread in the same hole.
+
+    Safe alongside the main drain because a command is claimed by an atomic
+    ``pending → running`` flip — the same thing that already made two worker
+    processes safe. Never raises: this thread dying silently would be worse than
+    the delay it exists to fix.
+    """
+    from django.db import connection
+
+    from franktheunicorn.review.tool_executor import workspace_lane
+    from franktheunicorn.security.queue import PRIORITY_INTERACTIVE
+    from franktheunicorn.worker.commands import process_pending_commands
+
+    # Its own checkouts. A force-run detaches HEAD onto the PR head and the
+    # verifier onto release branches; doing that in the tree the poll cycle is
+    # reading a diff out of produces wrong findings on unrelated PRs, and now that
+    # this runs on its own thread the two are genuinely simultaneous.
+    #
+    # Scoped, not set-and-forget: called directly from a test this would otherwise
+    # leave every later checkout in the session pointed at the force-run lane.
+    with workspace_lane(INTERACTIVE_LANE):
+        while not stop.is_set():
+            try:
+                processed = process_pending_commands(
+                    operator_config, min_priority=PRIORITY_INTERACTIVE
+                )
+                if processed:
+                    logger.info("Interactive queue: ran %d command(s) off-cycle", processed)
+            except Exception:
+                logger.exception("Interactive command drain failed; continuing")
+            finally:
+                # Per-thread connection, and a command can run for minutes. Left
+                # open it is an idle SQLite handle held across the cycle's writes.
+                connection.close()
+            stop.wait(INTERACTIVE_POLL_SECONDS)
 
 
 def _run_cycle(

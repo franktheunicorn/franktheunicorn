@@ -1,0 +1,14 @@
+{# Answer to the introduction-dating button. Same honesty as the version-map fragment. #}
+{% if blocked %}
+<div class="verify-result error-note">{{ blocked }}</div>
+{% elif created %}
+<div class="verify-result queued-note">
+    Introduction dating queued. Git will pickaxe the removed lines of any proposed
+    patch to find the commit that introduced them, then list the release tags
+    containing it — no agent. Reload to see the answer.
+</div>
+{% else %}
+<div class="verify-result queued-note">
+    An introduction scan is already queued for this report. Reload to see it land.
+</div>
+{% endif %}

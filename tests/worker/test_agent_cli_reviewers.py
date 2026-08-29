@@ -337,7 +337,9 @@ class TestStartupProbe:
                 side_effect=[
                     # The sentinel round-trips, so the command path is fine...
                     ExecResult(returncode=0, stdout="frank-remote-ok\n", stderr=""),
-                    # ...but the binary is not there.
+                    # ...the workspace is there...
+                    ExecResult(returncode=0, stdout="/home/u/.frank-remote\n", stderr=""),
+                    # ...but the binary is not.
                     ExecResult(returncode=1, stdout="", stderr="not found"),
                 ],
             ),
@@ -369,6 +371,7 @@ class TestStartupProbe:
                 "run",
                 side_effect=[
                     ExecResult(returncode=0, stdout="frank-remote-ok\n", stderr=""),
+                    ExecResult(returncode=0, stdout="/home/u/.frank-remote\n", stderr=""),
                     ExecResult(returncode=0, stdout="/usr/local/bin/claude\n", stderr=""),
                 ],
             ),
@@ -396,6 +399,7 @@ class TestStartupProbe:
                 "run",
                 side_effect=[
                     ExecResult(returncode=0, stdout="frank-remote-ok\n", stderr=""),
+                    ExecResult(returncode=0, stdout="/home/u/.frank-remote\n", stderr=""),
                     ExecResult(returncode=0, stdout="/bin/claude\n", stderr=""),
                 ],
             ),
@@ -405,6 +409,28 @@ class TestStartupProbe:
 
         for name in ("claude", "codex", "pi"):
             assert f"'{name}'" in caplog.text, f"{name} got no verdict line"
+
+    def test_a_missing_remote_workspace_is_named_at_startup(self, caplog: Any) -> None:
+        """The review's failure message used to tell the operator to check this by
+        hand; it is one round trip, so it is checked once here instead."""
+        oc = OperatorConfig(agent_cli_reviewers=[_ssh_reviewer()])
+
+        with (
+            patch.object(
+                RemoteSSHExecutor,
+                "run",
+                side_effect=[
+                    ExecResult(returncode=0, stdout="frank-remote-ok\n", stderr=""),
+                    ExecResult(returncode=1, stdout="", stderr="No such file or directory"),
+                    ExecResult(returncode=0, stdout="/bin/claude\n", stderr=""),
+                ],
+            ),
+            caplog.at_level(logging.INFO),
+        ):
+            _check_agent_cli_reviewers(oc)
+
+        assert "does not exist on the remote" in caplog.text
+        assert any(r.levelno >= logging.WARNING for r in caplog.records)
 
     def test_the_probe_never_disables_a_reviewer(self, caplog: Any) -> None:
         """A probe that fails for its own reasons — a slow bastion, a wrapper

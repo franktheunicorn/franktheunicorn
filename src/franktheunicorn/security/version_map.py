@@ -8,9 +8,10 @@ This is the other question, and git can answer it. A scanner finding names
 files. If those files are still on ``branch-3.5`` the finding likely applies
 to 3.5.x; if they were rewritten away, it likely does not. When the archive
 shipped a proposed patch, ``git apply --check`` says which trees it still
-fits — no agent, just git. No report cap, no branch cap. File presence and
-a clean apply are not a code read — the row says so, and the confidence
-stays low.
+fits — no agent, just git. No report cap and no branch *count* cap, though
+the verifier's ``branch_active_within_days`` and name patterns still decide
+which branches exist to look at. File presence and a clean apply are not a
+code read — the row says so, and the confidence stays low.
 
 Takes reports that already exist (imported, pasted, whatever). Prefers paths
 from an existing verification's evidence when one is there, then the report
@@ -53,10 +54,63 @@ VERSION_MAP_AGENT = "version-map"
 
 _GIT_TIMEOUT_SECONDS = 120
 
+#: Extensions we recognise in a citation.
+#:
+#: Two traps, and both produced a confident "not affected" for a file that was
+#: sitting right there on the branch. Alternation is first-match, not
+#: longest-match, so a bare ``c`` ahead of ``cpp`` captured ``foo.cpp`` as
+#: ``foo.c`` — fixed by sorting longest-first below. And with no boundary after
+#: the alternation, ``py`` captured ``App.pyi`` as ``App.py`` and ``h`` captured
+#: ``index.html`` as ``index.h`` however the list was ordered — fixed by the
+#: ``(?!\w)`` in the pattern. The list is broad because an unlisted extension is
+#: a citation that never gets checked.
+_SOURCE_EXTENSIONS = (
+    "java",
+    "scala",
+    "kt",
+    "py",
+    "pyi",
+    "js",
+    "jsx",
+    "ts",
+    "tsx",
+    "go",
+    "rb",
+    "c",
+    "cc",
+    "cpp",
+    "cs",
+    "h",
+    "hpp",
+    "rs",
+    "swift",
+    "php",
+    "pl",
+    "sh",
+    "sql",
+    "proto",
+    "xml",
+    "yaml",
+    "yml",
+    "json",
+    "toml",
+    "ini",
+    "conf",
+    "properties",
+    "gradle",
+    "html",
+    "htm",
+    "rst",
+    "tf",
+)
+
 #: Paths as they appear in reports and evidence. Case-preserving: git is.
+#: ``,`` and ``;`` are separators too — dense scanner output writes
+#: ``a/Foo.py,b/Bar.py`` and only the first was being picked up.
 _PATH_RE = re.compile(
-    r"(?:^|[\s`'\"=(])((?:[\w.-]+/)+[\w.-]+\."
-    r"(?:java|scala|py|js|ts|go|rb|c|cc|cpp|h|hpp|rs|kt|xml|yaml|yml))"
+    r"(?:^|[\s`'\"=(,;])((?:[\w.-]+/)+[\w.-]+\.(?:"
+    + "|".join(sorted(_SOURCE_EXTENSIONS, key=len, reverse=True))
+    + r"))(?!\w)"
 )
 _PATCH_PATH_RE = re.compile(r"^(?:\+\+\+|---) [ab]/(.+)$", re.MULTILINE)
 
@@ -99,7 +153,9 @@ def _unique_paths(text: str) -> list[str]:
     seen: set[str] = set()
     paths: list[str] = []
     for match in (*_PATCH_PATH_RE.finditer(text), *_PATH_RE.finditer(text)):
-        raw = match.group(1).strip().lstrip("./")
+        # removeprefix, not lstrip: lstrip takes a character *set*, so it ate the
+        # leading dot of ".github/workflows/ci.yml" and the path never matched.
+        raw = match.group(1).strip().removeprefix("./")
         if raw.startswith(("a/", "b/")) and raw.count("/") >= 2:
             raw = raw[2:]
         if not raw or raw.lower() in seen:
@@ -122,7 +178,7 @@ def release_line_from_branch(branch: str) -> str:
 
 
 def map_report_versions(report: SecurityReport, operator_config: OperatorConfig) -> VerificationRun:
-    """Walk every shipping line and record whether the cited files are there.
+    """Walk every active release line and record whether the cited files are there.
 
     Never raises. Same honesty contract as :func:`verify_report`: a run that
     could not start carries ``error``, and that is distinct from "looked and
@@ -277,9 +333,10 @@ def _map_one_branch(
     if found or applies is True:
         verdict = "affected"
         confidence = 0.7 if applies is True else 0.45
-    elif applies is None and patch.strip() and not paths:
-        # Could not even try, and there was no file-presence look.
-        # Same honesty as a failed ls-tree: that is not "not affected".
+    elif applies is None and patch.strip():
+        # The patch check is half the evidence and it did not run. A file-presence
+        # miss alone does not license "not affected" — the patch might well have
+        # applied. Same honesty as a failed ls-tree.
         verdict = "error"
         confidence = None
     else:
