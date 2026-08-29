@@ -648,13 +648,89 @@ class RemoteSSHExecutor:
         clone_url: str = "",
         workspace_subdir: str = "",
     ) -> str | None:
+        """A remote checkout for this thread's lane, or None.
+
+        A lane is a linked *worktree* of the un-laned clone, not a second clone of
+        it. Cloning per lane is minutes of network and gigabytes of disk on the
+        remote for a tree whose only difference is which commit HEAD points at —
+        Spark is the case that makes this obvious. A worktree shares the object
+        store and git keeps the two HEADs genuinely independent, which is the
+        whole requirement.
+
+        Returns None rather than the shared tree when the worktree can't be made.
+        Falling back to the shared tree would put a force-run's ``git checkout
+        --detach`` back into the tree the poll cycle is reading a diff out of,
+        which is the bug the lane exists to prevent; a degraded review is the
+        better failure.
+        """
+        lane = _workspace_lane.get()
+        if not lane:
+            return self._clone_or_fetch(owner, repo, clone_url, workspace_subdir)
+
+        base = self._clone_or_fetch(owner, repo, clone_url, workspace_subdir)
+        if base is None:
+            return None
+        target = self._remote_repo_path(owner, repo, lane_subdir(workspace_subdir))
+        return self._remote_worktree(base, target, lane)
+
+    def _remote_worktree(self, base_dir: str, target_dir: str, lane: str) -> str | None:
+        """Register *target_dir* as a detached worktree of *base_dir* on the remote.
+
+        Rebuilt rather than reused: a worktree whose admin directory has been
+        pruned (``git gc --auto`` runs ``worktree prune``) still looks like one
+        from the outside, and every git command inside it answers ``fatal: not a
+        git repository``. ``prune`` before ``add`` because git refuses a path it
+        holds a stale record for, and the directory goes first because ``add``
+        refuses a non-empty target. Same reasoning as the local version.
+        """
+        quoted_base = self._quote_remote_path(base_dir)
+        quoted_target = self._quote_remote_path(target_dir)
+        quoted_parent = self._quote_remote_path(target_dir.rsplit("/", 1)[0])
+        script = (
+            f"set -e; "
+            f"mkdir -p {quoted_parent}; "
+            f"git -C {quoted_base} worktree prune; "
+            f"if ! git -C {quoted_target} rev-parse --git-dir >/dev/null 2>&1; then "
+            f"rm -rf {quoted_target}; "
+            f"git -C {quoted_base} worktree add --detach --force {quoted_target} HEAD; "
+            f"fi; "
+            f"git -C {quoted_target} rev-parse --git-dir >/dev/null"
+        )
+        result = self.run(
+            ["sh", "-c", script], cwd=base_dir, timeout=self.config.prepare_timeout_seconds
+        )
+        if result is None or not result.ok:
+            detail = "no result" if result is None else (result.stderr or result.stdout)[:300]
+            logger.warning(
+                "Could not make a %r worktree at %s off %s on the remote: %s. Skipping the "
+                "checkout rather than sharing %s, which is what the lane is for.",
+                lane,
+                target_dir,
+                base_dir,
+                detail,
+                base_dir,
+            )
+            return None
+        logger.info("Remote %r lane ready at %s (worktree of %s)", lane, target_dir, base_dir)
+        return target_dir
+
+    def _clone_or_fetch(
+        self,
+        owner: str,
+        repo: str,
+        clone_url: str = "",
+        workspace_subdir: str = "",
+    ) -> str | None:
         if not clone_url:
             clone_url = self.config.clone_url_template.format(owner=owner, repo=repo)
 
         https_fallback = self._https_fallback_url(clone_url)
         ssh_fallback = self._ssh_fallback_url(clone_url)
 
-        remote_dir = self._remote_repo_path(owner, repo, lane_subdir(workspace_subdir))
+        # Verbatim, not lane_subdir(): prepare_repo resolves the lane and calls this
+        # for the *base* tree the lane's worktree hangs off. Applying it again here
+        # would clone into the lane directory and there would be nothing to hang off.
+        remote_dir = self._remote_repo_path(owner, repo, workspace_subdir)
         parent_dir = remote_dir.rsplit("/", 1)[0]
 
         quoted_parent = self._quote_remote_path(parent_dir)

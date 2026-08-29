@@ -186,6 +186,21 @@ digest_enabled: false
 # `remote_workspace_dir` and runs the CLI there -- useful for
 # offloading heavy reviews to a dedicated build box.
 #
+# Layout under `remote_workspace_dir`, so you know what you're looking at
+# when you ssh in:
+#
+#   <owner>/<repo>                      the review pipeline's clone
+#   security-verify/<owner>/<repo>      the security verifier's (it checks
+#                                       out release branches and leaves them)
+#   force-run/<owner>/<repo>            the worker's interactive thread
+#
+# Only the first two are clones. `force-run` is a linked `git worktree` of
+# the clone beside it, so it costs a checkout rather than another copy of
+# something Spark-sized -- but its HEAD is independent, which is the point:
+# a dashboard force-run detaches HEAD onto a PR head, and doing that in the
+# tree the poll cycle is mid-diff on produces wrong findings on unrelated
+# PRs. Safe to delete any of these; they are rebuilt on demand.
+#
 # Common remote block (uncomment under any tool below):
 #   remote:
 #     mode: "ssh"                      # "local" (default) | "ssh"

@@ -1791,3 +1791,77 @@ class TestWorkspaceLane:
         assert laned is not None
         assert laned != plain
         assert "force-run" in laned
+
+
+class TestRemoteLaneUsesAWorktree:
+    """A clone per lane is gigabytes on the remote for a tree that only needs a
+    different HEAD, so a lane is a linked worktree of the un-laned clone."""
+
+    def teardown_method(self) -> None:
+        from franktheunicorn.review.tool_executor import set_workspace_lane
+
+        set_workspace_lane("")
+
+    @staticmethod
+    def _ok() -> Any:
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout="op=fetch\n", stderr="")
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_a_lane_adds_a_worktree_off_the_base_clone(self, mock_run: Any) -> None:
+        from franktheunicorn.review.tool_executor import set_workspace_lane
+
+        mock_run.return_value = self._ok()
+        set_workspace_lane("force-run")
+        executor = RemoteSSHExecutor(config=_ssh_config())
+        cwd = executor.prepare_repo("acme", "widget")
+
+        assert cwd == "/srv/frank/force-run/acme/widget"
+        scripts = "\n".join(str(call.args[0][-1]) for call in mock_run.call_args_list)
+        assert "worktree add --detach --force" in scripts
+        assert "/srv/frank/force-run/acme/widget" in scripts
+        # One clone/fetch, for the base tree — the lane does not clone again.
+        assert scripts.count("git clone") == 1
+        assert "/srv/frank/acme/widget" in scripts
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_a_failed_worktree_returns_none_not_the_shared_tree(self, mock_run: Any) -> None:
+        """Sharing it puts a force-run's `git checkout --detach` back into the tree
+        the poll cycle is reading a diff out of — the bug the lane prevents."""
+        from franktheunicorn.review.tool_executor import set_workspace_lane
+
+        def _run(argv: Any, **_kwargs: Any) -> Any:
+            script = str(argv[-1])
+            code = 1 if "worktree add" in script else 0
+            return subprocess.CompletedProcess(
+                args=[], returncode=code, stdout="", stderr="fatal: nope" if code else ""
+            )
+
+        mock_run.side_effect = _run
+        set_workspace_lane("force-run")
+        executor = RemoteSSHExecutor(config=_ssh_config())
+        assert executor.prepare_repo("acme", "widget") is None
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_no_lane_is_the_plain_clone_path(self, mock_run: Any) -> None:
+        mock_run.return_value = self._ok()
+        executor = RemoteSSHExecutor(config=_ssh_config())
+        cwd = executor.prepare_repo("acme", "widget")
+
+        assert cwd == "/srv/frank/acme/widget"
+        scripts = "\n".join(str(call.args[0][-1]) for call in mock_run.call_args_list)
+        assert "worktree add" not in scripts
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_a_lane_widens_an_existing_workspace_subdir(self, mock_run: Any) -> None:
+        """The verifier already has its own tree; a force-run of it needs a third."""
+        from franktheunicorn.review.tool_executor import set_workspace_lane
+
+        mock_run.return_value = self._ok()
+        set_workspace_lane("force-run")
+        executor = RemoteSSHExecutor(config=_ssh_config())
+        cwd = executor.prepare_repo("acme", "widget", workspace_subdir="security-verify")
+
+        assert cwd == "/srv/frank/security-verify-force-run/acme/widget"
+        scripts = "\n".join(str(call.args[0][-1]) for call in mock_run.call_args_list)
+        # Hung off the verifier's own clone, not the review pipeline's.
+        assert "/srv/frank/security-verify/acme/widget" in scripts
