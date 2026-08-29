@@ -739,13 +739,21 @@ class TestParseVerdictIsBounded:
     the_verdict` for why the attempt cap had to go. These deadlines still hold, and
     holding them is what keeps the new budget from being set on vibes."""
 
+    #: Wall-clock ceiling for a brace flood. Chosen to sit between the two numbers
+    #: that matter, because a deadline can be wrong in both directions: the
+    #: regressions above were 6.5s and 22s, so it must stay under 6.5s to catch
+    #: them, and a GitHub runner took 1.24s for work that measures 0.18s locally,
+    #: so 1.0s was failing on hardware speed rather than on the parser. The real
+    #: guarantee is ``_MAX_JSON_SCAN_CHARS``; this is a proxy for it.
+    _DEADLINE_SECONDS = 4.0
+
     @pytest.mark.parametrize("size", [16_000, 200_000])
     def test_unbalanced_braces_do_not_hang_the_worker(self, size: int) -> None:
         import time
 
         started = time.monotonic()
         assert parse_verdict("{" * size) is None
-        assert time.monotonic() - started < 1.0
+        assert time.monotonic() - started < self._DEADLINE_SECONDS
 
     def test_a_verdict_at_the_tail_still_parses_after_junk(self) -> None:
         junk = "{" * 5_000
