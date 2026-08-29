@@ -809,7 +809,12 @@ def _import_findings(
                 if queue_triage_on_request(report, operator_config):
                     result.queued_triage += 1
             except Exception:
-                logger.warning("Could not queue triage for finding %s", record.finding_id)
+                # exc_info, as in the plain-zip path below: without it the actual
+                # reason (an unmigrated database, a locked file) is discarded and
+                # "triage never ran" has nothing to be diagnosed from.
+                logger.warning(
+                    "Could not queue triage for finding %s", record.finding_id, exc_info=True
+                )
 
     if expanded.truncated:
         # A warning on the result, not result.error. The command raises

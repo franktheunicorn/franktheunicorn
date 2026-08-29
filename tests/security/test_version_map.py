@@ -524,3 +524,10 @@ class TestApplyCheckScript:
         from franktheunicorn.security.version_map import MAX_PATCH_CHARS, _apply_check_script
 
         assert _apply_check_script("x" * (MAX_PATCH_CHARS + 1)) is None
+
+    def test_a_patch_with_a_nul_byte_is_declined_rather_than_raising(self) -> None:
+        """subprocess refuses an argv with embedded nulls, and map_report_versions
+        is contracted to never raise."""
+        from franktheunicorn.security.version_map import _apply_check_script
+
+        assert _apply_check_script("binary\x00patch") is None

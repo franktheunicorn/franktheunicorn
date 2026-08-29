@@ -297,6 +297,12 @@ class BaseLLMBackend:
         finally:
             self._last_duration = time.monotonic() - start
 
+    @property
+    def label(self) -> str:
+        """``provider/resolved-model`` — the same string cost records are filed
+        under, so a log line naming this backend names the same thing."""
+        return f"{self._config.provider}/{self._model}"
+
     def metered_call(
         self,
         system_prompt: str,
@@ -382,7 +388,7 @@ class BaseLLMBackend:
                 project_id=project_id,
                 pull_request_id=pr_id,
                 action_type=action_type,
-                backend=f"{self._config.provider}/{self._model}",
+                backend=self.label,
                 tokens_in=self._last_tokens_in,
                 tokens_out=self._last_tokens_out,
                 estimated_cost_usd=cost,

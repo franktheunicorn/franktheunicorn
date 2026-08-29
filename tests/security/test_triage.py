@@ -13,6 +13,7 @@ from django.test import override_settings
 from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig, SecurityTriageConfig
 from franktheunicorn.review.backends.base import BaseLLMBackend
 from franktheunicorn.security.triage import (
+    _AnalysisOutcome,
     _safe_json_parse,
     triage_report,
 )
@@ -145,7 +146,7 @@ class TestTriageReport:
         assert report.status in ("triaging", "new", "expected-behavior")
 
     @patch("franktheunicorn.security.triage.search_cves")
-    @patch("franktheunicorn.security.triage._get_triage_backend")
+    @patch("franktheunicorn.security.triage._get_triage_backends")
     def test_full_pipeline_with_mock_backend(
         self,
         mock_get_backend: MagicMock,
@@ -178,7 +179,7 @@ class TestTriageReport:
             }
         )
         backend = _MockLLMBackend(responses=[parse_json, analyze_json])
-        mock_get_backend.return_value = backend
+        mock_get_backend.return_value = [backend]
 
         report = SecurityReportFactory(raw_text="XSS vuln", title="", status="new")
         config = OperatorConfig(
@@ -496,7 +497,7 @@ class TestSecurityModelThreading:
         assert "CVE-2025-30065" in user
 
     @patch("franktheunicorn.security.triage.search_cves", return_value=[])
-    @patch("franktheunicorn.security.triage._get_triage_backend")
+    @patch("franktheunicorn.security.triage._get_triage_backends")
     def test_triage_report_threads_project_security_model(
         self,
         mock_get_backend: MagicMock,
@@ -518,7 +519,7 @@ class TestSecurityModelThreading:
             }
         )
         backend = _CapturingBackend(responses=[parse_json, self._analyze_json()])
-        mock_get_backend.return_value = backend
+        mock_get_backend.return_value = [backend]
 
         report = SecurityReportFactory(raw_text="RCE report", title="", status="new")
         project_config = ProjectConfig(
@@ -540,7 +541,7 @@ class TestSecurityModelThreading:
         assert "Spark treats submitted code and runners as trusted." in analyze_user
 
     @patch("franktheunicorn.security.triage.search_cves", return_value=[])
-    @patch("franktheunicorn.security.triage._get_triage_backend")
+    @patch("franktheunicorn.security.triage._get_triage_backends")
     def test_triage_autoloads_security_model_from_repo(
         self,
         mock_get_backend: MagicMock,
@@ -563,7 +564,7 @@ class TestSecurityModelThreading:
 
         parse_json = json.dumps({"title": "t", "component": "c", "poc": "p", "impact": "i"})
         backend = _CapturingBackend(responses=[parse_json, self._analyze_json()])
-        mock_get_backend.return_value = backend
+        mock_get_backend.return_value = [backend]
 
         project = ProjectFactory(owner="acme", repo="widget")
         report = SecurityReportFactory(project=project, raw_text="report", title="", status="new")
@@ -580,9 +581,12 @@ class TestSecurityModelThreading:
         _system, analyze_user = backend.calls[-1]
         assert "Data files are untrusted; loaded models are trusted." in analyze_user
 
-    @patch("franktheunicorn.security.triage._analyze_report", return_value=(True, ""))
+    @patch(
+        "franktheunicorn.security.triage._analyze_report",
+        return_value=_AnalysisOutcome(True, "", call_failed=False),
+    )
     @patch("franktheunicorn.security.triage.search_cves", return_value=[])
-    @patch("franktheunicorn.security.triage._get_triage_backend")
+    @patch("franktheunicorn.security.triage._get_triage_backends")
     def test_cve_lookup_runs_before_analysis(
         self,
         mock_get_backend: MagicMock,
@@ -598,7 +602,7 @@ class TestSecurityModelThreading:
 
         parse_json = json.dumps({"title": "t", "component": "c", "poc": "p", "impact": "i"})
         backend = _MockLLMBackend(responses=[parse_json])
-        mock_get_backend.return_value = backend
+        mock_get_backend.return_value = [backend]
 
         from franktheunicorn.security.cve_lookup import CVEMatch
 
@@ -607,10 +611,9 @@ class TestSecurityModelThreading:
         # When _analyze_report is called, cve_candidates must already be filled.
         captured: dict[str, Any] = {}
 
-        def _capture(*args: Any, **kwargs: Any) -> tuple[bool, str]:
+        def _capture(*args: Any, **kwargs: Any) -> Any:
             captured["cve_candidates"] = kwargs.get("cve_candidates")
-            # (wrote_a_verdict, reason_it_did_not)
-            return True, ""
+            return _AnalysisOutcome(True, "", call_failed=False)
 
         mock_analyze.side_effect = _capture
 
@@ -792,7 +795,7 @@ class TestPartialFailureIsolation:
             github_username="testuser", llm_backends=[LLMBackendConfig(provider="stub")]
         )
 
-    @patch("franktheunicorn.security.triage._get_triage_backend")
+    @patch("franktheunicorn.security.triage._get_triage_backends")
     def test_a_wrong_key_answer_does_not_blank_a_previous_verdict(
         self, mock_get_backend: MagicMock, db: Any
     ) -> None:
@@ -815,9 +818,9 @@ class TestPartialFailureIsolation:
             status="new",
         )
         parse_json = json.dumps({"title": "t", "component": "c", "severity": "high"})
-        mock_get_backend.return_value = _MockLLMBackend(
-            responses=[parse_json, json.dumps({"assessment": "looks real to me"})]
-        )
+        mock_get_backend.return_value = [
+            _MockLLMBackend(responses=[parse_json, json.dumps({"assessment": "looks real to me"})])
+        ]
 
         with (
             patch("franktheunicorn.security.triage._check_cves"),
@@ -829,7 +832,7 @@ class TestPartialFailureIsolation:
         assert report.triage_summary == "Previously judged real by a good run."
         assert report.poc_plausible is True
 
-    @patch("franktheunicorn.security.triage._get_triage_backend")
+    @patch("franktheunicorn.security.triage._get_triage_backends")
     def test_a_failed_cve_lookup_does_not_abort_the_run(
         self, mock_get_backend: MagicMock, db: Any
     ) -> None:
@@ -847,7 +850,7 @@ class TestPartialFailureIsolation:
         analyze_json = json.dumps(
             {"poc_plausible": True, "poc_assessment": "yes", "triage_summary": "Real."}
         )
-        mock_get_backend.return_value = _MockLLMBackend(responses=[parse_json, analyze_json])
+        mock_get_backend.return_value = [_MockLLMBackend(responses=[parse_json, analyze_json])]
 
         with patch(
             "franktheunicorn.security.triage._check_cves",
@@ -858,7 +861,7 @@ class TestPartialFailureIsolation:
         report.refresh_from_db()
         assert report.triage_summary == "Real."
 
-    @patch("franktheunicorn.security.triage._get_triage_backend", return_value=None)
+    @patch("franktheunicorn.security.triage._get_triage_backends", return_value=[])
     def test_no_backend_unsticks_a_report_left_in_triaging(
         self, _mock_backend: MagicMock, db: Any
     ) -> None:
@@ -877,6 +880,281 @@ class TestPartialFailureIsolation:
 
         report.refresh_from_db()
         assert report.status == "new"
+
+
+class TestRequiresAuthDisabledEvidence:
+    """The cheap close: a scenario that needs authentication switched off is a
+    disabled feature, not a vulnerability, and the report text usually says so."""
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Anyone can read the shuffle files when authentication is disabled.",
+            "Authentication is disabled on the server, so the endpoint is open.",
+            "If auth is off, the RPC handler accepts anything.",
+            "This requires authentication to be disabled.",
+            "With authentication turned off, I can fetch /logs.",
+            "Disable authentication and then run the client.",
+            "Disabling auth exposes the metrics servlet.",
+            "The server was running with auth turned off.",
+            # The config property spelling; the \b before "auth" sits on the dot.
+            "spark.authenticate is disabled by default, so this works everywhere.",
+            "The exploit assumes auth is disabled.",
+            # The structured spelling, straight out of a Preconditions section
+            # or a config dump.
+            "Preconditions: spark.authenticate=false",
+            "spark.authenticate = false",
+            "spark-defaults.conf:\nspark.authenticate false",
+            "-Dspark.authenticate=false",
+            "auth.enabled=false",
+            "authentication_enabled: off",
+            "Setup: set `spark.authenticate=false` and restart the master.",
+        ],
+    )
+    def test_precondition_phrases_match(self, text: str) -> None:
+        from franktheunicorn.security.triage import requires_auth_disabled_evidence
+
+        assert requires_auth_disabled_evidence(text), text
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # Missing authentication on an endpoint that should have it is a
+            # real finding — not what this check is for.
+            "An unauthenticated attacker can execute code.",
+            "No authentication is required for this endpoint.",
+            # Auth *bypass* is a real finding.
+            "The attacker can bypass authentication entirely.",
+            "This works even when authentication is enabled.",
+            # Works regardless of the auth setting — not a precondition.
+            "This works even when authentication is off.",
+            "The exploit does not require authentication to be disabled.",
+            # The bug is that the *attacker* gets to switch it off.
+            "An attacker can disable authentication by sending a crafted frame.",
+            "The vulnerability allows turning off authentication.",
+            "An attacker can set spark.authenticate=false on the driver.",
+            # The actor is further back than a modal's-width but on the same line.
+            "An attacker can use the /api/v2/config endpoint (no session needed) "
+            "to set spark.authenticate=false",
+            # Actor verbs beyond "can": the bug is that the server ends up off.
+            "A crafted POST to /admin/config causes the server to disable "
+            "authentication for all users",
+            # Auth *on* is not a precondition for anything.
+            "spark.authenticate=true",
+            # Advice against the setting is not the exploit's precondition.
+            "Do not set spark.authenticate=false in production.",
+            # "no"/"none" are not config values here: this is the
+            # unauthenticated-endpoint class above, not a disabled feature.
+            "auth no longer required",
+            "There is no auth=false workaround for this",
+            # A pasted config dump is context, not a precondition —
+            # spark.authenticate=false is Spark's default.
+            "Config (spark-defaults.conf):\nspark.authenticate=false\nspark.ui.enabled=true",
+            # "=false" means auth is ON for negative-prefixed and require- names.
+            "disable_auth=false is set in server.conf but the endpoint still answers.",
+            "noauth=false",
+            "require_auth=false",
+            # Both-states reports: the disambiguator sits after the match.
+            "Tested auth=false and auth=true. Same NPE both ways.",
+            "Reproduces with auth=true and auth=false",
+            "with auth off and on",
+            # An off-by-one is not an off switch.
+            "There is an auth off-by-one in the token parser",
+            # "unless" is a doubt-word: "safe unless disabled" and "fails
+            # unless disabled" are opposite claims with the same shape.
+            "The endpoint responds unless auth is off",
+            # "cannot" is the commonest negation of "can" and matches neither
+            # "not" (no word boundary inside it) nor "can".
+            "The exploit cannot be used to disable authentication.",
+            "You cannot turn off authentication remotely.",
+            # The bug itself is what switches auth off — the subject is the
+            # vulnerability, not the attacker.
+            "The vulnerability disables authentication between master and workers.",
+            "A crafted RPC frame disables authentication on the master.",
+            "This bug turns off authentication for the web UI.",
+            "Sending a single packet disables authentication checks entirely.",
+            "It is possible to disable authentication remotely.",
+            "It is possible to set spark.authenticate=false remotely.",
+            "This patch leaves authentication disabled for the admin API.",
+            # Both-states with "or" after the match: the setting is irrelevant,
+            # which is the real-finding class.
+            "The exploit works with authentication disabled or enabled.",
+            "Authentication is disabled or enabled, it makes no difference.",
+            # A property name longer than the bounded prefix is not a config
+            # line this check recognises.
+            "x" * 61 + "auth=false",
+            # Nothing about auth at all.
+            "SQL injection in /api/users?id=1 OR 1=1",
+        ],
+    )
+    def test_real_findings_and_negations_do_not_match(self, text: str) -> None:
+        from franktheunicorn.security.triage import requires_auth_disabled_evidence
+
+        assert requires_auth_disabled_evidence(text) == "", text
+
+    def test_a_dot_run_does_not_backtrack_quadratically(self) -> None:
+        """Report text is attacker-controlled; the unbounded prefix measured
+        30s on a 40KB run of "a." — the cheap close must stay cheap."""
+        import time
+
+        from franktheunicorn.security.triage import requires_auth_disabled_evidence
+
+        start = time.monotonic()
+        assert requires_auth_disabled_evidence("a." * 20_000) == ""
+        assert time.monotonic() - start < 5
+
+    def test_the_evidence_is_the_matching_line(self) -> None:
+        from franktheunicorn.security.triage import requires_auth_disabled_evidence
+
+        text = "Some setup.\nWhen authentication is disabled, the port is open.\nMore text."
+        assert requires_auth_disabled_evidence(text) == (
+            "When authentication is disabled, the port is open."
+        )
+
+
+@pytest.mark.django_db
+class TestAuthDisabledCheapClose:
+    """Integration: the close happens before a backend is even resolved."""
+
+    @pytest.mark.parametrize(
+        ("raw_text", "evidence"),
+        [
+            (
+                "Anyone can read the shuffle files when authentication is disabled.",
+                "authentication is disabled",
+            ),
+            # The structured spelling is the same close as the prose one.
+            (
+                "Preconditions: spark.authenticate=false\n"
+                "Steps: connect to the master and submit a job.",
+                "spark.authenticate=false",
+            ),
+        ],
+    )
+    def test_closes_without_any_backend_configured(self, raw_text: str, evidence: str) -> None:
+        """The whole point: no LLM is billed — or even configured — for a report
+        whose scenario needs authentication switched off."""
+        from tests.factories import SecurityReportFactory
+
+        report = SecurityReportFactory(raw_text=raw_text, status="new")
+        config = OperatorConfig(github_username="testuser")  # no llm_backends at all
+
+        triage_report(report, None, config)
+
+        report.refresh_from_db()
+        assert report.status == "invalid"
+        assert evidence in report.triage_summary
+
+    def test_the_close_is_logged(self, caplog: pytest.LogCaptureFixture) -> None:
+        from tests.factories import SecurityReportFactory
+
+        report = SecurityReportFactory(
+            raw_text="If auth is off, the RPC handler accepts anything.",
+            status="new",
+        )
+        with caplog.at_level(logging.INFO, logger="franktheunicorn.security.triage"):
+            triage_report(report, None, OperatorConfig(github_username="testuser"))
+
+        record = next(r for r in caplog.records if "without LLM triage" in r.getMessage())
+        assert record.levelno == logging.INFO
+        assert f"#{report.pk}" in record.getMessage()
+
+    @pytest.mark.parametrize(
+        ("raw_text", "status", "triage_summary", "expected_status"),
+        [
+            # status valid is the operator's; the regex doesn't get a say.
+            ("when authentication is disabled, bad things happen", "valid", "", "valid"),
+            # Reopen = status back to 'new', but the old summary is still
+            # there — the cheap close must not fire twice on the same text.
+            (
+                "when authentication is disabled, bad things happen",
+                "new",
+                "Operator reopened: auth was actually ON in this deployment.",
+                "new",
+            ),
+            # Nothing to close: a clean report proceeds to the pipeline.
+            ("SQL injection in /api/users?id=1 OR 1=1", "new", "", "new"),
+        ],
+    )
+    def test_the_cheap_close_defers(
+        self, raw_text: str, status: str, triage_summary: str, expected_status: str
+    ) -> None:
+        """Operator verdicts, reopened reports, and clean reports all skip the
+        cheap close and proceed to the full pipeline (which here raises: no
+        backend configured)."""
+        from franktheunicorn.security.triage import TriageIncompleteError
+        from tests.factories import SecurityReportFactory
+
+        report = SecurityReportFactory(
+            raw_text=raw_text,
+            status=status,
+            triage_summary=triage_summary,
+        )
+        config = OperatorConfig(github_username="testuser")
+        with pytest.raises(TriageIncompleteError, match="No LLM backend"):
+            triage_report(report, None, config)
+        report.refresh_from_db()
+        assert report.status == expected_status
+
+    def test_a_plausible_verdict_alone_counts_as_triaged(self) -> None:
+        """A terse model reply can set poc_plausible and leave both text fields
+        empty — that report was triaged, and the cheap close must not discard
+        the plausible verdict."""
+        from franktheunicorn.security.triage import TriageIncompleteError
+        from tests.factories import SecurityReportFactory
+
+        report = SecurityReportFactory(
+            raw_text="when authentication is disabled, bad things happen",
+            status="new",
+            triage_summary="",
+            poc_assessment="",
+            poc_plausible=True,
+        )
+        with pytest.raises(TriageIncompleteError, match="No LLM backend"):
+            triage_report(report, None, OperatorConfig(github_username="testuser"))
+        report.refresh_from_db()
+        assert report.status == "new"
+        assert report.poc_plausible is True
+
+    def test_an_expected_behavior_verdict_alone_counts_as_triaged(self) -> None:
+        """Same hole, other boolean: a reply of just {"is_expected_behavior":
+        true} leaves both text fields and poc_plausible empty."""
+        from franktheunicorn.security.triage import TriageIncompleteError
+        from tests.factories import SecurityReportFactory
+
+        report = SecurityReportFactory(
+            raw_text="when authentication is disabled, bad things happen",
+            status="new",
+            triage_summary="",
+            poc_assessment="",
+            poc_plausible=None,
+            is_expected_behavior=True,
+        )
+        with pytest.raises(TriageIncompleteError, match="No LLM backend"):
+            triage_report(report, None, OperatorConfig(github_username="testuser"))
+        report.refresh_from_db()
+        assert report.status == "new"
+        assert report.is_expected_behavior is True
+
+    def test_a_concurrent_operator_verdict_is_not_overwritten(self) -> None:
+        """The operator can rule from the still-open detail page while the
+        worker fetches; the cheap close re-reads status rather than trusting
+        this instance's copy."""
+        from franktheunicorn.core.models import SecurityReport
+        from franktheunicorn.security.triage import TriageIncompleteError
+        from tests.factories import SecurityReportFactory
+
+        report = SecurityReportFactory(
+            raw_text="when authentication is disabled, bad things happen",
+            status="new",
+        )
+        # The operator's verdict lands after the worker's fetch, before triage.
+        SecurityReport.objects.filter(pk=report.pk).update(status="valid")
+
+        with pytest.raises(TriageIncompleteError, match="No LLM backend"):
+            triage_report(report, None, OperatorConfig(github_username="testuser"))
+        report.refresh_from_db()
+        assert report.status == "valid"
 
 
 @pytest.mark.django_db
@@ -902,10 +1180,11 @@ class TestTriageSaysWhyItHadNoVerdict:
             backend._call_api = MagicMock(side_effect=exc)  # type: ignore[method-assign]
 
         with caplog.at_level(logging.WARNING):
-            wrote, reason = _analyze_report(self._report(), backend, "")
+            outcome = _analyze_report(self._report(), backend, "")
 
-        assert wrote is False
-        assert "not reachable" in reason
+        assert outcome.wrote_verdict is False
+        assert outcome.call_failed is True
+        assert "not reachable" in outcome.reason
         record = next(r for r in caplog.records if "could not reach the LLM backend" in r.message)
         assert record.levelno == logging.WARNING
         assert record.exc_info is None
@@ -916,13 +1195,14 @@ class TestTriageSaysWhyItHadNoVerdict:
         from franktheunicorn.security.triage import _analyze_report
 
         backend = _MockLLMBackend(responses=[json.dumps({"totally": "unrelated"})])
-        wrote, reason = _analyze_report(self._report(), backend, "")
+        outcome = _analyze_report(self._report(), backend, "")
 
-        assert wrote is False
-        assert "without any of the fields triage reads" in reason
+        assert outcome.wrote_verdict is False
+        assert outcome.call_failed is False
+        assert "without any of the fields triage reads" in outcome.reason
 
     def test_the_reason_reaches_the_operator_visible_error(self) -> None:
-        from franktheunicorn.security.triage import TriageIncompleteError, triage_report
+        from franktheunicorn.security.triage import TriageIncompleteError
 
         report = self._report()
         config = OperatorConfig(
@@ -933,9 +1213,169 @@ class TestTriageSaysWhyItHadNoVerdict:
         with (
             patch(
                 "franktheunicorn.security.triage._analyze_report",
-                return_value=(False, "the LLM backend is not reachable (Connection refused)"),
+                return_value=_AnalysisOutcome(
+                    False,
+                    "the LLM backend is not reachable (Connection refused)",
+                    call_failed=True,
+                ),
             ),
             patch("franktheunicorn.security.triage.search_cves", return_value=[]),
             pytest.raises(TriageIncompleteError, match="not reachable"),
         ):
             triage_report(report, None, config)
+
+
+class _FailingBackend(_MockLLMBackend):
+    """Test backend whose every call raises, like a misconfigured model name."""
+
+    def __init__(self, exc: Exception) -> None:
+        super().__init__(responses=[])
+        self._exc = exc
+
+    def _call_api(self, system_prompt: str, user_message: str, api_key: str) -> str:
+        self._call_count += 1
+        raise self._exc
+
+
+@pytest.mark.django_db
+class TestBackendFallthrough:
+    """A backend whose calls raise costs a fallthrough, not the report's verdict."""
+
+    def _analyze_json(self) -> str:
+        import json
+
+        return json.dumps(
+            {"poc_plausible": True, "poc_assessment": "yes", "triage_summary": "Real."}
+        )
+
+    def _broken_then_working(self) -> tuple[_FailingBackend, _MockLLMBackend]:
+        """The shape of the original report: ``unknown model "claude-sonnet-5-0"``
+        in front, a working backend behind it."""
+        import json
+
+        broken = _FailingBackend(RuntimeError('BadRequestError: 400 unknown model "x"'))
+        working = _MockLLMBackend(
+            responses=[json.dumps({"title": "t", "component": "c"}), self._analyze_json()]
+        )
+        return broken, working
+
+    @patch("franktheunicorn.security.triage.search_cves", return_value=[])
+    @patch("franktheunicorn.security.triage._get_triage_backends")
+    def test_a_raised_call_falls_through_to_the_next_backend(
+        self, mock_get_backends: MagicMock, _mock_cves: MagicMock, db: Any
+    ) -> None:
+        from tests.factories import SecurityReportFactory
+
+        broken, working = self._broken_then_working()
+        mock_get_backends.return_value = [broken, working]
+
+        report = SecurityReportFactory(raw_text="A vulnerability with an exploit.", status="new")
+        triage_report(report, None, OperatorConfig(github_username="testuser"))
+
+        report.refresh_from_db()
+        assert report.triage_summary == "Real."
+        assert broken._call_count == 2  # parse and analyze both raised
+        assert working._call_count == 2
+
+    @patch("franktheunicorn.security.triage.search_cves", return_value=[])
+    @patch("franktheunicorn.security.triage._get_triage_backends")
+    def test_the_fallthrough_is_logged_naming_where_it_went(
+        self,
+        mock_get_backends: MagicMock,
+        _mock_cves: MagicMock,
+        caplog: pytest.LogCaptureFixture,
+        db: Any,
+    ) -> None:
+        from tests.factories import SecurityReportFactory
+
+        broken, working = self._broken_then_working()
+        mock_get_backends.return_value = [broken, working]
+
+        report = SecurityReportFactory(raw_text="A vulnerability with an exploit.", status="new")
+        with caplog.at_level(logging.INFO, logger="franktheunicorn.security.triage"):
+            triage_report(report, None, OperatorConfig(github_username="testuser"))
+
+        record = next(r for r in caplog.records if "Falling through to backend" in r.getMessage())
+        assert record.levelno == logging.INFO
+        assert working.label in record.getMessage()
+        assert "unknown model" in record.getMessage()
+
+    @patch("franktheunicorn.security.triage.search_cves", return_value=[])
+    @patch("franktheunicorn.security.triage._get_triage_backends")
+    def test_a_garbage_reply_does_not_fall_through(
+        self, mock_get_backends: MagicMock, _mock_cves: MagicMock, db: Any
+    ) -> None:
+        """A call that *answered* with nothing usable is the model's behaviour;
+        billing every remaining backend for the same answer buys nothing."""
+        import json
+
+        from franktheunicorn.security.triage import TriageIncompleteError
+        from tests.factories import SecurityReportFactory
+
+        garbled = _MockLLMBackend(
+            responses=[json.dumps({"title": "t"}), json.dumps({"totally": "unrelated"})]
+        )
+        spare = _MockLLMBackend(responses=[self._analyze_json()])
+        mock_get_backends.return_value = [garbled, spare]
+
+        report = SecurityReportFactory(raw_text="A vulnerability with an exploit.", status="new")
+        with pytest.raises(TriageIncompleteError, match="without any of the fields"):
+            triage_report(report, None, OperatorConfig(github_username="testuser"))
+
+        assert spare._call_count == 0
+
+    @patch("franktheunicorn.security.triage.search_cves", return_value=[])
+    @patch("franktheunicorn.security.triage._get_triage_backends")
+    def test_all_backends_failing_says_how_many_were_tried(
+        self, mock_get_backends: MagicMock, _mock_cves: MagicMock, db: Any
+    ) -> None:
+        from franktheunicorn.security.triage import TriageIncompleteError
+        from tests.factories import SecurityReportFactory
+
+        mock_get_backends.return_value = [
+            _FailingBackend(RuntimeError("down")),
+            _FailingBackend(RuntimeError("also down")),
+        ]
+
+        report = SecurityReportFactory(raw_text="A vulnerability with an exploit.", status="new")
+        with pytest.raises(TriageIncompleteError, match=r"tried 2 backends"):
+            triage_report(report, None, OperatorConfig(github_username="testuser"))
+
+        report.refresh_from_db()
+        assert report.status == "new"
+
+    @patch("franktheunicorn.security.triage.search_cves", return_value=[])
+    @patch("franktheunicorn.security.triage._get_triage_backends")
+    def test_the_context_checks_wait_for_a_parse_that_populated_fields(
+        self, mock_get_backends: MagicMock, mock_cves: MagicMock, db: Any
+    ) -> None:
+        """On a fallthrough the first backend's parse raised, so gating the CVE
+        lookup on attempt 1 would run it with empty parsed fields — and never
+        again. It must run after the parse that worked."""
+        from tests.factories import SecurityReportFactory
+
+        broken, working = self._broken_then_working()
+        mock_get_backends.return_value = [broken, working]
+
+        report = SecurityReportFactory(raw_text="A vulnerability with an exploit.", status="new")
+        triage_report(report, None, OperatorConfig(github_username="testuser"))
+
+        # The working backend's parse sets parsed_component="c"; the CVE lookup
+        # must have seen it, not the empty fields the broken backend left.
+        assert mock_cves.call_count == 1
+        assert mock_cves.call_args.args[0] == "c"
+
+    def test_override_comes_first_and_identical_configs_dedup(self) -> None:
+        from franktheunicorn.security.triage import _get_triage_backends
+
+        override = LLMBackendConfig(provider="stub", model="strong")
+        shared = LLMBackendConfig(provider="stub", model="cheap")
+        config = OperatorConfig(
+            github_username="testuser",
+            llm_backends=[shared, shared],
+            security_triage=SecurityTriageConfig(enabled=True, llm_backend=override),
+        )
+
+        backends = _get_triage_backends(config)
+
+        assert [backend.label for backend in backends] == ["stub/strong", "stub/cheap"]

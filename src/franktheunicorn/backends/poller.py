@@ -28,6 +28,11 @@ logger = logging.getLogger(__name__)
 # YAML governance value → Project.project_type choice.
 _GOVERNANCE_TO_PROJECT_TYPE = {"asf": "asf", "personal": "personal", "corporate": "org"}
 
+#: Projects this process has already warned are configured-but-disabled. The
+#: warning is for the operator who just switched one off, not for every poll
+#: cycle afterwards.
+_warned_disabled_projects: set[tuple[str, str]] = set()
+
 # Stored fields the (free) open-PR listing payload can be compared against,
 # so a routing-relevant edit is never skipped as "unchanged".
 _LISTING_FIELDS = (
@@ -96,12 +101,19 @@ def poll_project(
         # view gates on enabled AND configured. Said out loud, because the way this
         # is usually reached is an ad-hoc ingest creating the row before the config
         # existed, and then there is no symptom at all.
-        logger.warning(
-            "%s/%s has a config but its Project row is disabled, so it stays off the "
-            "dashboard. Re-enable it in the admin or run manage.py add_project.",
-            project_config.owner,
-            project_config.repo,
-        )
+        #
+        # Once per process, not once per cycle: after the first telling, a
+        # deliberately-disabled project is a WARNING every few minutes forever,
+        # which is how the one useful warning gets lost in the noise.
+        key = (project_config.owner, project_config.repo)
+        if key not in _warned_disabled_projects:
+            _warned_disabled_projects.add(key)
+            logger.warning(
+                "%s/%s has a config but its Project row is disabled, so it stays off the "
+                "dashboard. Re-enable it in the admin or run manage.py add_project.",
+                project_config.owner,
+                project_config.repo,
+            )
 
     logger.debug("Listing pull requests for %s/%s ...", project_config.owner, project_config.repo)
     raw_prs = client.list_pull_requests(project_config.owner, project_config.repo)

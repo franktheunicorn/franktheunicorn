@@ -88,6 +88,22 @@ class TestBuildTriagePrompt:
         # It should call out the input-channel distinction (data file vs code).
         assert "data file" in lowered
 
+    def test_system_prompt_covers_the_auth_disabled_rule(self) -> None:
+        """The LLM gets the same rule the cheap close applies, in both
+        directions: needs-auth-off is not a vulnerability, works-despite-auth
+        is."""
+        system, _ = build_triage_prompt(
+            parsed_component="x",
+            parsed_poc="y",
+            parsed_impact="z",
+            project_context="",
+        )
+        lowered = system.lower()
+        assert "authentication" in lowered
+        assert "disabled or turned off" in lowered
+        assert "is_expected_behavior=true" in lowered
+        assert "despite" in lowered
+
     def test_security_model_included_when_provided(self) -> None:
         _, user = build_triage_prompt(
             parsed_component="x",

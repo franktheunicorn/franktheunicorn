@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import patch
 
 import pytest
@@ -132,6 +133,32 @@ class TestQueueTriageOnRequest:
         assert queue_triage_on_request(report) is True
         assert queue_triage_on_request(report) is False
         assert WorkerCommand.objects.filter(security_report=report).count() == 1
+
+
+@pytest.mark.django_db
+class TestQueueLogging:
+    """ "The button did nothing" is undiagnosable when the door itself is silent."""
+
+    def test_a_created_command_is_logged(self, caplog: pytest.LogCaptureFixture) -> None:
+        report = SecurityReportFactory()
+        with caplog.at_level(logging.INFO, logger="franktheunicorn.security.queue"):
+            assert queue_triage(report) is True
+
+        record = next(r for r in caplog.records if "Queued run_security_triage" in r.getMessage())
+        assert record.levelno == logging.INFO
+        assert f"report #{report.pk}" in record.getMessage()
+
+    def test_a_declined_auto_triage_names_the_settings(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A gate that stops configured work logs why, with the setting that changes it."""
+        report = SecurityReportFactory()
+        with caplog.at_level(logging.INFO, logger="franktheunicorn.security.queue"):
+            assert queue_triage_if_enabled(report, _config(auto_triage=False)) is False
+
+        record = next(r for r in caplog.records if "Not auto-triaging" in r.getMessage())
+        assert record.levelno == logging.INFO
+        assert "auto_triage=False" in record.getMessage()
 
 
 @pytest.mark.django_db

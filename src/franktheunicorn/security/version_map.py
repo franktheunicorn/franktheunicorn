@@ -310,6 +310,13 @@ def _apply_check_script(patch: str) -> str | None:
             MAX_PATCH_CHARS,
         )
         return None
+    if "\x00" in patch:
+        # A local executor hands the script to subprocess as argv, which refuses
+        # embedded nulls with a ValueError — and map_report_versions is contracted
+        # to never raise. A patch with a NUL is a binary patch, which git apply
+        # would want as literal chunks rather than text anyway.
+        logger.info("Proposed patch contains a NUL byte; skipping the apply check.")
+        return None
     delimiter = f"FRANK_PATCH_{hashlib.sha256(patch.encode('utf-8')).hexdigest()[:16]}"
     if delimiter in patch:
         return None

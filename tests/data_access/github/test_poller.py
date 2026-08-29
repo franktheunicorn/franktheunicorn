@@ -55,6 +55,28 @@ class TestPoller:
         assert pr42.interest_score > 0
         assert len(pr42.score_breakdown) > 0
 
+    def test_disabled_project_warns_once_per_process(
+        self, tmp_path: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The warning is for the operator who just switched the project off —
+        one per process, not one per poll cycle forever."""
+        import logging
+
+        from franktheunicorn.backends import poller
+
+        poller._warned_disabled_projects.discard(("apache", "spark"))
+        try:
+            ProjectFactory(owner="apache", repo="spark", enabled=False)
+            config = ProjectConfig(owner="apache", repo="spark")
+            with caplog.at_level(logging.WARNING, logger="franktheunicorn.backends.poller"):
+                poll_project(MockGitHubClient(tmp_path), config, operator_username="holdenk")
+                poll_project(MockGitHubClient(tmp_path), config, operator_username="holdenk")
+
+            warnings = [r for r in caplog.records if "stays off the dashboard" in r.getMessage()]
+            assert len(warnings) == 1
+        finally:
+            poller._warned_disabled_projects.discard(("apache", "spark"))
+
 
 @pytest.mark.django_db
 class TestSessionDetectionInPoller:

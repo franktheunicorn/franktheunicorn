@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from franktheunicorn.security.cve_lookup import search_cves
 from franktheunicorn.security.prompt import build_parse_prompt, build_triage_prompt
@@ -27,8 +28,161 @@ _VALID_SEVERITIES: frozenset[str] = frozenset(
 # computed, saved to every other field, and then never surfaced in any queue.
 _AUTO_MANAGED_STATUSES: frozenset[str] = frozenset({"new", "triaging", "expected-behavior"})
 
+
+#: A cheap-close pattern plus how the guards treat it — see _ACTOR_GUARD_RE.
+class _AuthDisabledPattern(NamedTuple):
+    pattern: re.Pattern[str]
+    actor_guarded: bool
+    is_config: bool = False
+
+
+#: Phrases that mean the report's scenario only holds with authentication
+#: switched off. That is the operator disabling a security feature, not a
+#: vulnerability — the feature exists precisely to stop the thing being
+#: reported — so the report can be closed from its own text without spending
+#: the two LLM calls. Deliberately narrow: "unauthenticated" and "no
+#: authentication required" are NOT here, because an endpoint that should
+#: authenticate and doesn't is a real finding; only an explicit disabled/off
+#: precondition qualifies, and even then the guard below gets a veto.
+_AUTH_DISABLED_RES: tuple[_AuthDisabledPattern, ...] = (
+    # "authentication is disabled", "auth was turned off", "spark.authenticate
+    # is disabled" (the \b before auth sits on the dot, and the alternation
+    # covers the config-property verb form).
+    _AuthDisabledPattern(
+        re.compile(
+            r"\bauth(?:entication|enticate)?\s+(?:is|was|were|are|be|been|being|to\s+be|"
+            r"must\s+be|has\s+been|have\s+been|needs?\s+to\s+be|turned|switched)\s+"
+            r"(?:(?:turned|switched)\s+)?(?:disabled|off)\b",
+            re.IGNORECASE,
+        ),
+        actor_guarded=False,
+    ),
+    # "with/when/if/requires authentication disabled" — no copula needed.
+    # "unless" is a doubt-word and lives in the negation guard instead:
+    # "safe unless disabled" and "fails unless disabled" are opposite claims
+    # with the same shape, and the cheap close can't tell them apart.
+    _AuthDisabledPattern(
+        re.compile(
+            r"\b(?:with|when|if|requires?|requiring|needs?|needing|assumes?|assuming|"
+            r"after|given)\s+(?:[\w-]+\s+){0,3}auth(?:entication|enticate)?\s+"
+            r"(?:is\s+|being\s+)?(?:disabled|turned\s+off|switched\s+off|off)\b",
+            re.IGNORECASE,
+        ),
+        actor_guarded=False,
+    ),
+    # The setup step itself: "disable authentication", "turning off auth".
+    _AuthDisabledPattern(
+        re.compile(
+            r"\b(?:disabl(?:e|es|ed|ing)|turn(?:s|ed|ing)?\s+off|switch(?:es|ed|ing)?\s+off)"
+            r"\s+(?:the\s+)?auth(?:entication|enticate)?\b",
+            re.IGNORECASE,
+        ),
+        actor_guarded=True,
+    ),
+    # The structured spelling, straight out of a Preconditions section:
+    # "spark.authenticate=false", "auth.enabled: off", "authentication_enabled
+    # disabled". Only false-y values — a report about an insecure *default*
+    # ("...=false out of the box") still matches, which is fine: the close
+    # message says how to reopen, and the docs already tell the operator to
+    # turn it on. "no"/"none"/"0" are deliberately not values: "auth no longer
+    # required" is the unauthenticated-endpoint class above. The (?!-) keeps
+    # "auth off-by-one" out. The property name is captured so the vetoes in
+    # _config_match_is_vetoed can read it. The prefix is bounded because
+    # report text is attacker-controlled: unbounded, [\w.-]* backtracks
+    # quadratically on dot-runs ("a." * 20000 was 30s of worker time).
+    _AuthDisabledPattern(
+        re.compile(
+            r"\b([\w.-]{0,60}auth(?:entication|enticate)?(?:[._]enabled)?)\s*[=:\s]\s*"
+            r"(?:false|off|disabled)\b(?!-)",
+            re.IGNORECASE,
+        ),
+        actor_guarded=True,
+        is_config=True,
+    ),
+)
+
+#: Words in the run-up to a match that mean it isn't the precondition we're
+#: looking for. "Works even when auth is off" is a real finding, and "does not
+#: require auth to be disabled" is a boast, not a precondition. A veto costs
+#: two LLM calls, a wrong close costs a real report marked invalid — so the
+#: guard fires on any doubt.
+_NEGATION_GUARD_RE = re.compile(
+    r"\b(?:not|never|no|without|even|despite|regardless|whether|still|instead|rather|"
+    r"unless|cannot)\b|n't",
+    re.IGNORECASE,
+)
+
+#: The extra veto for the action/setting patterns. "Disable authentication" is
+#: a precondition when it's a setup step and a real finding when the bug is
+#: that the attacker gets to — "attacker can disable authentication", "a
+#: crafted POST causes the server to disable authentication" — so who does the
+#: disabling decides. The second half of the list is the effect-phrasing
+#: version: when the *bug itself* switches auth off, the subject is the
+#: vulnerability, not the attacker — "the vulnerability disables
+#: authentication", "it is possible to set spark.authenticate=false remotely".
+#: These words are deliberately absent from the state patterns' guard: in
+#: "anyone can read the shuffle files when authentication is disabled" the
+#: "can" belongs to the main clause and says nothing about who switched auth
+#: off.
+_ACTOR_GUARD_RE = re.compile(
+    r"\b(?:attacker|bypass(?:es|ing)?|allows?|lets?|can|could|able|causes?|makes?|"
+    r"forces?|leads?|results?|vulnerabilit(?:y|ies)|bug|exploit|crafted|packet|frame|"
+    r"patch|possible|payload)\b",
+    re.IGNORECASE,
+)
+
+#: "with auth off and on", "disabled or enabled" — a both-states claim is the
+#: strongest real-finding signal there is, and the disambiguator sits *after*
+#: the match, where the other guards never look.
+_FORWARD_GUARD_RE = re.compile(r"\s*(?:and|or)\s+(?:on|enabled|true)\b", re.IGNORECASE)
+
+#: A true-y auth assignment anywhere in the report vetoes a false-y config
+#: match: "tested auth=false and auth=true, same result" is a comparison, not
+#: a precondition. Prefix bounded like the config pattern's — same attacker-
+#: controlled text, same quadratic backtracking otherwise.
+_AUTH_ENABLED_CONFIG_RE = re.compile(
+    r"\b[\w.-]{0,60}auth(?:entication|enticate)?(?:[._]enabled)?\s*[=:\s]\s*"
+    r"(?:true|on|enabled)\b(?!-)",
+    re.IGNORECASE,
+)
+
+#: A config dump looks exactly like a precondition to the config pattern —
+#: spark.authenticate=false is Spark's *default*, so a report that pastes its
+#: environment would be hijacked by its own context. The tell is company: a
+#: setting called out as a precondition stands alone, a dump is a run of
+#: key=value lines. "=" always counts; ":" only with a config-ish key
+#: (a dot/underscore/dash in it), so prose like "Steps: connect to the
+#: master" doesn't, and a bare "Preconditions:" header has no value to match.
+_CONFIG_LINE_RE = re.compile(r"^\s*[\w.-]+\s*=|^\s*[\w.-]*[._-][\w.-]*\s*:\s*\S")
+
+
+def _looks_like_config_line(line: str) -> bool:
+    # The slice keeps the regex linear: its character classes backtrack
+    # quadratically on very long lines, and report text is attacker-
+    # controlled. A config line's key and separator sit well inside 160
+    # chars; only the value runs long.
+    return bool(_CONFIG_LINE_RE.match(line.strip()[:160]))
+
+
+#: Property-name tokens that flip the meaning of "=false": disable_auth=false
+#: and require_auth=false both mean the protection is ON — the real-finding
+#: class the prose patterns are careful to exclude.
+_CONFIG_NAME_VETO_TOKENS = frozenset({"no", "noauth", "disable", "disabled", "require", "required"})
+
+#: How far before a match the guards look. One sentence's worth for negation.
+#: The actor guard looks back to the start of the line, capped: a modal on
+#: another line is not about this verb, but "an attacker can use the
+#: /api/v2/config endpoint to set spark.authenticate=false" puts sixty chars
+#: between the actor and the setting.
+_GUARD_WINDOW_CHARS = 100
+_ACTOR_GUARD_WINDOW_CHARS = 120
+_FORWARD_GUARD_WINDOW_CHARS = 20
+
+#: Cap on the evidence line stored in the summary and the log.
+_EVIDENCE_MAX_CHARS = 200
+
 if TYPE_CHECKING:
-    from franktheunicorn.config.models import OperatorConfig, ProjectConfig
+    from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig, ProjectConfig
     from franktheunicorn.core.models import SecurityReport
     from franktheunicorn.review.backends.base import BaseLLMBackend
 
@@ -52,19 +206,41 @@ def triage_report(
 ) -> SecurityReport:
     """Run full triage pipeline on a security report.
 
-    1. Parse raw text into structured fields via LLM
-    2. Load project context (README, docs) if available
-    3. Triage: assess POC validity, check for expected behavior
-    4. Search CVE database for duplicates
-    5. Save results to the report
+    A report whose own text says the scenario needs authentication disabled is
+    closed first, without a model. Otherwise, per backend in fallthrough
+    order: parse the raw text into structured fields, then assess POC validity
+    and expected behavior. CVE lookup and duplicate detection run once between
+    the two, as context for the analysis. Results are saved to the report.
     """
     logger.info("Starting triage for security report #%d", report.pk)
 
-    # Resolve the backend *before* mutating status — otherwise a deployment
+    # The operator can rule from the still-open detail page while the worker
+    # fetches and starts; don't let this instance's stale copy talk the cheap
+    # close (or the "triaging" claim below) into overwriting a verdict.
+    report.status = _current_status(report)
+
+    # The cheapest close comes first, before a backend is even resolved.
+    # Gated on never-been-triaged: once a verdict field is set the report gets
+    # the full pipeline, so an operator reopening it (status back to "new") is
+    # honoured rather than re-closed by the same regex. The two booleans count
+    # because a terse reply can set one alone and leave the text fields empty.
+    if (
+        report.status == "new"
+        and not report.triage_summary
+        and not report.poc_assessment
+        and report.poc_plausible is None
+        and not report.is_expected_behavior
+    ):
+        evidence = requires_auth_disabled_evidence(f"{report.title}\n{report.raw_text}")
+        if evidence:
+            _close_requires_auth_disabled(report, evidence)
+            return report
+
+    # Resolve the backends *before* mutating status — otherwise a deployment
     # with no LLM backends (e.g. email auto-triage on but llm_backends empty)
     # strands every report in "triaging" and it drops out of the "new" queue.
-    backend = _get_triage_backend(operator_config)
-    if backend is None:
+    backends = _get_triage_backends(operator_config)
+    if not backends:
         # Raised, not returned. Returning normally left the WorkerCommand
         # "completed", which the report page reads as "a run finished and the
         # model's answer had nothing usable in it — re-running is worth a try".
@@ -94,66 +270,89 @@ def triage_report(
     # times out or answers with unparseable JSON would silently swallow the
     # report. _analyze_report moves it off "triaging" on success; this puts it
     # back in the queue on every other path.
+    produced_verdict = False
+    no_verdict_reason = ""
+    attempts = 0
+    context_checked = False
     try:
-        logger.info("Parsing report #%d via LLM", report.pk)
-        _parse_report(report, backend)
-        logger.info(
-            "Parse complete for report #%d: severity=%r component=%r",
-            report.pk,
-            report.assessed_severity,
-            report.parsed_component[:60] if report.parsed_component else "",
-        )
-
         project_context = _load_project_context(report, project_config)
-        # CVE lookup runs before analysis so the matches are available as
-        # context for the expected-behavior / duplicate call.
-        #
-        # Guarded, unlike every other step here, because it was the one that
-        # wasn't. It is *optional context* sitting between the two calls that
-        # matter, and search_cves only catches httpx.HTTPError and
-        # TimeoutException — NVD answers 200 with an HTML maintenance page under
-        # load, so .json() raises JSONDecodeError, which is a ValueError and
-        # escapes both. That aborted the run after the parse call was already
-        # billed and before the call that produces the verdict.
-        try:
-            _check_cves(report, operator_config)
-        except Exception:
-            logger.warning(
-                "CVE lookup failed for report #%d; triaging without it", report.pk, exc_info=True
-            )
-
-        # The other dedup question, and the one that bites at volume: the CVE check
-        # asks whether the *public record* already has this, this asks whether *your
-        # backlog* does. Placed here for the same reason and guarded the same way —
-        # it is a link on the row, not part of the verdict, and it must not be able
-        # to abort a run whose parse call has already been billed.
-        #
-        # After _parse_report on purpose: the comparison reads parsed_component and
-        # parsed_poc, so running it earlier would compare on the raw text alone and
-        # miss the structure that makes it accurate.
-        try:
-            _check_duplicates(report, operator_config)
-        except Exception:
-            logger.warning(
-                "Duplicate detection failed for report #%d; triaging without it",
-                report.pk,
-                exc_info=True,
-            )
-
         security_model = _resolve_security_model(project_config)
 
         from franktheunicorn.security.learning import resolve_triage_guidance
 
         learned_guidance = resolve_triage_guidance(report.project)
-        logger.info("Analyzing report #%d via LLM", report.pk)
-        produced_verdict, no_verdict_reason = _analyze_report(
-            report,
-            backend,
-            project_context,
-            security_model=security_model,
-            cve_candidates=report.cve_matches,
-            learned_guidance=learned_guidance,
-        )
+
+        for backend in backends:
+            attempts += 1
+            if attempts > 1:
+                logger.info(
+                    "Falling through to backend %s for report #%d after: %s",
+                    backend.label,
+                    report.pk,
+                    no_verdict_reason,
+                )
+            logger.info("Parsing report #%d via LLM (%s)", report.pk, backend.label)
+            parsed = _parse_report(report, backend)
+            logger.info(
+                "Parse complete for report #%d: severity=%r component=%r",
+                report.pk,
+                report.assessed_severity,
+                report.parsed_component[:60] if report.parsed_component else "",
+            )
+
+            # CVE lookup and duplicate detection run once, after the first
+            # parse that populated fields — they read those fields (the CVE
+            # matches feed the analysis prompt), and NVD is rate-limited, so
+            # per-backend re-runs buy nothing. On a fallthrough the first
+            # backend's parse may have raised, leaving nothing to read; the
+            # last backend is the last chance to run them at all.
+            #
+            # Both are guarded, unlike every other step here, because they were
+            # the ones that weren't. Each is *optional context* sitting next to
+            # the two calls that matter, and search_cves only catches
+            # httpx.HTTPError and TimeoutException — NVD answers 200 with an
+            # HTML maintenance page under load, so .json() raises
+            # JSONDecodeError, which is a ValueError and escapes both. That
+            # aborted the run after the parse call was already billed and
+            # before the call that produces the verdict. The duplicate check
+            # writes a link on the row, never a verdict — duplicates are the
+            # operator's call.
+            if not context_checked and (parsed or attempts == len(backends)):
+                context_checked = True
+                try:
+                    _check_cves(report, operator_config)
+                except Exception:
+                    logger.warning(
+                        "CVE lookup failed for report #%d; triaging without it",
+                        report.pk,
+                        exc_info=True,
+                    )
+                try:
+                    _check_duplicates(report, operator_config)
+                except Exception:
+                    logger.warning(
+                        "Duplicate detection failed for report #%d; triaging without it",
+                        report.pk,
+                        exc_info=True,
+                    )
+
+            logger.info("Analyzing report #%d via LLM (%s)", report.pk, backend.label)
+            outcome = _analyze_report(
+                report,
+                backend,
+                project_context,
+                security_model=security_model,
+                cve_candidates=report.cve_matches,
+                learned_guidance=learned_guidance,
+            )
+            produced_verdict = outcome.wrote_verdict
+            no_verdict_reason = outcome.reason
+            # An analyze call that *raised* (unknown model, backend down, rate
+            # limit) is worth trying the next backend on. A call that answered
+            # with nothing usable is the model's behaviour, and every remaining
+            # backend is likely to answer the same way — don't bill them all.
+            if produced_verdict or not outcome.call_failed:
+                break
     finally:
         _restore_untriaged_status(report)
 
@@ -163,6 +362,8 @@ def triage_report(
         # the previous run's fields — so a silent return presented a stale
         # verdict as this run's answer, on the one page where being wrong about
         # a vulnerability matters most.
+        if attempts > 1:
+            no_verdict_reason = f"{no_verdict_reason} (tried {attempts} backends)"
         raise TriageIncompleteError(
             f"Triage produced no verdict for report #{report.pk}: {no_verdict_reason}"
         )
@@ -176,6 +377,105 @@ def triage_report(
     )
 
     return report
+
+
+def requires_auth_disabled_evidence(text: str) -> str:
+    """The line suggesting the scenario needs authentication switched off, or "".
+
+    Cheap string match over the report, run before any LLM call — see
+    ``_AUTH_DISABLED_RES`` for what qualifies and the guards for what vetoes a
+    match. The returned line is evidence: it goes into the triage summary and
+    the log so the close is auditable rather than a verdict from nowhere.
+    """
+    enabled_assignment = _AUTH_ENABLED_CONFIG_RE.search(text) is not None
+    for entry in _AUTH_DISABLED_RES:
+        for match in entry.pattern.finditer(text):
+            window = text[max(0, match.start() - _GUARD_WINDOW_CHARS) : match.start()]
+            if _NEGATION_GUARD_RE.search(window):
+                continue
+            if entry.actor_guarded:
+                line_start = text.rfind("\n", 0, match.start()) + 1
+                near = text[
+                    max(line_start, match.start() - _ACTOR_GUARD_WINDOW_CHARS) : match.start()
+                ]
+                if _ACTOR_GUARD_RE.search(near):
+                    continue
+            if _FORWARD_GUARD_RE.match(
+                text[match.end() : match.end() + _FORWARD_GUARD_WINDOW_CHARS]
+            ):
+                continue
+            if entry.is_config and _config_match_is_vetoed(text, match, enabled_assignment):
+                continue
+            return _evidence_line(text, match)
+    return ""
+
+
+def _config_match_is_vetoed(text: str, match: re.Match[str], enabled_assignment: bool) -> bool:
+    """The vetoes only the structured spelling needs — it can't tell a
+    precondition from its surroundings, so the surroundings decide: a property
+    name whose "=false" means ON, a true-y auth assignment anywhere else in
+    the report, or a config line next door all send the report to the LLM."""
+    name_tokens = set(re.split(r"[._-]+", match.group(1).lower()))
+    if name_tokens & _CONFIG_NAME_VETO_TOKENS:
+        return True
+    if enabled_assignment:
+        return True
+    line_start = text.rfind("\n", 0, match.start()) + 1
+    line_end = text.find("\n", match.end())
+    line_end = len(text) if line_end == -1 else line_end
+    prev_line = next(
+        (line for line in reversed(text[:line_start].splitlines()) if line.strip()), ""
+    )
+    next_line = next((line for line in text[line_end:].splitlines() if line.strip()), "")
+    return bool(_looks_like_config_line(prev_line) or _looks_like_config_line(next_line))
+
+
+def _evidence_line(text: str, match: re.Match[str]) -> str:
+    """The line containing *match*, whitespace-collapsed.
+
+    A line longer than _EVIDENCE_MAX_CHARS is windowed around the match: a
+    bare prefix truncation can cut the matched text off entirely, and the
+    match is the evidence.
+    """
+    line_start = text.rfind("\n", 0, match.start()) + 1
+    line_end = text.find("\n", match.end())
+    line = text[line_start : line_end if line_end != -1 else len(text)]
+    if len(line) > _EVIDENCE_MAX_CHARS:
+        start = min(
+            max(0, match.start() - line_start - _EVIDENCE_MAX_CHARS // 4),
+            len(line) - _EVIDENCE_MAX_CHARS,
+        )
+        line = line[start : start + _EVIDENCE_MAX_CHARS]
+    return " ".join(line.split())
+
+
+def _close_requires_auth_disabled(report: SecurityReport, evidence: str) -> None:
+    """Close *report* as not-a-vulnerability: its scenario needs auth switched off.
+
+    Written to the same fields an LLM run would set, so the detail page renders
+    it like any other triage result. Status "invalid" is deliberate and is the
+    one auto-close triage makes: the report describes the absence of a feature
+    the documentation already tells the operator to turn on. The LLM path marks
+    the same scenario class "expected-behavior" instead — the regex close is
+    stickier because a literal "spark.authenticate=false" is the more certain
+    signal, and the invalid queue is where operator-deleted reports live.
+    """
+    report.status = "invalid"
+    report.triage_summary = (
+        "Closed without model triage: the report's own text says the scenario "
+        "requires authentication to be disabled/turned off. That is a "
+        "configuration choice, not a vulnerability — authentication exists "
+        f"precisely to prevent it. Matched: {evidence!r}. If this is wrong, set "
+        "the status back to 'new' and re-run triage; the full pipeline will "
+        "assess it."
+    )
+    report.save(update_fields=["status", "triage_summary", "updated_at"])
+    logger.info(
+        "Closed security report #%d without LLM triage: the scenario requires "
+        "authentication to be disabled (matched %r).",
+        report.pk,
+        evidence,
+    )
 
 
 def _current_status(report: SecurityReport) -> str:
@@ -216,25 +516,30 @@ def _restore_untriaged_status(report: SecurityReport) -> None:
     )
 
 
-def _get_triage_backend(operator_config: OperatorConfig) -> BaseLLMBackend | None:
-    """The backend triage should use: its own if configured, else ``llm_backends[0]``.
+def _get_triage_backends(operator_config: OperatorConfig) -> list[BaseLLMBackend]:
+    """Triage's backends, in fallthrough order.
 
-    ``llm_backends[0]`` is shared by three unrelated consumers — triage,
-    ``review/shepherding.py`` and the ``llm_checks`` path — so "which model does
-    triage use" was not separately expressible, and picking one for triage picked it
-    for the other two. That is a real bind rather than a tidiness complaint: triage
-    reads security reports and wants the strongest model available, while the
-    per-PR check paths run on every PR and want the cheap local one. Putting Cortex
-    first to get good triage silently moved shepherding and ``llm_checks`` onto it
-    too.
+    Its own ``security_triage.llm_backend`` first if configured, then
+    ``llm_backends`` in order. The override exists because ``llm_backends[0]``
+    is shared by three unrelated consumers — triage, ``review/shepherding.py``
+    and the ``llm_checks`` path — so "which model does triage use" was not
+    separately expressible, and picking one for triage picked it for the other
+    two. That is a real bind rather than a tidiness complaint: triage reads
+    security reports and wants the strongest model available, while the per-PR
+    check paths run on every PR and want the cheap local one.
 
-    So ``security_triage.llm_backend`` overrides, and unset keeps the old behaviour
-    exactly. Logged when it's in force, because a second place a model can come from
-    is a second place to look when the answer is surprising.
+    A list rather than one backend because a misconfigured or down backend
+    ("unknown model", connection refused) should cost a fallthrough, not the
+    report's verdict: the worker marks the command failed and the report sits
+    in the new queue until someone notices. Dedup is on the connection
+    identity, not just provider+model: two entries differing only in
+    ``api_key_env`` or ``reviewer`` are different backends (a rate-limited key
+    and a different remote box are exactly what fallthrough is for).
     """
     from franktheunicorn.review.backends import get_backend
     from franktheunicorn.review.backends.base import BaseLLMBackend
 
+    configs: list[LLMBackendConfig] = []
     override = operator_config.security_triage.llm_backend
     if override is not None:
         logger.info(
@@ -242,16 +547,33 @@ def _get_triage_backend(operator_config: OperatorConfig) -> BaseLLMBackend | Non
             override.provider,
             override.model or "default model",
         )
-        chosen = override
-    elif operator_config.llm_backends:
-        chosen = operator_config.llm_backends[0]
-    else:
-        return None
+        configs.append(override)
+    configs.extend(operator_config.llm_backends)
 
-    backend = get_backend(chosen)
-    if not isinstance(backend, BaseLLMBackend):
-        return None
-    return backend
+    backends: list[BaseLLMBackend] = []
+    seen: set[tuple[str, str, str, str, str]] = set()
+    for cfg in configs:
+        key = (cfg.provider, cfg.model, cfg.base_url, cfg.api_key_env, cfg.reviewer)
+        if key in seen:
+            continue
+        seen.add(key)
+        backend = get_backend(cfg)
+        if isinstance(backend, BaseLLMBackend):
+            backends.append(backend)
+        else:
+            logger.warning(
+                "Triage backend %s/%s is not an LLM backend; skipping it.",
+                cfg.provider,
+                cfg.model or "default model",
+            )
+    return backends
+
+
+def _get_triage_backend(operator_config: OperatorConfig) -> BaseLLMBackend | None:
+    """The first of :func:`_get_triage_backends`, for callers that only want to
+    know which backend triage would use."""
+    backends = _get_triage_backends(operator_config)
+    return backends[0] if backends else None
 
 
 def _call_llm(
@@ -322,8 +644,13 @@ def _coerce_bool(value: object) -> bool:
     return _coerce_tristate(value) is True
 
 
-def _parse_report(report: SecurityReport, backend: BaseLLMBackend) -> None:
-    """Parse raw report text into structured fields via LLM."""
+def _parse_report(report: SecurityReport, backend: BaseLLMBackend) -> bool:
+    """Parse raw report text into structured fields via LLM.
+
+    Returns whether it populated anything — the caller gates the CVE and
+    duplicate lookups on that, and on a backend fallthrough the first parse
+    may have raised while the next one succeeds.
+    """
     system_prompt, user_message = build_parse_prompt(report.raw_text)
     project_id = report.project_id if report.project else None
 
@@ -337,7 +664,7 @@ def _parse_report(report: SecurityReport, backend: BaseLLMBackend) -> None:
         )
     except Exception:
         logger.exception("Failed to parse security report %d", report.pk)
-        return
+        return False
 
     if parsed:
         report.title = report.title or str(parsed.get("title", ""))[:500]
@@ -364,6 +691,17 @@ def _parse_report(report: SecurityReport, backend: BaseLLMBackend) -> None:
                 "updated_at",
             ]
         )
+        return True
+    return False
+
+
+class _AnalysisOutcome(NamedTuple):
+    """What ``_analyze_report`` did: whether a verdict was written, why not,
+    and whether the LLM call itself raised (the caller's fallthrough signal)."""
+
+    wrote_verdict: bool
+    reason: str
+    call_failed: bool
 
 
 def _analyze_report(
@@ -373,14 +711,13 @@ def _analyze_report(
     security_model: str = "",
     cve_candidates: list[object] | None = None,
     learned_guidance: str = "",
-) -> tuple[bool, str]:
+) -> _AnalysisOutcome:
     """Run triage analysis on parsed report.
 
-    Returns ``(wrote_a_verdict, reason_it_did_not)``. Deliberately does not raise
-    on an LLM failure (callers rely on that), so the return value is the only way
-    the caller can tell "assessed" from "the model was unreachable" — and the
-    dashboard needs that distinction to avoid presenting a previous run's verdict
-    as this one's.
+    Deliberately does not raise on an LLM failure (callers rely on that), so
+    the return value is the only way the caller can tell "assessed" from "the
+    model was unreachable" — and the dashboard needs that distinction to avoid
+    presenting a previous run's verdict as this one's.
 
     The reason is carried out rather than only logged, because the caller turns
     this into the operator-visible error and "Triage produced no verdict" told
@@ -419,9 +756,13 @@ def _analyze_report(
                 report.pk,
                 detail,
             )
-            return False, f"the LLM backend is not reachable ({detail})"
+            return _AnalysisOutcome(
+                False, f"the LLM backend is not reachable ({detail})", call_failed=True
+            )
         logger.exception("Failed to analyze security report %d", report.pk)
-        return False, f"the LLM call raised {type(exc).__name__}: {exc}"[:300]
+        return _AnalysisOutcome(
+            False, f"the LLM call raised {type(exc).__name__}: {exc}"[:300], call_failed=True
+        )
 
     # "Did the model answer?", not "is the dict non-empty". A reply with none of
     # these keys — a wrong key name is entirely ordinary — used to count as a
@@ -477,11 +818,13 @@ def _analyze_report(
                 "updated_at",
             ]
         )
-        return True, ""
-    return False, (
+        return _AnalysisOutcome(True, "", call_failed=False)
+    return _AnalysisOutcome(
+        False,
         "the model replied without any of the fields triage reads (poc_plausible, "
         "poc_assessment, is_expected_behavior, expected_behavior_explanation, "
-        "triage_summary) — check the model is one that follows a JSON schema"
+        "triage_summary) — check the model is one that follows a JSON schema",
+        call_failed=False,
     )
 
 

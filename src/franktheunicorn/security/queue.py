@@ -140,6 +140,7 @@ def queue_command(
     if (report is None) == (pull_request is None):
         msg = "queue_command needs exactly one of report / pull_request"
         raise ValueError(msg)
+    target = f"report #{report.pk}" if report is not None else f"PR #{pull_request.pk}"  # type: ignore[union-attr]
     # The constraint is the check. There used to be a pre-flight SELECT here to
     # avoid relying on an IntegrityError for the common case, and it cost more than
     # it saved: a bulk import calls this on a row it created microseconds earlier,
@@ -156,7 +157,6 @@ def queue_command(
                 priority=priority,
             )
     except IntegrityError as exc:
-        target = f"report #{report.pk}" if report is not None else f"PR #{pull_request.pk}"  # type: ignore[union-attr]
         if not _is_inflight_conflict(exc):
             # Not a duplicate — a foreign key to a row deleted between page render
             # and POST, a NOT NULL violation, anything else. Reporting those as
@@ -166,6 +166,10 @@ def queue_command(
             raise
         logger.info("%s already queued for %s", command, target)
         return False
+    # The success case was the only one with no line: a click produced nothing
+    # in any log until the worker claimed the row, which made "the button did
+    # nothing" and "the worker isn't running" indistinguishable from here.
+    logger.info("Queued %s for %s (priority %d)", command, target, priority)
     return True
 
 
@@ -208,6 +212,17 @@ def queue_triage_if_enabled(
     """
     triage_config = _resolve(operator_config).security_triage
     if not triage_config.enabled or not triage_config.auto_triage:
+        # A gate that stops configured work says so, naming the setting that
+        # changes it — the silent version of this is "reports sit in new
+        # forever and nobody knows why". The callers are the trickle paths
+        # (paste form, inbox poll), so one line per report is affordable.
+        logger.info(
+            "Not auto-triaging report #%d: security_triage.enabled=%s, "
+            "security_triage.auto_triage=%s (both in operator.yaml).",
+            report.pk,
+            triage_config.enabled,
+            triage_config.auto_triage,
+        )
         return False
     return queue_triage(report, priority=PRIORITY_BULK)
 
