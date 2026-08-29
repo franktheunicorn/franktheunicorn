@@ -156,15 +156,37 @@ def _unique_paths(text: str) -> list[str]:
         # removeprefix, not lstrip: lstrip takes a character *set*, so it ate the
         # leading dot of ".github/workflows/ci.yml" and the path never matched.
         raw = match.group(1).strip().removeprefix("./")
-        if raw.startswith(("a/", "b/")) and raw.count("/") >= 2:
-            raw = raw[2:]
-        if not raw or raw.lower() in seen:
-            continue
-        seen.add(raw.lower())
-        paths.append(raw)
+        for candidate in _prefix_candidates(raw):
+            if not candidate or candidate.lower() in seen:
+                continue
+            if candidate.startswith(("a/", "b/")) and candidate[2:].lower() in seen:
+                # _PATCH_PATH_RE runs first and strips the prefix authoritatively,
+                # so once the bare form is in, the prefixed spelling of a patch
+                # header is the same file listed twice.
+                continue
+            seen.add(candidate.lower())
+            paths.append(candidate)
         if len(paths) >= _MAX_PATHS:
             break
-    return paths
+    return paths[:_MAX_PATHS]
+
+
+def _prefix_candidates(raw: str) -> tuple[str, ...]:
+    """*raw*, and the same path without git's ``a/``/``b/`` diff prefix.
+
+    Which of the two is the real path is not decidable from the text: ``a/Foo.py``
+    is what a diff calls ``Foo.py``, and it is also what a repo with a top-level
+    ``a/`` calls a genuine file. The old guard stripped only at two or more
+    slashes, so ``a/Foo.py`` and ``b/pom.xml`` kept a prefix that matches nothing
+    in ``git ls-tree`` output — and a path that matches nothing is reported as
+    "not affected" with a confidence attached.
+
+    Both go in the list instead, and ls-tree picks whichever exists. It costs
+    nothing: the branch listing is fetched once and these are set lookups.
+    """
+    if raw.startswith(("a/", "b/")):
+        return (raw, raw[2:])
+    return (raw,)
 
 
 def release_line_from_branch(branch: str) -> str:

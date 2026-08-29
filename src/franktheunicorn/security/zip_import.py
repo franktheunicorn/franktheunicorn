@@ -578,6 +578,14 @@ def _queue_git_scan(
             f"{unattached} report(s) have no project, so there is no repo to {needs} "
             "— re-import with a project selected"
         )
+    elif not queued and ids:
+        # Every target already had a run in flight, so the queue deduped all of
+        # them. Said out loud because the caller ticked a box: with reason empty
+        # and the count zero, the import reported nothing about it at all.
+        reason = (
+            f"all {len(ids)} report(s) already have a {label} run queued or running, so "
+            "nothing new was added — wait for those to finish rather than re-importing"
+        )
     logger.info(
         "Queued %d %s run(s) from this import%s",
         queued,

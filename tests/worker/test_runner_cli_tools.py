@@ -323,3 +323,57 @@ class TestRemoteCloneUsesProjectForgeUrl:
         assert resolved is not None
         _cwd, _base_ref, temp_branch = resolved
         assert temp_branch == _REMOTE, f"expected _REMOTE sentinel, got {temp_branch!r}"
+
+
+@pytest.mark.django_db
+class TestLocalCheckoutHonoursTheLane:
+    """The interactive thread's lane has to reach the *local* path too — local is
+    the default mode, and this branch used the clone directly rather than going
+    through prepare_repo, so the isolation worked for ssh only."""
+
+    def teardown_method(self) -> None:
+        from franktheunicorn.review.tool_executor import set_workspace_lane
+
+        set_workspace_lane("")
+
+    @staticmethod
+    def _clone(tmp_path: Path) -> Path:
+        repo = tmp_path / "repos" / "acme" / "widget"
+        repo.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        (repo / "f.txt").write_text("x")
+        subprocess.run(["git", "add", "."], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "c"],
+            cwd=repo,
+            check=True,
+        )
+        return repo
+
+    def test_a_lane_moves_the_local_checkout_out_of_the_shared_clone(
+        self, db_pr: PullRequest, tmp_path: Path
+    ) -> None:
+        from franktheunicorn.config.models import RemoteExecutionConfig
+        from franktheunicorn.review.tool_executor import set_workspace_lane
+
+        repo = self._clone(tmp_path)
+        local = RemoteExecutionConfig(mode="local")
+
+        with (
+            patch("franktheunicorn.worker.runner._resolve_base_ref", return_value="main"),
+            patch(
+                "franktheunicorn.worker.runner._checkout_pr_head_with_merge",
+                return_value=(True, "frank-review-1"),
+            ) as merge,
+        ):
+            plain = _resolve_cwd_for_tool(db_pr, local, repo, "CodeRabbit")
+            set_workspace_lane("force-run")
+            laned = _resolve_cwd_for_tool(db_pr, local, repo, "CodeRabbit")
+
+        assert plain is not None
+        assert laned is not None
+        assert plain[0] == str(repo)
+        assert laned[0] != str(repo), "a force-run must not check out in the shared clone"
+        assert "force-run" in laned[0]
+        # And the merge/checkout ran in the laned tree, not the shared one.
+        assert merge.call_args_list[-1].args[1] == laned[0]

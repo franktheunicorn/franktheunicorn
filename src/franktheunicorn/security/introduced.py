@@ -257,9 +257,16 @@ def _pickaxe(executor: ToolExecutor, cwd: str, path: str, needle: str) -> PathOr
     ``git log -S`` is newest-first, so the introducing commit is the last line.
     ``--pickaxe-regex`` is deliberately off: the needle is source code and
     treating its brackets as syntax would match nothing.
+
+    ``--follow`` because history stops at a rename otherwise, and the commit it
+    stops on is the *rename* — reported as the introduction, badged as a real
+    answer, with every release between the true introduction and the rename
+    silently dropped from the affected list. Verified in a throwaway repo: a
+    needle added in commit A and the file renamed in B yields B without it and A
+    with it.
     """
     result = executor.run(
-        ["git", "log", _LOG_FORMAT, "-S", needle, "--", path],
+        ["git", "log", _LOG_FORMAT, "-S", needle, "--follow", "--", path],
         cwd=cwd,
         timeout=_GIT_TIMEOUT_SECONDS,
     )
@@ -341,8 +348,14 @@ def _releases_containing(executor: ToolExecutor, cwd: str, commit: str) -> list[
 
 
 def persist_introduction(report: SecurityReport, run: IntroductionRun) -> None:
-    """Store the run on the report. A failed scan does not wipe a good earlier one."""
-    if run.error:
+    """Store the run on the report. A scan with no answer does not wipe a good one.
+
+    Guarding on ``error`` alone was not enough: a run that started fine and dated
+    nothing carries ``error == ""`` and an empty commit, so a re-scan after the
+    cited paths were edited out of the report body would overwrite v1.0.0-and-86-
+    releases with blanks and take the whole panel off the page.
+    """
+    if run.error or not run.commit:
         return
     report.introduced_commit = run.commit[:64]
     report.introduced_at = run.when

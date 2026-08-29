@@ -70,8 +70,8 @@ def test_extract_paths_prefers_patch_and_keeps_casing() -> None:
         ("see .github/workflows/ci.yml", [".github/workflows/ci.yml"]),
         ("see ./sql/core/Foo.scala", ["sql/core/Foo.scala"]),
         # Dense scanner output separates with commas and no space.
-        ("Affected: a/Foo.py,b/Bar.py", ["a/Foo.py", "b/Bar.py"]),
-        ("Affected: a/Foo.py;b/Bar.py", ["a/Foo.py", "b/Bar.py"]),
+        ("Affected: src/Foo.py,lib/Bar.py", ["src/Foo.py", "lib/Bar.py"]),
+        ("Affected: src/Foo.py;lib/Bar.py", ["src/Foo.py", "lib/Bar.py"]),
         # An extension that *extends* a listed one. Ordering alone doesn't fix
         # these — without a boundary after the alternation, .pyi captured as .py
         # and .html as .h whatever the order.
@@ -450,3 +450,41 @@ def test_worker_handler_logs_a_declined_run() -> None:
     cmd = WorkerCommand.objects.create(command="map_report_versions", security_report=report)
     _dispatch(cmd, _operator(_verifier(enabled=False)))
     assert "enabled is false" in cmd.log
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # Undecidable from the text, so both go in and ls-tree picks. The old guard
+        # stripped only at two-or-more slashes, so these kept a prefix that matches
+        # nothing on any branch — read as "not affected" with a confidence attached.
+        (" a/Foo.py", ["a/Foo.py", "Foo.py"]),
+        (" b/pom.xml", ["b/pom.xml", "pom.xml"]),
+        (" a/sql/core/Foo.scala", ["a/sql/core/Foo.scala", "sql/core/Foo.scala"]),
+        # No prefix to be ambiguous about.
+        (" src/Foo.py", ["src/Foo.py"]),
+    ],
+)
+def test_an_ambiguous_diff_prefix_yields_both_candidates(text: str, expected: list[str]) -> None:
+    report = SecurityReportFactory.build(
+        raw_text=text, proposed_patch="", parsed_component="", title="", parsed_poc=""
+    )
+    assert extract_report_paths(report) == expected
+
+
+@pytest.mark.django_db
+def test_a_repo_root_path_behind_a_diff_prefix_is_found_on_the_branch() -> None:
+    """End to end: the citation says a/Foo.py, git says Foo.py, and the branch is
+    affected. This came back "not-affected 0.55" for a file sitting right there."""
+    report = SecurityReportFactory(
+        project=ProjectFactory(owner="apache", repo="spark"),
+        raw_text="Unsafe deserialization in a/Foo.py",
+        proposed_patch="",
+    )
+    executor = _PathExecutor({"master": "Foo.py\n", "branch-4.0": "", "branch-3.5": ""})
+    with patch("franktheunicorn.review.tool_executor.make_executor", return_value=executor):
+        run = map_report_versions(report, _operator())
+
+    by_branch = {r.branch: r for r in run.results}
+    assert by_branch["master"].verdict == "affected"
+    assert by_branch["branch-4.0"].verdict == "not-affected"

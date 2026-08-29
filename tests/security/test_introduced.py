@@ -130,6 +130,17 @@ class TestFindIntroduction:
         assert "Add dynamic class loading" in run.summary()
         assert executor.needles == ["val cls = Utils.classForName(userSuppliedName)"]
 
+    def test_the_pickaxe_follows_renames(self) -> None:
+        """Without --follow, history stops at the rename and the *rename* commit is
+        reported as the introduction — badged as a real answer, with every release
+        between the true introduction and the rename dropped from the list."""
+        executor = _GitExecutor(pickaxe=_log_line("introsha", 1_400_000_000, "Add the hole"))
+        self._run(executor, self._report())
+
+        pickaxes = [c for c in executor.calls if "-S" in c]
+        assert pickaxes
+        assert all("--follow" in c for c in pickaxes)
+
     def test_falls_back_to_file_added_and_says_it_is_a_floor(self) -> None:
         """No patch means we can only date the file, which is not the same answer."""
         executor = _GitExecutor(added=_log_line("addsha", 1_300_000_000, "Add Foo.scala"))
@@ -241,6 +252,28 @@ class TestPersistIntroduction:
         assert report.introduced_method == "patch-line"
         assert report.introduced_releases == ["v3.5.0"]
         assert "sql/core/src/Foo.scala" in report.introduced_summary
+
+    def test_a_scan_that_dates_nothing_does_not_wipe_an_earlier_answer(self) -> None:
+        """error stays empty when git answered and nothing matched, so guarding on
+        error alone overwrote a good answer with blanks and took the panel away."""
+        report = SecurityReportFactory(
+            project=ProjectFactory(owner="apache", repo="spark"),
+            raw_text="hole in sql/core/src/Foo.scala",
+            introduced_commit="keepme",
+            introduced_method="patch-line",
+            introduced_releases=["v1.0.0"],
+            introduced_release_count=86,
+        )
+        executor = _GitExecutor(pickaxe="", added="")
+        with patch("franktheunicorn.review.tool_executor.make_executor", return_value=executor):
+            run = find_introduction(report, _operator())
+        assert run.error == ""
+        assert run.commit == ""
+        persist_introduction(report, run)
+
+        report.refresh_from_db()
+        assert report.introduced_commit == "keepme"
+        assert report.introduced_release_count == 86
 
     def test_a_failed_scan_does_not_wipe_an_earlier_answer(self) -> None:
         report = SecurityReportFactory(

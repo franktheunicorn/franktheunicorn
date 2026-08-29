@@ -292,9 +292,11 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
     except KeyboardInterrupt:
         logger.info("Worker shutting down.")
     finally:
-        # Asked to stop, then given a moment — a command mid-run gets to finish
-        # rather than being abandoned in `running`, where it would dedupe every
-        # retry until fail_stuck_commands swept it.
+        # Asked to stop, then given a moment. A *short* command finishes; a long
+        # one does not, and cannot — an agent CLI has a 1500s budget and nobody
+        # wants Ctrl-C to take 25 minutes. Anything still running is abandoned in
+        # `running` and recovered by requeue_interrupted_commands at next startup,
+        # which is why that sweep exists.
         stop_interactive.set()
         interactive.join(timeout=INTERACTIVE_SHUTDOWN_SECONDS)
         if interactive.is_alive():
@@ -2233,6 +2235,25 @@ def _resolve_cwd_for_tool(
                 pr.number,
             )
             return None
+        # Through prepare_repo, not str(local_repo_path): that is where the
+        # checkout lane is applied, and this path bypassed it entirely — so the
+        # isolation added for the interactive thread worked only for remote.mode
+        # ssh, while local is the default. A force-run would run `git checkout -B`
+        # plus a merge in the very clone the poll cycle was reading blame out of.
+        # With no lane set, prepare_repo returns local_repo_path unchanged.
+        prepared = executor.prepare_repo(
+            pr.project.owner, pr.project.repo, local_path=local_repo_path
+        )
+        if prepared is None:
+            logger.warning(
+                "Could not prepare an isolated checkout of %s for %s; skipping it for "
+                "PR #%d rather than sharing the clone the poll cycle is using.",
+                local_repo_path,
+                tool_name,
+                pr.number,
+            )
+            return None
+        local_repo_path = Path(prepared)
         base_ref = _resolve_base_ref(local_repo_path, pr)
         if base_ref is None:
             # Was a silent return. Usually the base branch isn't fetched in the

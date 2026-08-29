@@ -1007,9 +1007,19 @@ def security_report_list(request: HttpRequest) -> HttpResponse:
             "active_sort": sort,
             "sort_options": _SECURITY_SORT_LABELS,
             "archives": _imported_archives(),
+            # Configured projects, plus any project that actually has a report.
+            # The reports themselves are deliberately *not* allow-list filtered —
+            # hiding a security report because its YAML was removed loses sight of
+            # security work, which is worse than showing a row for an unmonitored
+            # repo. But then the filter has to be able to reach those rows: with
+            # only the allow-list here, a report was listed whose owner/repo could
+            # not be selected in the dropdown above it.
             "projects": (
-                Project.objects.filter(enabled=True)
-                .filter(Project.configured_q())
+                Project.objects.filter(
+                    (Q(enabled=True) & Project.configured_q())
+                    | Q(pk__in=SecurityReport.objects.exclude(project=None).values("project"))
+                )
+                .distinct()
                 .order_by("owner", "repo")
             ),
             "zip_import_command": _zip_import_command(),
@@ -1656,6 +1666,7 @@ def security_report_detail(request: HttpRequest, report_id: int) -> HttpResponse
     # template because merging conflicting answers across branches is a decision,
     # not a loop.
     from franktheunicorn.security.verifier import version_rollup
+    from franktheunicorn.security.version_map import VERSION_MAP_AGENT
 
     version_rows = version_rollup(verifications)
 
@@ -1666,7 +1677,7 @@ def security_report_detail(request: HttpRequest, report_id: int) -> HttpResponse
             "report": report,
             "sandbox_enabled": sandbox_enabled,
             "verifications": verifications,
-            "has_version_map": any(v.agent == "version-map" for v in verifications),
+            "has_version_map": any(v.agent == VERSION_MAP_AGENT for v in verifications),
             "version_rows": version_rows,
             "affected_versions": [
                 row["name"] for row in version_rows if row["status"] == "affected"
