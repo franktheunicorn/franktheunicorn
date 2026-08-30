@@ -14,6 +14,7 @@ from franktheunicorn.security.queue import (
     queue_triage,
     queue_triage_if_enabled,
     queue_triage_on_request,
+    queue_version_follow_on,
 )
 from tests.factories import SecurityReportFactory
 
@@ -184,3 +185,41 @@ class TestCancelPendingForReports:
 
         assert cancel_pending_for_reports([]) == 0
         assert WorkerCommand.objects.count() == 1
+
+
+@pytest.mark.django_db
+class TestQueueVersionFollowOn:
+    """The post-triage version+verify fan-out, gated so a deployment with the
+    verifier off (or a report with no project) queues nothing rather than
+    fanning out no-op commands the worker would silently skip."""
+
+    def _config(self, *, verifier_enabled: bool = True) -> OperatorConfig:
+        config = OperatorConfig(github_username="holdenk")
+        config.security_triage.enabled = True
+        config.security_triage.verifier.enabled = verifier_enabled
+        return config
+
+    def test_queues_both_version_map_and_verify(self) -> None:
+        report = SecurityReportFactory()  # has a project by default
+        vm, verify, skipped = queue_version_follow_on(report, self._config())
+        assert skipped == ""
+        assert vm is True
+        assert verify is True
+        commands = list(
+            WorkerCommand.objects.filter(security_report=report).values_list("command", flat=True)
+        )
+        assert "map_report_versions" in commands
+        assert "verify_security_report" in commands
+
+    def test_a_report_with_no_project_is_skipped(self) -> None:
+        report = SecurityReportFactory(project=None)
+        vm, verify, skipped = queue_version_follow_on(report, self._config())
+        assert (vm, verify) == (False, False)
+        assert "no project" in skipped
+
+    def test_a_disabled_verifier_skips_both(self) -> None:
+        report = SecurityReportFactory()
+        vm, verify, skipped = queue_version_follow_on(report, self._config(verifier_enabled=False))
+        assert (vm, verify) == (False, False)
+        assert "verifier.enabled is false" in skipped
+        assert not WorkerCommand.objects.filter(security_report=report).exists()

@@ -1552,3 +1552,211 @@ class TestVerdictCvePreservation:
 
         report.refresh_from_db()
         assert report.matched_cve_id == ""
+
+
+@pytest.mark.django_db
+class TestSecurityReportAcceptTriage:
+    """The Agree button promotes the staged auto_triage_status into status."""
+
+    @patch("franktheunicorn.config.loader.get_operator_config")
+    def test_accept_promotes_the_suggestion(
+        self, mock_config: MagicMock, client: Client, db: Any
+    ) -> None:
+        from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig
+
+        mock_config.return_value = OperatorConfig(
+            github_username="testuser",
+            llm_backends=[LLMBackendConfig(provider="stub")],
+        )
+        report = SecurityReportFactory(status="new", auto_triage_status="invalid")
+
+        response = client.post(f"/security/{report.pk}/accept-triage/")
+
+        assert response.status_code == 200
+        report.refresh_from_db()
+        assert report.status == "invalid"
+        # The staging field is consumed.
+        assert report.auto_triage_status == ""
+
+    def test_accept_with_nothing_staged_says_so(self, client: Client, db: Any) -> None:
+        report = SecurityReportFactory(status="new", auto_triage_status="")
+
+        response = client.post(f"/security/{report.pk}/accept-triage/")
+
+        assert response.status_code == 200
+        assert b"No triage suggestion to accept" in response.content
+        report.refresh_from_db()
+        assert report.status == "new"
+
+    def test_a_manual_verdict_clears_the_staged_suggestion(self, client: Client, db: Any) -> None:
+        report = SecurityReportFactory(status="new", auto_triage_status="invalid")
+
+        client.post(
+            f"/security/{report.pk}/verdict/",
+            {"status": "valid", "operator_notes": "real after all"},
+        )
+
+        report.refresh_from_db()
+        assert report.status == "valid"
+        # The operator overruled the machine, so the stale suggestion is gone.
+        assert report.auto_triage_status == ""
+
+
+@pytest.mark.django_db
+class TestSecurityReportRerunTriage:
+    """The bulk re-triage button: procedural close, then LLM, then version
+    follow-on for valid-looking ones. Skips operator-ruled and CVE-assigned."""
+
+    @patch("franktheunicorn.config.loader.get_operator_config")
+    def test_no_backend_says_so(self, mock_config: MagicMock, client: Client, db: Any) -> None:
+        from franktheunicorn.config.models import OperatorConfig
+
+        mock_config.return_value = OperatorConfig(github_username="testuser")
+        response = client.post("/security/rerun-triage/")
+        assert response.status_code == 302
+        assert response["Location"].endswith("/security/")
+
+    @patch("franktheunicorn.config.loader.get_operator_config")
+    def test_procedural_close_runs_without_queuing_llm(
+        self, mock_config: MagicMock, client: Client, db: Any
+    ) -> None:
+        from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig
+        from franktheunicorn.core.models import WorkerCommand
+
+        mock_config.return_value = OperatorConfig(
+            github_username="testuser",
+            llm_backends=[LLMBackendConfig(provider="stub")],
+        )
+        report = SecurityReportFactory(
+            raw_text="If auth is off, the RPC handler accepts anything.", status="new"
+        )
+
+        client.post("/security/rerun-triage/")
+
+        report.refresh_from_db()
+        assert report.auto_triage_status == "invalid"
+        # No LLM triage was queued — the cheap close handled it.
+        assert not WorkerCommand.objects.filter(
+            command="run_security_triage", security_report=report
+        ).exists()
+
+    @patch("franktheunicorn.config.loader.get_operator_config")
+    def test_a_clean_report_queues_llm_triage(
+        self, mock_config: MagicMock, client: Client, db: Any
+    ) -> None:
+        from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig
+        from franktheunicorn.core.models import WorkerCommand
+
+        mock_config.return_value = OperatorConfig(
+            github_username="testuser",
+            llm_backends=[LLMBackendConfig(provider="stub")],
+        )
+        report = SecurityReportFactory(raw_text="SQL injection in /api/users?id=1", status="new")
+
+        client.post("/security/rerun-triage/")
+
+        assert WorkerCommand.objects.filter(
+            command="run_security_triage", security_report=report, status="pending"
+        ).exists()
+
+    @patch("franktheunicorn.config.loader.get_operator_config")
+    def test_operator_ruled_and_cve_reports_are_skipped(
+        self, mock_config: MagicMock, client: Client, db: Any
+    ) -> None:
+        from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig
+        from franktheunicorn.core.models import WorkerCommand
+
+        mock_config.return_value = OperatorConfig(
+            github_username="testuser",
+            llm_backends=[LLMBackendConfig(provider="stub")],
+        )
+        # status="new" but carries operator notes: reaches the loop (the
+        # candidate filter admits "new") and is skipped by the notes guard, not
+        # by the filter — so the in-loop skip is actually exercised.
+        ruled = SecurityReportFactory(status="new", operator_notes="operator ruled")
+        with_cve = SecurityReportFactory(status="new", matched_cve_id="CVE-2026-1")
+
+        client.post("/security/rerun-triage/")
+
+        # new + operator notes: skipped from re-triage by the notes guard.
+        # new + a CVE: skipped from re-triage by the CVE guard.
+        assert not WorkerCommand.objects.filter(security_report=ruled).exists()
+        assert not WorkerCommand.objects.filter(security_report=with_cve).exists()
+
+    @patch("franktheunicorn.config.loader.get_operator_config")
+    def test_a_valid_report_without_versions_queues_the_follow_on(
+        self, mock_config: MagicMock, client: Client, db: Any
+    ) -> None:
+        from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig
+        from franktheunicorn.core.models import WorkerCommand
+
+        mock_config.return_value = OperatorConfig(
+            github_username="testuser",
+            llm_backends=[LLMBackendConfig(provider="stub")],
+        )
+        report = SecurityReportFactory(status="valid", affected_versions="")
+
+        client.post("/security/rerun-triage/")
+
+        cmds = set(
+            WorkerCommand.objects.filter(security_report=report).values_list("command", flat=True)
+        )
+        assert "map_report_versions" in cmds
+        assert "verify_security_report" in cmds
+        # Triage itself was not re-queued — the operator already ruled.
+        assert "run_security_triage" not in cmds
+
+
+@pytest.mark.django_db
+class TestSecurityReportVersions:
+    """The explicit affected-versions field: copy from verification, or edit by hand."""
+
+    def test_copy_seeds_from_the_rollup(self, client: Client, db: Any) -> None:
+        from franktheunicorn.core.models import SecurityVerification
+
+        report = SecurityReportFactory(affected_versions="")
+        # The rollup reads each verification's version_impact (a list of
+        # {name, status} rows), not the per-branch verdict — so seed those.
+        SecurityVerification.objects.create(
+            report=report,
+            branch="master",
+            verdict="affected",
+            branch_order=0,
+            version_impact=[{"name": "master", "status": "affected"}],
+        )
+        SecurityVerification.objects.create(
+            report=report,
+            branch="branch-3.5",
+            verdict="not-affected",
+            branch_order=1,
+            version_impact=[{"name": "3.5.x", "status": "not-affected"}],
+        )
+
+        response = client.post(f"/security/{report.pk}/versions/", {"action": "copy"})
+
+        assert response.status_code == 200
+        report.refresh_from_db()
+        # Only the affected row's release line is copied.
+        assert "master" in report.affected_versions
+        assert "3.5" not in report.affected_versions
+
+    def test_copy_with_nothing_to_copy_says_so(self, client: Client, db: Any) -> None:
+        report = SecurityReportFactory(affected_versions="")
+
+        response = client.post(f"/security/{report.pk}/versions/", {"action": "copy"})
+
+        assert response.status_code == 200
+        assert b"No affected rows from verification to copy yet" in response.content
+        report.refresh_from_db()
+        assert report.affected_versions == ""
+
+    def test_save_writes_the_operators_text(self, client: Client, db: Any) -> None:
+        report = SecurityReportFactory(affected_versions="old")
+
+        client.post(
+            f"/security/{report.pk}/versions/",
+            {"action": "save", "affected_versions": "3.5.0, 3.5.1, 4.0.0"},
+        )
+
+        report.refresh_from_db()
+        assert report.affected_versions == "3.5.0, 3.5.1, 4.0.0"

@@ -1,0 +1,58 @@
+{# The operator's canonical affected-versions answer, with a one-click seed #}
+{# from the machine's verification rollup — same shape as the triage Agree #}
+{# button: the agent works it out, the operator owns the verdict, and a copy #}
+{# button bridges the two without retyping. No #versions-area wrapper here: #}
+{# it lives in security_detail.html so this partial's htmx swaps don't #}
+{# re-wrap it (innerHTML into the wrapper, not into a second wrapper). #}
+<div class="versions-panel">
+    <h3>Affected versions</h3>
+    <p class="verify-hint">
+        The sentence that goes in an advisory. The verification and version-map
+        runs above feed this — copy their rollup in, or write your own.
+    </p>
+
+    {% if notice %}
+    <div class="triage-result triage-{{ notice_level|default:"queued" }}">{{ notice }}</div>
+    {% endif %}
+
+    {% if report.affected_versions %}
+    <p class="affected-versions-value">{{ report.affected_versions }}</p>
+    {% else %}
+    <p class="muted">Not set yet.</p>
+    {% endif %}
+
+    <div class="verify-actions" style="margin-top: 0.5rem;">
+        {# Seed from the machine's rollup (the affected rows from the branch table). #}
+        {# Disabled when there's nothing to copy so the button doesn't promise #}
+        {# an action that would write an empty field. #}
+        <form method="post" action="{% url 'dashboard:security_versions' report.pk %}" style="display: inline;">
+            {% csrf_token %}
+            <input type="hidden" name="action" value="copy">
+            <button type="submit" class="action-btn"
+                    {% if not affected_versions %}disabled title="No affected rows from verification to copy yet"{% endif %}
+                    hx-post="{% url 'dashboard:security_versions' report.pk %}"
+                    hx-include="closest form"
+                    hx-target="#versions-area"
+                    hx-swap="innerHTML">
+            ⧉ Copy from verification
+            </button>
+        </form>
+    </div>
+
+    {# Edit by hand. A separate form so the copy button stays a one-click seed. #}
+    <form method="post" action="{% url 'dashboard:security_versions' report.pk %}"
+          class="versions-edit-form" style="margin-top: 0.5rem;">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="save">
+        <textarea name="affected_versions" rows="2"
+                  style="width: 100%; font-size: 0.85rem; padding: 0.3rem 0.5rem; border: 1px solid var(--border); border-radius: 4px;"
+                  placeholder="e.g. 3.5.0, 3.5.1, 4.0.0">{{ report.affected_versions }}</textarea>
+        <button type="submit" class="action-btn post" style="margin-top: 0.3rem;"
+                hx-post="{% url 'dashboard:security_versions' report.pk %}"
+                hx-include="closest form"
+                hx-target="#versions-area"
+                hx-swap="innerHTML">
+        Save versions
+        </button>
+    </form>
+</div>

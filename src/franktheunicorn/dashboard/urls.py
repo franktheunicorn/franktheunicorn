@@ -47,6 +47,15 @@ urlpatterns = [
     # Security report triage
     path("security/", views.security_report_list, name="security_list"),
     path("security/new/", views.security_report_create, name="security_create"),
+    # Bulk re-triage of every eligible report in the queue: procedural close
+    # first, then LLM triage, then (for valid-looking ones) version mapping and
+    # deep verification. Skips reports the operator already ruled on or that
+    # carry a CVE. Queued through the worker like every other command.
+    path(
+        "security/rerun-triage/",
+        views.security_report_rerun_triage,
+        name="security_rerun_triage",
+    ),
     # Bulk import: a zip of report files, same importer as import_security_zip.
     path("security/upload/", views.security_report_upload, name="security_upload"),
     # The undo for one: delete every report that came from a named archive.
@@ -68,6 +77,16 @@ urlpatterns = [
         "security/<int:report_id>/triage/",
         views.security_report_triage,
         name="security_triage",
+    ),
+    path(
+        "security/<int:report_id>/accept-triage/",
+        views.security_report_accept_triage,
+        name="security_accept_triage",
+    ),
+    path(
+        "security/<int:report_id>/versions/",
+        views.security_report_versions,
+        name="security_versions",
     ),
     path(
         "security/<int:report_id>/verdict/",

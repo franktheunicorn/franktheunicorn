@@ -48,6 +48,23 @@ literal text. Use this tag instead.
 {% include "dashboard/_security_triage_result.html" %}
 {% endif %}
 
+{# The machine's staged verdict, with the one-click Agree. Triage writes its #}
+{# suggestion to auto_triage_status and leaves status alone; this promotes it. #}
+{# Shown whenever there is a suggestion the operator hasn't applied yet — #}
+{# including "I disagree" cases, where the verdict form's save clears the stage. #}
+{% if report.auto_triage_status and report.auto_triage_status != report.status %}
+<div class="triage-suggestion">
+    <span class="triage-suggestion-label">Triage suggests:</span>
+    <span class="score-badge mid">{{ report.auto_triage_status }}</span>
+    <button class="action-btn approve"
+            hx-post="{% url 'dashboard:security_accept_triage' report.pk %}"
+            hx-target="#triage-area"
+            hx-swap="innerHTML">
+        Agree
+    </button>
+</div>
+{% endif %}
+
 {# Offer the button in every state except a run that's still in flight. #}
 {# triage_in_flight comes from the view so security.queue._IN_FLIGHT_STATUSES #}
 {# stays the single owner of which statuses those are. #}

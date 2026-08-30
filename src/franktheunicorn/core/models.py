@@ -636,6 +636,17 @@ class SecurityReport(models.Model):
     reporter_email = models.CharField(max_length=255, blank=True, default="")
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="new")
 
+    # The machine's suggested verdict, staged rather than applied. Triage
+    # writes this — "valid", "invalid", "expected-behavior", or blank for
+    # inconclusive — and leaves ``status`` alone, so ``status`` is the
+    # operator's field and theirs alone: a non-auto status is unambiguously a
+    # ruling, not a machine claim the operator never saw. The detail page
+    # shows the suggestion with an Agree button that copies it into
+    # ``status``. Blank means "triage ran but the model didn't commit" or
+    # "never triaged"; the two are told apart by whether the assessment
+    # fields below are populated.
+    auto_triage_status = models.CharField(max_length=20, blank=True, default="")
+
     # LLM-parsed structured fields (populated by triage pipeline)
     parsed_component = models.CharField(max_length=500, blank=True, default="")
     parsed_poc = models.TextField(blank=True, default="")
@@ -729,6 +740,15 @@ class SecurityReport(models.Model):
     #: How many releases contain it, before that cap.
     introduced_release_count = models.IntegerField(default=0)
     introduced_summary = models.TextField(blank=True, default="")
+
+    # The operator's canonical affected-versions answer — the sentence that
+    # goes in an advisory. Distinct from the machine-gathered evidence
+    # (verifier/version-map branch rows, the introduction scan's release list)
+    # on purpose: those are inputs, this is the verdict, and a verdict
+    # somebody can act on has to be one field the operator owns. The detail
+    # page offers a copy button to seed it from the machine's rollup so the
+    # operator doesn't retype what the agent already worked out.
+    affected_versions = models.TextField(blank=True, default="")
 
     # How far up the queue this report belongs, higher first. Read off a scanner
     # archive's own ranking at import (severity tier, triage-panel verdict, panel

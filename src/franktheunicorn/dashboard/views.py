@@ -1384,6 +1384,101 @@ def _back_to_security_list(request: HttpRequest) -> HttpResponse:
     return redirect(target)
 
 
+@require_POST
+def security_report_rerun_triage(request: HttpRequest) -> HttpResponse:
+    """Re-run triage across the queue, procedural close first then LLM (htmx, bulk).
+
+    For every report the operator hasn't ruled on and that carries no CVE: run
+    the procedural auth-disabled close synchronously (zero LLM cost), and if it
+    doesn't close, queue LLM triage. The worker chains the version follow-on
+    (cheap git map + deep verifier) for the ones triage rules valid-looking —
+    so this view doesn't bill agent runs on reports triage is about to call
+    invalid.
+
+    Also queues the version follow-on for reports the operator already ruled
+    *valid* but never wrote down affected versions — the second question
+    ("where does it ship") is worth answering on a confirmed hole even when the
+    first ("is it real") was settled by hand. Skipped for invalid / duplicate /
+    expected-behavior: no hole to map, and the operator already said so.
+    """
+    from franktheunicorn.config.loader import get_operator_config
+    from franktheunicorn.security.queue import PRIORITY_BULK, queue_triage, queue_version_follow_on
+    from franktheunicorn.security.triage import procedural_close_if_evidence
+
+    operator_config = get_operator_config()
+    if not operator_config.llm_backends:
+        messages.error(request, "No LLM backend configured. Add one to operator.yaml.")
+        return _back_to_security_list(request)
+
+    # The working set: reports the machine may touch (new / triaging) plus
+    # operator-ruled-valid ones that might still need version work. Everything
+    # else is out of scope — an operator who ruled invalid/duplicate is done.
+    candidates = list(
+        SecurityReport.objects.select_related("project")
+        .filter(status__in=["new", "triaging", "valid"])
+        .order_by("-priority", "created_at")
+    )
+
+    procedural_closed = 0
+    triage_queued = 0
+    triage_skipped_inflight = 0
+    followon_queued = 0
+    followon_skipped = 0
+    followon_inflight = 0
+    ruled_skipped = 0
+    for report in candidates:
+        is_auto = report.status in ("new", "triaging")
+        if is_auto and not report.operator_notes and not report.matched_cve_id:
+            if procedural_close_if_evidence(report):
+                procedural_closed += 1
+                continue
+            if queue_triage(report, priority=PRIORITY_BULK):
+                triage_queued += 1
+            else:
+                triage_skipped_inflight += 1
+        elif report.status == "valid" and not report.affected_versions:
+            vm, verify, skipped = queue_version_follow_on(report, operator_config)
+            if skipped:
+                followon_skipped += 1
+            elif vm or verify:
+                followon_queued += 1
+            else:
+                # Both commands declined because one was already in flight
+                # (the in-flight dedup, not a gate). Surface it so "the button
+                # did nothing" isn't indistinguishable from "it queued work".
+                followon_inflight += 1
+        else:
+            ruled_skipped += 1
+
+    parts = [
+        f"{procedural_closed} closed without a model (auth-disabled)",
+        f"{triage_queued} queued for LLM triage",
+    ]
+    if triage_skipped_inflight:
+        parts.append(f"{triage_skipped_inflight} already had triage in flight")
+    if followon_queued:
+        parts.append(f"{followon_queued} queued for version mapping + verification")
+    if followon_inflight:
+        parts.append(f"{followon_inflight} version follow-on already in flight")
+    if followon_skipped:
+        parts.append(f"{followon_skipped} version follow-on skipped (verifier off or no project)")
+    if ruled_skipped:
+        parts.append(f"{ruled_skipped} skipped (operator-ruled or CVE assigned)")
+    messages.success(request, "Re-ran triage: " + ", ".join(parts) + ".")
+    logger.info(
+        "Bulk re-triage: procedural_closed=%d triage_queued=%d triage_inflight=%d "
+        "followon_queued=%d followon_inflight=%d followon_skipped=%d ruled_skipped=%d",
+        procedural_closed,
+        triage_queued,
+        triage_skipped_inflight,
+        followon_queued,
+        followon_inflight,
+        followon_skipped,
+        ruled_skipped,
+    )
+    return _back_to_security_list(request)
+
+
 #: Cap on the CSV export. Not a performance bound — the export streams, so the
 #: size it can serve is unbounded — but a review bound: a sheet nobody is going
 #: to read to the bottom is a sheet whose bottom half gets rubber-stamped, and
@@ -1839,6 +1934,126 @@ def security_report_triage(request: HttpRequest, report_id: int) -> HttpResponse
 
 
 @require_POST
+def security_report_accept_triage(request: HttpRequest, report_id: int) -> HttpResponse:
+    """Promote the machine's staged triage verdict into ``status`` (htmx).
+
+    The Agree button. Triage writes its suggested verdict to
+    ``auto_triage_status`` and leaves ``status`` alone; this copies the
+    suggestion into ``status`` and clears the staging field, so the report
+    moves into the operator's queue for that verdict and the suggestion stops
+    being offered. A re-triage later would populate it again.
+    """
+    report = get_object_or_404(SecurityReport.objects.select_related("project"), pk=report_id)
+
+    suggestion = report.auto_triage_status.strip()
+    if not suggestion:
+        return _render_triage_area(
+            request,
+            report,
+            notice="No triage suggestion to accept. Run triage first.",
+            notice_level="failed",
+        )
+
+    valid_statuses = {choice[0] for choice in SecurityReport.STATUS_CHOICES}
+    if suggestion not in valid_statuses:
+        # Defensive: triage only ever writes valid STATUS_CHOICES values, but
+        # the staging field is a free CharField, so a corrupt row gets a message
+        # rather than a 500.
+        return _render_triage_area(
+            request,
+            report,
+            notice=f"The staged suggestion {suggestion!r} is not a valid status.",
+            notice_level="failed",
+        )
+
+    report.status = suggestion
+    report.auto_triage_status = ""
+    report.save(update_fields=["status", "auto_triage_status", "updated_at"])
+    logger.info("Accepted triage suggestion %r for security report #%d", suggestion, report.pk)
+
+    return _render_triage_area(
+        request,
+        report,
+        notice=f"Accepted — report moved to {report.get_status_display()}.",
+        notice_link=reverse("dashboard:security_detail", args=[report.pk]),
+    )
+
+
+def _affected_version_names(report: SecurityReport) -> list[str]:
+    """The release-line names the verification/version-map rollup calls affected.
+
+    Shared by the detail page and the versions POST endpoint so the "Copy from
+    verification" button copies the same rollup the page renders.
+    """
+    from franktheunicorn.security.verifier import version_rollup
+
+    verifications = list(report.verifications.order_by("branch_order", "branch"))
+    version_rows = version_rollup(verifications)
+    return [row["name"] for row in version_rows if row["status"] == "affected"]
+
+
+def _render_versions_area(
+    request: HttpRequest,
+    report: SecurityReport,
+    *,
+    notice: str = "",
+    notice_level: str = "queued",
+) -> HttpResponse:
+    return render(
+        request,
+        "dashboard/_security_versions.html",
+        {
+            "report": report,
+            "affected_versions": _affected_version_names(report),
+            "notice": notice,
+            "notice_level": notice_level,
+        },
+    )
+
+
+@require_POST
+def security_report_versions(request: HttpRequest, report_id: int) -> HttpResponse:
+    """Set the operator's affected-versions field, or seed it from verification (htmx).
+
+    Two actions on one endpoint: ``copy`` writes the verification/version-map
+    rollup (the affected release lines from the branch table) into the field,
+    and ``save`` writes the operator's edited textarea. Both re-render the
+    partial. The field is the operator's verdict — the agent's rollup is a
+    suggestion, never an overwrite — so ``copy`` is a seed, not a live link.
+    """
+    report = get_object_or_404(SecurityReport.objects.select_related("project"), pk=report_id)
+    action = request.POST.get("action", "save")
+
+    if action == "copy":
+        names = _affected_version_names(report)
+        if not names:
+            return _render_versions_area(
+                request,
+                report,
+                notice="No affected rows from verification to copy yet — run Verify first.",
+                notice_level="failed",
+            )
+        report.affected_versions = ", ".join(names)
+        report.save(update_fields=["affected_versions", "updated_at"])
+        logger.info("Copied %d affected version(s) onto report #%d", len(names), report.pk)
+        return _render_versions_area(
+            request,
+            report,
+            notice="Copied from verification — edit above if the advisory needs different wording.",
+        )
+
+    # save: take the operator's text as-is. Empty is allowed (clears the field).
+    report.affected_versions = request.POST.get("affected_versions", "").strip()
+    report.save(update_fields=["affected_versions", "updated_at"])
+    logger.info(
+        "Saved affected versions for report #%d (%d chars)",
+        report.pk,
+        len(report.affected_versions),
+    )
+    return _render_versions_area(request, report, notice="Saved.")
+
+
+@require_POST
 def security_report_verdict(request: HttpRequest, report_id: int) -> HttpResponse:
     """Set operator verdict on a security report (htmx)."""
     report = get_object_or_404(SecurityReport, pk=report_id)
@@ -1900,7 +2115,22 @@ def security_report_verdict(request: HttpRequest, report_id: int) -> HttpRespons
         report.matched_cve_id = ""
     else:
         report.matched_cve_id = submitted_cve
-    report.save(update_fields=["status", "operator_notes", "matched_cve_id", "updated_at"])
+    # The operator ruled, so the machine's staged suggestion is consumed:
+    # leaving it would re-offer an Agree button for a verdict the operator just
+    # overrode. A re-triage later would populate it again if wanted.
+    if report.auto_triage_status:
+        report.auto_triage_status = ""
+        report.save(
+            update_fields=[
+                "status",
+                "operator_notes",
+                "matched_cve_id",
+                "auto_triage_status",
+                "updated_at",
+            ]
+        )
+    else:
+        report.save(update_fields=["status", "operator_notes", "matched_cve_id", "updated_at"])
 
     return render(request, "dashboard/_security_verdict.html", {"report": report})
 

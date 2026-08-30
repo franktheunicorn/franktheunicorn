@@ -313,7 +313,8 @@ class TestTriageReport:
 
         report.refresh_from_db()
         assert report.is_expected_behavior is True
-        assert report.status == "expected-behavior"
+        assert report.auto_triage_status == "expected-behavior"
+        assert report.status == "new"
         assert "by design" in report.expected_behavior_explanation
 
     def test_analyze_report_plausible_poc(self, db: Any) -> None:
@@ -345,6 +346,7 @@ class TestTriageReport:
 
         report.refresh_from_db()
         assert report.poc_plausible is True
+        assert report.auto_triage_status == "valid"
         assert report.status == "new"
         assert report.assessed_severity == "high"
 
@@ -1042,7 +1044,10 @@ class TestAuthDisabledCheapClose:
         triage_report(report, None, config)
 
         report.refresh_from_db()
-        assert report.status == "invalid"
+        # The verdict is staged, not applied: status stays "new" and the
+        # suggestion lands in auto_triage_status for an Agree click.
+        assert report.status == "new"
+        assert report.auto_triage_status == "invalid"
         assert evidence in report.triage_summary
 
     def test_the_close_is_logged(self, caplog: pytest.LogCaptureFixture) -> None:
@@ -1155,6 +1160,77 @@ class TestAuthDisabledCheapClose:
             triage_report(report, None, OperatorConfig(github_username="testuser"))
         report.refresh_from_db()
         assert report.status == "valid"
+
+
+@pytest.mark.django_db
+class TestStagedVerdict:
+    """The machine writes its verdict to auto_triage_status; status is the
+    operator's. The Agree button on the detail page promotes the one to the
+    other, so these helpers are what makes "non-auto status = operator ruled"
+    a clean signal."""
+
+    def test_suggested_status_expected_beats_plausible(self, db: Any) -> None:
+        from franktheunicorn.security.triage import _suggested_status
+        from tests.factories import SecurityReportFactory
+
+        report = SecurityReportFactory(is_expected_behavior=True, poc_plausible=True)
+        assert _suggested_status(report) == "expected-behavior"
+
+    def test_suggested_status_valid_for_a_plausible_poc(self, db: Any) -> None:
+        from franktheunicorn.security.triage import _suggested_status
+        from tests.factories import SecurityReportFactory
+
+        report = SecurityReportFactory(poc_plausible=True)
+        assert _suggested_status(report) == "valid"
+
+    def test_suggested_status_invalid_for_an_implausible_poc(self, db: Any) -> None:
+        from franktheunicorn.security.triage import _suggested_status
+        from tests.factories import SecurityReportFactory
+
+        report = SecurityReportFactory(poc_plausible=False)
+        assert _suggested_status(report) == "invalid"
+
+    def test_suggested_status_blank_when_the_model_did_not_commit(self, db: Any) -> None:
+        from franktheunicorn.security.triage import _suggested_status
+        from tests.factories import SecurityReportFactory
+
+        report = SecurityReportFactory(poc_plausible=None)
+        assert _suggested_status(report) == ""
+
+    def test_procedural_close_stages_rather_than_applies(self, db: Any) -> None:
+        from franktheunicorn.security.triage import procedural_close_if_evidence
+        from tests.factories import SecurityReportFactory
+
+        report = SecurityReportFactory(
+            raw_text="If auth is off, the RPC handler accepts anything.",
+            status="new",
+        )
+        assert procedural_close_if_evidence(report) is True
+        report.refresh_from_db()
+        # The verdict is staged, not applied: status stays "new".
+        assert report.status == "new"
+        assert report.auto_triage_status == "invalid"
+        assert "authentication" in report.triage_summary
+
+    def test_procedural_close_leaves_a_clean_report_alone(self, db: Any) -> None:
+        from franktheunicorn.security.triage import procedural_close_if_evidence
+        from tests.factories import SecurityReportFactory
+
+        report = SecurityReportFactory(raw_text="SQL injection in /api/users?id=1", status="new")
+        assert procedural_close_if_evidence(report) is False
+        report.refresh_from_db()
+        assert report.auto_triage_status == ""
+
+    def test_procedural_close_will_not_re_close_a_reopened_report(self, db: Any) -> None:
+        from franktheunicorn.security.triage import procedural_close_if_evidence
+        from tests.factories import SecurityReportFactory
+
+        report = SecurityReportFactory(
+            raw_text="If auth is off, the RPC handler accepts anything.",
+            status="new",
+            triage_summary="Operator reopened: auth was actually ON here.",
+        )
+        assert procedural_close_if_evidence(report) is False
 
 
 @pytest.mark.django_db

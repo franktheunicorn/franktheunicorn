@@ -95,6 +95,72 @@ def queue_introduction_scan(report: SecurityReport, *, priority: int = PRIORITY_
     return queue_command("find_report_introduction", report=report, priority=priority)
 
 
+def _verifier_gate_reason(operator_config: OperatorConfig) -> str:
+    """Why the deep verifier (and the version map, which shares its checkout)
+    can't run, or "" when they can.
+
+    The two checks ``verifier.enabled`` and a resolvable reviewer, the same two
+    zip_import's ``_queue_verifications``/``_queue_git_scan`` make. Lifted here
+    so the worker's triage follow-on and the dashboard's bulk re-triage button
+    get the same answer without each re-deriving it — and without queuing a
+    command the worker would no-op on, which is noise that reads as "the button
+    did nothing".
+    """
+    verifier = operator_config.security_triage.verifier
+    if not verifier.enabled:
+        return (
+            "security_triage.verifier.enabled is false in operator.yaml — it defaults "
+            "true, so either something set it or the config failed to load and took "
+            "every other setting with it (`manage.py show_config` tells those apart)"
+        )
+    from franktheunicorn.security.verifier import resolve_verifier_reviewer
+
+    if resolve_verifier_reviewer(operator_config, verifier) is None:
+        have = ", ".join(rc.name for rc in operator_config.agent_cli_reviewers) or "none"
+        return (
+            f"no agent_cli_reviewers entry named {verifier.reviewer!r} (configured: "
+            f"{have}), so there is no coding-agent CLI / checkout to run"
+        )
+    return ""
+
+
+def queue_version_follow_on(
+    report: SecurityReport,
+    operator_config: OperatorConfig,
+    *,
+    priority: int = PRIORITY_BULK,
+) -> tuple[bool, bool, str]:
+    """Queue the cheap version map and the deep verifier for *report*.
+
+    Both answer "where does this hole live across release branches" — the
+    version map with git alone (cited files + whether the proposed patch
+    applies), the verifier with a coding agent per branch. Used after triage
+    rules a report valid-looking (the worker chains it) and from the bulk
+    re-triage button for operator-ruled-valid reports that haven't written
+    down affected versions.
+
+    Honours the verifier gate (``verifier.enabled`` and a configured reviewer)
+    and the project requirement: a report with no project has no repo to check,
+    and queuing a command the worker will no-op on is noise in the queue.
+    Returns ``(version_map_queued, verify_queued, skipped_reason)`` — the bools
+    are False and the reason set when the gate stopped either.
+    """
+    if report.project_id is None:
+        return False, False, "report has no project, so there is no repo to check it against"
+    reason = _verifier_gate_reason(operator_config)
+    if reason:
+        return False, False, reason
+    version_map_queued = queue_version_map(report, priority=priority)
+    verify_queued = queue_verification(report, priority=priority)
+    logger.info(
+        "Queued version follow-on for report #%d: version_map=%s verify=%s",
+        report.pk,
+        version_map_queued,
+        verify_queued,
+    )
+    return version_map_queued, verify_queued, ""
+
+
 def cancel_pending_for_reports(report_ids: list[int]) -> int:
     """Drop pending worker jobs for *report_ids* before the reports themselves go.
 

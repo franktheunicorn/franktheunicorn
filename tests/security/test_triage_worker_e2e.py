@@ -154,11 +154,12 @@ class TestRetriageOfJudgedReports:
     """Re-triage has to be able to revise triage's own past verdicts."""
 
     def test_expected_behavior_report_can_be_retriaged(self, no_cve_lookup: Any) -> None:
-        """'expected-behavior' is set BY triage, so triage must be able to undo it.
-
-        Leaving it out of the auto-managed set froze such reports: the new
-        verdict was computed and saved to every other field, then never
-        surfaced in any queue.
+        """Under the staging design the machine writes its verdict to
+        ``auto_triage_status`` and leaves ``status`` alone, so an operator-set
+        ``expected-behavior`` is preserved across a re-triage and the revised
+        verdict is staged for an Agree click — rather than the old failure
+        where a machine-set expected-behavior froze because nothing could
+        take it back.
         """
         from franktheunicorn.security.triage import triage_report
 
@@ -172,7 +173,9 @@ class TestRetriageOfJudgedReports:
             triage_report(report, None, config)
 
         report.refresh_from_db()
-        assert report.status == "new"
+        # The operator's verdict stands; the revised assessment is staged.
+        assert report.status == "expected-behavior"
+        assert report.auto_triage_status == "valid"
         assert report.assessed_severity == "high"
 
     def test_operator_verdict_set_mid_run_is_not_clobbered(self, no_cve_lookup: Any) -> None:
@@ -255,3 +258,118 @@ class TestEmailIngestionQueuesTriage:
         assert WorkerCommand.objects.filter(
             command="run_security_triage", security_report=report, status="pending"
         ).exists()
+
+
+@pytest.mark.django_db
+class TestTriageChainsVersionFollowOn:
+    """A triage run that rules a report valid-looking fans out to the cheap
+    version map and the deep verifier — but only for valid-looking verdicts,
+    and only when the verifier gate and a project let it run."""
+
+    def test_a_valid_verdict_queues_version_map_and_verify(self, no_cve_lookup: Any) -> None:
+        from franktheunicorn.security.queue import queue_triage
+        from franktheunicorn.worker.commands import process_pending_commands
+
+        config = _operator_config()
+        # A report with a project, so the follow-on has a repo to check against.
+        report = SecurityReportFactory(
+            title="real hole", raw_text="...", parsed_component="core/src/main/scala/Foo.scala"
+        )
+        assert report.project_id is not None
+
+        queue_triage(report)
+        with patch(
+            "franktheunicorn.security.triage._call_llm",
+            return_value=dict(_VALID_ANALYSIS),
+        ):
+            # limit=1: process only the triage, leaving the follow-on commands
+            # pending so this test isn't also a version-map/verify run.
+            assert process_pending_commands(config, limit=1) == 1
+
+        report.refresh_from_db()
+        assert report.auto_triage_status == "valid"
+        cmds = set(
+            WorkerCommand.objects.filter(security_report=report).values_list("command", flat=True)
+        )
+        assert "run_security_triage" in cmds
+        assert "map_report_versions" in cmds
+        assert "verify_security_report" in cmds
+
+    def test_an_invalid_verdict_does_not_queue_the_follow_on(self, no_cve_lookup: Any) -> None:
+        from franktheunicorn.security.queue import queue_triage
+        from franktheunicorn.worker.commands import process_pending_commands
+
+        config = _operator_config()
+        report = SecurityReportFactory(
+            title="not a hole", raw_text="...", parsed_component="core/Foo.scala"
+        )
+        queue_triage(report)
+        invalid = dict(_VALID_ANALYSIS, poc_plausible=False, is_expected_behavior=False)
+        with patch("franktheunicorn.security.triage._call_llm", return_value=invalid):
+            assert process_pending_commands(config, limit=1) == 1
+
+        report.refresh_from_db()
+        assert report.auto_triage_status == "invalid"
+        # No follow-on was queued: nothing to map for a report triage called invalid.
+        cmds = set(
+            WorkerCommand.objects.filter(security_report=report).values_list("command", flat=True)
+        )
+        assert cmds == {"run_security_triage"}
+
+    def test_an_expected_behavior_verdict_does_not_queue_the_follow_on(
+        self, no_cve_lookup: Any
+    ) -> None:
+        from franktheunicorn.security.queue import queue_triage
+        from franktheunicorn.worker.commands import process_pending_commands
+
+        config = _operator_config()
+        report = SecurityReportFactory(title="documented", raw_text="...")
+        queue_triage(report)
+        expected = dict(_VALID_ANALYSIS, is_expected_behavior=True)
+        with patch("franktheunicorn.security.triage._call_llm", return_value=expected):
+            assert process_pending_commands(config, limit=1) == 1
+
+        report.refresh_from_db()
+        assert report.auto_triage_status == "expected-behavior"
+        cmds = set(
+            WorkerCommand.objects.filter(security_report=report).values_list("command", flat=True)
+        )
+        assert cmds == {"run_security_triage"}
+
+    def test_an_operator_invalid_verdict_mid_run_is_not_overruled(self, no_cve_lookup: Any) -> None:
+        """The operator rules invalid from the detail page while the LLM is
+        thinking and says valid. The machine must NOT re-stage a contradicting
+        suggestion (no Agree banner offering to flip it back) and must NOT bill
+        the version/verify follow-on on a report the operator ruled not-a-vuln.
+        """
+        from franktheunicorn.security.queue import queue_triage
+        from franktheunicorn.worker.commands import process_pending_commands
+
+        config = _operator_config()
+        report = SecurityReportFactory(title="contested", raw_text="...")
+        queue_triage(report)
+
+        def rule_invalid_then_say_valid(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            # Stand in for the operator clicking "invalid" on the verdict form,
+            # which sets status and clears the staged suggestion.
+            SecurityReport.objects.filter(pk=report.pk).update(
+                status="invalid", auto_triage_status=""
+            )
+            return dict(_VALID_ANALYSIS)  # the machine says valid
+
+        with patch(
+            "franktheunicorn.security.triage._call_llm",
+            side_effect=rule_invalid_then_say_valid,
+        ):
+            assert process_pending_commands(config, limit=1) == 1
+
+        report.refresh_from_db()
+        # The operator's verdict stands...
+        assert report.status == "invalid"
+        # ...and no contradicting suggestion was staged.
+        assert report.auto_triage_status == ""
+        # ...and no follow-on was billed on a report ruled not-a-vuln.
+        cmds = set(
+            WorkerCommand.objects.filter(security_report=report).values_list("command", flat=True)
+        )
+        assert cmds == {"run_security_triage"}

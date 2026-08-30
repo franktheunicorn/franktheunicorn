@@ -19,14 +19,16 @@ _VALID_SEVERITIES: frozenset[str] = frozenset(
     {"critical", "high", "medium", "low", "informational"}
 )
 
-# Statuses that can be overwritten by automatic triage analysis.
-# Operator-set statuses (valid, invalid, duplicate) are preserved on re-triage.
-# "expected-behavior" belongs here: triage is what sets it, so a re-triage — the
-# whole point of the learning loop — has to be able to take it back. Leaving it
-# out froze such reports permanently: neither the status claim below nor
-# _analyze_report's identical guard would touch them, so a corrected verdict was
-# computed, saved to every other field, and then never surfaced in any queue.
-_AUTO_MANAGED_STATUSES: frozenset[str] = frozenset({"new", "triaging", "expected-behavior"})
+# Statuses the machine may touch. Under the staging design the machine writes
+# its verdict to ``auto_triage_status`` and leaves ``status`` alone except for
+# the transient in-flight ``triaging`` claim, so ``status`` is the operator's
+# field. That means ``expected-behavior`` is no longer auto-managed — the
+# machine used to file into it directly, and now it stages the suggestion
+# instead, so a report sitting in ``expected-behavior`` got there by an
+# operator's Agree click or verdict, and a re-triage must not overwrite it.
+# The learning loop still works: a re-triage writes a fresh suggestion to
+# ``auto_triage_status`` for the operator to agree to.
+_AUTO_MANAGED_STATUSES: frozenset[str] = frozenset({"new", "triaging"})
 
 
 #: A cheap-close pattern plus how the guards treat it — see _ACTOR_GUARD_RE.
@@ -410,6 +412,35 @@ def requires_auth_disabled_evidence(text: str) -> str:
     return ""
 
 
+def procedural_close_if_evidence(report: SecurityReport) -> bool:
+    """Run the procedural auth-disabled close on *report*; True if it closed.
+
+    Public door onto the cheap close for the bulk re-triage button, which runs
+    it synchronously before queuing any LLM work — a report whose own text
+    says the scenario needs auth off is closed in milliseconds and never billed.
+    Same gate as the in-pipeline close: never-been-triaged only, so a report
+    the operator reopened (status back to ``new`` but with an old summary) is
+    not re-closed by the same regex. Re-reads status first, for the same reason
+    ``triage_report`` does — the operator can rule from the detail page while
+    the bulk button's loop is mid-flight.
+    """
+    stored = _current_status(report)
+    if stored != "new":
+        return False
+    if (
+        report.triage_summary
+        or report.poc_assessment
+        or report.poc_plausible is not None
+        or report.is_expected_behavior
+    ):
+        return False
+    evidence = requires_auth_disabled_evidence(f"{report.title}\n{report.raw_text}")
+    if not evidence:
+        return False
+    _close_requires_auth_disabled(report, evidence)
+    return True
+
+
 def _config_match_is_vetoed(text: str, match: re.Match[str], enabled_assignment: bool) -> bool:
     """The vetoes only the structured spelling needs — it can't tell a
     precondition from its surroundings, so the surroundings decide: a property
@@ -452,24 +483,25 @@ def _evidence_line(text: str, match: re.Match[str]) -> str:
 def _close_requires_auth_disabled(report: SecurityReport, evidence: str) -> None:
     """Close *report* as not-a-vulnerability: its scenario needs auth switched off.
 
-    Written to the same fields an LLM run would set, so the detail page renders
-    it like any other triage result. Status "invalid" is deliberate and is the
-    one auto-close triage makes: the report describes the absence of a feature
-    the documentation already tells the operator to turn on. The LLM path marks
-    the same scenario class "expected-behavior" instead — the regex close is
-    stickier because a literal "spark.authenticate=false" is the more certain
-    signal, and the invalid queue is where operator-deleted reports live.
+    Writes the machine's verdict to ``auto_triage_status`` and the reasoning to
+    ``triage_summary`` — the same fields an LLM run would set, so the detail
+    page renders it like any other triage result — and leaves ``status`` alone.
+    ``status`` is the operator's field; the suggestion is staged for an Agree
+    click rather than applied. "invalid" is the one auto-close triage makes:
+    the report describes the absence of a feature the documentation already
+    tells the operator to turn on. The LLM path marks the same scenario class
+    "expected-behavior" instead — the regex close is stickier because a literal
+    "spark.authenticate=false" is the more certain signal.
     """
-    report.status = "invalid"
+    report.auto_triage_status = "invalid"
     report.triage_summary = (
         "Closed without model triage: the report's own text says the scenario "
         "requires authentication to be disabled/turned off. That is a "
         "configuration choice, not a vulnerability — authentication exists "
-        f"precisely to prevent it. Matched: {evidence!r}. If this is wrong, set "
-        "the status back to 'new' and re-run triage; the full pipeline will "
-        "assess it."
+        f"precisely to prevent it. Matched: {evidence!r}. If this is wrong, "
+        "re-run triage; the full pipeline will assess it."
     )
-    report.save(update_fields=["status", "triage_summary", "updated_at"])
+    report.save(update_fields=["auto_triage_status", "triage_summary", "updated_at"])
     logger.info(
         "Closed security report #%d without LLM triage: the scenario requires "
         "authentication to be disabled (matched %r).",
@@ -704,6 +736,26 @@ class _AnalysisOutcome(NamedTuple):
     call_failed: bool
 
 
+def _suggested_status(report: SecurityReport) -> str:
+    """The machine's suggested verdict from what triage populated.
+
+    ``expected-behavior`` beats everything (it's not a vulnerability at all);
+    a plausible POC that isn't expected behaviour is ``valid``; an implausible
+    one is ``invalid``; a model that said neither leaves it blank for
+    "inconclusive". This is what the Agree button copies into ``status`` and
+    what the version/verify follow-on gates on — "looks valid" is exactly
+    ``valid``, so an inconclusive or expected-behavior report doesn't spend
+    the agent runs.
+    """
+    if report.is_expected_behavior:
+        return "expected-behavior"
+    if report.poc_plausible is True:
+        return "valid"
+    if report.poc_plausible is False:
+        return "invalid"
+    return ""
+
+
 def _analyze_report(
     report: SecurityReport,
     backend: BaseLLMBackend,
@@ -793,31 +845,56 @@ def _analyze_report(
         if severity in _VALID_SEVERITIES:
             report.assessed_severity = severity
 
-        # Only auto-set status if operator hasn't already set a manual verdict.
-        # Re-read it first: triage runs in the worker now, so the operator can
-        # rule on the report from the still-open detail page while the two LLM
-        # calls are in flight, and this instance's copy is minutes stale.
+        # The machine's verdict is staged, not applied. ``status`` is the
+        # operator's field — a non-auto status is unambiguously a ruling — so
+        # triage writes its suggestion to ``auto_triage_status`` and leaves
+        # ``status`` alone. Three cases, told apart by whether *this run*
+        # claimed the in-flight ``triaging`` status at the top of triage_report:
+        #
+        # 1. Auto-managed and the operator didn't rule mid-run (stored status
+        #    is still ``triaging``): stage the suggestion, restore ``status``
+        #    to ``new``.
+        # 2. We claimed ``triaging`` and the operator ruled from the detail
+        #    page while the LLM was thinking (in-memory is still ``triaging``,
+        #    stored is now a verdict): keep their verdict and do NOT re-stage
+        #    a contradicting suggestion — a "Triage suggests: valid [Agree]"
+        #    banner on a report just ruled invalid is one misclick from undoing
+        #    them, and it would bill the version/verify follow-on on a
+        #    non-vulnerability.
+        # 3. The operator had ruled *before* this run (we never claimed
+        #    ``triaging``; this is an explicit re-triage they asked for):
+        #    stage the fresh suggestion for them to consider without
+        #    overwriting their verdict.
+        #
+        # Re-read status first: triage runs in the worker, so this instance's
+        # copy is minutes stale.
         stored_status = _current_status(report)
+        staged_fields: list[str] = [
+            "poc_plausible",
+            "poc_assessment",
+            "is_expected_behavior",
+            "expected_behavior_explanation",
+            "triage_summary",
+            "assessed_severity",
+            "status",
+            "updated_at",
+        ]
         if stored_status in _AUTO_MANAGED_STATUSES:
-            report.status = "expected-behavior" if report.is_expected_behavior else "new"
+            report.auto_triage_status = _suggested_status(report)
+            report.status = "new"
+            staged_fields.append("auto_triage_status")
+        elif report.status != "triaging":
+            # Case 3: explicit re-triage of an operator-ruled report. Stage
+            # the fresh suggestion; keep their status.
+            report.auto_triage_status = _suggested_status(report)
+            report.status = stored_status
+            staged_fields.append("auto_triage_status")
         else:
-            # Adopt the operator's verdict. "status" is in update_fields below,
-            # so leaving the stale in-memory value in place would write
-            # "triaging" straight over what they just chose.
+            # Case 2: the operator ruled mid-run. Keep their verdict; leave the
+            # staging field as the verdict form left it (cleared).
             report.status = stored_status
 
-        report.save(
-            update_fields=[
-                "poc_plausible",
-                "poc_assessment",
-                "is_expected_behavior",
-                "expected_behavior_explanation",
-                "triage_summary",
-                "assessed_severity",
-                "status",
-                "updated_at",
-            ]
-        )
+        report.save(update_fields=staged_fields)
         return _AnalysisOutcome(True, "", call_failed=False)
     return _AnalysisOutcome(
         False,

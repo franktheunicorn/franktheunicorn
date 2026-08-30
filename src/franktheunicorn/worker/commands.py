@@ -394,6 +394,30 @@ def _run_security_triage(cmd: WorkerCommand, operator_config: OperatorConfig) ->
     report.refresh_from_db()
     cmd.log = f"Triage complete: severity={report.assessed_severity!r} status={report.status!r}"
 
+    # The version follow-on: triage ruled the report valid-looking, so now go
+    # find where the hole lives across release branches — the cheap git version
+    # map first, then the deep coding-agent verifier. Skipped for invalid and
+    # expected-behavior verdicts (no hole to map) and for inconclusive ones
+    # (no point spending the agent runs on a maybe). Gated on the verifier
+    # config inside queue_version_follow_on, so a deployment with the verifier
+    # off queues nothing rather than fanning out no-op commands. The status
+    # check is defense-in-depth: triage only stages "valid" when the operator
+    # didn't rule mid-run, but a stale auto_triage_status from a prior run could
+    # survive an operator "invalid" verdict set through a path that didn't clear
+    # it — so don't bill agent runs on a report the operator ruled not-a-vuln.
+    if report.auto_triage_status == "valid" and report.status in ("new", "triaging", "valid"):
+        from franktheunicorn.security.queue import queue_version_follow_on
+
+        vm, verify, skipped = queue_version_follow_on(report, operator_config)
+        if skipped:
+            logger.info(
+                "Did not queue version follow-on for report #%d after triage: %s",
+                report.pk,
+                skipped,
+            )
+        else:
+            cmd.log += f" follow-on: version_map={vm} verify={verify}"
+
 
 def _verify_security_report(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
     """Send one report to the deep verifier: is the vulnerability actually there?

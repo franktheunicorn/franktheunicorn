@@ -195,6 +195,14 @@
     </div>
     {% endif %}
 
+    {# The operator's explicit affected-versions field, with a copy-from-verification #}
+    {# button. Lives in the verify panel because the branch table above is what #}
+    {# feeds it. The #versions-area wrapper lives here (in the detail page) so #}
+    {# the partial's htmx swaps don't re-wrap it — same shape as #triage-area. #}
+    <div id="versions-area">
+        {% include "dashboard/_security_versions.html" with affected_versions=affected_versions %}
+    </div>
+
     {% if verifications %}
     <table class="verify-table">
         <thead>

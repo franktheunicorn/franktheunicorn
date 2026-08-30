@@ -11,6 +11,18 @@
     <a href="{% url 'dashboard:security_create' %}" class="action-btn post" style="font-size: 0.85rem; padding: 0.4rem 0.8rem; text-decoration: none;">+ New Report</a>
     <a href="{% url 'dashboard:email_activity' %}" class="action-btn" style="font-size: 0.85rem; padding: 0.4rem 0.8rem; text-decoration: none;" title="Read-only audit of every email the scanner has read">📬 Email Activity</a>
     <a href="{% url 'dashboard:security_guidance' %}" class="action-btn" style="font-size: 0.85rem; padding: 0.4rem 0.8rem; text-decoration: none;" title="Learned guidance distilled from operator agree/disagree feedback">🎓 Learned Guidance</a>
+    {# Bulk re-triage: procedural close → LLM → (for valid-looking) version map + verify. #}
+    {# Skips reports the operator already ruled on or that carry a CVE. Plain form #}
+    {# so it works without htmx; htmx gets HX-Redirect back to this page with a flash. #}
+    <form method="post" action="{% url 'dashboard:security_rerun_triage' %}" style="display: inline;">
+        {% csrf_token %}
+        <button type="submit" class="action-btn post"
+                style="font-size: 0.85rem; padding: 0.4rem 0.8rem;"
+                hx-post="{% url 'dashboard:security_rerun_triage' %}"
+                hx-confirm="Re-run triage across every report in the queue you haven't ruled on? Procedural close is free; LLM triage is two calls per report; version mapping + verification fan out for the ones triage calls valid.">
+            ↻ Re-run Triage
+        </button>
+    </form>
 </div>
 
 {# Bulk import. Reports land as untriaged drafts exactly like a pasted one, and #}
