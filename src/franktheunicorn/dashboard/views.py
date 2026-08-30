@@ -1402,7 +1402,12 @@ def security_report_rerun_triage(request: HttpRequest) -> HttpResponse:
     expected-behavior: no hole to map, and the operator already said so.
     """
     from franktheunicorn.config.loader import get_operator_config
-    from franktheunicorn.security.queue import PRIORITY_BULK, queue_triage, queue_version_follow_on
+    from franktheunicorn.security.queue import (
+        PRIORITY_BULK,
+        in_flight_statuses,
+        queue_triage,
+        queue_version_follow_on,
+    )
     from franktheunicorn.security.triage import procedural_close_if_evidence
 
     operator_config = get_operator_config()
@@ -1419,6 +1424,20 @@ def security_report_rerun_triage(request: HttpRequest) -> HttpResponse:
         .order_by("-priority", "created_at")
     )
 
+    # Which reports already have a triage run queued or running, so the loop can
+    # leave them alone. Re-closing one of those procedurally would race the
+    # in-flight LLM run: the close writes auto_triage_status="invalid", the worker
+    # finishes a moment later and overwrites it with its own verdict — the cheap,
+    # evidence-based close loses to a guess. The worker does not re-run the
+    # procedural close itself (its never-been-triaged gate skips re-triage), so
+    # the only way that verdict lands is this button, and only when nothing is
+    # already in flight on the row.
+    inflight_ids = set(
+        WorkerCommand.objects.filter(
+            command="run_security_triage", status__in=in_flight_statuses()
+        ).values_list("security_report_id", flat=True)
+    )
+
     procedural_closed = 0
     triage_queued = 0
     triage_skipped_inflight = 0
@@ -1429,7 +1448,17 @@ def security_report_rerun_triage(request: HttpRequest) -> HttpResponse:
     for report in candidates:
         is_auto = report.status in ("new", "triaging")
         if is_auto and not report.operator_notes and not report.matched_cve_id:
-            if procedural_close_if_evidence(report):
+            if report.pk in inflight_ids:
+                # A triage run is already under way — don't race it.
+                triage_skipped_inflight += 1
+                continue
+            # retrigger=True so the close reaches reports the first pass missed —
+            # including ones the LLM path already assessed and left sitting in
+            # ``new`` with a staged verdict. Same door the procedural-only button
+            # uses; without it the full re-triage closed 0 where the standalone
+            # button closed 10, because the never-been-triaged gate skipped
+            # exactly the reports a re-triage is for.
+            if procedural_close_if_evidence(report, retrigger=True):
                 procedural_closed += 1
                 continue
             if queue_triage(report, priority=PRIORITY_BULK):

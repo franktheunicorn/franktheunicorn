@@ -1641,6 +1641,69 @@ class TestSecurityReportRerunTriage:
         ).exists()
 
     @patch("franktheunicorn.config.loader.get_operator_config")
+    def test_a_previously_triaged_report_with_auth_disabled_is_re_closed(
+        self, mock_config: MagicMock, client: Client, db: Any
+    ) -> None:
+        """The bug this fix is for: a report the LLM path already assessed and left
+        in ``new`` with a staged verdict carries auth-disabled evidence in its own
+        text. The never-been-triaged gate used to skip it (``retrigger=False``), so
+        the full re-triage closed 0 where the standalone procedural button closed
+        10. With ``retrigger=True`` the full re-triage reaches it too."""
+        from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig
+        from franktheunicorn.core.models import WorkerCommand
+
+        mock_config.return_value = OperatorConfig(
+            github_username="testuser",
+            llm_backends=[LLMBackendConfig(provider="stub")],
+        )
+        report = SecurityReportFactory(
+            raw_text="If auth is off, the RPC handler accepts anything.",
+            status="new",
+            triage_summary="LLM said this is a real vuln.",
+            auto_triage_status="valid",
+        )
+
+        client.post("/security/rerun-triage/")
+
+        report.refresh_from_db()
+        assert report.auto_triage_status == "invalid"
+        assert not WorkerCommand.objects.filter(
+            command="run_security_triage", security_report=report
+        ).exists()
+
+    @patch("franktheunicorn.config.loader.get_operator_config")
+    def test_a_report_with_triage_in_flight_is_not_re_closed(
+        self, mock_config: MagicMock, client: Client, db: Any
+    ) -> None:
+        """A triage run already under way owns the row. Re-closing it procedurally
+        would race the worker — the close writes auto_triage_status="invalid", the
+        in-flight LLM run overwrites it — so the cheap, evidence-based close loses
+        to a guess. Skip it and let the run finish."""
+        from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig
+        from franktheunicorn.core.models import WorkerCommand
+
+        mock_config.return_value = OperatorConfig(
+            github_username="testuser",
+            llm_backends=[LLMBackendConfig(provider="stub")],
+        )
+        report = SecurityReportFactory(
+            raw_text="If auth is off, the RPC handler accepts anything.",
+            status="new",
+            auto_triage_status="valid",
+        )
+        WorkerCommand.objects.create(
+            command="run_security_triage", security_report=report, status="pending"
+        )
+
+        client.post("/security/rerun-triage/")
+
+        report.refresh_from_db()
+        # The in-flight run was not raced — the staged verdict stands.
+        assert report.auto_triage_status == "valid"
+        # Only the one command the test created; no second was queued.
+        assert WorkerCommand.objects.filter(security_report=report).count() == 1
+
+    @patch("franktheunicorn.config.loader.get_operator_config")
     def test_a_clean_report_queues_llm_triage(
         self, mock_config: MagicMock, client: Client, db: Any
     ) -> None:
