@@ -180,6 +180,24 @@ _GUARD_WINDOW_CHARS = 100
 _ACTOR_GUARD_WINDOW_CHARS = 120
 _FORWARD_GUARD_WINDOW_CHARS = 20
 
+#: How far after a match the alternative-precondition guard looks. Bounded to
+#: the clause the match sits in (up to the next ``,`, `;`, `.` or newline, or
+#: this many chars) so an "or" in a later sentence about something else can't
+#: veto a real auth-disabled-only finding.
+_ALT_PRECONDITION_WINDOW_CHARS = 100
+
+#: An alternative precondition joined to the auth-disabled one by "or" —
+#: "spark.authenticate=false ... OR shared-secret multi-tenant deployment".
+#: That "or" means the vulnerability does not *require* auth disabled: it
+#: also holds in the other branch, so the cheap close (built for "scenario
+#: only holds with auth off") must not fire. Case-insensitive because prose
+#: "or" is the same doubt — the close vetoes on doubt, and a veto costs two
+#: LLM calls where a wrong close costs a real report.
+_ALT_PRECONDITION_RE = re.compile(r"\bor\b", re.IGNORECASE)
+
+#: The clause terminators that bound the alternative-precondition window.
+_CLAUSE_TERMINATOR_RE = re.compile(r"[,;.\n]")
+
 #: Cap on the evidence line stored in the summary and the log.
 _EVIDENCE_MAX_CHARS = 200
 
@@ -406,10 +424,41 @@ def requires_auth_disabled_evidence(text: str) -> str:
                 text[match.end() : match.end() + _FORWARD_GUARD_WINDOW_CHARS]
             ):
                 continue
+            if _alt_precondition_follows(text, match):
+                continue
             if entry.is_config and _config_match_is_vetoed(text, match, enabled_assignment):
                 continue
             return _evidence_line(text, match)
     return ""
+
+
+def _alt_precondition_follows(text: str, match: re.Match[str]) -> bool:
+    """Whether an "or" joins the auth-disabled match to another precondition.
+
+    "spark.authenticate=false ... OR shared-secret multi-tenant deployment"
+    is a branching precondition: the vulnerability holds in *either* branch,
+    so it does not require auth disabled and the cheap close must not fire.
+
+    Bounded to the clause the match sits in (up to the next ``,`, `;`, `.` or
+    newline, or ``_ALT_PRECONDITION_WINDOW_CHARS`` chars) so an "or" in a later
+    sentence about something else can't veto a real auth-disabled-only
+    finding. Parenthetical asides are stripped first — "(Spark DEFAULT; 0
+    preconditions per brief calibration)" sits between the config and the OR
+    and its `;` would otherwise end the clause before the OR that the guard
+    is looking for.
+    """
+    tail = text[match.end() : match.end() + _ALT_PRECONDITION_WINDOW_CHARS]
+    # Strip parenthetical asides: a `;` or `,` inside "(...)" is part of the
+    # aside, not a clause boundary. Repeat for one level of nesting.
+    while True:
+        stripped = re.sub(r"\([^()]*\)", " ", tail)
+        if stripped == tail:
+            break
+        tail = stripped
+    terminator = _CLAUSE_TERMINATOR_RE.search(tail)
+    if terminator is not None:
+        tail = tail[: terminator.start()]
+    return _ALT_PRECONDITION_RE.search(tail) is not None
 
 
 def procedural_close_if_evidence(report: SecurityReport) -> bool:

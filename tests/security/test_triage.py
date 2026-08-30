@@ -994,6 +994,47 @@ class TestRequiresAuthDisabledEvidence:
 
         assert requires_auth_disabled_evidence(text) == "", text
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # The auth-disabled condition is one branch of an OR: the vuln also
+            # holds in a multi-tenant deployment with auth ON, so it does not
+            # require auth disabled and the close must not fire.
+            "Preconditions: spark.authenticate=false (Spark DEFAULT; 0 "
+            "preconditions per brief calibration) OR shared-secret "
+            "multi-tenant deployment (1 precondition), For token/key theft "
+            "to matter: app runs with Kerberos delegation tokens.",
+            "Requires spark.authenticate=false or network access to the driver RPC port.",
+            "With authentication disabled or a shared-secret multi-tenant setup, the token leaks.",
+        ],
+    )
+    def test_a_branching_precondition_does_not_close(self, text: str) -> None:
+        """An "or" joining the auth-disabled match to another precondition
+        means the vulnerability doesn't require auth disabled — the cheap
+        close is for scenarios that *only* hold with auth off."""
+        from franktheunicorn.security.triage import requires_auth_disabled_evidence
+
+        assert requires_auth_disabled_evidence(text) == "", text
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # A parenthetical aside between the config and the rest of the
+            # sentence must not stop the close: there's no OR here, the aside
+            # is just calibration detail.
+            "Preconditions: spark.authenticate=false (Spark DEFAULT), the endpoint is open.",
+            "spark.authenticate=false (the default; see docs) and the RPC "
+            "handler accepts anything.",
+        ],
+    )
+    def test_a_parenthetical_aside_does_not_block_the_close(self, text: str) -> None:
+        """The guard strips parenthetical asides so their internal `;`/`,`
+        can't end the clause before any OR — and when there is no OR, the close
+        still fires."""
+        from franktheunicorn.security.triage import requires_auth_disabled_evidence
+
+        assert requires_auth_disabled_evidence(text) != "", text
+
     def test_a_dot_run_does_not_backtrack_quadratically(self) -> None:
         """Report text is attacker-controlled; the unbounded prefix measured
         30s on a 40KB run of "a." — the cheap close must stay cheap."""
