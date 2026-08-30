@@ -1520,6 +1520,41 @@ def security_report_rerun_procedural(request: HttpRequest) -> HttpResponse:
     return _back_to_security_list(request)
 
 
+@require_POST
+def security_report_rerun_duplicates(request: HttpRequest) -> HttpResponse:
+    """Re-run duplicate detection across the whole backlog (htmx, bulk, no LLM).
+
+    The duplicate check is cheap (set intersections, no model calls), so unlike
+    triage this one is fine to run across every report in one request. Links new
+    matches and clears stale auto-links that no longer score above the threshold
+    — the latter is the point: a re-check that only ever added links would leave
+    the false positives from a buggy heuristic (the finding-id-only match) on the
+    rows forever. Hand-set links are never touched.
+
+    Runs regardless of ``security_triage.duplicates.enabled``: that flag gates the
+    automatic triage-time path, and an operator pressing a button has asked for it.
+    """
+    from franktheunicorn.config.loader import get_operator_config
+    from franktheunicorn.security.duplicates import redetect_across_backlog
+
+    config = get_operator_config().security_triage.duplicates
+    candidates = list(SecurityReport.objects.select_related("project", "duplicate_of"))
+
+    linked, cleared = redetect_across_backlog(candidates, config)
+
+    parts = [f"{linked} linked"]
+    if cleared:
+        parts.append(f"{cleared} stale link(s) cleared")
+    messages.success(request, "Re-checked duplicates: " + ", ".join(parts) + ".")
+    logger.info(
+        "Bulk duplicate re-check: linked=%d cleared=%d (threshold %.2f)",
+        linked,
+        cleared,
+        config.threshold,
+    )
+    return _back_to_security_list(request)
+
+
 #: Cap on the CSV export. Not a performance bound — the export streams, so the
 #: size it can serve is unbounded — but a review bound: a sheet nobody is going
 #: to read to the bottom is a sheet whose bottom half gets rubber-stamped, and

@@ -64,6 +64,13 @@ urlpatterns = [
         views.security_report_rerun_procedural,
         name="security_rerun_procedural",
     ),
+    # Re-run the cheap duplicate check across the whole backlog: links new
+    # matches and clears stale auto-links from a buggy heuristic. No LLM cost.
+    path(
+        "security/rerun-duplicates/",
+        views.security_report_rerun_duplicates,
+        name="security_rerun_duplicates",
+    ),
     # Bulk import: a zip of report files, same importer as import_security_zip.
     path("security/upload/", views.security_report_upload, name="security_upload"),
     # The undo for one: delete every report that came from a named archive.

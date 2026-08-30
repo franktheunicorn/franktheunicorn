@@ -1788,6 +1788,60 @@ class TestSecurityReportRerunProcedural:
 
 
 @pytest.mark.django_db
+class TestSecurityReportRerunDuplicates:
+    """The bulk duplicate re-check: cheap (no LLM), links new matches and clears
+    stale auto-links. Hand-set links are never touched."""
+
+    def test_it_links_a_new_match_and_reports_both_halves(self, client: Client, db: Any) -> None:
+        project = ProjectFactory(owner="apache", repo="spark")
+        SecurityReportFactory(project=project, title="RCE in RPC", raw_text="port 7077 NettyRpcEnv")
+        SecurityReportFactory(project=project, title="RCE in RPC", raw_text="port 7077 NettyRpcEnv")
+
+        response = client.post("/security/rerun-duplicates/")
+
+        assert response.status_code == 302
+
+    def test_it_clears_a_stale_auto_link(self, client: Client, db: Any) -> None:
+        project = ProjectFactory(owner="apache", repo="spark")
+        original = SecurityReportFactory(
+            project=project, title="RCE in RPC", raw_text="port 7077 NettyRpcEnv"
+        )
+        stale = SecurityReportFactory(
+            project=project,
+            title="unrelated vuln",
+            raw_text="nothing in common with the RPC report",
+            duplicate_of=original,
+            duplicate_confidence=1.0,
+            duplicate_reason="same scanner finding id 'f005' in a different archive",
+        )
+
+        client.post("/security/rerun-duplicates/")
+
+        stale.refresh_from_db()
+        assert stale.duplicate_of_id is None
+        assert stale.duplicate_confidence is None
+
+    def test_a_hand_set_link_survives_the_re_check(self, client: Client, db: Any) -> None:
+        project = ProjectFactory(owner="apache", repo="spark")
+        original = SecurityReportFactory(
+            project=project, title="RCE in RPC", raw_text="port 7077 NettyRpcEnv"
+        )
+        hand = SecurityReportFactory(
+            project=project,
+            title="hand linked",
+            raw_text="operator decided this",
+            duplicate_of=original,
+            duplicate_confidence=None,
+        )
+
+        client.post("/security/rerun-duplicates/")
+
+        hand.refresh_from_db()
+        assert hand.duplicate_of_id == original.pk
+        assert hand.duplicate_confidence is None
+
+
+@pytest.mark.django_db
 class TestSecurityReportVersions:
     """The explicit affected-versions field: copy from verification, or edit by hand."""
 

@@ -34,6 +34,17 @@
             ↻ Re-close (procedural)
         </button>
     </form>
+    {# Re-run the duplicate check across the backlog: links new matches and #}
+    {# clears stale auto-links. Cheap (no LLM); works with no backend configured. #}
+    <form method="post" action="{% url 'dashboard:security_rerun_duplicates' %}" style="display: inline;">
+        {% csrf_token %}
+        <button type="submit" class="action-btn"
+                style="font-size: 0.85rem; padding: 0.4rem 0.8rem;"
+                hx-post="{% url 'dashboard:security_rerun_duplicates' %}"
+                hx-confirm="Re-check duplicates across the whole backlog? Cheap (no LLM). Links new matches and clears stale auto-links that no longer score as duplicates — hand-set links are left alone.">
+            ↻ Re-check Duplicates
+        </button>
+    </form>
 </div>
 
 {# Bulk import. Reports land as untriaged drafts exactly like a pasted one, and #}

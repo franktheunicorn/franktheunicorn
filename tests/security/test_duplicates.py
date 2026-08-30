@@ -120,9 +120,14 @@ class TestScoring:
 
         assert find_duplicate(b, [a], _config()) is None
 
-    def test_the_same_scanner_finding_in_a_different_archive_is_certain(self) -> None:
-        """Not "similar" — the same tool ran twice on the same code and numbered it
-        the same. Identity, so it short-circuits."""
+    def test_the_same_finding_id_across_archives_needs_the_title_to_corroborate(self) -> None:
+        """The finding id is a per-archive sequence number (``f001``, ``f002``, …),
+        not a stable hash, so ``f0042`` in a January archive and ``f0042`` in a
+        February archive are the 42nd finding in each scan — a coincidence, not
+        the same hole. A bare id match across two archives that scanned different
+        branches used to short-circuit to 1.0; it now falls through to the
+        weighted blend, where different content scores low and no link is made.
+        """
         project = ProjectFactory(owner="apache", repo="spark")
         a = SecurityReportFactory(
             project=project, finding_id="f0042", source_archive="scan-january.zip", **_RPC_REPORT
@@ -137,8 +142,30 @@ class TestScoring:
 
         match = score_pair(build_signature(b), build_signature(a), _config())
 
+        assert match.score < 1.0
+        assert "same scanner finding id" not in match.reason
+
+    def test_the_same_finding_id_and_title_across_archives_is_certain(self) -> None:
+        """A genuine re-scan keeps the title: the same tool ran twice on the same
+        code, numbered it the same, and described it the same way. That is
+        identity, so it short-circuits to 1.0 — the title is the corroboration
+        that the id match is not a coincidental per-archive collision."""
+        project = ProjectFactory(owner="apache", repo="spark")
+        a = SecurityReportFactory(
+            project=project, finding_id="f0042", source_archive="scan-january.zip", **_RPC_REPORT
+        )
+        b = SecurityReportFactory(
+            project=project,
+            finding_id="f0042",
+            source_archive="scan-february.zip",
+            **_RPC_REPORT,
+        )
+
+        match = score_pair(build_signature(b), build_signature(a), _config())
+
         assert match.score == 1.0
         assert "same scanner finding id" in match.reason
+        assert "identical title" in match.reason
 
     def test_the_same_finding_id_within_one_archive_is_not_a_duplicate(self) -> None:
         """Within one archive the ids are unique, so equality there would mean the
@@ -917,3 +944,105 @@ class TestReviewRegressions:
 
         assert f"-> #{original.pk}" in out.getvalue()
         assert f"-> #{middle.pk}" not in out.getvalue()
+
+
+@pytest.mark.django_db
+class TestRedetectAcrossBacklog:
+    """The dashboard "re-check duplicates" button: re-eval the whole backlog, link
+    new matches and clear stale auto-links. Hand-set links are never touched."""
+
+    def test_it_links_a_new_match_and_clears_a_stale_auto_link(self) -> None:
+        from franktheunicorn.security.duplicates import redetect_across_backlog
+
+        project = ProjectFactory(owner="apache", repo="spark")
+        # Two genuine duplicates (same title + text) that were never linked.
+        a = SecurityReportFactory(project=project, **_RPC_REPORT)
+        b = SecurityReportFactory(project=project, **_RPC_REPORT)
+        # A report with a stale auto-link to an unrelated report. Under the fixed
+        # finding-id logic the link no longer scores above threshold, so a re-check
+        # must clear it — the whole point of the button.
+        unrelated = SecurityReportFactory(
+            project=project, title="totally different", raw_text="nothing shared here"
+        )
+        stale = SecurityReportFactory(
+            project=project,
+            title="another unrelated thing",
+            raw_text="also nothing shared",
+            duplicate_of=unrelated,
+            duplicate_confidence=1.0,
+            duplicate_reason="same scanner finding id 'f005' in a different archive",
+        )
+
+        linked, cleared = redetect_across_backlog([a, b, unrelated, stale], _config())
+
+        assert linked >= 1
+        assert cleared == 1
+        stale.refresh_from_db()
+        assert stale.duplicate_of_id is None
+        assert stale.duplicate_confidence is None
+        assert stale.duplicate_reason == ""
+
+    def test_a_hand_set_link_is_left_alone_even_when_the_heuristic_disagrees(self) -> None:
+        from franktheunicorn.security.duplicates import redetect_across_backlog
+
+        project = ProjectFactory(owner="apache", repo="spark")
+        original = SecurityReportFactory(project=project, **_RPC_REPORT)
+        # The operator linked this by hand (confidence is NULL).
+        hand = SecurityReportFactory(
+            project=project,
+            duplicate_of=original,
+            duplicate_confidence=None,
+            title="hand linked, no score",
+            raw_text="operator decided this",
+        )
+
+        linked, cleared = redetect_across_backlog([original, hand], _config())
+
+        assert linked == 0
+        assert cleared == 0
+        hand.refresh_from_db()
+        assert hand.duplicate_of_id == original.pk
+        assert hand.duplicate_confidence is None
+
+    def test_a_coincidental_finding_id_collision_is_not_linked(self) -> None:
+        """The bug the re-check exists to clean up: two reports with the same
+        per-archive sequence id from different archives but different content used
+        to score 1.0 on the id alone. Under the fixed logic they fall through to
+        the weighted blend and do not link."""
+        from franktheunicorn.security.duplicates import redetect_across_backlog
+
+        project = ProjectFactory(owner="apache", repo="spark")
+        a = SecurityReportFactory(
+            project=project,
+            finding_id="f005",
+            source_archive="scan-spark-branch-3.5-20260811.zip",
+            title="Postgres renameTable interpolates the new table name unquoted",
+            raw_text="SQL injection via unquoted table name in renameTable.",
+        )
+        b = SecurityReportFactory(
+            project=project,
+            finding_id="f005",
+            source_archive="scan-spark-20260811.zip",
+            title="Any authenticated SHS user bypasses per-app history ACLs via ?doas=",
+            raw_text="ACL bypass through the doas proxy parameter.",
+        )
+
+        linked, _cleared = redetect_across_backlog([a, b], _config())
+
+        assert linked == 0
+        b.refresh_from_db()
+        assert b.duplicate_of_id is None
+
+    def test_it_runs_even_when_detection_is_switched_off(self) -> None:
+        """The flag gates the automatic triage-time path, not a button somebody
+        pressed. An explicit re-check runs regardless."""
+        from franktheunicorn.security.duplicates import redetect_across_backlog
+
+        project = ProjectFactory(owner="apache", repo="spark")
+        a = SecurityReportFactory(project=project, **_RPC_REPORT)
+        b = SecurityReportFactory(project=project, **_RPC_REPORT)
+
+        linked, _cleared = redetect_across_backlog([a, b], _config(enabled=False))
+
+        assert linked == 1
+        assert _cleared == 0

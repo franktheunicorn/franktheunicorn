@@ -182,25 +182,38 @@ def score_pair(a: Signature, b: Signature, config: SecurityDuplicateConfig) -> M
     similarity: the same scanner ``finding_id`` from a *different* archive is
     literally the same finding re-scanned, and an identical title within one project
     is what a re-forwarded disclosure looks like.
+
+    The finding-id guard needs a second check the title guard does not: the id is a
+    per-archive sequence number (``f001``, ``f002``, …) for most scanners, not a
+    stable hash, so ``f005`` in a branch-3.5 archive and ``f005`` in a main archive
+    are the 5th finding in each scan — a coincidence, not the same hole. Requiring
+    the titles to agree is what tells a genuine re-scan (same finding, same title)
+    from a coincidental collision (same number, different bug). Without it a
+    branch-3.5 finding and an unrelated main finding scored 1.00 on the id alone.
     """
     reasons: list[str] = []
 
     # Same finding, different scan. Not "similar" — the same tool ran twice on the
     # same code and numbered it the same. Guarded on the archive differing, because
     # within one archive the ids are unique and equality would mean comparing a row
-    # with itself.
+    # with itself. Also guarded on the titles agreeing, because the id is a
+    # per-archive sequence and a bare id match across two archives that scanned
+    # *different* branches is a coincidence — see the note above.
     if (
         a.finding_id
         and a.finding_id == b.finding_id
         and a.source_archive != b.source_archive
         and config.trust_finding_id
+        and a.title_tokens
+        and a.title_tokens == b.title_tokens
     ):
         return Match(
             report_id=b.report_id,
             score=1.0,
             reasons=[
-                f"same scanner finding id {a.finding_id!r} in a different archive "
-                f"({a.source_archive or 'unknown'} vs {b.source_archive or 'unknown'})"
+                f"same scanner finding id {a.finding_id!r} and identical title "
+                f"in a different archive ({a.source_archive or 'unknown'} vs "
+                f"{b.source_archive or 'unknown'})"
             ],
         )
 
@@ -539,3 +552,65 @@ def would_link(subject: SecurityReport, match: Match) -> bool:
         return False
     target = resolve_canonical(target)
     return not (target.pk == subject.pk or would_create_cycle(subject, target))
+
+
+def redetect_across_backlog(
+    reports: Sequence[SecurityReport],
+    config: SecurityDuplicateConfig,
+) -> tuple[int, int]:
+    """Re-run duplicate detection across *reports*: link new matches and clear
+    stale auto-links that no longer score above the threshold.
+
+    For the dashboard's "re-check duplicates" button — an explicit operator
+    action, so it runs regardless of ``config.enabled`` (the flag gates the
+    automatic triage-time path, not a button somebody pressed). Returns
+    ``(linked, cleared)`` so the button can report both halves: a re-check that
+    only ever added links would leave the false positives from a buggy heuristic
+    sitting on the rows forever, which is the thing the operator pressed the
+    button to clean up.
+
+    Hand-set links (a NULL ``duplicate_confidence``) are never touched: a
+    person's decision stays, even when the heuristic now disagrees. Only
+    machine-made links (a recorded score) are reconsidered and cleared.
+
+    Same quadratic shape as :func:`plan_duplicates`, for the same reason — set
+    intersections over a few hundred tokens, so 500 reports is under a second.
+    """
+    ordered = sorted(reports, key=lambda r: (r.created_at, r.pk))
+    signatures = [(report, build_signature(report)) for report in ordered]
+    linked = 0
+    cleared = 0
+    for index, (report, signature) in enumerate(signatures):
+        best: Match | None = None
+        for earlier, earlier_sig in signatures[:index]:
+            if earlier.project_id != report.project_id:
+                continue
+            match = score_pair(signature, earlier_sig, config)
+            if match.score < config.threshold:
+                continue
+            if best is None or match.score > best.score:
+                best = match
+        if best is not None:
+            if link_duplicate(report, best):
+                linked += 1
+        elif report.duplicate_of_id is not None and report.duplicate_confidence is not None:
+            logger.info(
+                "Re-check: clearing report #%s's stale duplicate link to #%s "
+                "(no match above %.2f on re-eval).",
+                report.pk,
+                report.duplicate_of_id,
+                config.threshold,
+            )
+            report.duplicate_of = None
+            report.duplicate_confidence = None
+            report.duplicate_reason = ""
+            report.save(
+                update_fields=[
+                    "duplicate_of",
+                    "duplicate_confidence",
+                    "duplicate_reason",
+                    "updated_at",
+                ]
+            )
+            cleared += 1
+    return linked, cleared
