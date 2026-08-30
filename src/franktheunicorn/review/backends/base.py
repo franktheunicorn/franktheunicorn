@@ -215,6 +215,37 @@ def looks_offline(exc: BaseException) -> bool:
     return any(fragment in text for fragment in _OFFLINE_MESSAGES)
 
 
+def is_hard_failure(exc: BaseException) -> bool:
+    """Whether *exc* is a failure that won't fix itself before the next retry.
+
+    The circuit breaker in ``security.triage`` marks a backend down for a cooldown
+    when this is True, so a 403 key or a connection-refused Ollama is tried once
+    and then left alone rather than 86 times across a backlog. Transient errors
+    (429 rate limit, 5xx, timeouts) are NOT hard — the backend is alive, just
+    busy or briefly unhappy, and marking it down would pause triage over a
+    blip.
+
+    Hard = offline (nothing listening) OR an auth/permission/not-found 4xx
+    (401/403/404): the key is wrong/forbidden or the model doesn't exist, and
+    retrying in 30s won't change that.
+    """
+    if looks_offline(exc):
+        return True
+    status_code = getattr(exc, "status_code", None)
+    if isinstance(status_code, int) and status_code in (401, 403, 404):
+        return True
+    # SDKs wrap: walk the cause chain for a buried status code.
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        code = getattr(current, "status_code", None)
+        if isinstance(code, int) and code in (401, 403, 404):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 class BaseLLMBackend:
     """Convenience base class for SDK-backed LLM backends.
 

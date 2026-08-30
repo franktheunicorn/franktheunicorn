@@ -99,10 +99,20 @@ def process_pending_commands(
     """
     budget = MAX_COMMANDS_PER_DRAIN if limit is None else limit
     processed = 0
+    from franktheunicorn.security.triage import triage_backends_alive
+
     while processed < budget:
         pending = WorkerCommand.objects.filter(status="pending")
         if min_priority is not None:
             pending = pending.filter(priority__gte=min_priority)
+        # Circuit breaker: when no triage backend is alive, leave triage
+        # commands pending rather than burning through a backlog of them — each
+        # would fail identically (403 key / Ollama down) and bill nothing. Other
+        # commands (version map, verify, sandbox) keep running; they don't
+        # need an LLM. The health check is cheap (a dict lookup) and only
+        # excludes one command type, so a healthy worker pays nothing for it.
+        if not triage_backends_alive(operator_config):
+            pending = pending.exclude(command="run_security_triage")
         cmd_id = pending.order_by("-priority", "created_at").values_list("pk", flat=True).first()
         if cmd_id is None:
             break

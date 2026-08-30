@@ -9,11 +9,16 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
+from franktheunicorn.config.models import LLMBackendConfig
 from franktheunicorn.security.cve_lookup import search_cves
 from franktheunicorn.security.prompt import build_parse_prompt, build_triage_prompt
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 _VALID_SEVERITIES: frozenset[str] = frozenset(
     {"critical", "high", "medium", "low", "informational"}
@@ -604,6 +609,164 @@ def _restore_untriaged_status(report: SecurityReport) -> None:
     )
 
 
+#: How long a backend stays "down" after a hard failure before a triage command
+#: re-probes it. Five minutes: short enough that an operator who fixes a key
+#: and doesn't restart the worker gets a canary retry promptly, long enough
+#: that a 234-report backlog doesn't re-probe a dead backend on every command.
+_BACKEND_DOWN_COOLDOWN_S = 300.0
+
+
+def _backend_key(cfg: LLMBackendConfig) -> tuple[str, str, str, str, str]:
+    """Connection identity for a backend config — the same key _get_triage_backends
+    uses for dedup, so boot-disabled and runtime-disabled refer to the same thing."""
+    return (cfg.provider, cfg.model, cfg.base_url, cfg.api_key_env, cfg.reviewer)
+
+
+class _BackendHealth:
+    """Which triage backends are down, and until when.
+
+    The boot smoke test and runtime hard-failures both feed this.
+    :func:`_get_triage_backends` skips anything down, so a dead backend (403
+    key, Ollama not running) is tried once — at boot, or on its first runtime
+    failure — and then left alone until its cooldown expires, rather than 86
+    times across a 234-report backlog. After the cooldown, the next triage
+    command that reaches it acts as a canary: if it works it's marked alive
+    again, if not it goes back down for another window.
+
+    A module-level singleton rather than passed around, because there is one
+    worker process and one set of backends — the health is process state, not
+    per-call state, and threading it through every triage call site would be
+    ceremony for no gain.
+    """
+
+    def __init__(self) -> None:
+        self._down_until: dict[tuple[str, str, str, str, str], float] = {}
+
+    def mark_down(self, key: tuple[str, str, str, str, str]) -> None:
+        self._down_until[key] = time.monotonic() + _BACKEND_DOWN_COOLDOWN_S
+
+    def mark_alive(self, key: tuple[str, str, str, str, str]) -> None:
+        self._down_until.pop(key, None)
+
+    def is_down(self, key: tuple[str, str, str, str, str]) -> bool:
+        deadline = self._down_until.get(key)
+        if deadline is None:
+            return False
+        if time.monotonic() >= deadline:
+            # Cooldown expired: let the next triage command re-probe it. Clearing
+            # here (not on success) is what makes a single canary command the
+            # re-test, rather than every command in the next drain. pop, not del:
+            # the main and interactive drain threads both reach here, and a
+            # concurrent mark_alive on the same key would turn del into a KeyError.
+            self._down_until.pop(key, None)
+            return False
+        return True
+
+    def any_alive(self, configs: Sequence[LLMBackendConfig]) -> bool:
+        return any(not self.is_down(_backend_key(cfg)) for cfg in configs)
+
+    def reset(self) -> None:
+        self._down_until.clear()
+
+
+_triage_backend_health = _BackendHealth()
+
+
+def _triage_backend_configs(operator_config: OperatorConfig) -> list[LLMBackendConfig]:
+    """The configs triage would consider, in order, before health filtering.
+
+    Override first if set, then ``llm_backends`` — the same shape
+    :func:`_get_triage_backends` builds backends from — minus dedup and minus
+    health, so the health check and the live build see the same candidates.
+    """
+    configs: list[LLMBackendConfig] = []
+    override = operator_config.security_triage.llm_backend
+    if override is not None:
+        configs.append(override)
+    configs.extend(operator_config.llm_backends)
+    return configs
+
+
+def seed_triage_backend_health(operator_config: OperatorConfig) -> tuple[int, int]:
+    """Probe every backend triage would use and mark the dead ones down.
+
+    The boot half of the circuit breaker. Runs the same cheap probe the worker's
+    ``_check_backends`` uses, so a 403 key or an Ollama that isn't running is
+    86'd here too — and triage's ``_get_triage_backends`` skips it, which is the
+    gap that used to make triage try a backend the boot preflight had already
+    disabled. Returns ``(total, disabled)``.
+
+    Idempotent: re-running after a cooldown re-probes everything, so an operator
+    who fixes a key without restarting the worker can re-seed from the dashboard
+    or a management command.
+    """
+    from franktheunicorn.review.backends.preflight import probe_llm_backend
+
+    configs = _triage_backend_configs(operator_config)
+    # Dedup by connection identity, matching _get_triage_backends, so two
+    # entries differing only in api_key_env/reviewer are distinct backends.
+    seen: set[tuple[str, str, str, str, str]] = set()
+    unique: list[LLMBackendConfig] = []
+    for cfg in configs:
+        key = _backend_key(cfg)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(cfg)
+
+    disabled = 0
+    for cfg in unique:
+        key = _backend_key(cfg)
+        result = probe_llm_backend(cfg)
+        if result.probed and not result.ok:
+            logger.warning(
+                "Triage backend %s/%s (%s): DISABLED at boot — %s",
+                cfg.provider,
+                cfg.model or "default model",
+                cfg.base_url or "(default)",
+                result.reason,
+            )
+            _triage_backend_health.mark_down(key)
+            disabled += 1
+        else:
+            _triage_backend_health.mark_alive(key)
+            logger.info(
+                "Triage backend %s/%s (%s): OK%s",
+                cfg.provider,
+                cfg.model or "default model",
+                cfg.base_url or "(default)",
+                "" if result.probed else " (no probe — unchecked)",
+            )
+
+    total = len(unique)
+    if disabled and disabled == total:
+        logger.error(
+            "Every triage backend failed its boot probe (%d/%d). Triage will pause "
+            "until one comes back — fix the keys above, or start Ollama, and re-seed.",
+            disabled,
+            total,
+        )
+    elif disabled:
+        logger.info(
+            "Triage backends: %d OK, %d disabled, of %d configured.",
+            total - disabled,
+            disabled,
+            total,
+        )
+    return total, disabled
+
+
+def triage_backends_alive(operator_config: OperatorConfig) -> bool:
+    """Whether any triage backend is currently alive — the worker's pause check.
+
+    The worker excludes ``run_security_triage`` commands from the claim loop when
+    this is False, so a dead-backend backlog sits pending rather than burning
+    through 234 commands that all fail identically. Other commands (version
+    map, verify) keep running — they don't need an LLM.
+    """
+    return _triage_backend_health.any_alive(_triage_backend_configs(operator_config))
+
+
 def _get_triage_backends(operator_config: OperatorConfig) -> list[BaseLLMBackend]:
     """Triage's backends, in fallthrough order.
 
@@ -645,6 +808,13 @@ def _get_triage_backends(operator_config: OperatorConfig) -> list[BaseLLMBackend
         if key in seen:
             continue
         seen.add(key)
+        if _triage_backend_health.is_down(key):
+            # Boot smoke test or a runtime hard-failure marked this one down.
+            # Skipping it here is the gap that used to make triage try a backend
+            # the boot preflight had already disabled — and the point of the
+            # circuit breaker: a dead backend costs a fallthrough, not 86
+            # identical failures across a backlog.
+            continue
         backend = get_backend(cfg)
         if isinstance(backend, BaseLLMBackend):
             backends.append(backend)
@@ -684,7 +854,47 @@ def _call_llm(
         action_type=action_type,
         project_id=project_id,
     )
+    # Defense-in-depth: a call that returned at all means the backend is alive.
+    # In the current design this is a no-op — a down backend is filtered out by
+    # _get_triage_backends before it reaches _call_llm, and a cooled-down one
+    # has its down mark cleared by is_down's expiry side effect, so by the time
+    # we get here the key is already absent. Kept so a future caller that
+    # bypasses the filter still clears a stale down mark. The actual recovery
+    # mechanism is is_down's cooldown-expiry clear, not this line.
+    _triage_backend_health.mark_alive(_backend_key_for(backend))
     return _safe_json_parse(raw_response)
+
+
+def _backend_key_for(backend: BaseLLMBackend) -> tuple[str, str, str, str, str]:
+    """The connection-identity key for a built backend, off its config."""
+    cfg = backend._config
+    return _backend_key(cfg)
+
+
+def _mark_backend_down_if_hard(backend: BaseLLMBackend, exc: BaseException) -> None:
+    """The runtime half of the circuit breaker.
+
+    A hard failure (403 key, connection refused — not a 429 or timeout) means
+    retrying the same backend in 30s won't change anything, so mark it down for
+    the cooldown and stop sending triage to it. Transient failures are left
+    alone: the backend is alive, just busy, and the fallthrough already handled
+    this one report.
+    """
+    from franktheunicorn.review.backends.base import is_hard_failure
+
+    if not is_hard_failure(exc):
+        return
+    key = _backend_key_for(backend)
+    if not _triage_backend_health.is_down(key):
+        logger.warning(
+            "Triage backend %s/%s (%s) marked down for %.0fs after a hard failure: %s",
+            backend._config.provider,
+            backend._model,
+            backend._config.base_url or "(default)",
+            _BACKEND_DOWN_COOLDOWN_S,
+            type(exc).__name__,
+        )
+    _triage_backend_health.mark_down(key)
 
 
 #: Spellings a model actually uses for yes and no. Anything outside both sets is
@@ -750,7 +960,8 @@ def _parse_report(report: SecurityReport, backend: BaseLLMBackend) -> bool:
             action_type="security-parse",
             project_id=project_id,
         )
-    except Exception:
+    except Exception as exc:
+        _mark_backend_down_if_hard(backend, exc)
         logger.exception("Failed to parse security report %d", report.pk)
         return False
 
@@ -854,6 +1065,7 @@ def _analyze_report(
     except Exception as exc:
         from franktheunicorn.review.backends.base import looks_offline
 
+        _mark_backend_down_if_hard(backend, exc)
         if looks_offline(exc):
             # The commonest cause by far, and it is a configuration state rather
             # than a bug — so a warning naming it, not a traceback through httpx.

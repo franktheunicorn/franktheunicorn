@@ -233,6 +233,14 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
     )
 
     disabled_backends = _check_backends(operator_config)
+    # Seed triage's own backend health so a backend the boot preflight 86'd
+    # is skipped by triage too — without this, triage read llm_backends directly
+    # and tried a backend _check_backends had already disabled. Probes the
+    # override + llm_backends (Ollama included), so a 403 key or a dead Ollama
+    # is down for triage from the first cycle, not the 234th failed command.
+    from franktheunicorn.security.triage import seed_triage_backend_health
+
+    seed_triage_backend_health(operator_config)
     _check_agent_cli_reviewers(operator_config)
     _check_ssh_configs(operator_config)
 
@@ -336,74 +344,6 @@ def _seed_token_param_fallback(model: str, base_url: str, token_param: str) -> N
         logger.debug("Could not seed LLM token-param fallback state to DB.", exc_info=True)
 
 
-def _openai_chat_preflight(
-    openai: object,
-    client_kwargs: dict[str, str],
-    model: str,
-    base_url: str,
-    idx: int,
-    masked: str,
-    disabled: set[int],
-) -> None:
-    """Verify an OpenAI-compatible endpoint that doesn't support /models via a minimal chat call.
-
-    Tries ``max_tokens`` first; if the server rejects it with a deprecation error (e.g. Snowflake
-    Cortex requires ``max_completion_tokens``), retries once with the alternative param name.
-    On success after retry, seeds ``LLMBackendFallback`` so ``OpenAIBackend`` starts with the
-    right param name and avoids its own first-attempt failure.
-
-    Mutates ``disabled`` on failure. Logs OK or WARNING.
-    """
-    import openai as _openai
-
-    client = _openai.OpenAI(**client_kwargs)  # type: ignore[arg-type]
-    token_param = "max_tokens"
-
-    for attempt in range(2):
-        try:
-            client.chat.completions.create(  # type: ignore[call-overload]
-                model=model,
-                messages=[{"role": "user", "content": "hi"}],
-                **{token_param: 1},
-            )
-        except _openai.BadRequestError as exc:
-            msg = str(exc).lower()
-            if attempt == 0 and ("max_tokens" in msg or "max_completion_tokens" in msg):
-                token_param = "max_completion_tokens"
-                continue
-            logger.warning(
-                "Backend[%d] openai (%s key=%s): preflight chat check failed — %s — "
-                "backend disabled for this run",
-                idx,
-                base_url,
-                masked,
-                exc,
-            )
-            disabled.add(idx)
-            return
-        except Exception as exc:
-            logger.warning(
-                "Backend[%d] openai (%s key=%s): preflight chat check failed — %s — "
-                "backend disabled for this run",
-                idx,
-                base_url,
-                masked,
-                exc,
-            )
-            disabled.add(idx)
-            return
-        else:
-            if token_param != "max_tokens":
-                _seed_token_param_fallback(model, base_url, token_param)
-            logger.info(
-                "Backend[%d] openai (%s key=%s): OK (no /models endpoint; chat check passed)",
-                idx,
-                base_url,
-                masked,
-            )
-            return
-
-
 #: Providers this preflight can prove nothing about, because they authenticate
 #: somewhere other than an env var frank reads.
 #:
@@ -414,36 +354,14 @@ def _openai_chat_preflight(
 #: disabled it with "no API key in env var '(unset)'", so an operator copying the
 #: example config got zero findings forever and a log telling them to fix a key
 #: that does not exist. ``claude-code``, ``llama-cpp``, ``vllm`` and ``rlm`` were
-#: all caught by the same trap.
-_KEYLESS_PROVIDERS: frozenset[str] = frozenset({"stub", "ollama", "llama-cpp", "vllm"})
-
-
+#: all caught by the same trap. The logic now lives in
+#: ``review.backends.preflight`` so the boot probe and triage's backend-health
+#: seed share one source of truth.
 def _provider_needs_api_key(provider: str) -> bool:
-    """Whether this provider authenticates through an env var this preflight reads.
+    """Delegate to the shared preflight helper (kept for the call sites below)."""
+    from franktheunicorn.review.backends.preflight import needs_api_key
 
-    Asks the backend class, falling back to a static list for the providers whose
-    modules are optional installs. A provider whose backend declares no
-    ``_default_key_env`` and takes no ``api_key_env`` is not something a missing-key
-    check can rule on, and guessing "it needs one" disables a working backend.
-    """
-    if provider in _KEYLESS_PROVIDERS:
-        return False
-    try:
-        from franktheunicorn.review.backends import _BACKENDS
-
-        entry = _BACKENDS.get(provider)
-        if entry is None:
-            # Unknown provider: get_backend falls back to stub, which needs no key.
-            return False
-        import importlib
-
-        backend_cls = getattr(importlib.import_module(entry[0]), entry[1])
-        return bool(getattr(backend_cls, "_default_key_env", ""))
-    except Exception:
-        # An optional dependency missing is not a reason to call the provider
-        # keyless; the key check below is still the useful signal.
-        logger.debug("Could not introspect backend for provider %r", provider, exc_info=True)
-        return True
+    return needs_api_key(provider)
 
 
 def _check_backends(operator_config: OperatorConfig) -> frozenset[int]:
@@ -481,93 +399,49 @@ def _check_backends(operator_config: OperatorConfig) -> frozenset[int]:
         return frozenset()
 
     logger.info("Checking %d configured LLM backend(s) ...", len(operator_config.llm_backends))
+    from franktheunicorn.review.backends.preflight import (
+        default_key_env,
+        probe_llm_backend,
+    )
+
     for idx, bc in enumerate(operator_config.llm_backends):
         provider = bc.provider.lower()
-        if not _provider_needs_api_key(provider):
-            # Named, not skipped in silence. "stub" especially: it is why an
-            # install can look wired up and quietly produce canned reviews.
-            logger.info(
-                "Backend[%d] %s (%s): SKIPPED preflight — needs no API key%s",
-                idx,
-                provider,
-                bc.base_url or "(default)",
-                " — note stub returns canned text, not a real review" if provider == "stub" else "",
-            )
-            unchecked.append(f"{idx}:{provider}")
-            continue
-
-        key_env = bc.api_key_env or {
-            "claude": "ANTHROPIC_API_KEY",
-            "openai": "OPENAI_API_KEY",
-            "gemini": "GOOGLE_API_KEY",
-        }.get(provider, "")
-        api_key = os.environ.get(key_env, "") if key_env else ""
-
         base_url = bc.base_url or {
             "claude": "https://api.anthropic.com",
             "openai": "https://api.openai.com",
             "gemini": "https://generativelanguage.googleapis.com",
         }.get(provider, "(default)")
+        masked = _mask_key(os.environ.get(bc.api_key_env or default_key_env(provider), ""))
 
-        if not api_key:
-            logger.warning(
-                "Backend[%d] %s (%s): DISABLED — no API key in env var %r",
+        result = probe_llm_backend(bc)
+        if not result.probed:
+            # stub / llama-cpp / vllm / unknown: no probe exists. Named, not
+            # skipped in silence — "stub" especially is why an install can look
+            # wired up and quietly produce canned reviews.
+            logger.info(
+                "Backend[%d] %s (%s): SKIPPED preflight — no probe implemented%s",
                 idx,
                 provider,
                 base_url,
-                key_env or "(unset)",
+                " — note stub returns canned text, not a real review" if provider == "stub" else "",
             )
-            disabled.add(idx)
+            unchecked.append(f"{idx}:{provider}")
             continue
-
-        masked = _mask_key(api_key)
-        try:
-            if provider == "claude":
-                import anthropic
-
-                anthropic.Anthropic(api_key=api_key).models.list()
-            elif provider == "openai":
-                import openai
-
-                kwargs: dict[str, str] = {"api_key": api_key}
-                if bc.base_url:
-                    kwargs["base_url"] = bc.base_url
-                try:
-                    openai.OpenAI(**kwargs).models.list()  # type: ignore[arg-type]
-                except openai.NotFoundError:
-                    # Some OpenAI-compatible endpoints (e.g. Snowflake Cortex)
-                    # don't implement /models. Fall back to a minimal chat call.
-                    _openai_chat_preflight(
-                        openai, kwargs, bc.model or "gpt-4o", base_url, idx, masked, disabled
-                    )
-                    continue
-            elif provider == "gemini":
-                from google import genai
-
-                genai.Client(api_key=api_key).models.list()
-            else:
-                logger.info(
-                    "Backend[%d] %s (%s key=%s): SKIPPED preflight — no probe implemented "
-                    "for this provider, so a bad key will only surface at the first call",
-                    idx,
-                    provider,
-                    base_url,
-                    masked,
-                )
-                unchecked.append(f"{idx}:{provider}")
-                continue
-        except Exception as exc:
+        if not result.ok:
             logger.warning(
                 "Backend[%d] %s (%s key=%s): DISABLED — preflight failed: %s",
                 idx,
                 provider,
                 base_url,
                 masked,
-                exc,
+                result.reason,
             )
             disabled.add(idx)
             continue
-
+        if result.token_param is not None:
+            # The openai chat probe discovered the server's token-param name;
+            # persist it so OpenAIBackend skips its own first-attempt error.
+            _seed_token_param_fallback(bc.model or "gpt-4o", bc.base_url or "", result.token_param)
         logger.info(
             "Backend[%d] %s (%s key=%s): OK",
             idx,
