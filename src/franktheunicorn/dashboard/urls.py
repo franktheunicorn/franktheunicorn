@@ -56,6 +56,14 @@ urlpatterns = [
         views.security_report_rerun_triage,
         name="security_rerun_triage",
     ),
+    # The cheap-only sibling: re-run the procedural auth-disabled close across
+    # the queue with zero LLM cost. The one bulk action that works with no
+    # backend configured.
+    path(
+        "security/rerun-procedural/",
+        views.security_report_rerun_procedural,
+        name="security_rerun_procedural",
+    ),
     # Bulk import: a zip of report files, same importer as import_security_zip.
     path("security/upload/", views.security_report_upload, name="security_upload"),
     # The undo for one: delete every report that came from a named archive.

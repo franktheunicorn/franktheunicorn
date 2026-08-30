@@ -461,7 +461,7 @@ def _alt_precondition_follows(text: str, match: re.Match[str]) -> bool:
     return _ALT_PRECONDITION_RE.search(tail) is not None
 
 
-def procedural_close_if_evidence(report: SecurityReport) -> bool:
+def procedural_close_if_evidence(report: SecurityReport, *, retrigger: bool = False) -> bool:
     """Run the procedural auth-disabled close on *report*; True if it closed.
 
     Public door onto the cheap close for the bulk re-triage button, which runs
@@ -472,11 +472,18 @@ def procedural_close_if_evidence(report: SecurityReport) -> bool:
     not re-closed by the same regex. Re-reads status first, for the same reason
     ``triage_report`` does — the operator can rule from the detail page while
     the bulk button's loop is mid-flight.
+
+    ``retrigger=True`` bypasses the never-been-triaged gate for the procedural
+    re-trigger button: the point of re-triggering is to catch reports the
+    close missed the first time — including ones the LLM path already
+    assessed and left sitting in ``new`` with a staged verdict. Those still
+    get closed; only an operator ruling (a non-``new`` status, or operator
+    notes / a CVE, which the caller gates on) keeps the close off.
     """
     stored = _current_status(report)
     if stored != "new":
         return False
-    if (
+    if not retrigger and (
         report.triage_summary
         or report.poc_assessment
         or report.poc_plausible is not None

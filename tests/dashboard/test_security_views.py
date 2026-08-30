@@ -1708,6 +1708,86 @@ class TestSecurityReportRerunTriage:
 
 
 @pytest.mark.django_db
+class TestSecurityReportRerunProcedural:
+    """The cheap-only re-trigger: re-run the auth-disabled regex close across
+    the queue with zero LLM cost. Skips operator-ruled and in-flight reports,
+    and re-closes already-triaged-but-not-ruled ones (the point of
+    re-triggering)."""
+
+    def test_a_report_the_close_missed_gets_closed(self, client: Client, db: Any) -> None:
+        from franktheunicorn.core.models import WorkerCommand
+
+        # Already triaged by the LLM (has a summary) but not operator-ruled —
+        # the never-been-triaged gate would skip it, but re-trigger must not.
+        report = SecurityReportFactory(
+            raw_text="If auth is off, the RPC handler accepts anything.",
+            status="new",
+            triage_summary="LLM said this is a real vuln.",
+            auto_triage_status="valid",
+        )
+
+        client.post("/security/rerun-procedural/")
+
+        report.refresh_from_db()
+        assert report.auto_triage_status == "invalid"
+        # No LLM was queued — the cheap close handled it.
+        assert not WorkerCommand.objects.filter(
+            command="run_security_triage", security_report=report
+        ).exists()
+
+    def test_a_clean_report_is_left_alone(self, client: Client, db: Any) -> None:
+        from franktheunicorn.core.models import WorkerCommand
+
+        report = SecurityReportFactory(raw_text="SQL injection in /api/users?id=1", status="new")
+
+        client.post("/security/rerun-procedural/")
+
+        report.refresh_from_db()
+        assert report.auto_triage_status == ""
+        assert not WorkerCommand.objects.filter(security_report=report).exists()
+
+    def test_operator_ruled_reports_are_skipped(self, client: Client, db: Any) -> None:
+        from franktheunicorn.core.models import WorkerCommand
+
+        # status="valid" is operator-ruled — excluded by the status="new" filter.
+        ruled = SecurityReportFactory(status="valid", operator_notes="ruled")
+        # new + a CVE — skipped by the CVE gate.
+        with_cve = SecurityReportFactory(status="new", matched_cve_id="CVE-2026-1")
+        # in-flight triaging — skipped (would race the worker).
+        triaging = SecurityReportFactory(
+            raw_text="If auth is off, bad things happen.", status="triaging"
+        )
+
+        client.post("/security/rerun-procedural/")
+
+        assert not WorkerCommand.objects.filter(security_report=ruled).exists()
+        assert not WorkerCommand.objects.filter(security_report=with_cve).exists()
+        # The in-flight report was not re-closed.
+        triaging.refresh_from_db()
+        assert triaging.auto_triage_status == ""
+
+    def test_it_works_with_no_llm_backend_configured(self, client: Client, db: Any) -> None:
+        """The one bulk action that works with zero LLM — no backend check."""
+        from unittest.mock import patch
+
+        from franktheunicorn.config.models import OperatorConfig
+
+        with patch(
+            "franktheunicorn.config.loader.get_operator_config",
+            return_value=OperatorConfig(github_username="testuser"),  # no llm_backends
+        ):
+            report = SecurityReportFactory(
+                raw_text="If auth is off, the RPC handler accepts anything.",
+                status="new",
+            )
+            response = client.post("/security/rerun-procedural/")
+
+        assert response.status_code == 302
+        report.refresh_from_db()
+        assert report.auto_triage_status == "invalid"
+
+
+@pytest.mark.django_db
 class TestSecurityReportVersions:
     """The explicit affected-versions field: copy from verification, or edit by hand."""
 

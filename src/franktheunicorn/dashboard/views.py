@@ -1479,6 +1479,47 @@ def security_report_rerun_triage(request: HttpRequest) -> HttpResponse:
     return _back_to_security_list(request)
 
 
+@require_POST
+def security_report_rerun_procedural(request: HttpRequest) -> HttpResponse:
+    """Re-run only the cheap procedural close across the queue (htmx, bulk, no LLM).
+
+    The lighter sibling of the full re-triage button: runs the auth-disabled
+    regex close on every report the operator hasn't ruled on, and queues
+    nothing. Zero LLM cost, zero agent runs — the one bulk action that works
+    with no backend configured at all. Useful to re-apply the close after a
+    regex fix (the OR-precondition guard, say) to reports the first pass missed,
+    including ones the LLM path already assessed and left in ``new`` with a
+    staged verdict.
+
+    Skips operator-ruled reports (non-``new`` status, operator notes, or a
+    CVE) and in-flight ``triaging`` reports (the worker is mid-LLM on those;
+    re-closing would race it). Re-opens are the operator's call.
+    """
+    from franktheunicorn.security.triage import procedural_close_if_evidence
+
+    candidates = list(
+        SecurityReport.objects.select_related("project")
+        .filter(status="new")
+        .order_by("-priority", "created_at")
+    )
+
+    closed = 0
+    ruled_skipped = 0
+    for report in candidates:
+        if report.operator_notes or report.matched_cve_id:
+            ruled_skipped += 1
+            continue
+        if procedural_close_if_evidence(report, retrigger=True):
+            closed += 1
+
+    parts = [f"{closed} closed without a model (auth-disabled)"]
+    if ruled_skipped:
+        parts.append(f"{ruled_skipped} skipped (operator-ruled or CVE assigned)")
+    messages.success(request, "Re-ran procedural close: " + ", ".join(parts) + ".")
+    logger.info("Bulk procedural re-trigger: closed=%d ruled_skipped=%d", closed, ruled_skipped)
+    return _back_to_security_list(request)
+
+
 #: Cap on the CSV export. Not a performance bound — the export streams, so the
 #: size it can serve is unbounded — but a review bound: a sheet nobody is going
 #: to read to the bottom is a sheet whose bottom half gets rubber-stamped, and

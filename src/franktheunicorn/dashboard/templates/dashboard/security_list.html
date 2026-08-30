@@ -23,6 +23,17 @@
             ↻ Re-run Triage
         </button>
     </form>
+    {# The cheap-only sibling: re-run the procedural auth-disabled close with #}
+    {# zero LLM cost. Works with no backend configured at all. #}
+    <form method="post" action="{% url 'dashboard:security_rerun_procedural' %}" style="display: inline;">
+        {% csrf_token %}
+        <button type="submit" class="action-btn"
+                style="font-size: 0.85rem; padding: 0.4rem 0.8rem;"
+                hx-post="{% url 'dashboard:security_rerun_procedural' %}"
+                hx-confirm="Re-run only the cheap procedural close across the queue? Zero LLM cost — it just re-applies the auth-disabled regex to reports you haven't ruled on.">
+            ↻ Re-close (procedural)
+        </button>
+    </form>
 </div>
 
 {# Bulk import. Reports land as untriaged drafts exactly like a pasted one, and #}
