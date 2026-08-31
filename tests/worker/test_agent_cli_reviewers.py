@@ -304,6 +304,83 @@ class TestNoCheckoutIsLoud:
         assert "produced 0 finding(s)" in caplog.text
 
 
+@pytest.mark.django_db
+class TestSecurityFocusWiring:
+    """A ``review_focus="security"`` reviewer gets the project's security model
+    bound into its review call; a general reviewer is left alone."""
+
+    @staticmethod
+    def _security_reviewer() -> AgentCLIReviewerConfig:
+        return _ssh_reviewer(
+            name="cursor-agent-security",
+            cli_path="cursor-agent",
+            review_focus="security",
+        )
+
+    def _run(
+        self, db_pr: PullRequest, reviewer: AgentCLIReviewerConfig, pc: ProjectConfig
+    ) -> MagicMock:
+        db_pr.head_sha = "a" * 40
+        db_pr.save()
+        run_review = MagicMock(return_value=[])
+        with (
+            patch.object(RemoteSSHExecutor, "prepare_repo", return_value="/remote/spark"),
+            patch(
+                "franktheunicorn.worker.runner._resolve_remote_base_ref",
+                return_value="origin/master",
+            ),
+            patch.object(
+                RemoteSSHExecutor,
+                "run",
+                return_value=ExecResult(returncode=0, stdout="", stderr=""),
+            ),
+            # Imported lazily inside _run_agent_cli_for_pr, so patching the
+            # module attribute intercepts it.
+            patch("franktheunicorn.review.agent_cli.run_agent_cli_review", run_review),
+        ):
+            _run_agent_cli_for_pr(
+                db_pr,
+                reviewer,
+                repo_path=None,
+                clone_url="https://example.com/a/b.git",
+                project_config=pc,
+            )
+        return run_review
+
+    def test_the_project_security_model_reaches_the_review(self, db_pr: PullRequest) -> None:
+        run_review = self._run(
+            db_pr,
+            self._security_reviewer(),
+            ProjectConfig(
+                owner="apache",
+                repo="spark",
+                security_model="Submitted code is trusted.",
+            ),
+        )
+
+        assert run_review.call_args.kwargs["security_model"] == "Submitted code is trusted."
+
+    def test_a_general_reviewer_gets_no_security_model(self, db_pr: PullRequest) -> None:
+        run_review = self._run(
+            db_pr,
+            _ssh_reviewer(),
+            ProjectConfig(owner="apache", repo="spark", security_model="KEEP ME OUT"),
+        )
+
+        assert "security_model" not in run_review.call_args.kwargs
+
+    def test_a_project_without_a_model_still_gets_reviewed(self, db_pr: PullRequest) -> None:
+        """An unresolvable model is an empty prompt section, not a skip — the
+        prompt itself says "not documented" and the review runs anyway."""
+        run_review = self._run(
+            db_pr,
+            self._security_reviewer(),
+            ProjectConfig(owner="no-such-owner", repo="no-such-repo"),
+        )
+
+        assert run_review.call_args.kwargs["security_model"] == ""
+
+
 class TestStartupProbe:
     """An ssh reviewer is enabled optimistically, so startup is the only place
     the remote binary gets checked at all."""

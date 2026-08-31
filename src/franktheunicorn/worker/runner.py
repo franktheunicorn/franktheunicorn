@@ -2375,6 +2375,30 @@ def _run_agent_cli_for_pr(
         run_agent_cli_review,
     )
 
+    run_review: Callable[..., list[Any]] = run_agent_cli_review
+    if reviewer.review_focus == "security":
+        # Resolved here rather than in run_agent_cli_review because the
+        # review-tool scaffold's run_review signature has no project config —
+        # and here is where the PR's project is known. Same resolver and
+        # precedence as security-report triage, so the two never disagree
+        # about what the project calls trusted.
+        from franktheunicorn.security.triage import resolve_security_model
+
+        security_model = resolve_security_model(project_config)
+        if not security_model:
+            # Per-PR detail stays at DEBUG (INFO per PR is ~900 lines a cycle
+            # on Spark). The prompt itself carries an explicit "not documented"
+            # section, so the review still runs — just without a stance to
+            # check findings against.
+            logger.debug(
+                "%s is a security-focused reviewer but %s/%s has no resolvable "
+                "security_model; the review runs without one.",
+                reviewer.name,
+                project_config.owner if project_config else "?",
+                project_config.repo if project_config else "?",
+            )
+        run_review = partial(run_agent_cli_review, security_model=security_model)
+
     create_drafts = partial(
         create_drafts_from_agent_cli,
         source=reviewer.name,
@@ -2390,7 +2414,7 @@ def _run_agent_cli_for_pr(
         project_config,
         operator_config,
         diff_http,
-        run_review=run_agent_cli_review,
+        run_review=run_review,
         create_drafts=create_drafts,
         tool_config=reviewer,
     )

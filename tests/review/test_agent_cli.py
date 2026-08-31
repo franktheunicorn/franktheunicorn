@@ -17,6 +17,7 @@ from franktheunicorn.config.models import (
 from franktheunicorn.core.models import Project, PullRequest
 from franktheunicorn.review.agent_cli import (
     AgentCLIFinding,
+    build_review_prompt,
     create_drafts_from_agent_cli,
     run_agent_cli_review,
 )
@@ -242,6 +243,96 @@ class TestRunAgentCLIReview:
         cmd = executor.run.call_args_list[1].args[0]
         assert "--model" in cmd
         assert cmd[cmd.index("--model") + 1] == "gpt-5"
+
+
+# ---------------------------------------------------------------------------
+# review_focus="security" — the security-only prompt + trust-boundary injection
+# ---------------------------------------------------------------------------
+
+
+class TestSecurityFocus:
+    def _security_config(self, **overrides: Any) -> AgentCLIReviewerConfig:
+        base: dict[str, Any] = {
+            "name": "cursor-agent-security",
+            "cli_path": "cursor-agent",
+            "review_focus": "security",
+        }
+        base.update(overrides)
+        return AgentCLIReviewerConfig(**base)
+
+    def _run_and_capture_prompt(self, config: AgentCLIReviewerConfig, **kwargs: Any) -> str:
+        executor = _executor_returning(
+            ExecResult(returncode=0, stdout="diff --git a/x b/x\n+pass\n", stderr=""),
+            ExecResult(returncode=0, stdout="Review completed", stderr=""),
+        )
+        run_agent_cli_review(
+            cwd="/tmp/repo", base_commit="abc", config=config, executor=executor, **kwargs
+        )
+        return executor.run.call_args_list[1].args[0][-1]
+
+    def test_default_focus_is_general(self) -> None:
+        cfg = AgentCLIReviewerConfig(name="pi")
+        assert cfg.review_focus == "general"
+        assert build_review_prompt(cfg, "DIFF").startswith("You are a senior code reviewer")
+
+    def test_an_unknown_focus_is_rejected(self) -> None:
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            AgentCLIReviewerConfig(name="pi", review_focus="sec")  # type: ignore[arg-type]
+
+    def test_security_focus_uses_the_security_prompt(self) -> None:
+        prompt = self._run_and_capture_prompt(self._security_config())
+        assert "senior security reviewer" in prompt
+        assert "You are a senior code reviewer" not in prompt
+
+    def test_the_security_model_is_prepended_to_the_diff(self) -> None:
+        prompt = self._run_and_capture_prompt(
+            self._security_config(),
+            security_model="Submitted jobs run arbitrary code by design.",
+        )
+        assert "Submitted jobs run arbitrary code by design." in prompt
+        # Ahead of the diff, so the model reads the stance before the code.
+        assert prompt.index("Submitted jobs") < prompt.index("diff --git")
+
+    def test_a_missing_security_model_says_so_in_the_prompt(self) -> None:
+        """Otherwise the agent invents a stance for the project."""
+        prompt = self._run_and_capture_prompt(self._security_config(), security_model="")
+        assert "has not documented a security model" in prompt
+
+    def test_a_general_reviewer_ignores_the_security_model(self) -> None:
+        prompt = build_review_prompt(
+            AgentCLIReviewerConfig(name="pi"), "DIFF", security_model="LEAK ME NOT"
+        )
+        assert "LEAK ME NOT" not in prompt
+
+    def test_security_findings_parse_with_the_shared_parser(self) -> None:
+        """The security prompt keeps the block-format output contract, and the
+        "security:" title prefix the prompt asks for lands in the finding body —
+        posted comments stand alone, without the source label next to them."""
+        output = (
+            "python/pyspark/sql/io.py:42 - [High] security: crafted footer triggers class load\n"
+            "\n"
+            "The Parquet footer path passes attacker-controlled bytes to reflection.\n"
+            "\n"
+            "**Suggestion:** Restrict the class allowlist.\n"
+            "\n"
+            "=============\n"
+            "Review completed\n"
+        )
+        executor = _executor_returning(
+            ExecResult(returncode=0, stdout="diff --git a/x b/x\n+pass\n", stderr=""),
+            ExecResult(returncode=0, stdout=output, stderr=""),
+        )
+        findings = run_agent_cli_review(
+            cwd="/tmp/repo",
+            base_commit="abc",
+            config=self._security_config(),
+            executor=executor,
+        )
+        assert len(findings) == 1
+        assert findings[0].severity == "high"
+        assert findings[0].body.startswith("security: crafted footer triggers class load")
 
 
 # ---------------------------------------------------------------------------

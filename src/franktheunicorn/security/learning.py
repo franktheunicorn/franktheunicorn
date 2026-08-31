@@ -129,7 +129,7 @@ def distill_triage_guidance(
 def resolve_triage_guidance(project: Project | None) -> str:
     """Resolve the learned triage guidance to inject for ``project``.
 
-    Precedence (mirrors ``security.triage._resolve_security_model``):
+    Precedence (mirrors ``security.triage.resolve_security_model``):
       1. Active project-specific guidance.
       2. Active global guidance (``project=None``).
       3. Empty string.

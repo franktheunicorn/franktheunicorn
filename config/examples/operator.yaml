@@ -293,6 +293,25 @@ digest_enabled: false
 #                                    # unless explicitly denied") — a much bigger
 #                                    # grant than "this is the directory I meant"
 #     extra_args: ["--mode", "ask"]  # read-only Q&A mode; the actual containment
+#
+# A second, security-only pass over each PR diff. Same binary as the
+# cursor-agent seed, but `review_focus: security` swaps the general review
+# prompt for a security one and prepends the project's security model —
+# resolved exactly as triage resolves it: inline `security_model` in the
+# project YAML (e.g. projects/apache-spark.yaml), else `security_model_file`,
+# else a threat-model file auto-discovered in the repo. The agent then reports
+# real trust-boundary crossings instead of behavior the project documents as
+# trusted. A SEPARATE entry, not a flag on the main reviewer: findings are
+# attributed by entry name, so one entry doing both jobs would cost the
+# general pass. `cli_path` must be set explicitly — it defaults to `name`,
+# and there is no binary called "cursor-agent-security".
+#   - name: "cursor-agent-security"
+#     cli_path: "cursor-agent"
+#     review_focus: "security"       # general (default) | security
+#     prompt_mode: "flag"
+#     prompt_arg: "-p"
+#     trust_args: ["--trust"]
+#     extra_args: ["--mode", "ask"]  # still read-only; it reviews, not edits
 
 # Snowflake code review CLI integration
 # Mirrors CodeRabbit's invocation contract; expects the same

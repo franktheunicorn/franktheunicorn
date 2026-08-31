@@ -24,6 +24,20 @@ test_expectations: "tests required for all new features and bug fixes"
 # what lets triage tell "we run arbitrary code by design" reports apart from
 # real findings, instead of flagging (or dismissing) everything the same way.
 #
+# The same text also feeds the security-focused agent PR review: an
+# agent_cli_reviewers entry in operator.yaml with `review_focus: security`
+# gets this model prepended to its prompt on every PR diff, so it flags real
+# boundary crossings (crafted data files, web-UI XSS) instead of the
+# documented "submitted code is trusted" behavior. To turn that pass on:
+#   agent_cli_reviewers:
+#     - name: "cursor-agent-security"
+#       cli_path: "cursor-agent"
+#       review_focus: "security"
+#       trust_args: ["--trust"]
+#       extra_args: ["--mode", "ask"]
+# There is no project-level switch — the operator entry is the consent, and
+# this file's security_model is what makes its findings accurate for Spark.
+#
 # The dividing line is the INPUT CHANNEL the exploit travels through:
 #   - Trusted (expected behavior, not a finding): anything reachable only by a
 #     party who can already submit code to the cluster. Submitted jobs, SQL,

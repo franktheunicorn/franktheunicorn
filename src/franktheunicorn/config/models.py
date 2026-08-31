@@ -262,6 +262,16 @@ class AgentCLIReviewerConfig(BaseModel):
     prompt_mode: Literal["flag", "subcommand"] = "flag"
     prompt_arg: str = "-p"
     extra_args: list[str] = Field(default_factory=list)
+    #: What the agent reviews for. ``general`` is the shared senior-reviewer
+    #: prompt. ``security`` swaps in a security-only prompt and prepends the
+    #: project's ``security_model`` (resolved from the project YAML with the
+    #: same precedence triage uses), so the agent reports real trust-boundary
+    #: crossings instead of behavior the project documents as trusted. Run it
+    #: as a separate entry (e.g. a ``cursor-agent-security`` entry with
+    #: ``cli_path: cursor-agent``) rather than flipping the main reviewer:
+    #: findings are attributed by entry name, so one entry doing both jobs
+    #: would cost the general pass.
+    review_focus: Literal["general", "security"] = "general"
     #: Flags that tell this CLI the working directory is one we meant to point it
     #: at. Separate from ``extra_args`` because it answers a different question:
     #: ``extra_args`` is how the operator wants the agent to behave, this is what

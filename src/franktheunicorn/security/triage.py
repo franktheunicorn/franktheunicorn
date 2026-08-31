@@ -301,7 +301,7 @@ def triage_report(
     context_checked = False
     try:
         project_context = _load_project_context(report, project_config)
-        security_model = _resolve_security_model(project_config)
+        security_model = resolve_security_model(project_config)
 
         from franktheunicorn.security.learning import resolve_triage_guidance
 
@@ -1285,8 +1285,12 @@ def _resolve_repo_path(project_config: ProjectConfig | None) -> Path | None:
     return repo_path if repo_path.is_dir() else None
 
 
-def _resolve_security_model(project_config: ProjectConfig | None) -> str:
-    """Resolve the project's security model (trust boundaries) for triage.
+def resolve_security_model(project_config: ProjectConfig | None) -> str:
+    """Resolve the project's security model (trust boundaries).
+
+    Shared by security-report triage and the security-focused agent PR
+    review (``review_focus="security"``), so the two never disagree about
+    what the project calls trusted.
 
     Precedence:
       1. Inline ``security_model`` prose in the project YAML (explicit override).

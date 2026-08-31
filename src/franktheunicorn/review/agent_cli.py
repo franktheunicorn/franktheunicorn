@@ -4,10 +4,13 @@ Generalized agent-CLI code reviewer.
 Any headless coding agent that takes a prompt on the command line and
 prints free-form text can act as a reviewer. We feed it the same
 ``<file>:<line> - [Severity] <title>`` block-format prompt CodeRabbit
-produces and parse the output with the shared parser. The three seeded
-agents — ``claude``, ``codex``, and ``pi`` — differ only in how a prompt
-becomes argv, which is delegated to
-:meth:`AgentCLIReviewerConfig.build_invocation`.
+produces and parse the output with the shared parser. The seeded
+agents — ``claude``, ``codex``, ``pi``, ``cursor-agent`` — differ only in
+how a prompt becomes argv, which is delegated to
+:meth:`AgentCLIReviewerConfig.build_invocation`. An entry with
+``review_focus="security"`` gets the security-only prompt instead, with the
+project's documented trust boundaries prepended (see
+:func:`build_review_prompt`).
 
 This is the generalization of ``review/claude_cli.py`` (which now delegates
 here for backwards compatibility). Degrades gracefully: an empty diff, a
@@ -81,6 +84,67 @@ Diff:
 {diff}
 """
 
+# Security-focused variant, selected by ``review_focus="security"``. Same
+# output contract (the shared parser reads it), two additions: the brief is
+# security-only, and the project's documented trust boundaries go in ahead of
+# the diff so the agent can tell a real crossing from behavior the project
+# declares trusted — the difference between "crafted Parquet footer loads a
+# class" (finding) and "submitted SQL runs code" (Spark's documented design).
+# The agent runs inside a checkout of the repo, and the prompt says so:
+# reading the surrounding code is the one thing this pass can do that the
+# one-shot LLM security check cannot.
+_SECURITY_PROMPT_TEMPLATE = """\
+You are a senior security reviewer. Review the diff below and identify ONLY
+security-relevant issues: vulnerabilities introduced or exposed by the change,
+security controls it weakens or bypasses, and trust-boundary shifts (code or
+data moving from a trusted path to an untrusted one, or the reverse). Skip
+everything else — no style, naming, test-coverage, or architecture comments.
+
+You are running in a checkout of the repository. Read the surrounding code
+before reporting: whether input is actually attacker-reachable is usually
+decided outside the diff.
+
+{security_model_section}
+
+For EACH security issue, emit a block in EXACTLY this format, separated by
+lines of five or more equals signs:
+
+<file_path>:<line_number> - [<Severity>] security: <Short title>
+
+<2-4 sentence explanation of the issue, including why the input is
+attacker-reachable and which trust boundary it crosses>
+
+**Suggestion:** <concrete fix>
+
+=============
+
+Severity must be one of: Critical, High, Medium, Low, Nit.
+File paths must be relative to the repository root, exactly as they appear
+in the diff. Line numbers must refer to the new file.
+
+If there are no security issues, output exactly: Review completed
+Do not include any other text outside the blocks.
+
+Diff:
+{diff}
+"""
+
+_SECURITY_MODEL_KNOWN_SECTION = """\
+## Project Security Model / Trust Boundaries
+The project documents the following trust boundaries. Treat them as
+authoritative: behavior they declare trusted or expected is NOT a finding, no
+matter how it looks in isolation. Report what crosses a boundary the model
+draws, not what the model permits:
+{security_model}
+"""
+
+_SECURITY_MODEL_UNKNOWN_SECTION = """\
+## Project Security Model / Trust Boundaries
+The project has not documented a security model. Assess on the merits of the
+diff and the surrounding code, and say which trust boundary each finding
+crosses so the operator can judge it against the project's stance.
+"""
+
 
 @dataclass
 class AgentCLIFinding:
@@ -94,11 +158,35 @@ class AgentCLIFinding:
     suggestion: str = ""
 
 
+def build_review_prompt(
+    config: AgentCLIReviewerConfig,
+    diff: str,
+    security_model: str = "",
+) -> str:
+    """Pick and fill the prompt template for the reviewer's ``review_focus``.
+
+    ``security_model`` only reaches the security template; a general reviewer
+    has no use for it and a security reviewer without one gets an explicit
+    "not documented" section, so the agent doesn't invent a stance for the
+    project.
+    """
+    if config.review_focus == "security":
+        section = (
+            _SECURITY_MODEL_KNOWN_SECTION.format(security_model=security_model.strip())
+            if security_model.strip()
+            else _SECURITY_MODEL_UNKNOWN_SECTION
+        )
+        return _SECURITY_PROMPT_TEMPLATE.format(security_model_section=section, diff=diff)
+    return _PROMPT_TEMPLATE.format(diff=diff)
+
+
 def run_agent_cli_review(
     cwd: str,
     base_commit: str,
     config: AgentCLIReviewerConfig,
     executor: ToolExecutor | None = None,
+    *,
+    security_model: str = "",
 ) -> list[AgentCLIFinding]:
     """
     Run the agent CLI against the diff between ``base_commit`` and HEAD.
@@ -112,6 +200,10 @@ def run_agent_cli_review(
     Argv assembly is delegated to ``config.build_invocation`` so the same
     body serves flag-style agents (claude, pi) and subcommand-style agents
     (codex).
+
+    ``security_model`` is the project's documented trust boundaries, used
+    only when ``config.review_focus`` is ``"security"`` — the caller (the
+    worker) resolves it from the project config.
     """
     if executor is None:
         executor = LocalExecutor()
@@ -154,7 +246,7 @@ def run_agent_cli_review(
             cutoff = config.max_diff_chars
         diff = diff[:cutoff] + "\n[...diff truncated...]\n"
 
-    prompt = _PROMPT_TEMPLATE.format(diff=diff)
+    prompt = build_review_prompt(config, diff, security_model)
 
     cmd = list(config.cli_argv) + config.build_invocation(prompt)
 
