@@ -1011,7 +1011,25 @@ SECURITY_LIST_ROW_CAP = 100
 
 def security_report_list(request: HttpRequest) -> HttpResponse:
     """List security reports with status tabs, ranked highest-priority first."""
+    # Normalised, not passed through. Two things went wrong while this was taken on
+    # trust, both because the page echoes the value into the Export CSV href:
+    #
+    # 1. ``?status=new%26full=1`` rendered ``status=new&full=1`` in that href
+    #    (autoescaped to ``&amp;``, which the browser decodes back to ``&``), so the
+    #    plain Export button handed back the ``--full`` export — raw report text and
+    #    proposed patches, the two columns kept opt-in precisely because they are a
+    #    working description of how to exploit the thing.
+    # 2. ``?status=`` filtered to ``Q(status="")``, which matches nothing, so the
+    #    page showed "No reports on this tab" while the href it rendered carried an
+    #    empty status the export reads as "no filter" — one click from "this slice is
+    #    clear" to mailing a PMC the entire unfixed backlog.
+    #
+    # Anything unrecognised falls back to "all" rather than 400ing: the tab bar has
+    # always rendered for a junk ?status=, and a page whose own Export button 400s is
+    # its own bug.
     status_filter = request.GET.get("status", "all")
+    if status_filter != "all" and status_filter not in SecurityReport.list_filters():
+        status_filter = "all"
     sort = request.GET.get("sort", _DEFAULT_SECURITY_SORT)
     if sort not in _SECURITY_SORTS:
         sort = _DEFAULT_SECURITY_SORT
@@ -1429,6 +1447,23 @@ def _back_to_security_list(request: HttpRequest) -> HttpResponse:
     return redirect(target)
 
 
+def _still_unruled(report: SecurityReport) -> bool:
+    """Whether *report* is still unruled **as stored**, not as this loop last saw it.
+
+    The bulk buttons materialise their candidates up front and then take real
+    wall-clock time — thousands of reports, a queue write and sometimes a procedural
+    close each — so a verdict the operator types at minute three is not in a snapshot
+    taken at minute zero. ``procedural_close_if_evidence`` re-reads status for exactly
+    this reason. One query, spent only where the next line would otherwise bill an
+    LLM call or a coding-agent run.
+    """
+    return not (
+        SecurityReport.objects.filter(pk=report.pk)
+        .filter(SecurityReport.operator_has_ruled_q())
+        .exists()
+    )
+
+
 @require_POST
 def security_report_rerun_triage(request: HttpRequest) -> HttpResponse:
     """Re-run triage across the queue, procedural close first then LLM (htmx, bulk).
@@ -1506,11 +1541,21 @@ def security_report_rerun_triage(request: HttpRequest) -> HttpResponse:
             if procedural_close_if_evidence(report, retrigger=True):
                 procedural_closed += 1
                 continue
+            if not _still_unruled(report):
+                ruled_skipped += 1
+                continue
             if queue_triage(report, priority=PRIORITY_BULK):
                 triage_queued += 1
             else:
                 triage_skipped_inflight += 1
-        elif report.status == "valid" and not report.affected_versions:
+        # Not gated on operator_has_ruled: a valid report *with* a CVE is precisely
+        # what version mapping is for, so the general ruled test would turn the
+        # follow-on off for its main case. A recorded fix branch is the narrow signal
+        # that the work is done, and this path is the expensive one — the verifier
+        # bills a coding-agent run per active release branch.
+        elif (
+            report.status == "valid" and not report.affected_versions and not report.fixed_in_branch
+        ):
             vm, verify, skipped = queue_version_follow_on(report, operator_config)
             if skipped:
                 followon_skipped += 1
@@ -1537,7 +1582,7 @@ def security_report_rerun_triage(request: HttpRequest) -> HttpResponse:
     if followon_skipped:
         parts.append(f"{followon_skipped} version follow-on skipped (verifier off or no project)")
     if ruled_skipped:
-        parts.append(f"{ruled_skipped} skipped (operator-ruled or CVE assigned)")
+        parts.append(f"{ruled_skipped} skipped (operator-ruled: notes, a CVE, or a fix branch)")
     messages.success(request, "Re-ran triage: " + ", ".join(parts) + ".")
     logger.info(
         "Bulk re-triage: procedural_closed=%d triage_queued=%d triage_inflight=%d "
@@ -1595,6 +1640,9 @@ def security_report_rerun_triage_failed(request: HttpRequest) -> HttpResponse:
         if report.status not in ("new", "triaging") or report.operator_has_ruled:
             ruled_skipped += 1
             continue
+        if not _still_unruled(report):
+            ruled_skipped += 1
+            continue
         if procedural_close_if_evidence(report, retrigger=True):
             procedural_closed += 1
             continue
@@ -1607,7 +1655,9 @@ def security_report_rerun_triage_failed(request: HttpRequest) -> HttpResponse:
     if procedural_closed:
         parts.append(f"{procedural_closed} closed without a model (auth-disabled)")
     if ruled_skipped:
-        parts.append(f"{ruled_skipped} skipped (operator-ruled or CVE assigned since)")
+        parts.append(
+            f"{ruled_skipped} skipped (operator-ruled: notes, a CVE, or a fix branch, set since)"
+        )
     if not candidates:
         parts = ["no failed triage runs in the queue"]
     messages.success(request, "Re-run failed triage: " + ", ".join(parts) + ".")
@@ -1655,7 +1705,7 @@ def security_report_rerun_procedural(request: HttpRequest) -> HttpResponse:
 
     parts = [f"{closed} closed without a model (auth-disabled)"]
     if ruled_skipped:
-        parts.append(f"{ruled_skipped} skipped (operator-ruled or CVE assigned)")
+        parts.append(f"{ruled_skipped} skipped (operator-ruled: notes, a CVE, or a fix branch)")
     messages.success(request, "Re-ran procedural close: " + ", ".join(parts) + ".")
     logger.info("Bulk procedural re-trigger: closed=%d ruled_skipped=%d", closed, ruled_skipped)
     return _back_to_security_list(request)
@@ -2278,7 +2328,12 @@ def security_report_versions(request: HttpRequest, report_id: int) -> HttpRespon
         )
 
     # save: take the operator's text as-is. Empty is allowed (clears the field).
-    report.affected_versions = request.POST.get("affected_versions", "").strip()
+    # Cleaned, not just stripped: same class of input as the branch field below, and
+    # this one is an export column too, so a NUL stored here rides into the CSV a PMC
+    # opens. Multi-line, so newlines survive.
+    from franktheunicorn.security.sheet_sync import clean_multi_line
+
+    report.affected_versions = clean_multi_line(request.POST.get("affected_versions", ""))
     report.save(update_fields=["affected_versions", "updated_at"])
     logger.info(
         "Saved affected versions for report #%d (%d chars)",
@@ -2364,32 +2419,17 @@ def security_report_verdict(request: HttpRequest, report_id: int) -> HttpRespons
     else:
         report.matched_cve_id = submitted_cve
 
-    # Which branch carries the fix. Presence-guarded so a POST that doesn't carry
-    # the field can't blank it, and validated for the reason the CVE beside it is:
-    # SQLite enforces neither max_length nor much else, so what it waves through is
-    # a 500 on the Postgres install DATABASE_URL promises — and a 500 here loses the
-    # status and notes saved in the same call. Cleared by submitting it empty, which
-    # is how a branch that turned out not to fix it gets taken back off.
-    #
-    # The bound is read off the column rather than written again, because it was
-    # already a literal in the model, the migration and the message; a widened
-    # column with a stale check rejects input the database would take.
+    # Which branch carries the fix. Cleaned rather than rejected: the characters
+    # worth worrying about here — a NUL, a zero-width space carried along by a copy
+    # out of a rendered page, a newline from a two-line paste — are ones the operator
+    # cannot see, so a 400 tells them nothing, and htmx does not swap a non-2xx body
+    # anyway. Same normaliser the importer uses, so the column's two write paths
+    # agree about what fits in it. Cleared by submitting it empty, which is how a
+    # branch that turned out not to fix it gets taken back off.
     if "fixed_in_branch" in request.POST:
-        branch = request.POST["fixed_in_branch"].strip()
-        limit = SecurityReport._meta.get_field("fixed_in_branch").max_length or 200
-        if len(branch) > limit:
-            return HttpResponse(
-                f"That branch name is too long ({limit} characters max).", status=400
-            )
-        # A NUL survives .strip() and the length check, and Postgres rejects it in a
-        # string outright — sheet_sync guards the same class of input on the import
-        # side (_CONTROL_CHARS) because report text is attacker-supplied and gets
-        # pasted around.
-        from franktheunicorn.security.sheet_sync import has_control_chars
+        from franktheunicorn.security.sheet_sync import clean_single_line
 
-        if has_control_chars(branch):
-            return HttpResponse("That branch name has control characters in it.", status=400)
-        report.fixed_in_branch = branch
+        report.fixed_in_branch = clean_single_line(request.POST["fixed_in_branch"])
 
     # The operator ruled, so the machine's staged suggestion is consumed:
     # leaving it would re-offer an Agree button for a verdict the operator just

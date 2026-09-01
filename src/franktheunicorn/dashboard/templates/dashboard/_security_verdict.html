@@ -34,11 +34,7 @@
             {# who just typed a CVE id is the one who knows the branch. Not the fix #}
             {# agent's fix_branch, which this page shows further up — that is a #}
             {# proposal the agent pushed, this is the operator's ruling. #}
-            {# maxlength because the server-side check answers 400 and htmx does not #}
-            {# swap a non-2xx body: without it an over-long paste is a Save button #}
-            {# that does nothing visible and drops the notes typed with it. #}
             <input type="text" name="fixed_in_branch" value="{{ report.fixed_in_branch }}"
-                   maxlength="200"
                    placeholder="branch carrying the fix, e.g. master, branch-3.5">
         </div>
 

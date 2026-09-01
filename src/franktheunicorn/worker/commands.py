@@ -423,7 +423,17 @@ def _run_security_triage(cmd: WorkerCommand, operator_config: OperatorConfig) ->
     # didn't rule mid-run, but a stale auto_triage_status from a prior run could
     # survive an operator "invalid" verdict set through a path that didn't clear
     # it — so don't bill agent runs on a report the operator ruled not-a-vuln.
-    if report.auto_triage_status == "valid" and report.status in ("new", "triaging", "valid"):
+    # ``fixed_in_branch`` for the same reason as the status check, and it is the
+    # cheaper thing to check: the operator recording which branch carries the fix
+    # says the question this fan-out answers — which versions are affected, is it
+    # still there — has already been settled by hand. A bulk re-triage queued
+    # before that happens arrives after it, so the guard has to be here and not
+    # only at the button.
+    if (
+        report.auto_triage_status == "valid"
+        and report.status in ("new", "triaging", "valid")
+        and not report.fixed_in_branch
+    ):
         from franktheunicorn.security.queue import queue_version_follow_on
 
         vm, verify, skipped = queue_version_follow_on(report, operator_config)

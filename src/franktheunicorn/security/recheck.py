@@ -65,9 +65,15 @@ def untriaged_by_project() -> dict[Project, list[SecurityReport]]:
     Project-less reports are excluded — the agent clones the project's repo,
     and a report with no project has no repo to check against. Ordered by
     priority so the prompt leads with what matters.
+
+    So are reports with a fix branch recorded: this run asks "did the last month of
+    commits fix this?", which the operator has already answered by hand for those.
+    They otherwise consumed slots of the per-run cap — 50 of them buy an extra cloud
+    agent run per project — and came back with a "still-valid" verdict the list page
+    renders directly beside the operator's branch.
     """
     reports = (
-        SecurityReport.objects.filter(status="new", project__isnull=False)
+        SecurityReport.objects.filter(status="new", project__isnull=False, fixed_in_branch="")
         .select_related("project")
         .order_by("-priority", "pk")
     )

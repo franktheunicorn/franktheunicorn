@@ -826,6 +826,29 @@ class TestSummary:
         assert result.rows[0].needs_attention
 
 
+class TestCleaners:
+    """The two normalisers both write paths share, so a column cleaned on one of
+    them isn't a column cleaned on neither."""
+
+    def test_single_line_collapses_whitespace(self) -> None:
+        from franktheunicorn.security.sheet_sync import clean_single_line
+
+        assert clean_single_line("  master \n branch-3.5\t ") == "master branch-3.5"
+
+    def test_single_line_drops_invisibles_a_c0_regex_misses(self) -> None:
+        """ZWSP, BOM and the bidi overrides are category Cf: not isspace(), so they
+        survive .strip() and a [\\x00-\\x1f] regex both."""
+        from franktheunicorn.security.sheet_sync import clean_single_line
+
+        assert clean_single_line("mas\u200bter\ufeff-3.5\x00") == "master-3.5"
+        assert clean_single_line("\u200b\ufeff\u202e") == ""
+
+    def test_multi_line_keeps_the_lines(self) -> None:
+        from franktheunicorn.security.sheet_sync import clean_multi_line
+
+        assert clean_multi_line("4.0\r\n3.5\x00\r3.4") == "4.0\n3.5\n3.4"
+
+
 @pytest.mark.django_db
 class TestSelection:
     def test_export_selection_is_ranked_and_filterable(self) -> None:
@@ -844,6 +867,32 @@ class TestSelection:
         assert [report.title for report in new_only] == ["high", "low"]
 
         assert len(list(reports_for_export(limit=2))) == 2
+
+    def test_an_edit_to_the_read_only_branch_column_is_reported_not_dropped(self) -> None:
+        """The CVE-no-branch export hands a PMC rows defined by having no branch, so
+        that column is the one they answer in — and a discard nobody is told about is
+        worse than a column that isn't there."""
+        import io
+
+        from franktheunicorn.security.sheet_sync import export_reports_csv, import_reports_csv
+
+        report = SecurityReportFactory(status="valid", fixed_in_branch="")
+        out = io.StringIO()
+        export_reports_csv(SecurityReport.objects.all(), out)
+        rows = out.getvalue().splitlines()
+        col = rows[0].split(",").index("fixed_in_branch")
+        cells = rows[1].split(",")
+        cells[col] = "branch-3.5"
+        edited = rows[0] + "\n" + ",".join(cells) + "\n"
+
+        result = import_reports_csv(edited)
+
+        report.refresh_from_db()
+        assert report.fixed_in_branch == ""
+        outcome = result.rows[0]
+        assert "fixed_in_branch is read-only" in outcome.detail
+        # An unchanged row with something to say still reaches the operator.
+        assert outcome.needs_attention
 
     def test_the_sheet_shows_the_fix_branch(self) -> None:
         """The export can be filtered to the "no branch recorded" queue, so the

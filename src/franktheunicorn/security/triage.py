@@ -483,7 +483,8 @@ def procedural_close_if_evidence(report: SecurityReport, *, retrigger: bool = Fa
     close missed the first time — including ones the LLM path already
     assessed and left sitting in ``new`` with a staged verdict. Those still
     get closed; only an operator ruling (a non-``new`` status, or operator
-    notes / a CVE, which the caller gates on) keeps the close off.
+    notes / a CVE / a recorded fix branch, which the caller gates on) keeps the
+    close off.
     """
     stored = _current_status(report)
     if stored != "new":

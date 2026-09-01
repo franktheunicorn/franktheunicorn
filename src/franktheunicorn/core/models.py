@@ -635,8 +635,9 @@ class SecurityReport(models.Model):
     #: without it the queue on a real backlog is almost entirely "dup of CVE-X", and
     #: a queue you have to skim past is one nobody opens twice.
     #:
-    #: A tuple, not a frozenset: set iteration order is not stable across processes,
-    #: so the emitted ``IN (...)`` text would churn for no gain.
+    #: A tuple for a stable order in the emitted parameters and in anything that
+    #: prints them; the SQL text is identical either way, since ``IN`` values are
+    #: bound parameters rather than inlined.
     NO_FIX_OWED_STATUSES = ("invalid", "expected-behavior", "duplicate")
 
     @classmethod
@@ -649,6 +650,18 @@ class SecurityReport(models.Model):
         hand-copied the set are the two that would disagree after the next filter.
         """
         return {key for key, _ in cls.STATUS_CHOICES} | {cls.CVE_NO_BRANCH_FILTER}
+
+    @staticmethod
+    def operator_has_ruled_q() -> Q:
+        """:attr:`operator_has_ruled`, for a queryset.
+
+        A property can't be used in a filter, so the selectors that pick reports for
+        bulk work were testing it in Python against a list materialised before the
+        loop. That reintroduces the race the close path already re-reads status to
+        avoid: a run over a few thousand reports takes real wall-clock time, and a
+        verdict typed at minute three is invisible to a snapshot taken at minute zero.
+        """
+        return ~Q(operator_notes="") | ~Q(matched_cve_id="") | ~Q(fixed_in_branch="")
 
     @property
     def operator_has_ruled(self) -> bool:
@@ -672,6 +685,8 @@ class SecurityReport(models.Model):
         measured as a full SCAN with an index present where ``> ''`` SEARCHes it.
         Nothing indexes this column today; the point is that whoever adds the index
         to fix a slow queue gets the speedup instead of concluding it didn't help.
+        The status clause stays negated because there is no index to lose there and
+        no useful one to add — five values over the whole table.
 
         ``duplicate_of`` as well as the ``duplicate`` status, because
         :mod:`franktheunicorn.security.duplicates` links without judging and
@@ -854,7 +869,13 @@ class SecurityReport(models.Model):
     # in a repo this install tracks (a private staging fork, an embargoed branch)
     # and a fix that lands on three release branches is written as a list.
     # ``cve_without_branch_q`` only ever asks whether it is empty.
-    fixed_in_branch = models.CharField(max_length=200, blank=True, default="")
+    #
+    # TextField, like affected_versions above: a realistic answer is
+    # "master, branch-4.0, branch-3.5 (backport pending)", which ran past the 200
+    # the column started with. That bound bought nothing and cost four copies of
+    # the number — model, migration, view check, and a maxlength the widened column
+    # would not have followed — plus a rejection htmx never showed the operator.
+    fixed_in_branch = models.TextField(blank=True, default="")
 
     # The batch "did the last month of commits fix this?" recheck
     # (security.recheck): one agent run per project over the untriaged

@@ -51,6 +51,7 @@ import hashlib
 import io
 import logging
 import re
+import unicodedata
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -224,15 +225,34 @@ def looks_like_cve(value: str) -> bool:
     return bool(_CVE_RE.match(value))
 
 
-def has_control_chars(value: str) -> bool:
-    """Whether *value* carries a C0 control character (tab and newline excepted).
+def clean_multi_line(value: str) -> str:
+    """Normalise newlines and drop C0 controls, keeping the line structure.
 
-    Public for the same reason :func:`looks_like_cve` is: the importer strips these
-    on the way in, and a column cleaned on one of its two write paths is a column
-    cleaned on neither. A NUL in particular survives ``.strip()`` and any length
-    check, and Postgres refuses it in a string outright.
+    Public for the same reason :func:`looks_like_cve` is: a column cleaned on one of
+    its two write paths is a column cleaned on neither. A NUL in particular survives
+    ``.strip()`` and any length check, and Postgres refuses it in a string outright,
+    so what SQLite stores is what the other database 500s on.
     """
-    return bool(_CONTROL_CHARS.search(value))
+    return _CONTROL_CHARS.sub("", value.replace("\r\n", "\n").replace("\r", "\n")).strip()
+
+
+def clean_single_line(value: str) -> str:
+    """Normalise *value* to one line with single spaces and no invisible characters.
+
+    For fields that are a single line by construction — a branch name, a list of
+    them. Cleaning rather than rejecting, because every character this removes is
+    one the operator cannot see:
+
+    * All Unicode whitespace collapses, so a two-line paste can't be stored with a
+      newline an ``<input type="text">`` then strips on the next render — which
+      turned "branch-3.5\nbranch-4.0" into the branch "branch-3.5branch-4.0".
+    * ``Cc`` and ``Cf`` are dropped. ``Cf`` is the one a C0-only regex misses:
+      ZWSP, BOM and the bidi overrides are not ``isspace()``, so they survive
+      ``.strip()`` and store a value that looks empty, renders as nothing, and can
+      never match ``field=""`` again — a report silently out of the queue.
+    """
+    collapsed = " ".join(value.split())
+    return "".join(ch for ch in collapsed if unicodedata.category(ch) not in ("Cc", "Cf"))
 
 
 def _truncate(value: str, limit: int) -> str:
@@ -607,7 +627,7 @@ def _cell(row: dict[str, str | None], column: str) -> str | None:
 
 def _fold(value: str) -> str:
     """CRLF to LF, C0 controls out, ends trimmed. See :func:`_cell`."""
-    return _CONTROL_CHARS.sub("", value.replace("\r\n", "\n").replace("\r", "\n")).strip()
+    return clean_multi_line(value)
 
 
 def _same_text(cell: str, stored: str) -> bool:
@@ -674,6 +694,7 @@ def _proposed_changes(
     row: dict[str, str | None],
     report: SecurityReport,
     present: set[str],
+    columns: set[str] | None = None,
 ) -> tuple[dict[str, str], str, list[str]]:
     """Work out what this row wants changed.
 
@@ -718,6 +739,22 @@ def _proposed_changes(
             # different duplicates of the same thing.
             if cve.upper() != report.matched_cve_id:
                 changes["matched_cve_id"] = cve.upper()
+
+    # Read-only, and said so out loud. The "CVE, no branch" export exists to hand a
+    # PMC the holes with nothing recorded as fixing them, so the one column those
+    # rows are defined by is the one a reviewer is most likely to answer in — and an
+    # answer this importer drops without a word is worse than a column that isn't
+    # there. Not writable because that means WRITABLE_COLUMNS *and*
+    # report_fingerprint, whose contract is exactly the importable fields; changing
+    # the fingerprint invalidates the check token on every sheet already out for
+    # review, so it is a decision with a cost, not a one-line addition.
+    if "fixed_in_branch" in (columns or set()):
+        cell = _cell(row, "fixed_in_branch")
+        if cell is not None and not _same_text(cell, report.fixed_in_branch):
+            notes.append(
+                "fixed_in_branch is read-only in the sheet — "
+                f"{cell!r} was not applied; set it in the dashboard"
+            )
 
     # Same name in the sheet as on the model, so no mapping table to drift.
     for column in ("external_notes", "operator_notes"):
@@ -847,7 +884,13 @@ def import_reports_csv(
         )
         return result
 
-    importer = _Importer(present=present, guarded=guarded, force=force, dry_run=dry_run)
+    importer = _Importer(
+        present=present,
+        guarded=guarded,
+        force=force,
+        dry_run=dry_run,
+        columns=set(header),
+    )
     with transaction.atomic():
         # Inside the transaction, not before it. The staleness guard compares the
         # sheet's token against a fingerprint computed from these in-memory
@@ -883,8 +926,20 @@ class _Importer:
     functions, which is what this was and it was already wrong once.
     """
 
-    def __init__(self, *, present: set[str], guarded: bool, force: bool, dry_run: bool) -> None:
+    def __init__(
+        self,
+        *,
+        present: set[str],
+        guarded: bool,
+        force: bool,
+        dry_run: bool,
+        columns: set[str] | None = None,
+    ) -> None:
         self.present = present
+        #: Every column the sheet actually has, writable or not. ``present`` is the
+        #: writable subset, so a read-only column is never in it — which is why the
+        #: read-only warning needs this one.
+        self.columns = columns or set(present)
         self.guarded = guarded
         self.force = force
         self.dry_run = dry_run
@@ -936,7 +991,7 @@ class _Importer:
                 detail="no such report — dropped archive, or a sheet from another install",
             )
 
-        changes, error, notes = _proposed_changes(raw_row, report, self.present)
+        changes, error, notes = _proposed_changes(raw_row, report, self.present, self.columns)
         if error:
             return RowOutcome(row=line, report_id=report_id, outcome="invalid", detail=error)
         if not changes:

@@ -41,6 +41,18 @@ class TestUntriagedByProject:
         assert list(grouped) == [included.project]
         assert grouped[included.project] == [included]
 
+    @pytest.mark.django_db
+    def test_a_report_with_a_fix_branch_is_not_batched(self) -> None:
+        """This run asks whether recent commits fixed it; the operator has already
+        answered by hand. Those rows otherwise consumed slots of the per-run cap and
+        came back "still-valid", which the list renders beside the operator's branch."""
+        included = SecurityReportFactory(status="new")
+        SecurityReportFactory(status="new", project=included.project, fixed_in_branch="branch-3.5")
+
+        grouped = untriaged_by_project()
+
+        assert grouped[included.project] == [included]
+
 
 class TestBuildRecheckPrompt:
     @pytest.mark.django_db

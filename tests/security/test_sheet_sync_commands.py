@@ -86,6 +86,36 @@ class TestExportCommand:
         assert "spark ruled" not in body
         assert "somebody else's" not in body
 
+    def test_accepts_the_cross_cutting_cve_filter(self, tmp_path: Path) -> None:
+        """The dashboard tab and this command validate the same parameter, and the
+        CLI is the uncapped door the page's capped-export banner sends you to."""
+        out = io.StringIO()
+        SecurityReportFactory(title="needs a branch", status="valid", matched_cve_id="CVE-2026-1")
+        SecurityReportFactory(title="has one", status="valid", fixed_in_branch="master")
+
+        call_command("export_security_csv", "--status", "cve-no-branch", stdout=out)
+
+        body = out.getvalue()
+        assert "needs a branch" in body
+        assert "has one" not in body
+
+    def test_the_filter_scopes_the_default_filename(self, tmp_path: Path) -> None:
+        """Two differently-scoped exports on the same day were the same filename."""
+        import os
+
+        SecurityReportFactory(status="valid", matched_cve_id="CVE-2026-2")
+        cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            call_command(
+                "export_security_csv", "--status", "cve-no-branch", "--out", stdout=io.StringIO()
+            )
+        finally:
+            os.chdir(cwd)
+
+        names = [path.name for path in tmp_path.iterdir()]
+        assert any("cve-no-branch" in name for name in names), names
+
     def test_rejects_a_bad_status(self) -> None:
         with pytest.raises(CommandError, match="--status must be one of"):
             call_command("export_security_csv", "--status", "probably-fine", stdout=io.StringIO())

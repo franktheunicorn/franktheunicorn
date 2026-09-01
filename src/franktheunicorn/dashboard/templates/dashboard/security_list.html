@@ -12,7 +12,7 @@
     <a href="{% url 'dashboard:email_activity' %}" class="action-btn" style="font-size: 0.85rem; padding: 0.4rem 0.8rem; text-decoration: none;" title="Read-only audit of every email the scanner has read">📬 Email Activity</a>
     <a href="{% url 'dashboard:security_guidance' %}" class="action-btn" style="font-size: 0.85rem; padding: 0.4rem 0.8rem; text-decoration: none;" title="Learned guidance distilled from operator agree/disagree feedback">🎓 Learned Guidance</a>
     {# Bulk re-triage: procedural close → LLM → (for valid-looking) version map + verify. #}
-    {# Skips reports the operator already ruled on or that carry a CVE. Plain form #}
+    {# Skips reports the operator already ruled on: notes, a CVE, or a fix branch. Plain form #}
     {# so it works without htmx; htmx gets HX-Redirect back to this page with a flash. #}
     <form method="post" action="{% url 'dashboard:security_rerun_triage' %}" style="display: inline;">
         {% csrf_token %}
@@ -31,7 +31,7 @@
         <button type="submit" class="action-btn"
                 style="font-size: 0.85rem; padding: 0.4rem 0.8rem;"
                 hx-post="{% url 'dashboard:security_rerun_triage_failed' %}"
-                hx-confirm="Re-queue triage for reports whose last triage run failed? Reports you've ruled on since (status, notes, or a CVE) are skipped.">
+                hx-confirm="Re-queue triage for reports whose last triage run failed? Reports you've ruled on since (status, notes, a CVE, or a fix branch) are skipped.">
             ↻ Re-run Failed Triage
         </button>
     </form>
@@ -212,11 +212,11 @@
     {# showing, so the cap keeps the rows the operator is actually looking at. #}
     <div class="sheet-sync-row">
         <a class="action-btn"
-           href="{% url 'dashboard:security_export_csv' %}?sort={{ active_sort }}{% if active_status != 'all' %}&amp;status={{ active_status }}{% endif %}">
+           href="{% url 'dashboard:security_export_csv' %}?sort={{ active_sort }}{% if active_status != 'all' %}&amp;status={{ active_status|urlencode }}{% endif %}">
             ⬇ Export CSV{% if active_status != 'all' %} ({{ active_status }}){% endif %}
         </a>
         <a class="action-btn sheet-sync-full"
-           href="{% url 'dashboard:security_export_csv' %}?full=1&amp;sort={{ active_sort }}{% if active_status != 'all' %}&amp;status={{ active_status }}{% endif %}"
+           href="{% url 'dashboard:security_export_csv' %}?full=1&amp;sort={{ active_sort }}{% if active_status != 'all' %}&amp;status={{ active_status|urlencode }}{% endif %}"
            title="Also include the raw report text and any proposed patch — bigger, and a good deal more sensitive to leave in a shared Drive">
             ⬇ Export CSV (full text)
         </a>
@@ -245,7 +245,7 @@
 
 <div class="tab-bar">
     {% for tab in status_tabs %}
-    <a href="{% url 'dashboard:security_list' %}?sort={{ active_sort }}{% if tab.key != 'all' %}&amp;status={{ tab.key }}{% endif %}"
+    <a href="{% url 'dashboard:security_list' %}?sort={{ active_sort }}{% if tab.key != 'all' %}&amp;status={{ tab.key|urlencode }}{% endif %}"
        {% if active_status == tab.key %}class="active"{% endif %}>
         {{ tab.label }}
         <span class="tab-count">{{ tab.count }}</span>
@@ -260,7 +260,7 @@
     Sort:
     {% for key, label in sort_options %}
     {% if key == active_sort %}<strong>{{ label }}</strong>{% else %}<a
-        href="{% url 'dashboard:security_list' %}?sort={{ key }}{% if active_status != 'all' %}&amp;status={{ active_status }}{% endif %}">{{ label }}</a>{% endif %}
+        href="{% url 'dashboard:security_list' %}?sort={{ key }}{% if active_status != 'all' %}&amp;status={{ active_status|urlencode }}{% endif %}">{{ label }}</a>{% endif %}
     {% if not forloop.last %}&middot;{% endif %}
     {% endfor %}
 </p>
@@ -268,7 +268,9 @@
 {% if rows_capped %}
 <p class="security-sort">
     Showing the top {{ row_cap }} of {{ export_total }} on this tab — the tab count
-    above is the whole set. Narrow with a tab or export the lot.
+    above is the whole set. There is no page 2: narrow with a tab, or use
+    <code>manage.py export_security_csv</code>, which is the only door with no cap
+    (the CSV button above stops at {{ export_cap }}).
 </p>
 {% endif %}
 

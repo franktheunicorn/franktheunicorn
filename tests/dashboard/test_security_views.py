@@ -235,6 +235,8 @@ class TestSecurityCveWithoutBranchTab:
         content = client.get("/security/?status=cve-no-branch").content.decode()
 
         assert "Showing the top 100 of 102" in content
+        # And it points somewhere real: there is no page 2, and the CSV button caps too.
+        assert "no page 2" in content
 
     def test_the_cap_notice_is_absent_when_everything_fits(self, client: Client) -> None:
         SecurityReportFactory(status="valid", matched_cve_id="CVE-2026-1212")
@@ -242,6 +244,47 @@ class TestSecurityCveWithoutBranchTab:
         content = client.get("/security/?status=cve-no-branch").content.decode()
 
         assert "Showing the top" not in content
+
+    def test_a_crafted_status_cannot_smuggle_params_into_the_export_href(
+        self, client: Client
+    ) -> None:
+        """?status=new%26full=1 rendered status=new&full=1 in the plain Export href
+        (autoescaped to &amp;, which the browser decodes back), so the ordinary
+        button handed back the --full export: raw report text and proposed patches."""
+        SecurityReportFactory(title="A report", status="new", raw_text="POC-BODY-HERE")
+
+        import re
+
+        content = client.get("/security/?status=new%26full=1").content.decode()
+
+        # The plain Export button: the one that must never carry full=1.
+        plain = re.findall(r'href="([^"]*export\.csv\?sort=[^"]*)"', content)
+        assert plain, "expected the plain export href to render"
+        assert all("full=1" not in href for href in plain), plain
+
+    def test_an_empty_status_does_not_show_a_clear_tab_over_a_full_export(
+        self, client: Client
+    ) -> None:
+        """?status= filtered to Q(status="") — nothing — while the export read the
+        same empty value as "no filter": one click from "this slice is clear" to
+        mailing out the whole backlog."""
+        SecurityReportFactory(title="Still here", status="new")
+
+        response = client.get("/security/?status=")
+
+        assert response.context["active_status"] == "all"
+        assert [r.title for r in response.context["reports"]] == ["Still here"]
+
+    def test_an_unknown_status_falls_back_rather_than_rendering_a_dead_button(
+        self, client: Client
+    ) -> None:
+        """It used to render 200 with an Export button that 400s."""
+        SecurityReportFactory(title="Still here", status="new")
+
+        response = client.get("/security/?status=garbage")
+
+        assert response.status_code == 200
+        assert response.context["active_status"] == "all"
 
     def test_an_empty_tab_does_not_claim_the_backlog_is_empty(self, client: Client) -> None:
         SecurityReportFactory(title="Untriaged", status="new")
@@ -622,37 +665,67 @@ class TestSecurityReportVerdict:
         report.refresh_from_db()
         assert report.fixed_in_branch == ""
 
-    def test_an_over_long_branch_is_refused_rather_than_500ing(
-        self, client: Client, db: Any
-    ) -> None:
-        """SQLite ignores max_length; Postgres raises DataError and loses the
-        status and notes saved in the same call."""
-        report = SecurityReportFactory(status="new", operator_notes="Keep me.")
+    def test_a_long_multi_branch_answer_is_kept(self, client: Client, db: Any) -> None:
+        """The realistic answer names several branches with commentary, which ran past
+        the 200-char column this field started as."""
+        report = SecurityReportFactory(status="new")
+        answer = "master, branch-4.0, branch-3.5 (backport pending), branch-3.4 " + "x" * 200
 
         response = client.post(
             f"/security/{report.pk}/verdict/",
-            {"status": "valid", "fixed_in_branch": "b" * 201, "operator_notes": "Lost?"},
+            {"status": "valid", "fixed_in_branch": answer},
         )
 
-        assert response.status_code == 400
+        assert response.status_code == 200
         report.refresh_from_db()
-        assert report.fixed_in_branch == ""
-        assert report.status == "new"
-        assert report.operator_notes == "Keep me."
+        assert report.fixed_in_branch == answer
 
-    def test_a_control_character_in_the_branch_is_refused(self, client: Client, db: Any) -> None:
-        """A NUL survives .strip() and the length check, and Postgres refuses it in
-        a string — so SQLite would store what the other database 500s on."""
+    def test_invisible_characters_are_cleaned_out_of_the_branch(
+        self, client: Client, db: Any
+    ) -> None:
+        """A NUL survives .strip() and Postgres refuses it in a string; a zero-width
+        space is not even whitespace, so it stored a value that looks empty, renders
+        as nothing, and can never match fixed_in_branch="" again — a report silently
+        out of the queue. Cleaned rather than refused: the operator cannot see any of
+        these, so a 400 tells them nothing (and htmx would not show it)."""
         report = SecurityReportFactory(status="new")
 
         response = client.post(
             f"/security/{report.pk}/verdict/",
-            {"status": "valid", "fixed_in_branch": "master\x00tail"},
+            {"status": "valid", "fixed_in_branch": "mas\u200bter\x00-3.5"},
         )
 
-        assert response.status_code == 400
+        assert response.status_code == 200
+        report.refresh_from_db()
+        assert report.fixed_in_branch == "master-3.5"
+
+    def test_a_zero_width_only_branch_is_stored_as_empty(self, client: Client, db: Any) -> None:
+        """Otherwise the row leaves the queue while rendering as "fixed in" nothing."""
+        report = SecurityReportFactory(status="new")
+
+        client.post(
+            f"/security/{report.pk}/verdict/",
+            {"status": "valid", "fixed_in_branch": "\u200b\ufeff"},
+        )
+
         report.refresh_from_db()
         assert report.fixed_in_branch == ""
+        assert report.operator_has_ruled is False
+
+    def test_a_two_line_paste_does_not_merge_on_the_next_save(
+        self, client: Client, db: Any
+    ) -> None:
+        """A stored newline is stripped by the <input type="text"> on re-render, so
+        the next Save persisted "branch-3.5branch-4.0" — a branch that never existed."""
+        report = SecurityReportFactory(status="new")
+
+        client.post(
+            f"/security/{report.pk}/verdict/",
+            {"status": "valid", "fixed_in_branch": "branch-3.5\nbranch-4.0"},
+        )
+
+        report.refresh_from_db()
+        assert report.fixed_in_branch == "branch-3.5 branch-4.0"
 
     def test_a_partial_post_does_not_blank_the_notes(self, client: Client, db: Any) -> None:
         """operator_notes is writable from the review sheet too, so a POST that
@@ -2008,6 +2081,33 @@ class TestSecurityReportRerunTriage:
         assert not WorkerCommand.objects.filter(
             command="run_security_triage", security_report=report
         ).exists()
+
+    @patch("franktheunicorn.config.loader.get_operator_config")
+    def test_a_valid_report_with_a_fix_branch_does_not_fan_out_the_verifier(
+        self, mock_config: MagicMock, client: Client, db: Any
+    ) -> None:
+        """The follow-on bills a coding-agent run per active release branch. Not
+        gated on the general ruled test — a valid report *with* a CVE is what version
+        mapping is for — but a recorded branch says the work is already done."""
+        from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig
+        from franktheunicorn.core.models import WorkerCommand
+
+        mock_config.return_value = OperatorConfig(
+            github_username="testuser",
+            llm_backends=[LLMBackendConfig(provider="stub")],
+        )
+        project = ProjectFactory(owner="apache", repo="spark")
+        report = SecurityReportFactory(
+            project=project,
+            status="valid",
+            matched_cve_id="CVE-2026-4321",
+            affected_versions="",
+            fixed_in_branch="branch-3.5",
+        )
+
+        client.post("/security/rerun-triage/")
+
+        assert not WorkerCommand.objects.filter(security_report=report).exists()
 
     @patch("franktheunicorn.config.loader.get_operator_config")
     def test_a_report_with_a_recorded_fix_branch_is_left_alone(

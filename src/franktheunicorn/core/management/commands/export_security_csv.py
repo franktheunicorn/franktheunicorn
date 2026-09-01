@@ -39,10 +39,10 @@ class Command(BaseCommand):
         parser.add_argument(
             "--status",
             help=(
-                "Only reports with this status "
-                f"({', '.join(key for key, _ in SecurityReport.STATUS_CHOICES)}), "
-                f"or {SecurityReport.CVE_NO_BRANCH_FILTER} for reports with a CVE "
-                "assigned and no branch recorded as fixing them"
+                "Only reports matching this filter: "
+                f"{', '.join(sorted(SecurityReport.list_filters()))}. "
+                f"{SecurityReport.CVE_NO_BRANCH_FILTER} is the cross-cutting one — "
+                "reports with a CVE and no branch recorded as fixing them."
             ),
         )
         parser.add_argument("--limit", type=int, help="Only the top N by priority")
@@ -59,11 +59,7 @@ class Command(BaseCommand):
     def handle(self, *args: object, **options: object) -> None:
         status = str(options.get("status") or "")
         if status:
-            # The dashboard's cross-cutting tab is a legal value here too, so the
-            # command can export the same selection the page shows.
-            valid = {key for key, _ in SecurityReport.STATUS_CHOICES} | {
-                SecurityReport.CVE_NO_BRANCH_FILTER
-            }
+            valid = SecurityReport.list_filters()
             if status not in valid:
                 raise CommandError(f"--status must be one of: {', '.join(sorted(valid))}")
 
@@ -97,7 +93,10 @@ class Command(BaseCommand):
             self.stderr.write(f"{count} report(s) exported.")
             return
 
-        path = Path(str(destination) or export_filename(full=full))
+        # ``status`` too: without it two differently-scoped exports on the same day
+        # are the same filename, which is the collision export_filename's own
+        # docstring says the scope exists to prevent.
+        path = Path(str(destination) or export_filename(full=full, status=status))
         with path.open("w", encoding="utf-8", newline="") as handle:
             count = export_reports_csv(reports.iterator(chunk_size=200), handle, full=full)
 
