@@ -56,6 +56,13 @@ urlpatterns = [
         views.security_report_rerun_triage,
         name="security_rerun_triage",
     ),
+    # The narrower sibling: re-queue triage only for reports whose last triage
+    # run failed in the worker, rather than every unruled report.
+    path(
+        "security/rerun-triage-failed/",
+        views.security_report_rerun_triage_failed,
+        name="security_rerun_triage_failed",
+    ),
     # The cheap-only sibling: re-run the procedural auth-disabled close across
     # the queue with zero LLM cost. The one bulk action that works with no
     # backend configured.
@@ -64,12 +71,20 @@ urlpatterns = [
         views.security_report_rerun_procedural,
         name="security_rerun_procedural",
     ),
-    # Re-run the cheap duplicate check across the whole backlog: links new
-    # matches and clears stale auto-links from a buggy heuristic. No LLM cost.
+    # Re-check duplicates across the whole backlog with the LLM title-grouping
+    # pass: links the groups the model calls out and clears stale auto-links it
+    # saw both halves of and declined to group. Hand-set links are left alone.
     path(
         "security/rerun-duplicates/",
         views.security_report_rerun_duplicates,
         name="security_rerun_duplicates",
+    ),
+    # Batch recheck: one cloud agent per project walks the last month of
+    # commits and says which untriaged reports they already fixed.
+    path(
+        "security/recheck-fixed/",
+        views.security_recheck_fixed,
+        name="security_recheck_fixed",
     ),
     # Bulk import: a zip of report files, same importer as import_security_zip.
     path("security/upload/", views.security_report_upload, name="security_upload"),
@@ -81,8 +96,14 @@ urlpatterns = [
     path("security/import-csv/", views.security_report_import_csv, name="security_import_csv"),
     # Read-only transparency: everything the email scanner has looked at.
     path("security/email-activity/", views.email_activity, name="email_activity"),
-    # Learned triage guidance overview (iterative learning loop).
+    # Learned triage guidance overview (iterative learning loop), and the button
+    # that distills accumulated feedback + the operator's own rulings on demand.
     path("security/guidance/", views.security_guidance_list, name="security_guidance"),
+    path(
+        "security/guidance/distill/",
+        views.security_guidance_distill,
+        name="security_guidance_distill",
+    ),
     path(
         "security/<int:report_id>/",
         views.security_report_detail,
@@ -124,6 +145,19 @@ urlpatterns = [
         "security/<int:report_id>/verify/",
         views.security_report_verify,
         name="security_verify",
+    ),
+    # One-click fix: a Cursor cloud agent applies the scanner's patch, scrubs
+    # the wording, and pushes an innocuously-named branch to the fork. The
+    # refresh asks the API and the fork where the run got to.
+    path(
+        "security/<int:report_id>/fix/",
+        views.security_report_fix,
+        name="security_fix",
+    ),
+    path(
+        "security/<int:report_id>/fix/refresh/",
+        views.security_report_fix_refresh,
+        name="security_fix_refresh",
     ),
     path(
         "security/<int:report_id>/map-versions/",

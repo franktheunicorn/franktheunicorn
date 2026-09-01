@@ -382,15 +382,19 @@ digest_enabled: false
 #   # forwarded by three people. Working through hundreds of those, the expensive
 #   # mistake is investigating the same hole four times.
 #   #
-#   # Local string comparison, no API calls — 500 reports is 125,000 pairs and a
-#   # model call per pair would be a bill, not a feature. It writes a link plus
-#   # the reasoning that produced it and NEVER sets status: duplicate; that is a
+#   # Triage and the dashboard's Re-check button ask the LLM to group the
+#   # backlog's titles — one call per project per few hundred reports, not one
+#   # per pair (500 reports is 125,000 pairs; that would be a bill, not a
+#   # feature). The weights below tune the local string-comparison fallback the
+#   # management command uses by default. Either way it writes a link plus the
+#   # reasoning that produced it and NEVER sets status: duplicate; that is a
 #   # verdict and verdicts are yours.
 #   #
 #   # For reports already imported before this existed:
 #   #   python manage.py find_security_duplicates             # dry run, prints pairs
 #   #   python manage.py find_security_duplicates --threshold 0.5   # try a cutoff
 #   #   python manage.py find_security_duplicates --apply     # write the links
+#   #   python manage.py find_security_duplicates --llm --apply  # the LLM pass instead
 #   duplicates:
 #     enabled: true            # DEFAULT
 #     threshold: 0.62          # raise if you disagree with the links you're seeing
@@ -401,9 +405,14 @@ digest_enabled: false
 #     title_weight: 0.45
 #     body_weight: 0.25
 #     path_weight: 0.30
+#     patch_weight: 0.50           # same fix, same hole — compared line-number-
+#                                  # blind, so master and branch-3.5 scans match.
+#                                  # Governs the blend; the 1.0 short-circuit for
+#                                  # an identical patch (modulo line numbers,
+#                                  # context and hunk order) is the flag below.
 #     same_component_bonus: 0.05   # corroboration only — half of Spark is "core"
-#     trust_finding_id: true       # same scanner id in a different archive = same finding
 #     trust_identical_title: true  # set false if your scanner's titles collide
+#     trust_identical_patch: true  # set false if your scanner emits a templated fix
 #     max_candidates: 500          # per-report bound during triage; the command ignores it
 #
 #   # Deep verification: not "is this report plausible" (that's triage above),
@@ -484,6 +493,27 @@ digest_enabled: false
 #     # NOTE: if you raise timeout_seconds or max_branches much past these,
 #     # raise worker.commands.STUCK_COMMAND_TIMEOUT_SECONDS too, or a long
 #     # legitimate run gets failed as hung.
+#
+#   # The one-click fix agent and the batch "did recent commits fix these?"
+#   # recheck. Both launch Cursor cloud agents: the fix agent applies the
+#   # scanner's patch, scrubs the wording (no JIRA, nothing security-saying in
+#   # the branch name or comments), and pushes an innocuously-named branch to
+#   # your fork; the recheck walks the last month of commits against every
+#   # untriaged report and writes a per-report verdict. Nothing fires without a
+#   # button press — the button is the consent — but both need a Cursor API key
+#   # (Cursor Dashboard -> API Keys) in the environment.
+#   fix_agent:
+#     enabled: true            # DEFAULT. False leaves the buttons but makes
+#                              # them explain why they won't launch.
+#     model: "kimi-k3"         # any id from GET /v1/models
+#     api_key_env: "CURSOR_API_KEY"
+#     # owner/repo of your fork — the "origin" fix branches are pushed to and
+#     # matched against. Empty means <github_username>/<project's repo name>.
+#     # fork: "you/spark"
+#     refuse_on_injection: false   # true refuses reports whose text trips the
+#                                  # injection patterns instead of launching
+#     recheck_lookback_days: 30    # how far back "recent changes" means
+#     recheck_timeout_seconds: 3600  # how long the worker waits on a run
 #   email:
 #     enabled: true
 #     # --- Gmail over IMAP ---

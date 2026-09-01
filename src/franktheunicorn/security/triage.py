@@ -353,7 +353,7 @@ def triage_report(
                         exc_info=True,
                     )
                 try:
-                    _check_duplicates(report, operator_config)
+                    _check_duplicates(report, operator_config, backend)
                 except Exception:
                     logger.warning(
                         "Duplicate detection failed for report #%d; triaging without it",
@@ -827,7 +827,7 @@ def _get_triage_backends(operator_config: OperatorConfig) -> list[BaseLLMBackend
     return backends
 
 
-def _get_triage_backend(operator_config: OperatorConfig) -> BaseLLMBackend | None:
+def resolve_triage_backend(operator_config: OperatorConfig) -> BaseLLMBackend | None:
     """The first of :func:`_get_triage_backends`, for callers that only want to
     know which backend triage would use."""
     backends = _get_triage_backends(operator_config)
@@ -1190,12 +1190,15 @@ def _check_cves(report: SecurityReport, operator_config: OperatorConfig) -> None
     report.save(update_fields=["cve_matches", "updated_at"])
 
 
-def _check_duplicates(report: SecurityReport, operator_config: OperatorConfig) -> None:
+def _check_duplicates(
+    report: SecurityReport,
+    operator_config: OperatorConfig,
+    backend: BaseLLMBackend,
+) -> None:
     """Link *report* to an earlier report of the same hole, if there is one.
 
-    Local string comparison, no model call — see ``security.duplicates`` for why
-    (500 reports is 125,000 pairs, and a model call per pair is a bill rather than
-    a feature).
+    One LLM call over the project's titles — see ``security.duplicates`` for the
+    shape (a call per pair would be a bill; a call per backlog is not).
 
     Clears a previous link when a re-triage genuinely finds nothing, for the same
     reason ``_check_cves`` always saves: a stale link from an earlier run presented
@@ -1213,7 +1216,7 @@ def _check_duplicates(report: SecurityReport, operator_config: OperatorConfig) -
     from franktheunicorn.security.duplicates import detect_for_report
 
     config = operator_config.security_triage.duplicates
-    outcome = detect_for_report(report, config)
+    outcome = detect_for_report(report, config, backend)
     if not outcome.ran:
         logger.debug(
             "Duplicate detection did not run for report #%d (%s); leaving any existing link alone.",

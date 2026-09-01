@@ -1,11 +1,19 @@
-"""factory_boy factories for franktheunicorn models."""
+"""factory_boy factories for franktheunicorn models, plus shared test doubles."""
 
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import Any
+from unittest.mock import MagicMock
 
 import factory  # type: ignore[import-untyped]
 
+from franktheunicorn.config.models import (
+    LLMBackendConfig,
+    OperatorConfig,
+    SecurityFixAgentConfig,
+    SecurityTriageConfig,
+)
 from franktheunicorn.core.models import (
     AgentFeedback,
     Alert,
@@ -18,11 +26,13 @@ from franktheunicorn.core.models import (
     Project,
     PullRequest,
     ReviewDraft,
+    SecurityRecheckRun,
     SecurityReport,
     SecurityTriageFeedback,
     SecurityTriageGuidance,
     TestRun,
 )
+from franktheunicorn.review.backends.stub_backend import StubBackend
 
 
 class ProjectFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
@@ -221,6 +231,53 @@ class SecurityReportFactory(factory.django.DjangoModelFactory):  # type: ignore[
     operator_notes = ""
 
 
+class SecurityRecheckRunFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
+    """Factory for SecurityRecheckRun (batch recheck agent run) instances."""
+
+    class Meta:
+        model = SecurityRecheckRun
+
+    project = factory.SubFactory(ProjectFactory)
+    agent_id = factory.Sequence(lambda n: f"bc-recheck-{n}")
+    run_id = factory.Sequence(lambda n: f"run-recheck-{n}")
+    status = "launched"
+    report_count = 1
+    detail = ""
+
+
+def patched_report(**kwargs: Any) -> Any:
+    """A SecurityReport with a scanner patch bundle, ready for the fix agent."""
+    defaults = {
+        "finding_id": "f086",
+        "proposed_patch": "--- a/core/Foo.java\n+++ b/core/Foo.java\n@@ -1 +1 @@\n-bad\n+good\n",
+        "proposed_patch_path": "PATCHES/bug_86/patch.diff",
+        "source_archive": "scan-spark-20260811.zip",
+    }
+    defaults.update(kwargs)
+    return SecurityReportFactory(**defaults)
+
+
+def make_operator_config(**fix_agent_kwargs: Any) -> OperatorConfig:
+    """An operator config with the fix-agent section filled in.
+
+    The fix agent and the batch recheck both read it, so both test suites build
+    it the same way.
+    """
+    return OperatorConfig(
+        github_username="holden",
+        security_triage=SecurityTriageConfig(fix_agent=SecurityFixAgentConfig(**fix_agent_kwargs)),
+    )
+
+
+def cursor_response(payload: dict[str, Any], status_code: int = 200) -> MagicMock:
+    """A mock httpx.Response shaped like the Cursor API's answers."""
+    response = MagicMock()
+    response.status_code = status_code
+    response.json.return_value = payload
+    response.text = str(payload)
+    return response
+
+
 class EmailScanRecordFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
     """Factory for EmailScanRecord (email-reading audit) instances."""
 
@@ -292,3 +349,24 @@ class LLMBackendFallbackFactory(factory.django.DjangoModelFactory):  # type: ign
     base_url = ""
     token_param = "max_completion_tokens"
     supports_json_object = True
+
+
+class CannedLLMBackend(StubBackend):
+    """A StubBackend whose every completion is one canned answer.
+
+    For tests of the non-review ``metered_call`` paths (security triage,
+    duplicate grouping): a real ``BaseLLMBackend`` so call sites need no
+    ``type: ignore``, no SDK, and no cost rows — the token counters stay at
+    zero, so ``record_cost`` no-ops. Records the user messages it was shown
+    in ``calls`` so a test can assert what the model was actually asked.
+    """
+
+    def __init__(self, response: str):
+        super().__init__(LLMBackendConfig(provider="stub"))
+        self._response = response
+        self.calls: list[str] = []
+
+    def _call_api(self, system_prompt: str, user_message: str, api_key: str) -> str:
+        del api_key
+        self.calls.append(user_message)
+        return self._response

@@ -750,6 +750,42 @@ class SecurityReport(models.Model):
     # operator doesn't retype what the agent already worked out.
     affected_versions = models.TextField(blank=True, default="")
 
+    # The one-click fix agent (security.fix_agent): a button press launches a
+    # Cursor cloud agent that applies the scanner's patch, scrubs the wording
+    # so nothing about the branch or comments says "security", and pushes an
+    # innocuously-named branch to the operator's fork. These track that:
+    # which branch the fix is based on (master vs branch-3.5, read off the
+    # archive name), the branch the agent pushed, and the Cursor agent/run ids
+    # so a refresh can ask the API where the run got to.
+    fix_base_branch = models.CharField(max_length=100, blank=True, default="")
+    fix_branch = models.CharField(max_length=200, blank=True, default="")
+    fix_agent_id = models.CharField(max_length=100, blank=True, default="")
+    fix_run_id = models.CharField(max_length=100, blank=True, default="")
+    #: "" (never launched), "launched", "branch-pushed", "failed".
+    fix_status = models.CharField(max_length=20, blank=True, default="")
+    fix_status_detail = models.CharField(max_length=300, blank=True, default="")
+    fix_launched_at = models.DateTimeField(null=True, blank=True)
+
+    # The batch "did the last month of commits fix this?" recheck
+    # (security.recheck): one agent run per project over the untriaged
+    # backlog, per-report verdict stored here. "" is "never checked".
+    #: "" / "still-valid" / "likely-fixed".
+    recheck_status = models.CharField(max_length=20, blank=True, default="")
+    recheck_reason = models.TextField(blank=True, default="")
+    rechecked_at = models.DateTimeField(null=True, blank=True)
+
+    # Build dependencies between findings of the same archive, parsed from the
+    # scanner's own composition notes ("bug_86 depends on bug_83's conf —
+    # cherry-picking one without the other does not compile"). Not duplication:
+    # both are real findings, one just doesn't apply without the other, which
+    # the fix agent needs to know before it bases a branch on thin air.
+    depends_on = models.ManyToManyField(
+        "self",
+        symmetrical=False,
+        blank=True,
+        related_name="required_by",
+    )
+
     # How far up the queue this report belongs, higher first. Read off a scanner
     # archive's own ranking at import (severity tier, triage-panel verdict, panel
     # confidence, CVSS overlay) — see security.scan_archive._priority. Zero for
@@ -779,6 +815,41 @@ class SecurityReport(models.Model):
 
     def __str__(self) -> str:
         return f"SecurityReport: {self.title or self.raw_text[:60]}"
+
+
+class SecurityRecheckRun(models.Model):
+    """One batch "did recent commits fix these?" agent run, scoped to a project.
+
+    The launch is one POST; the run itself takes minutes on Cursor's infra, so
+    the ids live here and a worker command (``poll_security_rechecks``) does the
+    waiting and writes the per-report verdicts (``SecurityReport.recheck_*``)
+    when the run finishes. One row per project per batch — the agent clones one
+    repo, so a backlog spanning two projects is two runs.
+    """
+
+    STATUS_CHOICES = [
+        ("launched", "Launched"),
+        ("finished", "Finished"),
+        ("error", "Error"),
+    ]
+
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.CASCADE,
+        related_name="security_recheck_runs",
+    )
+    agent_id = models.CharField(max_length=100, blank=True, default="")
+    run_id = models.CharField(max_length=100, blank=True, default="")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="launched")
+    #: How many reports the run was asked about.
+    report_count = models.IntegerField(default=0)
+    #: Where it landed: verdict counts on success, the failure reason otherwise.
+    detail = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self) -> str:
+        return f"SecurityRecheckRun: {self.project} ({self.status})"
 
 
 class SecurityVerification(models.Model):
@@ -1057,6 +1128,7 @@ class WorkerCommand(models.Model):
     COMMAND_CHOICES = [
         ("run_dual_tests", "Run differential tests"),
         ("run_security_sandbox", "Run security report sandbox"),
+        ("poll_security_rechecks", "Wait on batch security rechecks"),
         ("run_security_triage", "Run LLM triage on security report"),
         ("run_agents", "Force-run review agents"),
     ]

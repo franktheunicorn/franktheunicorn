@@ -161,6 +161,24 @@ def queue_version_follow_on(
     return version_map_queued, verify_queued, ""
 
 
+def queue_recheck_poll(*, priority: int = PRIORITY_BULK) -> bool:
+    """Queue the wait on launched recheck runs unless one is already in flight.
+
+    Targetless, so neither per-target unique constraint covers it and the
+    in-flight check is a SELECT — the pre-flight read ``queue_command`` dropped
+    is fine at this rate: one row per button press, not two thousand per
+    import.
+    """
+    if WorkerCommand.objects.filter(
+        command="poll_security_rechecks", status__in=_IN_FLIGHT_STATUSES
+    ).exists():
+        logger.info("poll_security_rechecks already in flight")
+        return False
+    WorkerCommand.objects.create(command="poll_security_rechecks", priority=priority)
+    logger.info("Queued poll_security_rechecks (priority %d)", priority)
+    return True
+
+
 def cancel_pending_for_reports(report_ids: list[int]) -> int:
     """Drop pending worker jobs for *report_ids* before the reports themselves go.
 

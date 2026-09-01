@@ -23,6 +23,18 @@
             ↻ Re-run Triage
         </button>
     </form>
+    {# The narrow sibling: only reports whose last triage run FAILED in the #}
+    {# worker. The full pass re-bills every unruled report to reach those; #}
+    {# this goes straight to them. #}
+    <form method="post" action="{% url 'dashboard:security_rerun_triage_failed' %}" style="display: inline;">
+        {% csrf_token %}
+        <button type="submit" class="action-btn"
+                style="font-size: 0.85rem; padding: 0.4rem 0.8rem;"
+                hx-post="{% url 'dashboard:security_rerun_triage_failed' %}"
+                hx-confirm="Re-queue triage for reports whose last triage run failed? Reports you've ruled on since (status, notes, or a CVE) are skipped.">
+            ↻ Re-run Failed Triage
+        </button>
+    </form>
     {# The cheap-only sibling: re-run the procedural auth-disabled close with #}
     {# zero LLM cost. Works with no backend configured at all. #}
     <form method="post" action="{% url 'dashboard:security_rerun_procedural' %}" style="display: inline;">
@@ -34,15 +46,28 @@
             ↻ Re-close (procedural)
         </button>
     </form>
-    {# Re-run the duplicate check across the backlog: links new matches and #}
-    {# clears stale auto-links. Cheap (no LLM); works with no backend configured. #}
+    {# Re-check duplicates across the backlog: the LLM groups the backlog's #}
+    {# titles (one call per project per few hundred reports), links the groups, #}
+    {# and clears stale auto-links it saw both halves of and didn't group. #}
     <form method="post" action="{% url 'dashboard:security_rerun_duplicates' %}" style="display: inline;">
         {% csrf_token %}
         <button type="submit" class="action-btn"
                 style="font-size: 0.85rem; padding: 0.4rem 0.8rem;"
                 hx-post="{% url 'dashboard:security_rerun_duplicates' %}"
-                hx-confirm="Re-check duplicates across the whole backlog? Cheap (no LLM). Links new matches and clears stale auto-links that no longer score as duplicates — hand-set links are left alone.">
+                hx-confirm="Re-check duplicates across the whole backlog? One LLM call per project per few hundred reports. Links the groups the model calls out and clears stale auto-links it saw both titles of and didn't group — hand-set links are left alone.">
             ↻ Re-check Duplicates
+        </button>
+    </form>
+    {# The expensive one: one Cursor cloud agent per project walks the last #}
+    {# month of commits against every untriaged report and writes a per-report #}
+    {# verdict (still plausibly valid / likely fixed). Batch, not per-item. #}
+    <form method="post" action="{% url 'dashboard:security_recheck_fixed' %}" style="display: inline;">
+        {% csrf_token %}
+        <button type="submit" class="action-btn"
+                style="font-size: 0.85rem; padding: 0.4rem 0.8rem;"
+                hx-post="{% url 'dashboard:security_recheck_fixed' %}"
+                hx-confirm="Check every untriaged report against the last month's commits? Launches one Cursor cloud agent per project — real money, minutes per run. Verdicts land on the reports as runs finish.">
+            ↻ Check Untriaged vs Recent Changes
         </button>
     </form>
 </div>
@@ -282,6 +307,16 @@
             {% if report.matched_cve_id %} &middot;
                 {% if report.status == "duplicate" %}Dup of{% else %}Related{% endif %}
                 {{ report.matched_cve_id }}
+            {% endif %}
+            {# The batch recheck's per-report answer, so "likely fixed already" #}
+            {# is visible in the queue rather than one click into each detail. #}
+            {% if report.recheck_status == "likely-fixed" %} &middot;
+                <span class="muted" title="{{ report.recheck_reason }}">✓ likely fixed already</span>
+            {% elif report.recheck_status == "still-valid" %} &middot;
+                <span class="muted" title="{{ report.recheck_reason }}">rechecked: still valid</span>
+            {% endif %}
+            {% if report.fix_branch %} &middot;
+                <span class="muted" title="Fix branch on the fork">🛠 {{ report.fix_branch }}</span>
             {% endif %}
         </div>
     </li>

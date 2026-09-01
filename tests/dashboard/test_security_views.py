@@ -2,19 +2,27 @@
 
 from __future__ import annotations
 
+import json
+from datetime import timedelta
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import Client
+from django.utils import timezone
 
 from franktheunicorn.core.models import SecurityReport, SecurityTriageFeedback
 from tests.factories import (
+    CannedLLMBackend,
     EmailScanRecordFactory,
     ProjectFactory,
+    SecurityRecheckRunFactory,
     SecurityReportFactory,
     SecurityTriageGuidanceFactory,
+    cursor_response,
+    make_operator_config,
+    patched_report,
 )
 
 
@@ -446,6 +454,56 @@ class TestSecurityReportVerdict:
         assert response.status_code == 200
         report.refresh_from_db()
         assert report.matched_cve_id == ""
+
+    def test_a_verdict_against_the_staged_suggestion_records_disagreement(
+        self, client: Client, db: Any
+    ) -> None:
+        """The operator's own triage is learning material: ruling against the
+        machine's staged verdict is the disagree signal, captured here because
+        most rulings never get a feedback-widget click."""
+        report = SecurityReportFactory(
+            status="new",
+            auto_triage_status="valid",
+            triage_summary="The machine said this looks real.",
+            assessed_severity="high",
+        )
+
+        response = client.post(
+            f"/security/{report.pk}/verdict/",
+            {"status": "expected-behavior", "operator_notes": "Documented on purpose."},
+        )
+
+        assert response.status_code == 200
+        feedback = SecurityTriageFeedback.objects.get(report=report)
+        assert feedback.agreed is False
+        assert feedback.operator_comment == "Documented on purpose."
+        assert feedback.triage_summary_snapshot == "The machine said this looks real."
+        report.refresh_from_db()
+        assert report.auto_triage_status == ""
+
+    def test_a_verdict_matching_the_staged_suggestion_records_agreement(
+        self, client: Client, db: Any
+    ) -> None:
+        report = SecurityReportFactory(status="new", auto_triage_status="invalid")
+
+        client.post(f"/security/{report.pk}/verdict/", {"status": "invalid"})
+
+        feedback = SecurityTriageFeedback.objects.get(report=report)
+        assert feedback.agreed is True
+
+    def test_a_verdict_with_no_staged_suggestion_records_nothing(
+        self, client: Client, db: Any
+    ) -> None:
+        """No machine verdict means nothing to agree or disagree with — the
+        ruling itself still reaches the distiller as an operator ruling."""
+        report = SecurityReportFactory(status="new")
+
+        client.post(
+            f"/security/{report.pk}/verdict/",
+            {"status": "valid", "operator_notes": "Reviewed the code myself."},
+        )
+
+        assert not SecurityTriageFeedback.objects.filter(report=report).exists()
 
 
 @pytest.mark.django_db
@@ -954,6 +1012,78 @@ class TestSecurityGuidanceList:
 
         response = client.get("/security/guidance/")
         assert b"stale guidance" not in response.content
+
+    def test_the_pending_counts_are_shown(self, client: Client, db: Any) -> None:
+        """What the next distillation has to work with: feedback rows and the
+        operator's own rulings."""
+        SecurityTriageFeedback.objects.create(agreed=True, operator_comment="yes")
+        SecurityReportFactory(status="valid")
+        SecurityReportFactory(status="new")  # not a ruling
+
+        body = client.get("/security/guidance/").content.decode()
+
+        assert "1 feedback row" in body
+        assert "1 operator ruling" in body
+
+
+@pytest.mark.django_db
+class TestSecurityGuidanceDistill:
+    """The on-demand distill button on the guidance page."""
+
+    @staticmethod
+    def _config() -> Any:
+        from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig
+
+        return OperatorConfig(
+            github_username="testuser",
+            llm_backends=[LLMBackendConfig(provider="stub")],
+        )
+
+    @patch("franktheunicorn.config.loader.get_operator_config")
+    def test_distills_global_and_per_project(
+        self, mock_config: MagicMock, client: Client, db: Any
+    ) -> None:
+        from franktheunicorn.core.models import SecurityTriageGuidance
+
+        mock_config.return_value = self._config()
+        project = ProjectFactory(owner="apache", repo="spark")
+        SecurityReportFactory(project=project, status="invalid", operator_notes="not exploitable")
+        SecurityReportFactory(project=None, status="valid", operator_notes="real")
+
+        with patch("franktheunicorn.review.backends.get_backend") as mock_get_backend:
+            backend = MagicMock()
+            backend.complete.return_value = "- Treat auth-disabled reports as invalid."
+            mock_get_backend.return_value = backend
+            response = client.post("/security/guidance/distill/")
+
+        assert response.status_code == 302
+        assert SecurityTriageGuidance.objects.filter(project=None).exists()
+        guidance = SecurityTriageGuidance.objects.get(project=project)
+        assert "auth-disabled" in guidance.guidance_text
+
+    @patch("franktheunicorn.config.loader.get_operator_config")
+    def test_nothing_to_learn_from_says_so(
+        self, mock_config: MagicMock, client: Client, db: Any
+    ) -> None:
+        mock_config.return_value = self._config()
+
+        response = client.post("/security/guidance/distill/", follow=True)
+
+        assert response.status_code == 200
+        assert "Nothing distilled" in response.content.decode()
+
+    @patch("franktheunicorn.config.loader.get_operator_config")
+    def test_no_backend_is_an_error_message(
+        self, mock_config: MagicMock, client: Client, db: Any
+    ) -> None:
+        from franktheunicorn.config.models import OperatorConfig
+
+        mock_config.return_value = OperatorConfig(github_username="testuser")
+
+        response = client.post("/security/guidance/distill/", follow=True)
+
+        assert response.status_code == 200
+        assert "No LLM backend configured" in response.content.decode()
 
 
 @pytest.mark.django_db
@@ -1601,6 +1731,19 @@ class TestSecurityReportAcceptTriage:
         # The operator overruled the machine, so the stale suggestion is gone.
         assert report.auto_triage_status == ""
 
+    def test_accept_records_agreement_for_the_guidance_loop(self, client: Client, db: Any) -> None:
+        """An Agree click is agreement — the loop learns from it without waiting
+        for a feedback-widget click that rarely comes."""
+        report = SecurityReportFactory(
+            status="new", auto_triage_status="invalid", triage_summary="Not exploitable here."
+        )
+
+        client.post(f"/security/{report.pk}/accept-triage/")
+
+        feedback = SecurityTriageFeedback.objects.get(report=report)
+        assert feedback.agreed is True
+        assert feedback.triage_summary_snapshot == "Not exploitable here."
+
 
 @pytest.mark.django_db
 class TestSecurityReportRerunTriage:
@@ -1771,6 +1914,121 @@ class TestSecurityReportRerunTriage:
 
 
 @pytest.mark.django_db
+class TestSecurityReportRerunTriageFailed:
+    """The narrow re-run: only reports whose most recent triage command failed."""
+
+    @staticmethod
+    def _config() -> Any:
+        from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig
+
+        return OperatorConfig(
+            github_username="testuser",
+            llm_backends=[LLMBackendConfig(provider="stub")],
+        )
+
+    @patch("franktheunicorn.config.loader.get_operator_config")
+    def test_a_failed_report_is_requeued_and_a_clean_one_is_not(
+        self, mock_config: MagicMock, client: Client, db: Any
+    ) -> None:
+        from franktheunicorn.core.models import WorkerCommand
+
+        mock_config.return_value = self._config()
+        failed = SecurityReportFactory(raw_text="SQL injection in /api/users?id=1", status="new")
+        clean = SecurityReportFactory(raw_text="XSS in the admin UI", status="new")
+        WorkerCommand.objects.create(
+            command="run_security_triage",
+            security_report=failed,
+            status="failed",
+            error="model unreachable",
+            finished_at=timezone.now(),
+        )
+        WorkerCommand.objects.create(
+            command="run_security_triage",
+            security_report=clean,
+            status="completed",
+            finished_at=timezone.now(),
+        )
+
+        response = client.post("/security/rerun-triage-failed/")
+
+        assert response.status_code == 302
+        assert WorkerCommand.objects.filter(
+            security_report=failed, command="run_security_triage", status="pending"
+        ).exists()
+        # The clean report got nothing — the full re-run's job, not this one's.
+        assert not WorkerCommand.objects.filter(
+            security_report=clean, command="run_security_triage", status="pending"
+        ).exists()
+
+    @patch("franktheunicorn.config.loader.get_operator_config")
+    def test_an_older_failure_under_a_newer_success_is_not_requeued(
+        self, mock_config: MagicMock, client: Client, db: Any
+    ) -> None:
+        """The latest command is the one that counts: a report that failed once
+        and then re-ran fine is not a failure."""
+        from franktheunicorn.core.models import WorkerCommand
+
+        mock_config.return_value = self._config()
+        report = SecurityReportFactory(raw_text="SSRF in the webhook tester", status="new")
+        WorkerCommand.objects.create(
+            command="run_security_triage",
+            security_report=report,
+            status="failed",
+            error="model unreachable",
+            created_at=timezone.now() - timedelta(hours=2),
+            finished_at=timezone.now() - timedelta(hours=2),
+        )
+        WorkerCommand.objects.create(
+            command="run_security_triage",
+            security_report=report,
+            status="completed",
+            created_at=timezone.now() - timedelta(hours=1),
+            finished_at=timezone.now() - timedelta(hours=1),
+        )
+
+        client.post("/security/rerun-triage-failed/")
+
+        assert not WorkerCommand.objects.filter(
+            security_report=report, command="run_security_triage", status="pending"
+        ).exists()
+
+    @patch("franktheunicorn.config.loader.get_operator_config")
+    def test_a_report_ruled_since_the_failure_is_skipped(
+        self, mock_config: MagicMock, client: Client, db: Any
+    ) -> None:
+        from franktheunicorn.core.models import WorkerCommand
+
+        mock_config.return_value = self._config()
+        ruled = SecurityReportFactory(status="invalid", operator_notes="not a bug")
+        WorkerCommand.objects.create(
+            command="run_security_triage",
+            security_report=ruled,
+            status="failed",
+            error="model unreachable",
+            finished_at=timezone.now(),
+        )
+
+        client.post("/security/rerun-triage-failed/")
+
+        assert not WorkerCommand.objects.filter(
+            security_report=ruled, command="run_security_triage", status="pending"
+        ).exists()
+
+    @patch("franktheunicorn.config.loader.get_operator_config")
+    def test_no_backend_is_an_error_message(
+        self, mock_config: MagicMock, client: Client, db: Any
+    ) -> None:
+        from franktheunicorn.config.models import OperatorConfig
+
+        mock_config.return_value = OperatorConfig(github_username="testuser")
+
+        response = client.post("/security/rerun-triage-failed/", follow=True)
+
+        assert response.status_code == 200
+        assert "No LLM backend configured" in response.content.decode()
+
+
+@pytest.mark.django_db
 class TestSecurityReportRerunProcedural:
     """The cheap-only re-trigger: re-run the auth-disabled regex close across
     the queue with zero LLM cost. Skips operator-ruled and in-flight reports,
@@ -1831,8 +2089,6 @@ class TestSecurityReportRerunProcedural:
 
     def test_it_works_with_no_llm_backend_configured(self, client: Client, db: Any) -> None:
         """The one bulk action that works with zero LLM — no backend check."""
-        from unittest.mock import patch
-
         from franktheunicorn.config.models import OperatorConfig
 
         with patch(
@@ -1850,19 +2106,37 @@ class TestSecurityReportRerunProcedural:
         assert report.auto_triage_status == "invalid"
 
 
+def _patch_duplicates_backend(response: str) -> Any:
+    return patch(
+        "franktheunicorn.security.triage.resolve_triage_backend",
+        return_value=CannedLLMBackend(response),
+    )
+
+
 @pytest.mark.django_db
 class TestSecurityReportRerunDuplicates:
-    """The bulk duplicate re-check: cheap (no LLM), links new matches and clears
-    stale auto-links. Hand-set links are never touched."""
+    """The bulk duplicate re-check: one LLM title-grouping pass per project, links
+    the groups it calls out and clears stale auto-links it saw both halves of and
+    declined to group. Hand-set links are never touched."""
 
     def test_it_links_a_new_match_and_reports_both_halves(self, client: Client, db: Any) -> None:
         project = ProjectFactory(owner="apache", repo="spark")
-        SecurityReportFactory(project=project, title="RCE in RPC", raw_text="port 7077 NettyRpcEnv")
-        SecurityReportFactory(project=project, title="RCE in RPC", raw_text="port 7077 NettyRpcEnv")
+        a = SecurityReportFactory(
+            project=project, title="RCE in RPC", raw_text="port 7077 NettyRpcEnv"
+        )
+        b = SecurityReportFactory(
+            project=project, title="RCE in RPC", raw_text="port 7077 NettyRpcEnv"
+        )
+        response_body = json.dumps(
+            {"groups": [{"ids": [a.pk, b.pk], "confidence": "high", "reason": "same hole"}]}
+        )
 
-        response = client.post("/security/rerun-duplicates/")
+        with _patch_duplicates_backend(response_body):
+            response = client.post("/security/rerun-duplicates/")
 
         assert response.status_code == 302
+        b.refresh_from_db()
+        assert b.duplicate_of_id == a.pk
 
     def test_it_clears_a_stale_auto_link(self, client: Client, db: Any) -> None:
         project = ProjectFactory(owner="apache", repo="spark")
@@ -1878,7 +2152,8 @@ class TestSecurityReportRerunDuplicates:
             duplicate_reason="same scanner finding id 'f005' in a different archive",
         )
 
-        client.post("/security/rerun-duplicates/")
+        with _patch_duplicates_backend('{"groups": []}'):
+            client.post("/security/rerun-duplicates/")
 
         stale.refresh_from_db()
         assert stale.duplicate_of_id is None
@@ -1897,11 +2172,32 @@ class TestSecurityReportRerunDuplicates:
             duplicate_confidence=None,
         )
 
-        client.post("/security/rerun-duplicates/")
+        with _patch_duplicates_backend('{"groups": []}'):
+            client.post("/security/rerun-duplicates/")
 
         hand.refresh_from_db()
         assert hand.duplicate_of_id == original.pk
         assert hand.duplicate_confidence is None
+
+    def test_no_backend_is_an_error_message_not_a_silent_pass(
+        self, client: Client, db: Any
+    ) -> None:
+        """A button that needs the model says so when there isn't one — "0 linked"
+        from a check that never ran is the lie this codebase has a rule about."""
+        project = ProjectFactory(owner="apache", repo="spark")
+        SecurityReportFactory(project=project, title="RCE in RPC", raw_text="port 7077 NettyRpcEnv")
+        b = SecurityReportFactory(
+            project=project, title="RCE in RPC", raw_text="port 7077 NettyRpcEnv"
+        )
+
+        with patch("franktheunicorn.security.triage.resolve_triage_backend", return_value=None):
+            response = client.post("/security/rerun-duplicates/", follow=True)
+
+        assert response.status_code == 200
+        content = response.content.decode()
+        assert "No LLM backend configured" in content
+        b.refresh_from_db()
+        assert b.duplicate_of_id is None
 
 
 @pytest.mark.django_db
@@ -1957,3 +2253,259 @@ class TestSecurityReportVersions:
 
         report.refresh_from_db()
         assert report.affected_versions == "3.5.0, 3.5.1, 4.0.0"
+
+
+@pytest.mark.django_db
+class TestSecurityReportFix:
+    """The one-click fix button and its refresh."""
+
+    def test_fix_launches_the_agent(self, client: Client, db: Any) -> None:
+        report = patched_report()
+        with (
+            patch.dict("os.environ", {"CURSOR_API_KEY": "key"}),
+            patch(
+                "franktheunicorn.config.loader.get_operator_config",
+                return_value=make_operator_config(),
+            ),
+            patch(
+                "franktheunicorn.security.fix_agent.httpx.post",
+                return_value=cursor_response({"agent": {"id": "bc-1"}, "run": {"id": "run-1"}}),
+            ),
+        ):
+            response = client.post(f"/security/{report.pk}/fix/")
+
+        assert response.status_code == 200
+        assert b"bc-1" in response.content
+        report.refresh_from_db()
+        assert report.fix_status == "launched"
+
+    def test_fix_without_a_patch_says_so(self, client: Client, db: Any) -> None:
+        report = patched_report(proposed_patch="", proposed_patch_path="")
+        with (
+            patch.dict("os.environ", {"CURSOR_API_KEY": "key"}),
+            patch(
+                "franktheunicorn.config.loader.get_operator_config",
+                return_value=make_operator_config(),
+            ),
+        ):
+            response = client.post(f"/security/{report.pk}/fix/")
+
+        assert response.status_code == 200
+        assert b"no proposed patch" in response.content
+        report.refresh_from_db()
+        assert report.fix_status == ""
+
+    def test_fix_without_an_api_key_names_the_env_var(self, client: Client, db: Any) -> None:
+        report = patched_report()
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch(
+                "franktheunicorn.config.loader.get_operator_config",
+                return_value=make_operator_config(),
+            ),
+        ):
+            response = client.post(f"/security/{report.pk}/fix/")
+
+        assert b"CURSOR_API_KEY" in response.content
+
+    def test_a_launched_report_refuses_a_second_agent(self, client: Client, db: Any) -> None:
+        report = patched_report(fix_status="launched", fix_agent_id="bc-1", fix_run_id="run-1")
+        with (
+            patch.dict("os.environ", {"CURSOR_API_KEY": "key"}),
+            patch(
+                "franktheunicorn.config.loader.get_operator_config",
+                return_value=make_operator_config(),
+            ),
+            patch("franktheunicorn.security.fix_agent.httpx.post") as mock_post,
+        ):
+            response = client.post(f"/security/{report.pk}/fix/")
+
+        assert response.status_code == 200
+        assert b"already launched" in response.content
+        assert not mock_post.called
+
+    def test_refresh_finds_the_branch(self, client: Client, db: Any) -> None:
+        report = patched_report(fix_agent_id="bc-1", fix_run_id="run-1", fix_status="launched")
+        with (
+            patch.dict("os.environ", {"CURSOR_API_KEY": "key"}),
+            patch(
+                "franktheunicorn.config.loader.get_operator_config",
+                return_value=make_operator_config(),
+            ),
+            patch(
+                "franktheunicorn.security.fix_agent.httpx.get",
+                return_value=cursor_response(
+                    {
+                        "status": "FINISHED",
+                        "git": {"branches": [{"branch": "bug_86-quiet-cleanup"}]},
+                    }
+                ),
+            ),
+            patch(
+                "franktheunicorn.security.fix_agent.find_fix_branch_on_fork",
+                return_value="",
+            ),
+        ):
+            response = client.post(f"/security/{report.pk}/fix/refresh/")
+
+        assert response.status_code == 200
+        assert b"bug_86-quiet-cleanup" in response.content
+        report.refresh_from_db()
+        assert report.fix_status == "branch-pushed"
+
+
+@pytest.mark.django_db
+class TestSecurityRecheckFixed:
+    """The bulk 'check untriaged against recent changes' button."""
+
+    def test_launches_one_agent_per_project_and_queues_the_poll(
+        self, client: Client, db: Any
+    ) -> None:
+        from franktheunicorn.core.models import SecurityRecheckRun, WorkerCommand
+
+        one = SecurityReportFactory(status="new")
+        other_project = ProjectFactory()
+        two = SecurityReportFactory(status="new", project=other_project)
+        SecurityReportFactory(status="valid")  # ruled on — not covered
+        with (
+            patch.dict("os.environ", {"CURSOR_API_KEY": "key"}),
+            patch(
+                "franktheunicorn.config.loader.get_operator_config",
+                return_value=make_operator_config(),
+            ),
+            patch(
+                "franktheunicorn.security.recheck.create_cursor_agent",
+                return_value=("bc-x", "run-x"),
+            ),
+        ):
+            response = client.post("/security/recheck-fixed/", follow=True)
+
+        assert response.status_code == 200
+        assert SecurityRecheckRun.objects.count() == 2
+        assert WorkerCommand.objects.filter(command="poll_security_rechecks").exists()
+        assert b"2 project(s)" in response.content
+        # One run per project, each covering its one untriaged report.
+        assert {r.report_count for r in SecurityRecheckRun.objects.all()} == {1}
+        assert {r.project_id for r in SecurityRecheckRun.objects.all()} == {
+            one.project_id,
+            two.project_id,
+        }
+
+    def test_no_untriaged_reports_says_so(self, client: Client, db: Any) -> None:
+        SecurityReportFactory(status="valid")
+        with (
+            patch.dict("os.environ", {"CURSOR_API_KEY": "key"}),
+            patch(
+                "franktheunicorn.config.loader.get_operator_config",
+                return_value=make_operator_config(),
+            ),
+        ):
+            response = client.post("/security/recheck-fixed/", follow=True)
+
+        assert b"No untriaged reports with a project" in response.content
+
+    def test_no_api_key_names_the_env_var(self, client: Client, db: Any) -> None:
+        SecurityReportFactory(status="new")
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch(
+                "franktheunicorn.config.loader.get_operator_config",
+                return_value=make_operator_config(),
+            ),
+        ):
+            response = client.post("/security/recheck-fixed/", follow=True)
+
+        assert b"CURSOR_API_KEY" in response.content
+
+    def test_disabled_config_names_the_setting(self, client: Client, db: Any) -> None:
+        SecurityReportFactory(status="new")
+        with patch(
+            "franktheunicorn.config.loader.get_operator_config",
+            return_value=make_operator_config(enabled=False),
+        ):
+            response = client.post("/security/recheck-fixed/", follow=True)
+
+        assert b"fix_agent.enabled" in response.content
+
+    def test_a_second_press_does_not_double_queue_the_poll(self, client: Client, db: Any) -> None:
+        from franktheunicorn.core.models import SecurityRecheckRun, WorkerCommand
+
+        SecurityReportFactory(status="new")
+        with (
+            patch.dict("os.environ", {"CURSOR_API_KEY": "key"}),
+            patch(
+                "franktheunicorn.config.loader.get_operator_config",
+                return_value=make_operator_config(),
+            ),
+            patch(
+                "franktheunicorn.security.recheck.create_cursor_agent",
+                return_value=("bc-x", "run-x"),
+            ) as mock_create,
+        ):
+            client.post("/security/recheck-fixed/", follow=True)
+            response = client.post("/security/recheck-fixed/", follow=True)
+
+        # The first run is still in flight, so the second press launches
+        # nothing — the running agent's prompt already covers these reports.
+        assert mock_create.call_count == 1
+        assert SecurityRecheckRun.objects.count() == 1
+        assert b"already running" in response.content
+        assert (
+            WorkerCommand.objects.filter(command="poll_security_rechecks", status="pending").count()
+            == 1
+        )
+
+    def test_a_stale_run_does_not_block_a_fresh_recheck(self, client: Client, db: Any) -> None:
+        # A launched run older than the poll's own timeout outlived its poll;
+        # it is not coming back, and it must not hold the button hostage.
+        from franktheunicorn.core.models import SecurityRecheckRun
+
+        report = SecurityReportFactory(status="new")
+        stale = SecurityRecheckRunFactory(
+            project=report.project,
+            created_at=timezone.now() - timedelta(hours=2),
+        )
+        with (
+            patch.dict("os.environ", {"CURSOR_API_KEY": "key"}),
+            patch(
+                "franktheunicorn.config.loader.get_operator_config",
+                return_value=make_operator_config(),
+            ),
+            patch(
+                "franktheunicorn.security.recheck.create_cursor_agent",
+                return_value=("bc-new", "run-new"),
+            ),
+        ):
+            response = client.post("/security/recheck-fixed/", follow=True)
+
+        assert b"1 project(s)" in response.content
+        stale.refresh_from_db()
+        assert stale.status == "error"
+        assert "stale" in stale.detail
+        assert SecurityRecheckRun.objects.filter(status="launched").count() == 1
+
+    def test_a_partial_chunk_failure_still_queues_the_poll(self, client: Client, db: Any) -> None:
+        # Chunk 1 launched and is billing before chunk 2's POST fails; its run
+        # still needs the poll, and the message must not claim nothing happened.
+        from franktheunicorn.core.models import SecurityRecheckRun, WorkerCommand
+        from franktheunicorn.security.fix_agent import FixAgentError
+
+        project = ProjectFactory()
+        for _ in range(51):  # two chunks
+            SecurityReportFactory(status="new", project=project)
+        with (
+            patch.dict("os.environ", {"CURSOR_API_KEY": "key"}),
+            patch(
+                "franktheunicorn.config.loader.get_operator_config",
+                return_value=make_operator_config(),
+            ),
+            patch(
+                "franktheunicorn.security.recheck.create_cursor_agent",
+                side_effect=[("bc-1", "run-1"), FixAgentError("Cursor API said 500")],
+            ),
+        ):
+            response = client.post("/security/recheck-fixed/", follow=True)
+
+        assert SecurityRecheckRun.objects.count() == 1
+        assert WorkerCommand.objects.filter(command="poll_security_rechecks").exists()
+        assert b"did launch and will be polled" in response.content

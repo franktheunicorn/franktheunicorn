@@ -56,6 +56,17 @@ class Command(BaseCommand):
                 "Never touches a link with no confidence score — that's one you set."
             ),
         )
+        parser.add_argument(
+            "--llm",
+            action="store_true",
+            help=(
+                "Use the LLM title-grouping pass (what triage and the dashboard "
+                "re-check use) instead of the local heuristic. One model call per "
+                "project per few hundred reports; also clears stale auto-links the "
+                "model saw both halves of and didn't group. Needs a configured "
+                "backend."
+            ),
+        )
 
     def handle(self, *args: object, **options: object) -> None:
         config = get_operator_config().security_triage.duplicates
@@ -119,6 +130,10 @@ class Command(BaseCommand):
             self.stdout.write("No reports to consider.")
             return
 
+        if options.get("llm"):
+            self._run_llm(candidates, config, apply=bool(options.get("apply")))
+            return
+
         self.stdout.write(
             f"Comparing {len(candidates)} report(s) at threshold {config.threshold:.2f}"
             + (" — DRY RUN, nothing will be written." if not options.get("apply") else "")
@@ -136,6 +151,81 @@ class Command(BaseCommand):
             return
 
         self._report_dry_run(candidates, config)
+
+    def _run_llm(
+        self, candidates: list[SecurityReport], config: SecurityDuplicateConfig, *, apply: bool
+    ) -> None:
+        """The LLM title-grouping pass: what triage and the dashboard re-check use.
+
+        The dry run prints the groups the model called out; ``--apply`` writes
+        them through :func:`redetect_across_backlog`, which also clears stale
+        auto-links the model saw both halves of and declined to group.
+        """
+        from franktheunicorn.security.duplicates import (
+            bucket_by_project,
+            llm_duplicate_sweep,
+            redetect_across_backlog,
+        )
+        from franktheunicorn.security.triage import resolve_triage_backend
+
+        backend = resolve_triage_backend(get_operator_config())
+        if backend is None:
+            self.stderr.write(
+                self.style.ERROR("No LLM backend configured. Add one to operator.yaml.")
+            )
+            return
+
+        if apply:
+            result = redetect_across_backlog(candidates, config, backend)
+            if result is None:
+                self.stderr.write(
+                    self.style.ERROR("Every LLM call failed — nothing was written. See the log.")
+                )
+                return
+            linked, cleared = result
+            self.stdout.write(
+                self.style.SUCCESS(
+                    f"Linked {linked} report(s) as probable duplicates"
+                    + (f", cleared {cleared} stale link(s)." if cleared else ".")
+                )
+            )
+            self.stdout.write(
+                "Nothing was marked as status=duplicate — that verdict is yours. "
+                "The links are on the report pages."
+            )
+            return
+
+        # Dry run: the same bucketing --apply sweeps, printed, nothing written.
+        buckets = bucket_by_project(sorted(candidates, key=lambda r: (r.created_at, r.pk)))
+        by_id = {report.pk: report for report in candidates}
+        found = 0
+        for project_id, bucket in buckets.items():
+            if len(bucket) < 2:
+                continue
+            sweep = llm_duplicate_sweep(bucket, backend, project_id=project_id)
+            if sweep is None:
+                self.stderr.write(
+                    self.style.ERROR(f"LLM grouping failed for project {project_id}; skipping it.")
+                )
+                continue
+            for group in sweep.groups:
+                found += len(group.ids) - 1
+                self.stdout.write(
+                    f"  group ({group.confidence}): {', '.join(f'#{i}' for i in group.ids)}"
+                    f"  — {group.reason}"
+                )
+                for report_id in group.ids:
+                    report = by_id[report_id]
+                    self.stdout.write(f"      #{report_id}: {(report.title or '')[:90]!r}")
+        if found:
+            self.stdout.write(
+                self.style.WARNING(
+                    f"\n{found} probable duplicate(s) in the model's groups. "
+                    "Re-run with --llm --apply to write the links."
+                )
+            )
+        else:
+            self.stdout.write("The model found no duplicates in these titles.")
 
     def _report_dry_run(
         self, candidates: list[SecurityReport], config: SecurityDuplicateConfig

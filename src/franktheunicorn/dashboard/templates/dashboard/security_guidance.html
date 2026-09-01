@@ -4,17 +4,37 @@
 {% block content %}
 <h2>Learned Triage Guidance</h2>
 <p style="font-size: 0.85rem; color: var(--muted); margin-bottom: 1rem;">
-    Distilled from operator agree/disagree feedback on security triage verdicts.
-    Injected into future triage system prompts (per project, plus a global
-    addendum). See <a href="{% url 'dashboard:security_list' %}">Security Reports</a>.
+    Distilled from operator agree/disagree feedback on security triage verdicts
+    and from the operator's own rulings (the status, severity and notes they
+    chose — including triage done entirely by hand). Injected into future triage
+    system prompts (per project, plus a global addendum).
+    See <a href="{% url 'dashboard:security_list' %}">Security Reports</a>.
 </p>
+
+{# Explicit feedback distills itself as it's recorded; verdict saves and the #}
+{# Agree button only record. This button is what folds those into guidance. #}
+<div style="margin-bottom: 1rem; display: flex; gap: 0.5rem; align-items: center;">
+    <form method="post" action="{% url 'dashboard:security_guidance_distill' %}" style="display: inline;">
+        {% csrf_token %}
+        <button type="submit" class="action-btn post"
+                style="font-size: 0.85rem; padding: 0.4rem 0.8rem;"
+                hx-post="{% url 'dashboard:security_guidance_distill' %}"
+                hx-confirm="Distill guidance now? One LLM call for the global addendum plus one per project with feedback or rulings.">
+            🎓 Distill Guidance Now
+        </button>
+    </form>
+    <span style="font-size: 0.85rem; color: var(--muted);">
+        {{ feedback_count }} feedback row{{ feedback_count|pluralize }} and
+        {{ rulings_count }} operator ruling{{ rulings_count|pluralize }} inform the next distillation.
+    </span>
+</div>
 
 <table>
     <thead>
         <tr>
             <th>Project</th>
             <th>Guidance</th>
-            <th>Feedback Count</th>
+            <th>Sources</th>
             <th>Updated</th>
         </tr>
     </thead>
@@ -30,7 +50,8 @@
         </tr>
         {% empty %}
         <tr><td colspan="4" class="empty-state">
-            <p>No learned guidance yet. Agree or disagree with a triage verdict to start building it.</p>
+            <p>No learned guidance yet. Agree or disagree with a triage verdict — or just rule on
+            reports yourself — then press Distill Guidance.</p>
         </td></tr>
         {% endfor %}
     </tbody>

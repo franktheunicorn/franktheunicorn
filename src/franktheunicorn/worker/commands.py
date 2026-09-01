@@ -280,6 +280,7 @@ def _dispatch(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
         "verify_security_report": _verify_security_report,
         "map_report_versions": _map_report_versions,
         "find_report_introduction": _find_report_introduction,
+        "poll_security_rechecks": _poll_security_rechecks,
         "run_agents": _run_agents,
     }
     handler = handlers.get(cmd.command)
@@ -456,6 +457,21 @@ def _verify_security_report(cmd: WorkerCommand, operator_config: OperatorConfig)
         logger.info(
             "Verification for report #%s did not run: %s", cmd.security_report.pk, run.error
         )
+
+
+def _poll_security_rechecks(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
+    """Wait on the launched batch-recheck runs and write their per-report verdicts.
+
+    Blocks like the dual-tests handler — a recheck run is minutes of remote
+    agent time and the 6h stuck-command ceiling is nowhere near it. The whole
+    outcome lands in ``cmd.log`` either way.
+    """
+    from franktheunicorn.security.recheck import poll_rechecks
+
+    finished, failed = poll_rechecks(operator_config)
+    cmd.log = f"recheck poll: {finished} finished, {failed} failed"
+    if not finished and not failed:
+        cmd.log = "recheck poll: no launched runs — nothing to wait on"
 
 
 def _map_report_versions(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:

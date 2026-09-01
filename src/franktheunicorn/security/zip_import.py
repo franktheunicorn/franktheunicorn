@@ -760,6 +760,9 @@ def _import_findings(
     """
     project_id = project.pk if project is not None else None
     ranked = sorted(expanded.findings, key=lambda r: (-r.priority, r.finding_id))
+    #: finding id -> report pk, for wiring composition.md dependencies after the
+    #: loop. A finding that deduped to an earlier import still gets its links.
+    by_finding: dict[str, int] = {}
     for record in ranked:
         text_key = _text_key(record.body, project_id)
         existing = seen.get(text_key)
@@ -771,6 +774,7 @@ def _import_findings(
             # the page's "re-importing is safe" hint and half not.
             existing = seen.get(_text_key(record.body, None))
         if existing is not None:
+            by_finding[record.finding_id] = existing
             _record(
                 result,
                 EntryOutcome(name=record.origin_label, outcome="duplicate", report_id=existing),
@@ -798,6 +802,7 @@ def _import_findings(
             continue
 
         seen[text_key] = report.pk
+        by_finding[record.finding_id] = report.pk
         _record(
             result,
             EntryOutcome(name=record.origin_label, outcome="imported", report_id=report.pk),
@@ -815,6 +820,24 @@ def _import_findings(
                 logger.warning(
                     "Could not queue triage for finding %s", record.finding_id, exc_info=True
                 )
+
+    linked = 0
+    for record in ranked:
+        if not record.depends_on:
+            continue
+        report_pk = by_finding.get(record.finding_id)
+        # A report must not depend on itself — two findings that dedupe to one
+        # row would otherwise wire exactly that.
+        dep_pks = [by_finding[d] for d in record.depends_on if d in by_finding]
+        dep_pks = [pk for pk in dep_pks if pk != report_pk]
+        if report_pk is None or not dep_pks:
+            continue
+        # add(), not set(): a re-import converges the links, it doesn't wipe
+        # ones a richer archive declared earlier.
+        SecurityReport.objects.get(pk=report_pk).depends_on.add(*dep_pks)
+        linked += 1
+    if linked:
+        logger.info("Wired composition.md dependencies for %d findings", linked)
 
     if expanded.truncated:
         # A warning on the result, not result.error. The command raises

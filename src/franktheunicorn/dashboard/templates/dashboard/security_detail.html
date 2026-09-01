@@ -68,6 +68,46 @@
 </div>
 {% endif %}
 
+{# Build order between findings of one archive, from the scanner's composition #}
+{# notes. Not duplication: both are real, one just doesn't apply without the #}
+{# other — which is what the fix agent needs to know before basing a branch. #}
+{% if report.depends_on.all %}
+<div class="dup-note">
+    <strong>Depends on {{ report.depends_on.all|length }} other finding(s) from the same archive:</strong>
+    <div class="dup-why">
+        {% for dep in report.depends_on.all %}
+        <a href="{% url 'dashboard:security_detail' dep.pk %}">#{{ dep.pk }}</a>
+        {{ dep.title|default:"Untitled"|truncatechars:60 }}{% if not forloop.last %} · {% endif %}
+        {% endfor %}
+    </div>
+    <div class="dup-why">Cherry-picking this patch without those may not compile — the fix agent bases on their branches when they exist.</div>
+</div>
+{% endif %}
+{% if report.required_by.all %}
+<div class="dup-note">
+    <strong>{{ report.required_by.all|length }} other finding(s) depend on this one:</strong>
+    <div class="dup-why">
+        {% for dep in report.required_by.all %}
+        <a href="{% url 'dashboard:security_detail' dep.pk %}">#{{ dep.pk }}</a>
+        {{ dep.title|default:"Untitled"|truncatechars:60 }}{% if not forloop.last %} · {% endif %}
+        {% endfor %}
+    </div>
+    <div class="dup-why">Fix this one first — their patches build on it.</div>
+</div>
+{% endif %}
+
+{% if report.recheck_status %}
+<div class="dup-note">
+    <strong>Recent-changes check{% if report.rechecked_at %} ({{ report.rechecked_at|date:"Y-m-d" }}){% endif %}:</strong>
+    {% if report.recheck_status == "likely-fixed" %}
+    <span class="score-badge mid">likely fixed already</span>
+    {% else %}
+    <span class="score-badge">still plausibly valid</span>
+    {% endif %}
+    <div class="dup-why">{{ report.recheck_reason }}</div>
+</div>
+{% endif %}
+
 <!-- Raw Report -->
 <details open style="margin-bottom: 1rem;">
     <summary style="font-weight: 600; font-size: 0.9rem; cursor: pointer;">Raw Report</summary>
@@ -89,6 +129,20 @@
     </p>
     <pre class="patch-body">{{ report.proposed_patch }}</pre>
 </details>
+
+{# The one-click fix. Only offered when there is a patch to apply — without #}
+{# one the button could only ever answer "this report has no proposed patch". #}
+<section class="verify-panel" style="margin-bottom: 1rem;">
+    <h3 style="font-size: 0.9rem; margin-bottom: 0.5rem;">Fix with an agent</h3>
+    <p class="pr-meta" style="margin: 0 0 0.5rem;">
+        Launches a Cursor cloud agent that applies the patch, scrubs the wording
+        (no JIRA, nothing security-saying in the branch name or comments),
+        reviews its own work, and pushes an innocuously-named branch to your fork.
+    </p>
+    <div id="fix-status-area">
+        {% include "dashboard/_security_fix_status.html" %}
+    </div>
+</section>
 {% endif %}
 
 <!-- Parsed Fields -->

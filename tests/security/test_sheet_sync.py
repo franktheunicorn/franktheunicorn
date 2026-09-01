@@ -166,6 +166,81 @@ class TestExport:
         reports = [SecurityReportFactory() for _ in range(3)]
         assert "".join(stream_reports_csv(reports)) == _export(reports)
 
+    def test_the_machine_context_columns_are_there_for_the_reviewer(self) -> None:
+        """The export audit: a reviewer deciding valid/invalid in the sheet needs
+        what the machine already thinks — the staged verdict, the POC read, the
+        sandbox, the CVE candidates, and any dup link — or they're re-deriving in
+        a spreadsheet what the dashboard already knows."""
+        twin = SecurityReportFactory()
+        report = SecurityReportFactory(
+            auto_triage_status="invalid",
+            poc_plausible=False,
+            is_expected_behavior=True,
+            sandbox_verdict="reproduced",
+            cve_matches=[{"cve_id": "CVE-2026-1234", "summary": "..."}, {"nope": True}],
+            duplicate_of=twin,
+            affected_versions="3.5.0 to 4.0.0",
+            introduced_summary="Since SPARK-12345 in 3.5.0.",
+            reporter_name="A. Researcher",
+        )
+
+        row = _rows(_export([report]))[0]
+
+        assert row["auto_triage_suggestion"] == "invalid"
+        assert row["poc_plausible"] == "no"
+        assert row["expected_behavior"] == "yes"
+        assert row["sandbox_verdict"] == "reproduced"
+        assert row["cve_candidates"] == "CVE-2026-1234"
+        assert row["duplicate_of_report"] == str(twin.pk)
+        assert row["affected_versions"] == "3.5.0 to 4.0.0"
+        assert row["introduced"] == "Since SPARK-12345 in 3.5.0."
+        assert row["reporter"] == "A. Researcher"
+
+    def test_the_new_columns_blank_out_cleanly_on_a_fresh_report(self) -> None:
+        report = SecurityReportFactory()
+        row = _rows(_export([report]))[0]
+        for column in (
+            "auto_triage_suggestion",
+            "poc_plausible",
+            "expected_behavior",
+            "sandbox_verdict",
+            "cve_candidates",
+            "duplicate_of_report",
+            "affected_versions",
+            "introduced",
+            "reporter",
+        ):
+            assert row[column] == "", column
+
+    def test_poc_plausible_distinguishes_yes_no_and_unrun(self) -> None:
+        """None means the POC assessor never ran; "no" is a verdict. Collapsing
+        those into one cell would tell the reviewer a POC was implausible when
+        nobody looked."""
+        rows = _rows(
+            _export(
+                [
+                    SecurityReportFactory(poc_plausible=True),
+                    SecurityReportFactory(poc_plausible=False),
+                    SecurityReportFactory(poc_plausible=None),
+                ]
+            )
+        )
+        assert [row["poc_plausible"] for row in rows] == ["yes", "no", ""]
+
+    def test_the_new_columns_are_read_only_on_import(self) -> None:
+        """They're context for the reviewer, not a back door into fields the import
+        doesn't own — an edited auto_triage_suggestion must not write."""
+        report = SecurityReportFactory(status="new", auto_triage_status="invalid")
+        text = _edit(_export([report]), report.pk, "auto_triage_suggestion", "valid")
+        text = _edit(text, report.pk, "sandbox_verdict", "not-reproduced")
+
+        result = _apply(text)
+
+        assert result.unchanged == 1
+        report.refresh_from_db()
+        assert report.auto_triage_status == "invalid"
+        assert report.sandbox_verdict == ""
+
 
 @pytest.mark.django_db
 class TestImportApplies:

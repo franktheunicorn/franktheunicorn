@@ -1421,23 +1421,34 @@ class SecurityDuplicateConfig(BaseModel):
     title_weight: float = 0.45
     body_weight: float = 0.25
     path_weight: float = 0.30
+    #: The proposed patch, when both reports have one, is the strongest signal
+    #: there is: same fix, same hole. Compared line-number- and context-blind,
+    #: so the same patch against master and branch-3.5 still matches.
+    patch_weight: float = 0.50
     #: Corroboration, not evidence: on a project like Spark half the backlog is
     #: "core", so a shared component nudges rather than scores.
     same_component_bonus: float = 0.05
-    #: The same scanner finding id in a *different* archive is the same finding
-    #: re-scanned, not something merely similar. Turn off if your archives reuse ids
-    #: across unrelated scans.
-    trust_finding_id: bool = True
     #: An identical title within one project is what a re-forwarded disclosure looks
     #: like. Turn off for a scanner whose titles are templated to the point of
     #: colliding between genuinely different findings.
     trust_identical_title: bool = True
+    #: An identical patch (line numbers and context ignored) is identity, not
+    #: similarity — the same finding re-scanned, possibly against another
+    #: branch. Turn off for a scanner that emits a templated fix for everything.
+    trust_identical_patch: bool = True
     #: Bound on the per-report comparison during triage, so one report's triage cost
     #: doesn't grow with the size of the backlog it lands in. The backfill command
     #: is not subject to this — it compares everything.
     max_candidates: int = 500
 
-    @field_validator("threshold", "title_weight", "body_weight", "path_weight")
+    @field_validator(
+        "threshold",
+        "title_weight",
+        "body_weight",
+        "path_weight",
+        "patch_weight",
+        "same_component_bonus",
+    )
     @classmethod
     def must_be_a_fraction(cls, v: float) -> float:
         if not 0.0 <= v <= 1.0:
@@ -1460,13 +1471,59 @@ class SecurityDuplicateConfig(BaseModel):
         Which would present as "duplicate detection doesn't work" with a config that
         looks deliberate — the failure mode this codebase has a rule about.
         """
-        if self.title_weight + self.body_weight + self.path_weight <= 0:
+        if self.title_weight + self.body_weight + self.path_weight + self.patch_weight <= 0:
             msg = (
-                "at least one of title_weight/body_weight/path_weight must be "
-                "non-zero, or nothing can ever score above the threshold"
+                "at least one of title_weight/body_weight/path_weight/patch_weight "
+                "must be non-zero, or nothing can ever score above the threshold"
             )
             raise ValueError(msg)
         return self
+
+
+class SecurityFixAgentConfig(BaseModel):
+    """Config for the one-click fix agent and the batch recheck.
+
+    Both launch Cursor cloud agents (``security.fix_agent`` /
+    ``security.recheck``): the fix agent applies the scanner's patch, scrubs
+    the wording so neither the branch name nor the comments say "security",
+    and pushes an innocuously-named branch to the operator's fork; the recheck
+    asks one agent per project whether the last month of commits already fixed
+    any untriaged reports.
+
+    ``enabled`` defaults True for the same reason the verifier's does: nothing
+    here fires without a button press, and the button is the consent. What it
+    still needs is a Cursor API key in ``api_key_env`` — without one the
+    buttons say so rather than failing silently.
+    """
+
+    enabled: bool = True
+    #: Cursor model id for both agents. Discover valid ids with
+    #: ``GET /v1/models``; the operator asked for Kimi.
+    model: str = "kimi-k3"
+    #: Env var holding the Cursor API key (Dashboard → API Keys).
+    api_key_env: str = "CURSOR_API_KEY"
+    #: ``owner/repo`` of the operator's fork of the project — the "origin" fix
+    #: branches are pushed to and matched against. Empty means
+    #: ``<github_username>/<project's repo name>``, which is the usual shape of
+    #: a fork.
+    fork: str = ""
+    #: Appended after the untrusted report block, same ordering rule as the
+    #: verifier's: operator text must not sit inside the region framed as
+    #: untrusted data.
+    prompt_addendum: str = ""
+    #: Refuse to launch when the report text trips the prompt-injection
+    #: patterns, rather than launching and recording the hit. Defaults False
+    #: for the verifier's reason: a report *about* an injection quotes the
+    #: payload, and those reports need fixing too. The blast radius here is a
+    #: branch on the operator's fork — reviewable before merge, same as any
+    #: other branch the agent could get wrong.
+    refuse_on_injection: bool = False
+    #: How far back the batch recheck looks for fixing commits.
+    recheck_lookback_days: int = 30
+    #: How long the worker waits on a recheck run before calling it stuck. A
+    #: Spark-scale "read a month of history against forty reports" run is not
+    #: fast.
+    recheck_timeout_seconds: int = 3600
 
 
 class SecurityTriageConfig(BaseModel):
@@ -1513,6 +1570,7 @@ class SecurityTriageConfig(BaseModel):
     sandbox_enabled: bool = False
     verifier: SecurityVerifierConfig = Field(default_factory=SecurityVerifierConfig)
     duplicates: SecurityDuplicateConfig = Field(default_factory=SecurityDuplicateConfig)
+    fix_agent: SecurityFixAgentConfig = Field(default_factory=SecurityFixAgentConfig)
 
 
 class ForgeRegistryEntry(BaseModel):

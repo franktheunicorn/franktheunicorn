@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import zipfile
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -1011,3 +1012,71 @@ class TestBudgetAndHonesty:
         outcome = EntryOutcome(name="x" * 60_000, outcome="error")
 
         assert len(outcome.name) < 400
+
+
+@pytest.mark.django_db
+class TestCompositionDependencyWiring:
+    """composition.md's "depends on" notes become depends_on links at import."""
+
+    def _archive(self) -> dict[str, str]:
+        findings = {
+            "findings": [
+                {
+                    "id": "f001",
+                    "file": "core/Foo.java",
+                    "description": "A vulnerability: the conf is not validated, exploit follows.",
+                },
+                {
+                    "id": "f002",
+                    "file": "core/Bar.java",
+                    "description": "A vulnerability: mergeDir escapes, exploit is trivial.",
+                },
+            ]
+        }
+        return {
+            "VULN-FINDINGS.json": json.dumps(findings),
+            "PATCHES/bug_01/meta.json": json.dumps({"finding": "f001"}),
+            "PATCHES/bug_01/patch.diff": "--- a/core/Foo.java\n+++ b/core/Foo.java\n",
+            "PATCHES/bug_02/meta.json": json.dumps({"finding": "f002"}),
+            "PATCHES/bug_02/patch.diff": "--- a/core/Bar.java\n+++ b/core/Bar.java\n",
+            "PATCHES/composition.md": (
+                "- **bug_02 depends on bug_01's conf** — cherry-picking bug_02 "
+                "without bug_01 does not compile.\n"
+            ),
+        }
+
+    def test_the_import_wires_the_links(self, no_auto_triage: Any) -> None:
+        result = import_reports_from_zip(make_zip(self._archive()))
+
+        assert result.imported == 2, [e.detail for e in result.entries]
+        by_finding = {r.finding_id: r for r in SecurityReport.objects.all()}
+        assert [r.finding_id for r in by_finding["f002"].depends_on.all()] == ["f001"]
+        assert [r.finding_id for r in by_finding["f001"].required_by.all()] == ["f002"]
+
+    def test_a_reimport_keeps_the_links(self, no_auto_triage: Any) -> None:
+        """The duplicate path still resolves the finding, so links survive a re-import."""
+        import_reports_from_zip(make_zip(self._archive()))
+        result = import_reports_from_zip(make_zip(self._archive()))
+
+        assert result.duplicates == 2
+        f002 = SecurityReport.objects.get(finding_id="f002")
+        assert [r.finding_id for r in f002.depends_on.all()] == ["f001"]
+
+    def test_two_findings_deduping_to_one_row_do_not_self_link(self, no_auto_triage: Any) -> None:
+        """If dedup ever collapses two findings to one row, a depends-on
+        between them must not wire the survivor as depending on itself.
+
+        Today's key embeds the finding id so this can't happen; the guard is
+        pinned against a future dedup change (the project-less fallback above
+        it exists because dedup has drifted before).
+        """
+        with patch(
+            "franktheunicorn.security.zip_import._text_key",
+            side_effect=lambda body, project_id: "same",
+        ):
+            result = import_reports_from_zip(make_zip(self._archive()))
+
+        assert result.imported == 1
+        assert result.duplicates == 1
+        report = SecurityReport.objects.get()
+        assert list(report.depends_on.all()) == []

@@ -119,7 +119,10 @@ WRITABLE_COLUMNS = (
 )
 
 #: Full header order. `check` sits second so it's visible rather than hidden off
-#: to the right where somebody deletes it as mystery junk.
+#: to the right where somebody deletes it as mystery junk. Everything after the
+#: writable block is read-only context for the reviewer's decision: what the
+#: machine thinks (staged verdict, POC read, sandbox), what else it might be
+#: (CVE candidates, a duplicate already in the backlog), and where it ships.
 _HEADER = (
     KEY_COLUMN,
     CHECK_COLUMN,
@@ -130,6 +133,15 @@ _HEADER = (
     "component",
     "impact",
     "triage_summary",
+    "auto_triage_suggestion",
+    "poc_plausible",
+    "expected_behavior",
+    "sandbox_verdict",
+    "cve_candidates",
+    "duplicate_of_report",
+    "affected_versions",
+    "introduced",
+    "reporter",
     "priority_reason",
     "source",
     "source_archive",
@@ -266,6 +278,29 @@ def _row_for(report: SecurityReport, *, full: bool) -> dict[str, str]:
         "component": report.parsed_component,
         "impact": _truncate(report.parsed_impact, MAX_CELL_CHARS),
         "triage_summary": _truncate(report.triage_summary, MAX_CELL_CHARS),
+        # The machine's staged verdict, still awaiting an Agree. A reviewer
+        # should see it — it's often the thing they're being asked to ratify.
+        "auto_triage_suggestion": report.auto_triage_status,
+        "poc_plausible": (
+            "yes" if report.poc_plausible else ("no" if report.poc_plausible is not None else "")
+        ),
+        "expected_behavior": "yes" if report.is_expected_behavior else "",
+        "sandbox_verdict": report.sandbox_verdict,
+        # The NVD candidates, so picking one for duplicate_of_cve doesn't take a
+        # second lookup. Ids only — the descriptions are a dashboard read.
+        "cve_candidates": "; ".join(
+            str(match.get("cve_id", ""))
+            for match in report.cve_matches
+            if isinstance(match, dict) and match.get("cve_id")
+        ),
+        # The backlog's own dup link, so a reviewer doesn't re-review #12's
+        # twin — and so "duplicate" rulings in the sheet can agree on of-what.
+        "duplicate_of_report": str(report.duplicate_of_id or ""),
+        "affected_versions": _truncate(report.affected_versions, MAX_CELL_CHARS),
+        "introduced": _truncate(report.introduced_summary, MAX_CELL_CHARS),
+        # Name, not email: who filed it bears on credibility, but the sheet is
+        # shared by link-holding humans and an address book is not the decision.
+        "reporter": report.reporter_name,
         "priority_reason": report.priority_reason,
         "source": report.source,
         "source_archive": report.source_archive,

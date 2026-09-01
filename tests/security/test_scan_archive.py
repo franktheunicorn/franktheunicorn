@@ -880,3 +880,53 @@ class TestProvenanceEdgeCases:
         # Not consumed: the full text is left for the generic walk to import.
         assert "PROVENANCE.md" not in result.consumed
         assert result.residuals["PROVENANCE.md"] == text.strip()
+
+
+class TestCompositionDependencies:
+    """The composition.md "bug_86 depends on bug_83" notes become structure."""
+
+    def test_a_depends_on_line_links_the_findings(self) -> None:
+        result = expand(
+            {
+                **sidecar_archive(),
+                "PATCHES/composition.md": (
+                    "# Patch composition\n\n"
+                    "- **bug_02 depends on bug_01's conf** (`spark.sql.foo` gates the "
+                    "sites bug_02 patches) — cherry-picking bug_02 without bug_01 "
+                    "does not compile.\n"
+                ),
+            }
+        )
+        by_id = {f.finding_id: f for f in result.findings}
+        assert by_id["f002"].depends_on == ["f001"]
+        assert by_id["f001"].depends_on == []
+
+    def test_both_ends_must_resolve_to_a_known_finding(self) -> None:
+        result = expand(
+            {
+                **sidecar_archive(),
+                "PATCHES/composition.md": (
+                    "- bug_02 depends on bug_01\n"
+                    "- bug_02 depends on bug_99\n"  # no such finding
+                    "- this depends on Spark 3.5\n"  # not a finding at all
+                ),
+            }
+        )
+        by_id = {f.finding_id: f for f in result.findings}
+        assert by_id["f002"].depends_on == ["f001"]
+
+    def test_a_fenced_example_is_not_a_declaration(self) -> None:
+        result = expand(
+            {
+                **sidecar_archive(),
+                "PATCHES/composition.md": (
+                    "Example of the format:\n\n```\n- bug_02 depends on bug_01\n```\n"
+                ),
+            }
+        )
+        by_id = {f.finding_id: f for f in result.findings}
+        assert by_id["f002"].depends_on == []
+
+    def test_no_composition_file_means_no_links(self) -> None:
+        result = expand(sidecar_archive())
+        assert all(f.depends_on == [] for f in result.findings)

@@ -7,6 +7,7 @@ Function-based views. No SPA, no React. htmx for all dynamic updates.
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -25,6 +26,7 @@ from django.http import HttpRequest, HttpResponse, StreamingHttpResponse
 from django.http.response import HttpResponseBase
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django.utils import timezone
 from django.views.decorators.http import require_POST
 
 from franktheunicorn.core.models import (
@@ -38,7 +40,9 @@ from franktheunicorn.core.models import (
     Project,
     PullRequest,
     ReviewDraft,
+    SecurityRecheckRun,
     SecurityReport,
+    SecurityTriageFeedback,
     SecurityTriageGuidance,
     TestRun,
     WorkerCommand,
@@ -1509,6 +1513,77 @@ def security_report_rerun_triage(request: HttpRequest) -> HttpResponse:
 
 
 @require_POST
+def security_report_rerun_triage_failed(request: HttpRequest) -> HttpResponse:
+    """Re-queue triage for reports whose last triage run *failed* (htmx, bulk).
+
+    The full re-triage button walks every unruled report, which on a big backlog
+    is a lot of LLM calls to reach the handful that actually need another
+    attempt. This one touches only reports whose most recent run_security_triage
+    command failed — the model was down, the answer didn't parse — and leaves
+    reports with a verdict, a ruling, or a clean run alone.
+
+    Same manners as the full pass: the free procedural close gets first crack,
+    and anything the operator has ruled on since (a status, notes, a CVE) is
+    skipped — a failure doesn't make the report unruled.
+    """
+    from django.db.models import OuterRef, Subquery
+
+    from franktheunicorn.config.loader import get_operator_config
+    from franktheunicorn.security.queue import PRIORITY_BULK, queue_triage
+    from franktheunicorn.security.triage import procedural_close_if_evidence
+
+    operator_config = get_operator_config()
+    if not operator_config.llm_backends:
+        messages.error(request, "No LLM backend configured. Add one to operator.yaml.")
+        return _back_to_security_list(request)
+
+    latest_triage = WorkerCommand.objects.filter(
+        command="run_security_triage", security_report=OuterRef("pk")
+    ).order_by("-created_at")
+    candidates = list(
+        SecurityReport.objects.select_related("project")
+        .annotate(last_triage_status=Subquery(latest_triage.values("status")[:1]))
+        .filter(last_triage_status="failed")
+        .order_by("-priority", "created_at")
+    )
+
+    requeued = 0
+    procedural_closed = 0
+    ruled_skipped = 0
+    for report in candidates:
+        if (
+            report.status not in ("new", "triaging")
+            or report.operator_notes
+            or report.matched_cve_id
+        ):
+            ruled_skipped += 1
+            continue
+        if procedural_close_if_evidence(report, retrigger=True):
+            procedural_closed += 1
+            continue
+        # queue_triage dedups on anything already in flight, so a report that
+        # got re-queued between page load and click is not queued twice.
+        if queue_triage(report, priority=PRIORITY_BULK):
+            requeued += 1
+
+    parts = [f"{requeued} re-queued"]
+    if procedural_closed:
+        parts.append(f"{procedural_closed} closed without a model (auth-disabled)")
+    if ruled_skipped:
+        parts.append(f"{ruled_skipped} skipped (operator-ruled or CVE assigned since)")
+    if not candidates:
+        parts = ["no failed triage runs in the queue"]
+    messages.success(request, "Re-run failed triage: " + ", ".join(parts) + ".")
+    logger.info(
+        "Bulk re-triage of failures: requeued=%d procedural_closed=%d ruled_skipped=%d",
+        requeued,
+        procedural_closed,
+        ruled_skipped,
+    )
+    return _back_to_security_list(request)
+
+
+@require_POST
 def security_report_rerun_procedural(request: HttpRequest) -> HttpResponse:
     """Re-run only the cheap procedural close across the queue (htmx, bulk, no LLM).
 
@@ -1551,36 +1626,47 @@ def security_report_rerun_procedural(request: HttpRequest) -> HttpResponse:
 
 @require_POST
 def security_report_rerun_duplicates(request: HttpRequest) -> HttpResponse:
-    """Re-run duplicate detection across the whole backlog (htmx, bulk, no LLM).
+    """Re-run duplicate detection across the whole backlog (htmx, bulk, one LLM pass).
 
-    The duplicate check is cheap (set intersections, no model calls), so unlike
-    triage this one is fine to run across every report in one request. Links new
-    matches and clears stale auto-links that no longer score above the threshold
-    — the latter is the point: a re-check that only ever added links would leave
-    the false positives from a buggy heuristic (the finding-id-only match) on the
-    rows forever. Hand-set links are never touched.
+    Asks the model to group the backlog's titles — one call per project per few
+    hundred reports, so a handful of completions in-request rather than a worker
+    command (no container, no per-pair calls). Links the groups it calls out and
+    clears stale auto-links whose two titles the model saw together and did not
+    group — the latter is the point: a re-check that only ever added links would
+    leave the false positives from a buggy heuristic on the rows forever.
+    Hand-set links are never touched.
 
     Runs regardless of ``security_triage.duplicates.enabled``: that flag gates the
     automatic triage-time path, and an operator pressing a button has asked for it.
     """
     from franktheunicorn.config.loader import get_operator_config
     from franktheunicorn.security.duplicates import redetect_across_backlog
+    from franktheunicorn.security.triage import resolve_triage_backend
 
-    config = get_operator_config().security_triage.duplicates
+    operator_config = get_operator_config()
+    backend = resolve_triage_backend(operator_config)
+    if backend is None:
+        messages.error(request, "No LLM backend configured. Add one to operator.yaml.")
+        return _back_to_security_list(request)
+
+    config = operator_config.security_triage.duplicates
     candidates = list(SecurityReport.objects.select_related("project", "duplicate_of"))
 
-    linked, cleared = redetect_across_backlog(candidates, config)
+    result = redetect_across_backlog(candidates, config, backend)
+    if result is None:
+        messages.error(
+            request,
+            "Duplicate re-check failed — every LLM call errored or returned nothing "
+            "parseable. Existing links were left alone; see the log.",
+        )
+        return _back_to_security_list(request)
+    linked, cleared = result
 
     parts = [f"{linked} linked"]
     if cleared:
         parts.append(f"{cleared} stale link(s) cleared")
     messages.success(request, "Re-checked duplicates: " + ", ".join(parts) + ".")
-    logger.info(
-        "Bulk duplicate re-check: linked=%d cleared=%d (threshold %.2f)",
-        linked,
-        cleared,
-        config.threshold,
-    )
+    logger.info("Bulk duplicate re-check (LLM): linked=%d cleared=%d", linked, cleared)
     return _back_to_security_list(request)
 
 
@@ -2071,6 +2157,13 @@ def security_report_accept_triage(request: HttpRequest, report_id: int) -> HttpR
             notice_level="failed",
         )
 
+    # An Agree click is agreement the guidance loop can learn from, same as the
+    # feedback widget's.
+    from franktheunicorn.config.loader import get_operator_config
+    from franktheunicorn.security.learning import record_triage_feedback
+
+    record_triage_feedback(report, True, "", get_operator_config(), distill=False)
+
     report.status = suggestion
     report.auto_triage_status = ""
     report.save(update_fields=["status", "auto_triage_status", "updated_at"])
@@ -2224,6 +2317,20 @@ def security_report_verdict(request: HttpRequest, report_id: int) -> HttpRespons
     # leaving it would re-offer an Agree button for a verdict the operator just
     # overrode. A re-triage later would populate it again if wanted.
     if report.auto_triage_status:
+        # The ruling is also learning material: whether the operator's verdict
+        # matched the staged one is exactly the agree/disagree signal the
+        # guidance loop runs on, and most rulings never get a feedback-widget
+        # click.
+        from franktheunicorn.config.loader import get_operator_config
+        from franktheunicorn.security.learning import record_triage_feedback
+
+        record_triage_feedback(
+            report,
+            report.auto_triage_status.strip() == new_status,
+            notes,
+            get_operator_config(),
+            distill=False,
+        )
         report.auto_triage_status = ""
         report.save(
             update_fields=[
@@ -2375,6 +2482,134 @@ def security_report_verify(request: HttpRequest, report_id: int) -> HttpResponse
     )
 
 
+@require_POST
+def security_report_fix(request: HttpRequest, report_id: int) -> HttpResponse:
+    """Launch the one-click fix agent (htmx).
+
+    In-request because the launch is one POST to the Cursor API and the
+    operator is standing there — the answer (an agent id, or exactly why not)
+    is the feedback. The run itself takes minutes on Cursor's infra and nothing
+    here waits on it; the branch lands on the fork when it lands.
+    """
+    report = get_object_or_404(SecurityReport.objects.select_related("project"), pk=report_id)
+
+    from franktheunicorn.config.loader import get_operator_config
+    from franktheunicorn.security.fix_agent import FixAgentError, launch_fix_agent
+
+    try:
+        launch_fix_agent(report, get_operator_config())
+    except FixAgentError as exc:
+        return render(
+            request,
+            "dashboard/_security_fix_status.html",
+            {"report": report, "blocked": str(exc)},
+        )
+    return render(request, "dashboard/_security_fix_status.html", {"report": report})
+
+
+@require_POST
+def security_report_fix_refresh(request: HttpRequest, report_id: int) -> HttpResponse:
+    """Ask the Cursor API and the fork where the fix run got to (htmx)."""
+    report = get_object_or_404(SecurityReport.objects.select_related("project"), pk=report_id)
+
+    from franktheunicorn.config.loader import get_operator_config
+    from franktheunicorn.security.fix_agent import refresh_fix_status
+
+    note = refresh_fix_status(report, get_operator_config())
+    return render(request, "dashboard/_security_fix_status.html", {"report": report, "note": note})
+
+
+@require_POST
+def security_recheck_fixed(request: HttpRequest) -> HttpResponse:
+    """Launch the batch "did recent commits fix these?" recheck (bulk).
+
+    One cloud agent per project over the untriaged backlog; the launches are
+    one POST each and happen here, and the waiting is queued for the worker —
+    a recheck run is minutes, which is worker time, not request time.
+    """
+    from franktheunicorn.config.loader import get_operator_config
+    from franktheunicorn.security.fix_agent import FixAgentError, cursor_api_key
+    from franktheunicorn.security.queue import PRIORITY_INTERACTIVE, queue_recheck_poll
+    from franktheunicorn.security.recheck import launch_recheck, untriaged_by_project
+
+    operator_config = get_operator_config()
+    config = operator_config.security_triage.fix_agent
+    if not config.enabled:
+        messages.error(
+            request,
+            "The fix agent is switched off (security_triage.fix_agent.enabled: false "
+            "in operator.yaml), and the recheck rides on it.",
+        )
+        return _back_to_security_list(request)
+    if not cursor_api_key(config):
+        messages.error(
+            request,
+            f"Recheck needs a Cursor API key — set {config.api_key_env} in the environment.",
+        )
+        return _back_to_security_list(request)
+
+    grouped = untriaged_by_project()
+    if not grouped:
+        messages.info(request, "No untriaged reports with a project to check.")
+        return _back_to_security_list(request)
+
+    # A launched run older than the poll's own timeout outlived its poll
+    # without being marked — the worker died or the command was lost. It is
+    # not coming back, and leaving it "launched" would block the button for
+    # that project forever.
+    stale_before = timezone.now() - timedelta(seconds=config.recheck_timeout_seconds)
+    launched_runs = SecurityRecheckRun.objects.filter(status="launched")
+    stale = launched_runs.filter(created_at__lt=stale_before)
+    if stale.exists():
+        stale.update(
+            status="error",
+            detail="the poll never finished it — marked stale by a later recheck press",
+            updated_at=timezone.now(),
+        )
+    in_flight = set(
+        launched_runs.filter(created_at__gte=stale_before).values_list("project_id", flat=True)
+    )
+    launched = 0
+    covered = 0
+    needs_poll = False
+    failures: list[str] = []
+    for project, reports in grouped.items():
+        if project.pk in in_flight:
+            # The running agent's prompt already covers these reports; a second
+            # one would answer the same question twice at full price.
+            failures.append(f"{project.full_name}: a recheck is already running")
+            continue
+        try:
+            launch_recheck(project, reports, operator_config)
+        except FixAgentError as exc:
+            # A mid-loop failure can leave earlier chunks launched and billing;
+            # those runs still need their poll, and the message shouldn't claim
+            # nothing happened.
+            partial = SecurityRecheckRun.objects.filter(project=project, status="launched")
+            if partial.exists():
+                needs_poll = True
+                failures.append(
+                    f"{project.full_name}: {exc} — {partial.count()} chunk(s) did "
+                    "launch and will be polled"
+                )
+            else:
+                failures.append(f"{project.full_name}: {exc}")
+        else:
+            launched += 1
+            covered += len(reports)
+    if launched or needs_poll:
+        queue_recheck_poll(priority=PRIORITY_INTERACTIVE)
+    if launched:
+        messages.success(
+            request,
+            f"Recheck launched for {launched} project(s) covering {covered} report(s) — "
+            "verdicts land on the reports as the runs finish.",
+        )
+    for failure in failures:
+        messages.error(request, f"Recheck not launched for {failure}.")
+    return _back_to_security_list(request)
+
+
 def _git_scan_blocker(report: SecurityReport, what: str, needs: str) -> str:
     """Why a git-only scan of *report* can't run, or "" if it can.
 
@@ -2503,16 +2738,82 @@ def security_report_cve_check(request: HttpRequest, report_id: int) -> HttpRespo
 def security_guidance_list(request: HttpRequest) -> HttpResponse:
     """Overview of learned triage guidance, per project and global.
 
-    Mirrors ``anti_pattern_list`` — a read-only view of what the iterative
-    learning loop has distilled from operator agree/disagree feedback so
-    far.
+    Mirrors ``anti_pattern_list`` — a view of what the iterative learning loop
+    has distilled so far, plus the raw material waiting for the next
+    distillation (feedback rows and the operator's own rulings), and the button
+    that triggers it.
     """
+    from franktheunicorn.security.learning import RULED_STATUSES
+
     guidance = SecurityTriageGuidance.objects.select_related("project").filter(is_active=True)
     return render(
         request,
         "dashboard/security_guidance.html",
-        {"guidance_rows": guidance},
+        {
+            "guidance_rows": guidance,
+            "feedback_count": SecurityTriageFeedback.objects.count(),
+            "rulings_count": SecurityReport.objects.filter(status__in=RULED_STATUSES).count(),
+        },
     )
+
+
+@require_POST
+def security_guidance_distill(request: HttpRequest) -> HttpResponse:
+    """Distill accumulated feedback and operator rulings into guidance, on demand.
+
+    Explicit agree/disagree feedback distills itself as it's recorded; the loop's
+    other inputs — verdict saves that overrode (or matched) a staged suggestion,
+    the Agree button, rulings on never-triaged reports — only record, so without
+    this button nothing turns them into guidance until the next feedback click.
+    One LLM call per scope (global, plus each project with anything to learn
+    from), in-request: no container, no queue.
+    """
+    from franktheunicorn.config.loader import get_operator_config
+    from franktheunicorn.security.learning import RULED_STATUSES, distill_triage_guidance
+
+    operator_config = get_operator_config()
+    if not operator_config.llm_backends:
+        messages.error(request, "No LLM backend configured. Add one to operator.yaml.")
+        return _back_to_guidance(request)
+
+    projects = list(
+        Project.objects.filter(
+            Q(triage_feedback__isnull=False) | Q(security_reports__status__in=RULED_STATUSES)
+        ).distinct()
+    )
+
+    distilled = 0
+    if distill_triage_guidance(None, operator_config) is not None:
+        distilled += 1
+    for project in projects:
+        if distill_triage_guidance(project, operator_config) is not None:
+            distilled += 1
+
+    if distilled:
+        messages.success(
+            request,
+            f"Distilled guidance for {distilled} scope(s) "
+            f"(global plus {len(projects)} project(s) with feedback or rulings).",
+        )
+    else:
+        messages.warning(
+            request,
+            "Nothing distilled — either there is no feedback and no operator ruling "
+            "to learn from yet, or the LLM call failed (see the log).",
+        )
+    logger.info(
+        "Guidance distillation on demand: %d scope(s) distilled across %d project(s)",
+        distilled,
+        len(projects),
+    )
+    return _back_to_guidance(request)
+
+
+def _back_to_guidance(request: HttpRequest) -> HttpResponse:
+    target = reverse("dashboard:security_guidance")
+    if request.headers.get("HX-Request") == "true":
+        return HttpResponse(status=204, headers={"HX-Redirect": target})
+    return redirect(target)
 
 
 def _auto_triage_report(report: SecurityReport) -> None:

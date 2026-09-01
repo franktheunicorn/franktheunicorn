@@ -381,7 +381,7 @@ class TestTriageBackendSelection:
     expressible. llm_backends[0] is shared with shepherding and llm_checks."""
 
     def test_the_override_is_preferred_when_set(self) -> None:
-        from franktheunicorn.security.triage import _get_triage_backend
+        from franktheunicorn.security.triage import resolve_triage_backend
 
         config = OperatorConfig()
         config.llm_backends = [LLMBackendConfig(provider="ollama", model="qwen2.5-coder:14b")]
@@ -389,24 +389,24 @@ class TestTriageBackendSelection:
             provider="agent-cli", reviewer="cursor-agent"
         )
 
-        backend = _get_triage_backend(config)
+        backend = resolve_triage_backend(config)
 
         assert isinstance(backend, AgentCLIBackend)
 
     def test_it_falls_back_to_llm_backends_zero_when_unset(self) -> None:
         """The old behaviour, exactly."""
         from franktheunicorn.review.backends.ollama_backend import OllamaBackend
-        from franktheunicorn.security.triage import _get_triage_backend
+        from franktheunicorn.security.triage import resolve_triage_backend
 
         config = OperatorConfig()
         config.llm_backends = [LLMBackendConfig(provider="ollama", model="qwen2.5-coder:14b")]
         config.security_triage.llm_backend = None
 
-        assert isinstance(_get_triage_backend(config), OllamaBackend)
+        assert isinstance(resolve_triage_backend(config), OllamaBackend)
 
     def test_the_override_works_with_no_llm_backends_at_all(self) -> None:
         """Otherwise the early `if not llm_backends: return None` would defeat it."""
-        from franktheunicorn.security.triage import _get_triage_backend
+        from franktheunicorn.security.triage import resolve_triage_backend
 
         config = OperatorConfig()
         config.llm_backends = []
@@ -414,29 +414,29 @@ class TestTriageBackendSelection:
             provider="agent-cli", reviewer="cursor-agent"
         )
 
-        assert _get_triage_backend(config) is not None
+        assert resolve_triage_backend(config) is not None
 
     def test_no_backends_and_no_override_is_still_none(self) -> None:
-        from franktheunicorn.security.triage import _get_triage_backend
+        from franktheunicorn.security.triage import resolve_triage_backend
 
         config = OperatorConfig()
         config.llm_backends = []
 
-        assert _get_triage_backend(config) is None
+        assert resolve_triage_backend(config) is None
 
     def test_the_override_being_in_force_is_logged(self, caplog: Any) -> None:
         """A second place a model can come from is a second place to look when the
         answer is surprising."""
         import logging
 
-        from franktheunicorn.security.triage import _get_triage_backend
+        from franktheunicorn.security.triage import resolve_triage_backend
 
         config = OperatorConfig()
         config.llm_backends = [LLMBackendConfig(provider="ollama", model="qwen")]
         config.security_triage.llm_backend = LLMBackendConfig(provider="stub")
 
         with caplog.at_level(logging.INFO):
-            _get_triage_backend(config)
+            resolve_triage_backend(config)
 
         assert "security_triage.llm_backend" in caplog.text
 

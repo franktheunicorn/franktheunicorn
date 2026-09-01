@@ -88,6 +88,20 @@ class TestRecordTriageFeedback:
         assert feedback.pk is not None
         assert SecurityTriageFeedback.objects.filter(pk=feedback.pk).exists()
 
+    def test_distill_false_records_without_a_model_call(
+        self, operator_config_with_llm: OperatorConfig
+    ) -> None:
+        """The implicit captures (verdict save, Agree button) record the signal
+        and leave the spending to the distill button."""
+        report = SecurityReportFactory(triage_summary="x")
+        with patch("franktheunicorn.security.learning.distill_triage_guidance") as mock_distill:
+            feedback = record_triage_feedback(
+                report, True, "", operator_config_with_llm, distill=False
+            )
+
+        assert feedback.pk is not None
+        mock_distill.assert_not_called()
+
 
 @pytest.mark.django_db
 class TestDistillTriageGuidance:
@@ -159,6 +173,78 @@ class TestDistillTriageGuidance:
             backend.complete.side_effect = RuntimeError("llm down")
             mock_get_backend.return_value = backend
             assert distill_triage_guidance(project, operator_config_with_llm) is None
+
+    def test_rulings_alone_are_enough_to_distill(
+        self, operator_config_with_llm: OperatorConfig
+    ) -> None:
+        """The operator's own triage is learning material even when they never
+        once clicked agree or disagree — which is most of a fresh backlog."""
+        project = ProjectFactory()
+        SecurityReportFactory(
+            project=project,
+            status="expected-behavior",
+            assessed_severity="low",
+            operator_notes="Documented in SECURITY.md",
+        )
+        SecurityReportFactory(project=project, status="new")  # not a ruling
+
+        with patch("franktheunicorn.review.backends.get_backend") as mock_get_backend:
+            mock_get_backend.return_value = _stub_backend("- Learned from rulings.")
+            guidance = distill_triage_guidance(project, operator_config_with_llm)
+
+        assert guidance is not None
+        assert guidance.source_feedback_count == 1
+
+    def test_rulings_are_rendered_for_the_distiller(
+        self, operator_config_with_llm: OperatorConfig
+    ) -> None:
+        project = ProjectFactory()
+        SecurityReportFactory(
+            project=project,
+            title="Path traversal in the archive loader",
+            status="valid",
+            assessed_severity="critical",
+            operator_notes="Real. Fix before the release.",
+        )
+
+        captured: dict[str, str] = {}
+
+        def _capture(prompt: str, *, system: str = "") -> str:
+            captured["user"] = prompt
+            return "- Guidance."
+
+        with patch("franktheunicorn.review.backends.get_backend") as mock_get_backend:
+            backend = MagicMock()
+            backend.complete.side_effect = _capture
+            mock_get_backend.return_value = backend
+            distill_triage_guidance(project, operator_config_with_llm)
+
+        assert "Path traversal in the archive loader" in captured["user"]
+        assert "valid" in captured["user"]
+        assert "Real. Fix before the release." in captured["user"]
+
+    def test_other_projects_rulings_do_not_leak_into_a_project_scope(
+        self, operator_config_with_llm: OperatorConfig
+    ) -> None:
+        project = ProjectFactory()
+        other = ProjectFactory()
+        SecurityReportFactory(project=other, status="invalid")
+
+        assert distill_triage_guidance(project, operator_config_with_llm) is None
+
+    def test_the_global_scope_learns_from_every_projects_rulings(
+        self, operator_config_with_llm: OperatorConfig
+    ) -> None:
+        SecurityReportFactory(project=ProjectFactory(), status="invalid")
+        SecurityReportFactory(project=ProjectFactory(), status="valid")
+
+        with patch("franktheunicorn.review.backends.get_backend") as mock_get_backend:
+            mock_get_backend.return_value = _stub_backend("- Global guidance.")
+            guidance = distill_triage_guidance(None, operator_config_with_llm)
+
+        assert guidance is not None
+        assert guidance.project is None
+        assert guidance.source_feedback_count == 2
 
 
 @pytest.mark.django_db

@@ -29,7 +29,10 @@ next to f003. So everything per-finding is de-normalised onto the finding:
   true_positive" in TRIAGE.json is the panel, and collapsing them loses one;
 * a rollup's per-finding sections are cut out and attached, and whatever is left
   (summary tables, cluster narrative, appendices) imports as one overview report
-  instead of the whole blob.
+  instead of the whole blob;
+* a ``composition.md``'s "bug_86 depends on bug_83" notes become structured
+  ``depends_on`` links, because the fix agent needs to know a patch doesn't
+  compile without its sibling before it bases a branch on thin air.
 
 Measured on the real archive: 124 of 124 patches join, and 129 findings each pick
 up their PATCHES.json row plus their VULN-FINDINGS.md, TRIAGE.md and
@@ -53,6 +56,7 @@ import json
 import logging
 import re
 import zipfile
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -159,6 +163,9 @@ class FindingRecord:
     priority: float = 0.0
     #: What that number was read off, for the dashboard to show.
     priority_reason: str = ""
+    #: Other finding ids this one's patch needs applied first, from the
+    #: archive's composition notes. See :func:`_dependencies`.
+    depends_on: list[str] = field(default_factory=list)
 
     @property
     def origin_label(self) -> str:
@@ -279,6 +286,7 @@ def expand_scan_archive(archive: zipfile.ZipFile, read_entry: Any) -> ScanArchiv
     # residual and then drop it with the finding, so the only copy in the archive
     # would go missing. Left uncut, it stays in the overview report.
     rollups = _split_rollups(archive, read_entry, set(order[:MAX_FINDINGS]), index, result)
+    dependencies = _dependencies(archive, read_entry, set(order), index.aliases)
 
     # After the rollup split, deliberately. A PROVENANCE that turns out to anchor
     # findings is a rollup and gets cut up like one; taking it first pasted the
@@ -310,6 +318,7 @@ def expand_scan_archive(archive: zipfile.ZipFile, read_entry: Any) -> ScanArchiv
                 patch_path=bundle.patch_path if bundle else "",
                 priority=priority,
                 priority_reason=reason,
+                depends_on=dependencies.get(fid, []),
             )
         )
     if len(order) > MAX_FINDINGS:
@@ -963,13 +972,13 @@ def _split_rollup(
     return {fid: body for fid, body in cut.items() if body}, residual
 
 
-def _anchors(lines: list[str], known: set[str], aliases: dict[str, str]) -> list[_Anchor]:
-    """Every line whose leading token names a known finding, outside code fences.
+def _outside_fences(lines: list[str]) -> Iterator[tuple[int, str]]:
+    """Yield ``(index, line)`` for the lines outside fenced code blocks.
 
-    Fences matter: ``PATCHES.md`` and ``composition.md`` both quote shell
-    transcripts, and a ``bug_01`` inside one is an example, not a section head.
+    ``PATCHES.md`` and ``composition.md`` both quote shell transcripts, and a
+    ``bug_01`` inside one is an example, not a declaration — every scan of these
+    files skips fences the same way.
     """
-    anchors: list[_Anchor] = []
     fence = ""
     for number, line in enumerate(lines):
         opening = _FENCE_RE.match(line)
@@ -979,6 +988,13 @@ def _anchors(lines: list[str], known: set[str], aliases: dict[str, str]) -> list
             continue
         if fence:
             continue
+        yield number, line
+
+
+def _anchors(lines: list[str], known: set[str], aliases: dict[str, str]) -> list[_Anchor]:
+    """Every line whose leading token names a known finding, outside code fences."""
+    anchors: list[_Anchor] = []
+    for number, line in _outside_fences(lines):
         match = _ANCHOR_RE.match(line)
         if match is None:
             continue
@@ -996,6 +1012,58 @@ def _anchors(lines: list[str], known: set[str], aliases: dict[str, str]) -> list
             )
         )
     return anchors
+
+
+#: "bug_86 depends on bug_83's conf" — the shape composition notes declare
+#: inter-finding build dependencies in. Both tokens still have to resolve to a
+#: known finding before anyone believes them; the regex just finds candidates.
+#: One pair per match: "bug_1 depends on bug_2 and bug_3" only links bug_2 —
+#: write one line per dependency instead.
+_DEPENDS_RE = re.compile(
+    r"\b(?P<src>[A-Za-z][\w-]*?)\s+depends\s+on\s+(?P<dst>[A-Za-z][\w-]*?)\b",
+    re.IGNORECASE,
+)
+
+
+def _dependencies(
+    archive: zipfile.ZipFile,
+    read_entry: Any,
+    known: set[str],
+    aliases: dict[str, str],
+) -> dict[str, list[str]]:
+    """Inter-finding build dependencies declared in composition notes.
+
+    Archives that ship patches sometimes ship a ``composition.md`` saying which
+    patches need which others ("bug_86 depends on bug_83's conf — cherry-picking
+    one without the other does not compile"). That is exactly what the fix agent
+    needs to know before it bases a branch, so it becomes structure rather than
+    staying prose. A pair only counts when *both* tokens resolve to a finding
+    the manifest actually has — "this depends on Spark 3.5" is not a link.
+    """
+    by_lower = {token.lower(): fid for token, fid in aliases.items()}
+
+    def resolve(token: str) -> str:
+        if token in known:
+            return token
+        return aliases.get(token) or by_lower.get(token.lower(), "")
+
+    pairs: dict[str, list[str]] = {}
+    for info in archive.infolist():
+        if info.is_dir() or info.filename.rsplit("/", 1)[-1].lower() != "composition.md":
+            continue
+        raw = read_entry(info)
+        if raw is None:
+            continue
+        for _, line in _outside_fences(raw.decode("utf-8", errors="replace").splitlines()):
+            for match in _DEPENDS_RE.finditer(line):
+                src = resolve(match.group("src"))
+                dst = resolve(match.group("dst"))
+                if not src or not dst or src == dst:
+                    continue
+                bucket = pairs.setdefault(src, [])
+                if dst not in bucket:
+                    bucket.append(dst)
+    return pairs
 
 
 def _section_end(lines: list[str], anchor: _Anchor, anchor_lines: set[int]) -> int:
