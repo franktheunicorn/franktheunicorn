@@ -622,6 +622,70 @@ class SecurityReport(models.Model):
         ("unknown", "Unknown"),
     ]
 
+    #: A list/export filter that is not a status: rows carrying a CVE id with no
+    #: branch recorded as fixing them. It lives on the model, next to
+    #: STATUS_CHOICES, because the dashboard tab and the CSV export both have to
+    #: mean the same thing by it — the export honours whichever filter the page is
+    #: showing, so a filter the page understands and the export doesn't is a 400 on
+    #: the Export button.
+    CVE_NO_BRANCH_FILTER = "cve-no-branch"
+
+    #: Statuses that owe no fix, so no branch is the answer rather than a gap.
+    #: ``duplicate`` is here because that is what ``matched_cve_id`` was built for —
+    #: without it the queue on a real backlog is almost entirely "dup of CVE-X", and
+    #: a queue you have to skim past is one nobody opens twice.
+    #:
+    #: A tuple, not a frozenset: set iteration order is not stable across processes,
+    #: so the emitted ``IN (...)`` text would churn for no gain.
+    NO_FIX_OWED_STATUSES = ("invalid", "expected-behavior", "duplicate")
+
+    @classmethod
+    def list_filters(cls) -> set[str]:
+        """Every legal value of the list page's ``?status=`` and the export's
+        ``--status``, statuses plus the cross-cutting filters.
+
+        One definition because the dashboard, the export view and
+        ``export_security_csv`` each validate the same parameter, and the two that
+        hand-copied the set are the two that would disagree after the next filter.
+        """
+        return {key for key, _ in cls.STATUS_CHOICES} | {cls.CVE_NO_BRANCH_FILTER}
+
+    @property
+    def operator_has_ruled(self) -> bool:
+        """Whether the operator has put anything of their own on this report.
+
+        The bulk paths — re-run triage, re-run procedural — use this to leave
+        already-worked reports alone, and each of them used to spell the test out
+        inline. Spelled once because every new operator-owned field has to join it:
+        ``fixed_in_branch`` did not, and a report with a branch recorded was re-billed
+        for two LLM calls and had a fresh suggestion staged over the operator's work.
+        """
+        return bool(self.operator_notes or self.matched_cve_id or self.fixed_in_branch)
+
+    @staticmethod
+    def cve_without_branch_q() -> Q:
+        """Match reports with a CVE id and nothing recorded as fixing it.
+
+        ``__gt=""`` rather than ``~Q(matched_cve_id="")``: for a non-null CharField
+        the two select the same rows, but ``NOT (col = '')`` is not answerable from
+        an index, so the negated form quietly makes the predicate unindexable —
+        measured as a full SCAN with an index present where ``> ''`` SEARCHes it.
+        Nothing indexes this column today; the point is that whoever adds the index
+        to fix a slow queue gets the speedup instead of concluding it didn't help.
+
+        ``duplicate_of`` as well as the ``duplicate`` status, because
+        :mod:`franktheunicorn.security.duplicates` links without judging and
+        deliberately never sets that status — so a backlog-detected duplicate is
+        still ``new``/``valid``, and six findings of one missing check in a shared
+        helper would be six rows in the queue.
+        """
+        return (
+            Q(matched_cve_id__gt="")
+            & Q(fixed_in_branch="")
+            & Q(duplicate_of__isnull=True)
+            & ~Q(status__in=SecurityReport.NO_FIX_OWED_STATUSES)
+        )
+
     project = models.ForeignKey(
         Project,
         on_delete=models.CASCADE,
@@ -778,6 +842,19 @@ class SecurityReport(models.Model):
     #: state, not just the failed one, next to the branch they are about to judge.
     fix_injection_hits = models.JSONField(default=list, blank=True)
     fix_launched_at = models.DateTimeField(null=True, blank=True)
+
+    # Which branch actually carries the fix — the operator's answer, the way
+    # affected_versions is the operator's answer about versions. Deliberately not
+    # fix_branch above: that one is the cloud agent's output, a proposal nobody has
+    # ruled on yet, and it gets overwritten by the next relaunch. This is the
+    # operator saying "the fix for this lives here", which is the thing you need
+    # when a CVE id has been assigned and somebody asks what ships it.
+    #
+    # Free text rather than a FK to anything, because the branch is frequently not
+    # in a repo this install tracks (a private staging fork, an embargoed branch)
+    # and a fix that lands on three release branches is written as a list.
+    # ``cve_without_branch_q`` only ever asks whether it is empty.
+    fixed_in_branch = models.CharField(max_length=200, blank=True, default="")
 
     # The batch "did the last month of commits fix this?" recheck
     # (security.recheck): one agent run per project over the untriaged

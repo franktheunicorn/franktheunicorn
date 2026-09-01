@@ -27,6 +27,21 @@
             <input type="text" name="matched_cve_id" value="{{ report.matched_cve_id }}" placeholder="CVE-YYYY-NNNNN (related or duplicate)">
         </div>
 
+        <div class="form-row" style="margin-bottom: 0.5rem;">
+            <label style="min-width: 5rem; font-size: 0.85rem; font-weight: 600;">Fixed in</label>
+            {# Paired with the CVE field on purpose: those two together are what the #}
+            {# "CVE, No Branch" queue on the list page is counting, and the operator #}
+            {# who just typed a CVE id is the one who knows the branch. Not the fix #}
+            {# agent's fix_branch, which this page shows further up — that is a #}
+            {# proposal the agent pushed, this is the operator's ruling. #}
+            {# maxlength because the server-side check answers 400 and htmx does not #}
+            {# swap a non-2xx body: without it an over-long paste is a Save button #}
+            {# that does nothing visible and drops the notes typed with it. #}
+            <input type="text" name="fixed_in_branch" value="{{ report.fixed_in_branch }}"
+                   maxlength="200"
+                   placeholder="branch carrying the fix, e.g. master, branch-3.5">
+        </div>
+
         {# What came back from the shared sheet (security.sheet_sync), when #}
         {# anything did. Shown here rather than nowhere: an import that lands a #}
         {# PMC's ruling in a field no page displays is worse than not importing #}

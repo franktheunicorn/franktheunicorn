@@ -144,6 +144,137 @@ class TestSecurityReportListRanking:
 
 
 @pytest.mark.django_db
+class TestSecurityCveWithoutBranchTab:
+    """A CVE id is assigned and nothing is recorded as fixing it — the queue an
+    operator holding a CVE number works from."""
+
+    def test_the_tab_lists_a_cve_with_no_branch(self, client: Client) -> None:
+        SecurityReportFactory(
+            title="Needs a branch", status="valid", matched_cve_id="CVE-2026-1111"
+        )
+
+        content = client.get("/security/?status=cve-no-branch").content.decode()
+
+        assert "Needs a branch" in content
+
+    def test_a_report_with_a_branch_is_not_listed(self, client: Client) -> None:
+        SecurityReportFactory(
+            title="Already fixed",
+            status="valid",
+            matched_cve_id="CVE-2026-2222",
+            fixed_in_branch="branch-3.5",
+        )
+
+        content = client.get("/security/?status=cve-no-branch").content.decode()
+
+        assert "Already fixed" not in content
+
+    def test_a_report_with_no_cve_is_not_listed(self, client: Client) -> None:
+        SecurityReportFactory(title="No CVE yet", status="valid", matched_cve_id="")
+
+        content = client.get("/security/?status=cve-no-branch").content.decode()
+
+        assert "No CVE yet" not in content
+
+    @pytest.mark.parametrize("status", ["invalid", "expected-behavior", "duplicate"])
+    def test_a_status_owing_no_fix_is_not_listed(self, client: Client, status: str) -> None:
+        """Without this the queue on a real backlog is almost entirely "dup of
+        CVE-X", which is what matched_cve_id was built for."""
+        SecurityReportFactory(title="Owes nothing", status=status, matched_cve_id="CVE-2026-3333")
+
+        content = client.get("/security/?status=cve-no-branch").content.decode()
+
+        assert "Owes nothing" not in content
+
+    def test_the_tab_count_matches_what_the_tab_lists(self, client: Client) -> None:
+        """Count and contents were two separate expressions; they read one Q now."""
+        SecurityReportFactory(title="Listed", status="valid", matched_cve_id="CVE-2026-4444")
+        SecurityReportFactory(
+            title="Has branch",
+            status="valid",
+            matched_cve_id="CVE-2026-5555",
+            fixed_in_branch="master",
+        )
+        SecurityReportFactory(title="No CVE", status="valid")
+
+        response = client.get("/security/?status=cve-no-branch")
+
+        tabs = {tab["key"]: tab["count"] for tab in response.context["status_tabs"]}
+        assert tabs["cve-no-branch"] == 1
+        assert [report.title for report in response.context["reports"]] == ["Listed"]
+
+    def test_the_branch_is_shown_on_the_row(self, client: Client) -> None:
+        """A count nobody can account for row by row is a count nobody believes."""
+        SecurityReportFactory(title="Fixed one", status="valid", fixed_in_branch="branch-4.0")
+
+        content = client.get("/security/").content.decode()
+
+        assert "fixed in branch-4.0" in content
+
+    def test_a_machine_linked_duplicate_is_not_listed(self, client: Client) -> None:
+        """security.duplicates links without judging and never sets the status, so
+        six findings of one missing check would otherwise be six rows."""
+        keeper = SecurityReportFactory(status="valid", matched_cve_id="CVE-2026-8888")
+        SecurityReportFactory(
+            title="Linked twin",
+            status="valid",
+            matched_cve_id="CVE-2026-8888",
+            duplicate_of=keeper,
+        )
+
+        content = client.get("/security/?status=cve-no-branch").content.decode()
+
+        assert "Linked twin" not in content
+
+    def test_the_row_cap_is_said_on_the_page(self, client: Client) -> None:
+        """The badge counts the whole set; the page shows 100. On a queue meant to
+        reach zero, a count the rows can't account for is the wrong kind of wrong."""
+        for index in range(102):
+            SecurityReportFactory(status="valid", matched_cve_id=f"CVE-2026-{9000 + index}")
+
+        content = client.get("/security/?status=cve-no-branch").content.decode()
+
+        assert "Showing the top 100 of 102" in content
+
+    def test_the_cap_notice_is_absent_when_everything_fits(self, client: Client) -> None:
+        SecurityReportFactory(status="valid", matched_cve_id="CVE-2026-1212")
+
+        content = client.get("/security/?status=cve-no-branch").content.decode()
+
+        assert "Showing the top" not in content
+
+    def test_an_empty_tab_does_not_claim_the_backlog_is_empty(self, client: Client) -> None:
+        SecurityReportFactory(title="Untriaged", status="new")
+
+        content = client.get("/security/?status=cve-no-branch").content.decode()
+
+        assert "No reports on this tab" in content
+        assert "No security reports yet" not in content
+
+    def test_the_export_button_on_this_tab_works(self, client: Client) -> None:
+        """The export honours the page's filter, and this filter is not a status —
+        so the button on this tab handed back a 400 until the export learned it."""
+        SecurityReportFactory(
+            title="Needs a branch", status="valid", matched_cve_id="CVE-2026-7777"
+        )
+        SecurityReportFactory(title="Has one", status="valid", fixed_in_branch="master")
+
+        response = client.get("/security/export.csv?status=cve-no-branch")
+
+        assert response.status_code == 200
+        body = b"".join(response.streaming_content).decode()
+        assert "Needs a branch" in body
+        assert "Has one" not in body
+
+    def test_the_tab_keeps_the_sort(self, client: Client) -> None:
+        SecurityReportFactory(status="valid", matched_cve_id="CVE-2026-6666")
+
+        content = client.get("/security/?sort=newest").content.decode()
+
+        assert "?sort=newest&amp;status=cve-no-branch" in content
+
+
+@pytest.mark.django_db
 class TestSecurityArchiveDrop:
     """The undo for a bad import."""
 
@@ -454,6 +585,101 @@ class TestSecurityReportVerdict:
         assert response.status_code == 200
         report.refresh_from_db()
         assert report.matched_cve_id == ""
+
+    def test_the_fix_branch_is_recorded(self, client: Client, db: Any) -> None:
+        """Which branch carries the fix is the operator's answer, typed here."""
+        report = SecurityReportFactory(status="new")
+
+        response = client.post(
+            f"/security/{report.pk}/verdict/",
+            {"status": "valid", "fixed_in_branch": "  branch-3.5  "},
+        )
+
+        assert response.status_code == 200
+        report.refresh_from_db()
+        assert report.fixed_in_branch == "branch-3.5"
+
+    def test_a_post_without_the_branch_field_does_not_blank_it(
+        self, client: Client, db: Any
+    ) -> None:
+        """The CVE beside it lost data exactly this way — see the view's comment."""
+        report = SecurityReportFactory(status="valid", fixed_in_branch="branch-4.0")
+
+        client.post(f"/security/{report.pk}/verdict/", {"status": "valid"})
+
+        report.refresh_from_db()
+        assert report.fixed_in_branch == "branch-4.0"
+
+    def test_submitting_an_empty_branch_clears_it(self, client: Client, db: Any) -> None:
+        """A branch that turned out not to fix it has to be removable."""
+        report = SecurityReportFactory(status="valid", fixed_in_branch="wrong-branch")
+
+        client.post(
+            f"/security/{report.pk}/verdict/",
+            {"status": "valid", "fixed_in_branch": ""},
+        )
+
+        report.refresh_from_db()
+        assert report.fixed_in_branch == ""
+
+    def test_an_over_long_branch_is_refused_rather_than_500ing(
+        self, client: Client, db: Any
+    ) -> None:
+        """SQLite ignores max_length; Postgres raises DataError and loses the
+        status and notes saved in the same call."""
+        report = SecurityReportFactory(status="new", operator_notes="Keep me.")
+
+        response = client.post(
+            f"/security/{report.pk}/verdict/",
+            {"status": "valid", "fixed_in_branch": "b" * 201, "operator_notes": "Lost?"},
+        )
+
+        assert response.status_code == 400
+        report.refresh_from_db()
+        assert report.fixed_in_branch == ""
+        assert report.status == "new"
+        assert report.operator_notes == "Keep me."
+
+    def test_a_control_character_in_the_branch_is_refused(self, client: Client, db: Any) -> None:
+        """A NUL survives .strip() and the length check, and Postgres refuses it in
+        a string — so SQLite would store what the other database 500s on."""
+        report = SecurityReportFactory(status="new")
+
+        response = client.post(
+            f"/security/{report.pk}/verdict/",
+            {"status": "valid", "fixed_in_branch": "master\x00tail"},
+        )
+
+        assert response.status_code == 400
+        report.refresh_from_db()
+        assert report.fixed_in_branch == ""
+
+    def test_a_partial_post_does_not_blank_the_notes(self, client: Client, db: Any) -> None:
+        """operator_notes is writable from the review sheet too, so a POST that
+        never showed the operator the textarea must not delete a PMC's comment."""
+        report = SecurityReportFactory(status="valid", operator_notes="The PMC said no.")
+
+        client.post(
+            f"/security/{report.pk}/verdict/",
+            {"status": "valid", "fixed_in_branch": "master"},
+        )
+
+        report.refresh_from_db()
+        assert report.operator_notes == "The PMC said no."
+        assert report.fixed_in_branch == "master"
+
+    def test_the_branch_survives_the_learning_feedback_path(self, client: Client, db: Any) -> None:
+        """The save has two update_fields lists and only one gets exercised by a
+        report with a staged suggestion."""
+        report = SecurityReportFactory(status="new", auto_triage_status="valid")
+
+        client.post(
+            f"/security/{report.pk}/verdict/",
+            {"status": "valid", "fixed_in_branch": "branch-3.5"},
+        )
+
+        report.refresh_from_db()
+        assert report.fixed_in_branch == "branch-3.5"
 
     def test_a_verdict_against_the_staged_suggestion_records_disagreement(
         self, client: Client, db: Any
@@ -1782,6 +2008,30 @@ class TestSecurityReportRerunTriage:
         assert not WorkerCommand.objects.filter(
             command="run_security_triage", security_report=report
         ).exists()
+
+    @patch("franktheunicorn.config.loader.get_operator_config")
+    def test_a_report_with_a_recorded_fix_branch_is_left_alone(
+        self, mock_config: MagicMock, client: Client, db: Any
+    ) -> None:
+        """A branch is operator-typed, so the report has been worked on. Without it
+        in the ruled test, re-run triage bills two LLM calls and stages a fresh
+        suggestion over the operator's answer."""
+        from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig
+        from franktheunicorn.core.models import WorkerCommand
+
+        mock_config.return_value = OperatorConfig(
+            github_username="testuser",
+            llm_backends=[LLMBackendConfig(provider="stub")],
+        )
+        report = SecurityReportFactory(status="new", fixed_in_branch="branch-3.5")
+
+        client.post("/security/rerun-triage/")
+
+        report.refresh_from_db()
+        assert not WorkerCommand.objects.filter(
+            command="run_security_triage", security_report=report
+        ).exists()
+        assert report.auto_triage_status == ""
 
     @patch("franktheunicorn.config.loader.get_operator_config")
     def test_a_previously_triaged_report_with_auth_disabled_is_re_closed(

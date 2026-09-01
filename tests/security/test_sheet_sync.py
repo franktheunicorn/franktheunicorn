@@ -845,6 +845,41 @@ class TestSelection:
 
         assert len(list(reports_for_export(limit=2))) == 2
 
+    def test_the_sheet_shows_the_fix_branch(self) -> None:
+        """The export can be filtered to the "no branch recorded" queue, so the
+        reviewer needs a column showing the branch to check that premise."""
+        import io
+
+        from franktheunicorn.security.sheet_sync import export_reports_csv
+
+        SecurityReportFactory(status="valid", fixed_in_branch="branch-3.5")
+
+        out = io.StringIO()
+        export_reports_csv(SecurityReport.objects.all(), out)
+        text = out.getvalue()
+
+        assert "fixed_in_branch" in text.splitlines()[0]
+        assert "branch-3.5" in text
+
+    def test_export_selection_understands_the_cve_without_branch_filter(self) -> None:
+        """Not a status, but the list page offers it as a tab and the export's
+        contract is "export what I'm looking at"."""
+        from franktheunicorn.security.sheet_sync import reports_for_export
+
+        SecurityReportFactory(status="valid", matched_cve_id="CVE-2026-1111", title="unfixed")
+        SecurityReportFactory(
+            status="valid",
+            matched_cve_id="CVE-2026-2222",
+            fixed_in_branch="branch-3.5",
+            title="fixed",
+        )
+        SecurityReportFactory(status="valid", title="no cve")
+        SecurityReportFactory(status="duplicate", matched_cve_id="CVE-2026-3333", title="dup")
+
+        selected = reports_for_export(status=SecurityReport.CVE_NO_BRANCH_FILTER)
+
+        assert [report.title for report in selected] == ["unfixed"]
+
     def test_export_honours_the_newest_sort(self) -> None:
         """A trickle of emailed reports all rank 0.0, so arrival order is the right
         one for an inbox — and an export that silently re-ranks means the row cap

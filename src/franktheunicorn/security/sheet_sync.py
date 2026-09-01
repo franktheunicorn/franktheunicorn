@@ -140,6 +140,15 @@ _HEADER = (
     "cve_candidates",
     "duplicate_of_report",
     "affected_versions",
+    # Read-only, beside affected_versions for the same reason it is here: both
+    # answer "where does this stand in the shipping story". Present because the
+    # export can now be filtered to the "CVE, no branch" queue, and a sheet whose
+    # rows are defined by having no branch recorded with no column showing a branch
+    # is a sheet the reviewer can't check the premise of. Not writable: making it
+    # writable means adding it to WRITABLE_COLUMNS *and* report_fingerprint, whose
+    # contract is exactly the importable fields, or the staleness guard goes blind
+    # to it.
+    "fixed_in_branch",
     "introduced",
     "reporter",
     "priority_reason",
@@ -213,6 +222,17 @@ def looks_like_cve(value: str) -> bool:
     validated by neither.
     """
     return bool(_CVE_RE.match(value))
+
+
+def has_control_chars(value: str) -> bool:
+    """Whether *value* carries a C0 control character (tab and newline excepted).
+
+    Public for the same reason :func:`looks_like_cve` is: the importer strips these
+    on the way in, and a column cleaned on one of its two write paths is a column
+    cleaned on neither. A NUL in particular survives ``.strip()`` and any length
+    check, and Postgres refuses it in a string outright.
+    """
+    return bool(_CONTROL_CHARS.search(value))
 
 
 def _truncate(value: str, limit: int) -> str:
@@ -297,6 +317,7 @@ def _row_for(report: SecurityReport, *, full: bool) -> dict[str, str]:
         # twin — and so "duplicate" rulings in the sheet can agree on of-what.
         "duplicate_of_report": str(report.duplicate_of_id or ""),
         "affected_versions": _truncate(report.affected_versions, MAX_CELL_CHARS),
+        "fixed_in_branch": report.fixed_in_branch,
         "introduced": _truncate(report.introduced_summary, MAX_CELL_CHARS),
         # Name, not email: who filed it bears on credibility, but the sheet is
         # shared by link-holding humans and an address book is not the decision.
@@ -398,7 +419,9 @@ def export_filename(*, full: bool = False, status: str = "") -> str:
     names the second one ``(1)``, and nothing in either file says which slice of
     the backlog it holds — which is how the wrong sheet gets sent to the PMC, or
     the wrong one imported back. Callers validate status against
-    ``STATUS_CHOICES`` before it reaches here.
+    :meth:`SecurityReport.list_filters` before it reaches here — statuses plus the
+    cross-cutting filters, all of them filename-safe literals, which is what lets
+    this interpolate the value straight into a ``Content-Disposition``.
     """
     stamp = timezone.now().date().isoformat()
     scope = f"-{status}" if status else ""
@@ -1012,7 +1035,13 @@ def reports_for_export(
     """
     order = EXPORT_SORTS.get(sort, EXPORT_SORTS[DEFAULT_EXPORT_SORT])
     reports = SecurityReport.objects.select_related("project").order_by(*order)
-    if status:
+    if status == SecurityReport.CVE_NO_BRANCH_FILTER:
+        # Not a status — the list page's cross-cutting "assigned a CVE, nothing
+        # fixing it" tab. Accepted here because the export's whole contract is
+        # "export what I'm looking at", and that tab is the one worth sending to
+        # a PMC: the holes that are public by assignment and still open.
+        reports = reports.filter(SecurityReport.cve_without_branch_q())
+    elif status:
         reports = reports.filter(status=status)
     if project:
         owner, _, repo = project.partition("/")

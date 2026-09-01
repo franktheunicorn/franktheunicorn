@@ -40,7 +40,9 @@ class Command(BaseCommand):
             "--status",
             help=(
                 "Only reports with this status "
-                f"({', '.join(key for key, _ in SecurityReport.STATUS_CHOICES)})"
+                f"({', '.join(key for key, _ in SecurityReport.STATUS_CHOICES)}), "
+                f"or {SecurityReport.CVE_NO_BRANCH_FILTER} for reports with a CVE "
+                "assigned and no branch recorded as fixing them"
             ),
         )
         parser.add_argument("--limit", type=int, help="Only the top N by priority")
@@ -57,7 +59,11 @@ class Command(BaseCommand):
     def handle(self, *args: object, **options: object) -> None:
         status = str(options.get("status") or "")
         if status:
-            valid = {key for key, _ in SecurityReport.STATUS_CHOICES}
+            # The dashboard's cross-cutting tab is a legal value here too, so the
+            # command can export the same selection the page shows.
+            valid = {key for key, _ in SecurityReport.STATUS_CHOICES} | {
+                SecurityReport.CVE_NO_BRANCH_FILTER
+            }
             if status not in valid:
                 raise CommandError(f"--status must be one of: {', '.join(sorted(valid))}")
 

@@ -963,7 +963,31 @@ def merge_pr(request: HttpRequest, pr_id: int) -> HttpResponse:
 SECURITY_STATUS_TABS: list[dict[str, str]] = [
     {"key": "all", "label": "All"},
     *[{"key": k, "label": v} for k, v in SecurityReport.STATUS_CHOICES],
+    # Last, after the status tabs, because it cuts across them rather than being
+    # one more status: the thing an operator with a CVE id in hand needs is the
+    # list of holes that are public-by-assignment and still unfixed.
+    {"key": SecurityReport.CVE_NO_BRANCH_FILTER, "label": "CVE, No Branch"},
 ]
+
+
+def _security_tab_q(key: str) -> Q:
+    """The filter behind one security-list tab.
+
+    One function so the tab's count and the tab's contents can't disagree — they
+    were two separate expressions, which is fine while every tab is
+    ``status=<key>`` and a bug waiting for the first tab that isn't.
+
+    "all" is an empty ``Q``, not ``None``: ``filter(Q())`` produces byte-identical
+    SQL to no filter at all (verified — no WHERE clause emitted), so the callers
+    lose a branch each and there is no fast path to forget.
+    """
+    if key == "all":
+        return Q()
+    if key == SecurityReport.CVE_NO_BRANCH_FILTER:
+        return SecurityReport.cve_without_branch_q()
+    # Unknown keys included: a garbage ?status= has always returned an empty list
+    # rather than 400ing, and the tab bar still renders to click out of.
+    return Q(status=key)
 
 
 #: Orderings the list offers, and the default.
@@ -980,6 +1004,10 @@ _SECURITY_SORTS = {
 _SECURITY_SORT_LABELS = (("priority", "Priority"), ("newest", "Newest"))
 _DEFAULT_SECURITY_SORT = "priority"
 
+#: Rows the list renders. Ranked first, so the cap keeps the top of the queue —
+#: but it has to be said on the page, not just honoured.
+SECURITY_LIST_ROW_CAP = 100
+
 
 def security_report_list(request: HttpRequest) -> HttpResponse:
     """List security reports with status tabs, ranked highest-priority first."""
@@ -989,24 +1017,37 @@ def security_report_list(request: HttpRequest) -> HttpResponse:
         sort = _DEFAULT_SECURITY_SORT
     reports = SecurityReport.objects.select_related("project").order_by(*_SECURITY_SORTS[sort])
 
-    if status_filter != "all":
-        reports = reports.filter(status=status_filter)
+    reports = reports.filter(_security_tab_q(status_filter))
 
     all_reports = SecurityReport.objects.all()
-    all_count = all_reports.count()
-    # Bound once: this was two identical COUNT(*) in the same dict literal below.
-    filtered_count = reports.count()
     tabs_with_counts: list[dict[str, str | int]] = []
     for tab in SECURITY_STATUS_TABS:
-        count = all_count if tab["key"] == "all" else all_reports.filter(status=tab["key"]).count()
+        count = all_reports.filter(_security_tab_q(tab["key"])).count()
         tabs_with_counts.append({**tab, "count": count})
+
+    # Read out of the counts just computed rather than counted again: the active
+    # tab's COUNT(*) and this one were byte-identical queries, free on the "all"
+    # tab (SQLite answers a bare count from the smallest b-tree) and so only
+    # wasteful on the filtered tabs, which is every tab anyone works from. Falls
+    # back to a count for a ?status= that matches no tab, which renders empty.
+    counts_by_key = {str(tab["key"]): int(tab["count"]) for tab in tabs_with_counts}
+    filtered_count = counts_by_key.get(status_filter, -1)
+    if filtered_count < 0:
+        filtered_count = reports.count()
 
     return render(
         request,
         "dashboard/security_list.html",
         {
-            "reports": reports[:100],
+            "reports": reports[:SECURITY_LIST_ROW_CAP],
             "status_tabs": tabs_with_counts,
+            # So the page can say it is showing 100 of N. The tab badge counts the
+            # whole filtered set, and on a tab meant to be driven to zero — "CVE, No
+            # Branch" — a badge the visible rows can't account for reads as either a
+            # broken count or a queue that won't clear. The CSV cap next to it is a
+            # different number about a different thing.
+            "row_cap": SECURITY_LIST_ROW_CAP,
+            "rows_capped": filtered_count > SECURITY_LIST_ROW_CAP,
             "active_status": status_filter,
             "active_sort": sort,
             "sort_options": _SECURITY_SORT_LABELS,
@@ -1374,7 +1415,7 @@ def _back_to_security_list(request: HttpRequest) -> HttpResponse:
     """Reload the security list, whether htmx made the request or the form did.
 
     Every other htmx endpoint here swaps a fragment, and this one can't: dropping
-    an archive changes its own row, the report list and all seven tab counts. A
+    an archive changes its own row, the report list and all eight tab counts. A
     fragment would leave the operator looking at counts that no longer match the
     list. ``HX-Redirect`` asks htmx to do a full navigation instead, which is also
     what makes the flash message land — a swapped fragment never renders one.
@@ -1451,7 +1492,7 @@ def security_report_rerun_triage(request: HttpRequest) -> HttpResponse:
     ruled_skipped = 0
     for report in candidates:
         is_auto = report.status in ("new", "triaging")
-        if is_auto and not report.operator_notes and not report.matched_cve_id:
+        if is_auto and not report.operator_has_ruled:
             if report.pk in inflight_ids:
                 # A triage run is already under way — don't race it.
                 triage_skipped_inflight += 1
@@ -1551,11 +1592,7 @@ def security_report_rerun_triage_failed(request: HttpRequest) -> HttpResponse:
     procedural_closed = 0
     ruled_skipped = 0
     for report in candidates:
-        if (
-            report.status not in ("new", "triaging")
-            or report.operator_notes
-            or report.matched_cve_id
-        ):
+        if report.status not in ("new", "triaging") or report.operator_has_ruled:
             ruled_skipped += 1
             continue
         if procedural_close_if_evidence(report, retrigger=True):
@@ -1610,7 +1647,7 @@ def security_report_rerun_procedural(request: HttpRequest) -> HttpResponse:
     closed = 0
     ruled_skipped = 0
     for report in candidates:
-        if report.operator_notes or report.matched_cve_id:
+        if report.operator_has_ruled:
             ruled_skipped += 1
             continue
         if procedural_close_if_evidence(report, retrigger=True):
@@ -1711,7 +1748,7 @@ def security_report_export_csv(request: HttpRequest) -> HttpResponseBase:
     status = request.GET.get("status", "")
     if status == "all":
         status = ""
-    if status and status not in {key for key, _ in SecurityReport.STATUS_CHOICES}:
+    if status and status not in SecurityReport.list_filters():
         # A bad tab in a hand-edited URL. Exporting everything instead would hand
         # back a wider sheet than the operator asked for, which is the wrong way
         # to be wrong about a security backlog.
@@ -2251,12 +2288,25 @@ def security_report_versions(request: HttpRequest, report_id: int) -> HttpRespon
     return _render_versions_area(request, report, notice="Saved.")
 
 
+#: What Save Verdict writes. Named once because the two save paths below differ
+#: only by ``auto_triage_status``, and a field added to one list and not the other
+#: is a field that silently doesn't persist on half the reports.
+_VERDICT_FIELDS = ("status", "operator_notes", "matched_cve_id", "fixed_in_branch")
+
+
 @require_POST
 def security_report_verdict(request: HttpRequest, report_id: int) -> HttpResponse:
     """Set operator verdict on a security report (htmx)."""
     report = get_object_or_404(SecurityReport, pk=report_id)
     new_status = request.POST.get("status", "")
-    notes = request.POST.get("operator_notes", "")
+    # Presence-guarded, like the CVE and the branch below: read with a default, a
+    # POST that doesn't carry the textarea blanks it. That matters because
+    # ``operator_notes`` is in sheet_sync.WRITABLE_COLUMNS, so it has the same
+    # second writer that made the CVE guard necessary — an imported ruling should
+    # not be destroyed by a submission that never showed the operator the field.
+    notes = report.operator_notes
+    if "operator_notes" in request.POST:
+        notes = request.POST["operator_notes"]
 
     valid_statuses = {choice[0] for choice in SecurityReport.STATUS_CHOICES}
     if new_status not in valid_statuses:
@@ -2313,6 +2363,34 @@ def security_report_verdict(request: HttpRequest, report_id: int) -> HttpRespons
         report.matched_cve_id = ""
     else:
         report.matched_cve_id = submitted_cve
+
+    # Which branch carries the fix. Presence-guarded so a POST that doesn't carry
+    # the field can't blank it, and validated for the reason the CVE beside it is:
+    # SQLite enforces neither max_length nor much else, so what it waves through is
+    # a 500 on the Postgres install DATABASE_URL promises — and a 500 here loses the
+    # status and notes saved in the same call. Cleared by submitting it empty, which
+    # is how a branch that turned out not to fix it gets taken back off.
+    #
+    # The bound is read off the column rather than written again, because it was
+    # already a literal in the model, the migration and the message; a widened
+    # column with a stale check rejects input the database would take.
+    if "fixed_in_branch" in request.POST:
+        branch = request.POST["fixed_in_branch"].strip()
+        limit = SecurityReport._meta.get_field("fixed_in_branch").max_length or 200
+        if len(branch) > limit:
+            return HttpResponse(
+                f"That branch name is too long ({limit} characters max).", status=400
+            )
+        # A NUL survives .strip() and the length check, and Postgres rejects it in a
+        # string outright — sheet_sync guards the same class of input on the import
+        # side (_CONTROL_CHARS) because report text is attacker-supplied and gets
+        # pasted around.
+        from franktheunicorn.security.sheet_sync import has_control_chars
+
+        if has_control_chars(branch):
+            return HttpResponse("That branch name has control characters in it.", status=400)
+        report.fixed_in_branch = branch
+
     # The operator ruled, so the machine's staged suggestion is consumed:
     # leaving it would re-offer an Agree button for a verdict the operator just
     # overrode. A re-triage later would populate it again if wanted.
@@ -2332,17 +2410,9 @@ def security_report_verdict(request: HttpRequest, report_id: int) -> HttpRespons
             distill=False,
         )
         report.auto_triage_status = ""
-        report.save(
-            update_fields=[
-                "status",
-                "operator_notes",
-                "matched_cve_id",
-                "auto_triage_status",
-                "updated_at",
-            ]
-        )
+        report.save(update_fields=[*_VERDICT_FIELDS, "auto_triage_status", "updated_at"])
     else:
-        report.save(update_fields=["status", "operator_notes", "matched_cve_id", "updated_at"])
+        report.save(update_fields=[*_VERDICT_FIELDS, "updated_at"])
 
     return render(request, "dashboard/_security_verdict.html", {"report": report})
 

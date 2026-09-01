@@ -265,6 +265,13 @@
     {% endfor %}
 </p>
 
+{% if rows_capped %}
+<p class="security-sort">
+    Showing the top {{ row_cap }} of {{ export_total }} on this tab — the tab count
+    above is the whole set. Narrow with a tab or export the lot.
+</p>
+{% endif %}
+
 <ul class="pr-list">
     {% for report in reports %}
     <li class="pr-item">
@@ -318,12 +325,27 @@
             {% if report.fix_branch %} &middot;
                 <span class="muted" title="Fix branch on the fork">🛠 {{ report.fix_branch }}</span>
             {% endif %}
+            {# The operator's answer, distinct from the agent's branch above. Shown #}
+            {# because the tab beside it counts rows where this is missing, and a #}
+            {# count you can't account for row by row is a count nobody believes. #}
+            {% if report.fixed_in_branch %} &middot;
+                <span class="muted" title="Branch carrying the fix">fixed in {{ report.fixed_in_branch }}</span>
+            {% endif %}
         </div>
     </li>
     {% empty %}
     <li class="empty-state">
+        {# An empty tab and an empty install are different things, and saying #}
+        {# "No security reports yet" on a filtered view reads as the backlog #}
+        {# having vanished. The CVE queue is empty in the good case, so it needs #}
+        {# to say which case this is. #}
+        {% if active_status != 'all' %}
+        <p>No reports on this tab.</p>
+        <p style="font-size: 0.85rem;"><a href="{% url 'dashboard:security_list' %}?sort={{ active_sort }}">Show all reports</a></p>
+        {% else %}
         <p>No security reports yet.</p>
         <p style="font-size: 0.85rem;"><a href="{% url 'dashboard:security_create' %}">Paste a report</a> to get started.</p>
+        {% endif %}
     </li>
     {% endfor %}
 </ul>
