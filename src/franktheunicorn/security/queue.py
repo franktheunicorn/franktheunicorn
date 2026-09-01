@@ -161,17 +161,24 @@ def queue_version_follow_on(
     return version_map_queued, verify_queued, ""
 
 
-def queue_recheck_poll(*, priority: int = PRIORITY_BULK) -> bool:
+def queue_recheck_poll(*, priority: int = PRIORITY_BULK, exclude_pk: int | None = None) -> bool:
     """Queue the wait on launched recheck runs unless one is already in flight.
 
     Targetless, so neither per-target unique constraint covers it and the
     in-flight check is a SELECT — the pre-flight read ``queue_command`` dropped
     is fine at this rate: one row per button press, not two thousand per
     import.
+
+    *exclude_pk* is the poll handler re-queueing itself: its own row is still
+    ``running`` at that moment and would otherwise count as the in-flight one,
+    so every poll after the first would decline and the runs would go unread.
     """
-    if WorkerCommand.objects.filter(
+    in_flight = WorkerCommand.objects.filter(
         command="poll_security_rechecks", status__in=_IN_FLIGHT_STATUSES
-    ).exists():
+    )
+    if exclude_pk is not None:
+        in_flight = in_flight.exclude(pk=exclude_pk)
+    if in_flight.exists():
         logger.info("poll_security_rechecks already in flight")
         return False
     WorkerCommand.objects.create(command="poll_security_rechecks", priority=priority)

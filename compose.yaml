@@ -21,6 +21,10 @@ x-common: &common
     OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
     REVIEW_AGENT_SMTP_PASS: ${REVIEW_AGENT_SMTP_PASS:-}
+    # Cursor cloud agents (the one-click fix and the batch recheck). Both
+    # containers need it: the web process launches the runs and the worker
+    # polls them, so a key on only one of them is a launch nobody reads back.
+    CURSOR_API_KEY: ${CURSOR_API_KEY:-}
     # Django infrastructure. DEBUG is off by default so WhiteNoise serves
     # static files under gunicorn; flip to "true" in .env for verbose
     # error pages while developing.

@@ -12,8 +12,9 @@ operator's.
 
 The launch is one POST per project and happens in the request; the run takes
 minutes, so the waiting is a worker command (``poll_security_rechecks``) that
-polls until every run is terminal or the timeout says they're stuck. That
-handler blocks like the dual-tests handler does — long, and fine there.
+does *one* pass over the launched runs and re-queues itself while any remain.
+It used to block until every run was terminal — up to an hour, mostly asleep,
+in the worker lane reserved for work somebody is waiting on.
 """
 
 from __future__ import annotations
@@ -21,9 +22,10 @@ from __future__ import annotations
 import json
 import logging
 import re
-import time
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from franktheunicorn.core.models import SecurityRecheckRun, SecurityReport
@@ -117,6 +119,11 @@ def launch_recheck(
     """Create the cloud agent(s) for one project's backlog and record the runs.
 
     One run per ``_MAX_REPORTS_PER_RUN`` reports — see the constant for why.
+
+    The row is reserved *before* the POST, and the unique constraint on
+    (project, chunk) is what makes that worth doing: two concurrent presses race
+    on the row, the loser raises here, and only one of them ever spends an agent
+    run. A POST that then fails releases the slot again.
     """
     config = operator_config.security_triage.fix_agent
     reason = enabled_key_reason(config)
@@ -126,6 +133,21 @@ def launch_recheck(
     runs = []
     for start in range(0, len(reports), _MAX_REPORTS_PER_RUN):
         chunk = reports[start : start + _MAX_REPORTS_PER_RUN]
+        chunk_index = start // _MAX_REPORTS_PER_RUN
+        try:
+            with transaction.atomic():
+                run = SecurityRecheckRun.objects.create(
+                    project=project,
+                    status="launched",
+                    report_count=len(chunk),
+                    chunk_index=chunk_index,
+                )
+        except IntegrityError as exc:
+            msg = (
+                f"a recheck is already running for {project.full_name} "
+                f"(chunk {chunk_index}) — nothing new was launched"
+            )
+            raise FixAgentError(msg) from exc
         prompt = build_recheck_prompt(project, chunk, lookback_days=config.recheck_lookback_days)
         payload = {
             "prompt": {"text": prompt},
@@ -135,21 +157,23 @@ def launch_recheck(
             "autoCreatePR": False,
             "skipReviewerRequest": True,
         }
-        agent_id, run_id = create_cursor_agent(payload, api_key)
-        runs.append(
-            SecurityRecheckRun.objects.create(
-                project=project,
-                agent_id=agent_id,
-                run_id=run_id,
-                status="launched",
-                report_count=len(chunk),
-            )
-        )
+        try:
+            agent_id, run_id = create_cursor_agent(payload, api_key)
+        except FixAgentError:
+            # Nothing is running under this row, so it must not hold the slot —
+            # otherwise one failed POST blocks the button until the stale sweep.
+            run.delete()
+            raise
+        run.agent_id = agent_id
+        run.run_id = run_id
+        run.save(update_fields=["agent_id", "run_id", "updated_at"])
+        runs.append(run)
         logger.info(
-            "Launched recheck agent %s for %s (%d reports)",
+            "Launched recheck agent %s for %s (%d reports, chunk %d)",
             agent_id,
             project.full_name,
             len(chunk),
+            chunk_index,
         )
     return runs
 
@@ -159,19 +183,34 @@ _VERDICTS = frozenset({"likely-fixed", "still-valid"})
 
 
 def _verdicts_from(result: str) -> list[dict[str, Any]]:
-    """The JSON array out of a run's final text, tolerating a code fence."""
+    """The JSON array out of a run's final text, tolerating prose around it.
+
+    Outermost-bracket slicing looked reasonable and lost whole runs: a citation
+    ``[1]`` before the array, a ``- [x]`` checklist line, or a bracketed aside
+    after it all made ``find("[")``/``rfind("]")`` span something that isn't
+    JSON, and the decode error came back as "no verdicts" — indistinguishable
+    from an agent that answered nothing. So: try every ``[`` as a start and let
+    the decoder say where the value ends, keeping the longest array of objects
+    it finds.
+    """
     text = result.strip()
     fence = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", text, re.DOTALL)
     if fence:
         text = fence.group(1)
-    start, end = text.find("["), text.rfind("]")
-    if start == -1 or end <= start:
-        return []
-    try:
-        data = json.loads(text[start : end + 1])
-    except json.JSONDecodeError:
-        return []
-    return [row for row in data if isinstance(row, dict)] if isinstance(data, list) else []
+    decoder = json.JSONDecoder()
+    best: list[dict[str, Any]] = []
+    for index, char in enumerate(text):
+        if char != "[":
+            continue
+        try:
+            data, _ = decoder.raw_decode(text, index)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, list):
+            rows = [row for row in data if isinstance(row, dict)]
+            if len(rows) > len(best):
+                best = rows
+    return best
 
 
 def apply_recheck_results(run: SecurityRecheckRun, result: str) -> int:
@@ -182,6 +221,7 @@ def apply_recheck_results(run: SecurityRecheckRun, result: str) -> int:
     """
     rows = _verdicts_from(result)
     written = 0
+    now = timezone.now()
     for row in rows:
         try:
             report_id = int(row.get("report", 0))
@@ -195,8 +235,8 @@ def apply_recheck_results(run: SecurityRecheckRun, result: str) -> int:
         ).update(
             recheck_status=verdict,
             recheck_reason=str(row.get("reason", ""))[:2000],
-            rechecked_at=timezone.now(),
-            updated_at=timezone.now(),
+            rechecked_at=now,
+            updated_at=now,
         )
         written += updated
     if written < run.report_count:
@@ -230,10 +270,21 @@ def _poll_one(run: SecurityRecheckRun, api_key: str) -> None:
     status = data.get("status", "")
     if status == "FINISHED":
         written = apply_recheck_results(run, data.get("result") or "")
-        run.status = "finished"
         run.detail = f"wrote verdicts for {written} of {run.report_count} reports"
+        if written:
+            run.status = "finished"
+            logger.info("Recheck run %s finished: %s", run.agent_id, run.detail)
+        else:
+            # A run that answered nothing usable is not a success. It cost a full
+            # agent run and every operator-facing surface would otherwise show it
+            # the same as one that answered all fifty.
+            run.status = "error"
+            run.detail = (
+                f"the run finished but no verdicts could be read out of its answer "
+                f"({run.report_count} reports asked about)"
+            )
+            logger.warning("Recheck run %s: %s", run.agent_id, run.detail)
         run.save(update_fields=["status", "detail", "updated_at"])
-        logger.info("Recheck run %s finished: %s", run.agent_id, run.detail)
     elif status in FAILED_RUN_STATUSES:
         run.status = "error"
         run.detail = f"run {status.lower()}: {(data.get('result') or '')[:200]}"
@@ -241,60 +292,61 @@ def _poll_one(run: SecurityRecheckRun, api_key: str) -> None:
         logger.warning("Recheck run %s %s", run.agent_id, status)
 
 
-def poll_rechecks(operator_config: OperatorConfig) -> tuple[int, int]:
-    """Wait on every launched recheck run until terminal or its own timeout.
+def poll_rechecks(operator_config: OperatorConfig) -> tuple[int, int, int]:
+    """One pass over the launched recheck runs. Returns ``(finished, failed, still)``.
 
-    Returns ``(finished, failed)`` for the runs this poll waited on. Expiry is
-    per run — a run launched a minute before the command's budget runs out has
-    not "timed out" — and a run that outlives the budget stays launched for
-    the next poll command to pick up (every button press queues one). A run
-    that does expire keeps its remote agent, but its verdicts won't be read;
-    the recheck button starts a new run rather than resuming the old one.
+    One pass, not a wait. This used to loop until every run was terminal or
+    ``recheck_timeout_seconds`` (default 3600) ran out, and it is queued at
+    PRIORITY_INTERACTIVE — so a recheck parked the lane that exists precisely so
+    a click doesn't sit behind bulk work, for up to an hour, nearly all of it
+    asleep. The caller re-queues while ``still`` is non-zero, which is the
+    codebase's own idiom for waiting on something slow.
+
+    Expiry is still per run, measured from its own ``created_at``: a run that
+    outlives ``recheck_timeout_seconds`` keeps its remote agent but its verdicts
+    won't be read, and the button starts a new run rather than resuming it.
     """
     config = operator_config.security_triage.fix_agent
     api_key = cursor_api_key(config)
-    deadline = time.monotonic() + config.recheck_timeout_seconds
-    seen: set[int] = set()
-    while True:
-        launched = list(SecurityRecheckRun.objects.filter(status="launched"))
-        if not launched:
-            break
-        seen.update(run.pk for run in launched)
-        if not api_key:
-            for run in launched:
-                run.status = "error"
-                run.detail = f"no Cursor API key — set {config.api_key_env}"
-                run.save(update_fields=["status", "detail", "updated_at"])
-            break
-        for run in launched:
-            _poll_one(run, api_key)
-        still = list(SecurityRecheckRun.objects.filter(status="launched"))
-        if not still:
-            break
-        now = timezone.now()
-        expired = [
-            run
-            for run in still
-            if (now - run.created_at).total_seconds() > config.recheck_timeout_seconds
-        ]
-        for run in expired:
-            run.status = "error"
-            run.detail = (
-                "gave up waiting; the agent may still finish remotely, but its "
-                "verdicts won't be read — the recheck button starts a new run"
-            )
-            run.save(update_fields=["status", "detail", "updated_at"])
-            logger.warning("Recheck run %s timed out and was marked error", run.agent_id)
-        if len(expired) == len(still):
-            break
-        if time.monotonic() > deadline:
-            # The command's own budget is spent. Younger runs keep "launched";
-            # the next press's poll picks them up.
-            logger.warning(
-                "Recheck poll budget spent with %d run(s) still launched",
-                len(still) - len(expired),
-            )
-            break
-        time.sleep(_POLL_INTERVAL_SECONDS)
-    counts = SecurityRecheckRun.objects.filter(pk__in=seen).values_list("status", flat=True)
-    return (sum(1 for s in counts if s == "finished"), sum(1 for s in counts if s == "error"))
+    launched = list(SecurityRecheckRun.objects.filter(status="launched"))
+    if not launched:
+        return (0, 0, 0)
+    if not api_key:
+        # Launch happens in the web process and this in the worker; under compose
+        # they are separate containers. A worker without the key knows nothing
+        # about these runs' fate, and marking them error threw away the verdicts
+        # of agents that were still running. Leave them for a worker that has it.
+        logger.warning(
+            "%d recheck run(s) are launched but this process has no Cursor API key "
+            "(%s) — leaving them for a worker that does. Set it in the worker's "
+            "environment; docker/compose passes it through when present.",
+            len(launched),
+            config.api_key_env,
+        )
+        return (0, 0, len(launched))
+
+    seen = {run.pk for run in launched}
+    for run in launched:
+        _poll_one(run, api_key)
+
+    now = timezone.now()
+    expired = SecurityRecheckRun.objects.filter(
+        pk__in=seen,
+        status="launched",
+        created_at__lt=now - timedelta(seconds=config.recheck_timeout_seconds),
+    )
+    for run in expired:
+        run.status = "error"
+        run.detail = (
+            "gave up waiting; the agent may still finish remotely, but its "
+            "verdicts won't be read — the recheck button starts a new run"
+        )
+        run.save(update_fields=["status", "detail", "updated_at"])
+        logger.warning("Recheck run %s timed out and was marked error", run.agent_id)
+
+    counts = list(SecurityRecheckRun.objects.filter(pk__in=seen).values_list("status", flat=True))
+    return (
+        sum(1 for s in counts if s == "finished"),
+        sum(1 for s in counts if s == "error"),
+        sum(1 for s in counts if s == "launched"),
+    )

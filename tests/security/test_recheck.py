@@ -186,6 +186,14 @@ class TestApplyRecheckResults:
 
 
 class TestPollRechecks:
+    """One pass, then hand the waiting back to the queue.
+
+    This used to loop until every run was terminal or ``recheck_timeout_seconds``
+    (default 3600) expired, in the worker lane reserved for work somebody is
+    waiting on. Now it polls once and reports how many are still running so the
+    caller can re-queue.
+    """
+
     @pytest.mark.django_db
     def test_a_finished_run_writes_verdicts_and_marks_finished(self) -> None:
         report = SecurityReportFactory(status="new")
@@ -198,8 +206,7 @@ class TestPollRechecks:
             patch.dict(os.environ, {"CURSOR_API_KEY": "key"}),
             patch("franktheunicorn.security.recheck.fetch_run", return_value=data),
         ):
-            finished, failed = poll_rechecks(make_operator_config())
-        assert (finished, failed) == (1, 0)
+            assert poll_rechecks(make_operator_config()) == (1, 0, 0)
         run.refresh_from_db()
         assert run.status == "finished"
         report.refresh_from_db()
@@ -215,24 +222,20 @@ class TestPollRechecks:
                 return_value={"status": "ERROR", "result": "boom"},
             ),
         ):
-            finished, failed = poll_rechecks(make_operator_config())
-        assert (finished, failed) == (0, 1)
+            assert poll_rechecks(make_operator_config()) == (0, 1, 0)
 
     @pytest.mark.django_db
-    def test_a_transient_failure_is_retried_not_fatal(self) -> None:
-        # None means the API hiccuped, not that the remote agent died — the
-        # run stays launched and the next pass asks again.
+    def test_a_transient_failure_leaves_the_run_for_the_next_pass(self) -> None:
+        # None means the API hiccuped, not that the remote agent died — the run
+        # stays launched and is reported as still running so the caller re-queues.
         run = SecurityRecheckRunFactory()
-        answers = [None, {"status": "FINISHED", "result": "[]"}]
         with (
             patch.dict(os.environ, {"CURSOR_API_KEY": "key"}),
-            patch("franktheunicorn.security.recheck.fetch_run", side_effect=answers),
-            patch("franktheunicorn.security.recheck.time.sleep"),
+            patch("franktheunicorn.security.recheck.fetch_run", return_value=None),
         ):
-            finished, failed = poll_rechecks(make_operator_config())
-        assert (finished, failed) == (1, 0)
+            assert poll_rechecks(make_operator_config()) == (0, 0, 1)
         run.refresh_from_db()
-        assert run.status == "finished"
+        assert run.status == "launched"
 
     @pytest.mark.django_db
     def test_a_gone_run_is_an_error_not_a_retry(self) -> None:
@@ -245,17 +248,15 @@ class TestPollRechecks:
                 side_effect=RunGoneError("Cursor API said 404: the run is gone"),
             ),
         ):
-            finished, failed = poll_rechecks(make_operator_config())
-        assert (finished, failed) == (0, 1)
+            assert poll_rechecks(make_operator_config()) == (0, 1, 0)
         run.refresh_from_db()
         assert run.status == "error"
         assert "gone" in run.detail
 
     @pytest.mark.django_db
     def test_an_old_run_times_out_but_a_young_one_survives(self) -> None:
-        # Expiry is per run: the run launched an hour ago is stuck, the one
-        # launched a minute ago is not — and the poll's own budget running out
-        # must not mark it either.
+        # Expiry is per run, from its own created_at: the run launched two hours
+        # ago is stuck, the one launched a minute ago is still working.
         old = SecurityRecheckRunFactory(created_at=timezone.now() - timedelta(hours=2))
         young = SecurityRecheckRunFactory()
         with (
@@ -264,14 +265,8 @@ class TestPollRechecks:
                 "franktheunicorn.security.recheck.fetch_run",
                 return_value={"status": "RUNNING"},
             ),
-            patch("franktheunicorn.security.recheck.time.sleep"),
-            patch(
-                "franktheunicorn.security.recheck.time.monotonic",
-                side_effect=[0, 10_000],
-            ),
         ):
-            finished, failed = poll_rechecks(make_operator_config(recheck_timeout_seconds=60))
-        assert (finished, failed) == (0, 1)
+            assert poll_rechecks(make_operator_config(recheck_timeout_seconds=60)) == (0, 1, 1)
         old.refresh_from_db()
         young.refresh_from_db()
         assert old.status == "error"
@@ -279,6 +274,121 @@ class TestPollRechecks:
         assert young.status == "launched"
 
     @pytest.mark.django_db
+    def test_a_finished_run_that_answered_nothing_is_not_a_success(self) -> None:
+        # It cost a full agent run. "finished" would show it identically to one
+        # that answered all fifty, and SecurityRecheckRun is on no page.
+        run = SecurityRecheckRunFactory(report_count=50)
+        with (
+            patch.dict(os.environ, {"CURSOR_API_KEY": "key"}),
+            patch(
+                "franktheunicorn.security.recheck.fetch_run",
+                return_value={"status": "FINISHED", "result": "I could not check these."},
+            ),
+        ):
+            assert poll_rechecks(make_operator_config()) == (0, 1, 0)
+        run.refresh_from_db()
+        assert run.status == "error"
+        assert "no verdicts could be read" in run.detail
+
+    @pytest.mark.django_db
+    def test_a_keyless_worker_leaves_live_runs_alone(self) -> None:
+        # The launch happens in the web process and the poll in the worker; under
+        # compose they are separate containers. Marking these error threw away the
+        # verdicts of agents that were still running and billing.
+        run = SecurityRecheckRunFactory()
+        with (
+            patch.dict(os.environ, {"CURSOR_API_KEY": ""}),
+            patch("franktheunicorn.security.recheck.fetch_run") as mock_fetch,
+        ):
+            assert poll_rechecks(make_operator_config()) == (0, 0, 1)
+        assert not mock_fetch.called
+        run.refresh_from_db()
+        assert run.status == "launched"
+
+    @pytest.mark.django_db
     def test_no_runs_is_a_clean_zero(self) -> None:
         with patch.dict(os.environ, {"CURSOR_API_KEY": "key"}):
-            assert poll_rechecks(make_operator_config()) == (0, 0)
+            assert poll_rechecks(make_operator_config()) == (0, 0, 0)
+
+
+class TestVerdictsSurviveRealisticAnswers:
+    """Outermost-bracket slicing lost whole runs to a stray ``[``.
+
+    The prompt asks for a bare array, so there is usually no code fence to lean
+    on, and ``find("[")``/``rfind("]")`` then spanned whatever else the answer
+    contained. The decode failed and came back as "no verdicts" — which looked
+    exactly like an agent that answered nothing, on a run that still said
+    "finished".
+    """
+
+    def test_a_citation_before_the_array(self) -> None:
+        rows = _verdicts_from('See [1] for context.\n[{"report": 7, "verdict": "still-valid"}]')
+        assert [row["report"] for row in rows] == [7]
+
+    def test_a_checklist_line_before_the_array(self) -> None:
+        rows = _verdicts_from('- [x] checked history\n[{"report": 8, "verdict": "likely-fixed"}]')
+        assert [row["report"] for row in rows] == [8]
+
+    def test_a_bracketed_aside_after_the_array(self) -> None:
+        rows = _verdicts_from('[{"report": 9, "verdict": "still-valid"}]\n[end of report]')
+        assert [row["report"] for row in rows] == [9]
+
+    def test_the_longest_array_of_objects_wins(self) -> None:
+        rows = _verdicts_from(
+            '[1, 2]\n[{"report": 10, "verdict": "still-valid"}, '
+            '{"report": 11, "verdict": "likely-fixed"}]'
+        )
+        assert [row["report"] for row in rows] == [10, 11]
+
+    def test_a_truncated_array_is_still_nothing(self) -> None:
+        assert _verdicts_from('[{"report": 12, "verdict": "still-') == []
+
+
+class TestOneLiveRunPerProjectChunk:
+    @pytest.mark.django_db
+    def test_a_second_concurrent_launch_does_not_pay_twice(self) -> None:
+        # The view read in-flight state and then created rows, so two overlapping
+        # presses both saw nothing running and both launched a full paid run.
+        report = SecurityReportFactory(status="new")
+        SecurityRecheckRun.objects.create(
+            project=report.project, status="launched", report_count=1, chunk_index=0
+        )
+        with (
+            patch.dict(os.environ, {"CURSOR_API_KEY": "key"}),
+            patch("franktheunicorn.security.recheck.create_cursor_agent") as mock_create,
+            pytest.raises(FixAgentError, match="already running"),
+        ):
+            launch_recheck(report.project, [report], make_operator_config())
+        assert not mock_create.called
+
+    @pytest.mark.django_db
+    def test_a_finished_run_does_not_block_the_next_one(self) -> None:
+        report = SecurityReportFactory(status="new")
+        SecurityRecheckRun.objects.create(
+            project=report.project, status="finished", report_count=1, chunk_index=0
+        )
+        with (
+            patch.dict(os.environ, {"CURSOR_API_KEY": "key"}),
+            patch(
+                "franktheunicorn.security.recheck.create_cursor_agent",
+                return_value=("bc-1", "run-1"),
+            ),
+        ):
+            runs = launch_recheck(report.project, [report], make_operator_config())
+        assert len(runs) == 1
+
+    @pytest.mark.django_db
+    def test_a_failed_post_releases_the_slot(self) -> None:
+        # Otherwise one unreachable-API press blocks the button for that project
+        # until the stale sweep, an hour later.
+        report = SecurityReportFactory(status="new")
+        with (
+            patch.dict(os.environ, {"CURSOR_API_KEY": "key"}),
+            patch(
+                "franktheunicorn.security.recheck.create_cursor_agent",
+                side_effect=FixAgentError("could not reach the Cursor API"),
+            ),
+            pytest.raises(FixAgentError),
+        ):
+            launch_recheck(report.project, [report], make_operator_config())
+        assert not SecurityRecheckRun.objects.filter(status="launched").exists()

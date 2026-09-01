@@ -11,8 +11,13 @@ import pytest
 from django.utils import timezone
 
 from franktheunicorn.core.models import PullRequest, SecurityReport, WorkerCommand
-from franktheunicorn.worker.commands import process_pending_commands
-from tests.factories import ProjectFactory, PullRequestFactory, SecurityReportFactory
+from franktheunicorn.worker.commands import _dispatch, process_pending_commands
+from tests.factories import (
+    ProjectFactory,
+    PullRequestFactory,
+    SecurityReportFactory,
+    make_operator_config,
+)
 
 
 @pytest.mark.django_db
@@ -804,3 +809,62 @@ class TestInteractiveDrain:
             _interactive_drain_loop(MagicMock(), stop)
 
         assert len(calls) == 2
+
+
+class TestPollSecurityRechecks:
+    """The handler stays short and hands the waiting back to the queue.
+
+    It is queued at PRIORITY_INTERACTIVE, and the runner gives that priority a
+    dedicated thread precisely so a click does not sit behind bulk work. The old
+    handler blocked in a poll loop until ``recheck_timeout_seconds`` — 3600 by
+    default, nearly all of it asleep — which parked that thread for the hour.
+    """
+
+    @pytest.mark.django_db
+    def test_runs_still_going_are_re_queued(self) -> None:
+        cmd = WorkerCommand.objects.create(command="poll_security_rechecks", status="running")
+        with (
+            patch(
+                "franktheunicorn.security.recheck.poll_rechecks",
+                return_value=(0, 0, 2),
+            ),
+            patch("franktheunicorn.worker.commands.time.sleep") as mock_sleep,
+        ):
+            _dispatch(cmd, make_operator_config())
+        assert "2 still running" in cmd.log
+        assert "re-queued" in cmd.log
+        # Its own running row must not count as the in-flight poll, or every pass
+        # after the first would decline and the runs would go unread.
+        assert WorkerCommand.objects.filter(
+            command="poll_security_rechecks", status="pending"
+        ).exists()
+        # One sleep, so the requeued row is not claimed instantly in a hot loop.
+        assert mock_sleep.called
+
+    @pytest.mark.django_db
+    def test_a_finished_batch_is_not_re_queued(self) -> None:
+        cmd = WorkerCommand.objects.create(command="poll_security_rechecks", status="running")
+        with (
+            patch(
+                "franktheunicorn.security.recheck.poll_rechecks",
+                return_value=(3, 1, 0),
+            ),
+            patch("franktheunicorn.worker.commands.time.sleep") as mock_sleep,
+        ):
+            _dispatch(cmd, make_operator_config())
+        assert "3 finished, 1 failed" in cmd.log
+        assert "re-queued" not in cmd.log
+        assert not mock_sleep.called
+        assert not WorkerCommand.objects.filter(
+            command="poll_security_rechecks", status="pending"
+        ).exists()
+
+    @pytest.mark.django_db
+    def test_nothing_launched_says_so(self) -> None:
+        cmd = WorkerCommand.objects.create(command="poll_security_rechecks", status="running")
+        with patch(
+            "franktheunicorn.security.recheck.poll_rechecks",
+            return_value=(0, 0, 0),
+        ):
+            _dispatch(cmd, make_operator_config())
+        assert "nothing to wait on" in cmd.log

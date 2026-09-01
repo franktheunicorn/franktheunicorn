@@ -2268,6 +2268,10 @@ class TestSecurityReportFix:
                 return_value=make_operator_config(),
             ),
             patch(
+                "franktheunicorn.security.fix_agent.remote_default_branch",
+                return_value="master",
+            ),
+            patch(
                 "franktheunicorn.security.fix_agent.httpx.post",
                 return_value=cursor_response({"agent": {"id": "bc-1"}, "run": {"id": "run-1"}}),
             ),
@@ -2337,13 +2341,23 @@ class TestSecurityReportFix:
                 return_value=cursor_response(
                     {
                         "status": "FINISHED",
-                        "git": {"branches": [{"branch": "bug_86-quiet-cleanup"}]},
+                        "git": {
+                            "branches": [
+                                {
+                                    "branch": "bug_86-quiet-cleanup",
+                                    "repoUrl": (
+                                        "https://github.com/holden/"
+                                        + report.project.full_name.rsplit("/", 1)[-1]
+                                    ),
+                                }
+                            ]
+                        },
                     }
                 ),
             ),
             patch(
-                "franktheunicorn.security.fix_agent.find_fix_branch_on_fork",
-                return_value="",
+                "franktheunicorn.security.fix_agent.find_fix_branches_on_fork",
+                return_value=[],
             ),
         ):
             response = client.post(f"/security/{report.pk}/fix/refresh/")
@@ -2509,3 +2523,65 @@ class TestSecurityRecheckFixed:
         assert SecurityRecheckRun.objects.count() == 1
         assert WorkerCommand.objects.filter(command="poll_security_rechecks").exists()
         assert b"did launch and will be polled" in response.content
+
+
+class TestAnOrphanedRecheckRunIsPolledAgain:
+    """A live run needs a poll even when this press launched nothing.
+
+    A run whose poll command died — worker restart, budget spent — was never
+    asked about again: it stayed launched, the view declined to queue a poll
+    because nothing new had launched, and the stale sweep eventually binned it.
+    Its verdicts were paid for and thrown away every time.
+    """
+
+    def test_a_live_run_with_no_new_launch_still_queues_a_poll(
+        self, client: Client, db: Any
+    ) -> None:
+        import os
+
+        from franktheunicorn.core.models import SecurityRecheckRun, WorkerCommand
+
+        report = SecurityReportFactory(status="new")
+        SecurityRecheckRun.objects.create(
+            project=report.project, status="launched", report_count=1, chunk_index=0
+        )
+        WorkerCommand.objects.filter(command="poll_security_rechecks").delete()
+        with (
+            patch.dict(os.environ, {"CURSOR_API_KEY": "key"}),
+            patch("franktheunicorn.security.recheck.create_cursor_agent") as mock_create,
+        ):
+            response = client.post("/security/recheck-fixed/", follow=True)
+        # Nothing new launched — that project already has a live run.
+        assert not mock_create.called
+        assert b"already running" in response.content
+        # But the orphan is now going to be read.
+        assert WorkerCommand.objects.filter(
+            command="poll_security_rechecks", status="pending"
+        ).exists()
+
+
+class TestTheInjectionNoteReachesTheOperator:
+    """``refuse_on_injection`` defaults false, so recording the hit IS the whole
+    mitigation — and it was rendered only in the failed state, which is not the
+    state anyone judging a pushed branch is looking at."""
+
+    def _report_with_hits(self, status: str) -> Any:
+        return patched_report(
+            fix_agent_id="bc-1",
+            fix_run_id="run-1",
+            fix_status=status,
+            fix_branch="bug_86-quiet" if status == "branch-pushed" else "",
+            fix_injection_hits=["ignore_previous", "exfiltrate"],
+        )
+
+    def test_the_note_shows_on_a_pushed_branch(self, client: Client, db: Any) -> None:
+        report = self._report_with_hits("branch-pushed")
+        response = client.get(f"/security/{report.pk}/")
+        assert response.status_code == 200
+        assert b"prompt-injection patterns" in response.content
+        assert b"ignore_previous" in response.content
+
+    def test_the_note_shows_while_launched(self, client: Client, db: Any) -> None:
+        report = self._report_with_hits("launched")
+        response = client.get(f"/security/{report.pk}/")
+        assert b"prompt-injection patterns" in response.content

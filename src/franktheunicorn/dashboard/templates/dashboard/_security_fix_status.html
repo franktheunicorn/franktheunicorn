@@ -10,6 +10,17 @@
     <div class="verify-result queued-note">{{ note }}</div>
     {% endif %}
 
+    {% if report.fix_injection_hits %}
+    {# refuse_on_injection defaults false, so recording the hit IS the mitigation. #}
+    {# It belongs next to the branch the operator is about to judge, in every state. #}
+    <div class="verify-result error-note">
+        NOTE: the report text trips prompt-injection patterns
+        ({{ report.fix_injection_hits|join:", " }}) — it may be a report about
+        injection, or an attempt at one. This patch and its branch were produced from
+        that text; weigh them accordingly.
+    </div>
+    {% endif %}
+
     {% if report.fix_agent_id %}
     <p>
         Fix agent
@@ -23,6 +34,9 @@
             {% if report.fix_branch %}
             — branch <code>{{ report.fix_branch }}</code> is on the fork anyway; judge it yourself.
             {% endif %}
+        {% elif report.fix_status == "finished-no-branch" %}
+            <span class="badge badge-warning">finished, no branch</span>
+            {{ report.fix_status_detail }} You can launch again.
         {% else %}
             <span class="badge">launched</span> no branch yet.
         {% endif %}

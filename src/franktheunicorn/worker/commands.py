@@ -23,6 +23,7 @@ Commands supported:
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -71,6 +72,12 @@ def _forge_client_for(
 #: Bounded, the backlog still drains — across successive drains five seconds
 #: apart — and everything else keeps its turn.
 MAX_COMMANDS_PER_DRAIN = 20
+
+#: How long ``poll_security_rechecks`` waits before handing itself back to the
+#: queue. The whole point of the re-queue is that the handler stays short, so
+#: this is the one sleep it takes — without it the requeued row is claimed
+#: immediately and the poll becomes a hot loop against the Cursor API.
+_RECHECK_POLL_INTERVAL_SECONDS = 30
 
 
 def process_pending_commands(
@@ -460,18 +467,27 @@ def _verify_security_report(cmd: WorkerCommand, operator_config: OperatorConfig)
 
 
 def _poll_security_rechecks(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
-    """Wait on the launched batch-recheck runs and write their per-report verdicts.
+    """One pass over the launched batch-recheck runs, re-queued while any remain.
 
-    Blocks like the dual-tests handler — a recheck run is minutes of remote
-    agent time and the 6h stuck-command ceiling is nowhere near it. The whole
-    outcome lands in ``cmd.log`` either way.
+    Short on purpose: this command is queued at PRIORITY_INTERACTIVE, and a
+    handler that blocks for the recheck timeout parks the lane that exists so a
+    click doesn't wait behind bulk work. One pass costs a status read per run,
+    then it hands the waiting back to the queue.
     """
+    from franktheunicorn.security.queue import PRIORITY_INTERACTIVE, queue_recheck_poll
     from franktheunicorn.security.recheck import poll_rechecks
 
-    finished, failed = poll_rechecks(operator_config)
-    cmd.log = f"recheck poll: {finished} finished, {failed} failed"
-    if not finished and not failed:
+    finished, failed, still = poll_rechecks(operator_config)
+    if not finished and not failed and not still:
         cmd.log = "recheck poll: no launched runs — nothing to wait on"
+        return
+    cmd.log = f"recheck poll: {finished} finished, {failed} failed, {still} still running"
+    if still:
+        # Sleep one interval before handing it back, or the requeued command is
+        # claimed immediately and this becomes a hot loop of API reads.
+        time.sleep(_RECHECK_POLL_INTERVAL_SECONDS)
+        requeued = queue_recheck_poll(priority=PRIORITY_INTERACTIVE, exclude_pk=cmd.pk)
+        cmd.log += "; re-queued" if requeued else "; another poll is already queued"
 
 
 def _map_report_versions(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:

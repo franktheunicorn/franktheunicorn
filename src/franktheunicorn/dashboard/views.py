@@ -2597,7 +2597,12 @@ def security_recheck_fixed(request: HttpRequest) -> HttpResponse:
         else:
             launched += 1
             covered += len(reports)
-    if launched or needs_poll:
+    # Any live run needs a poll, not just one this press started. A run whose
+    # poll command died — worker restart, budget spent — was otherwise never
+    # asked about again: it stayed launched, this branch declined to queue
+    # anything because `launched` was 0, and the stale sweep above eventually
+    # binned it. Its verdicts were paid for and thrown away every time.
+    if launched or needs_poll or SecurityRecheckRun.objects.filter(status="launched").exists():
         queue_recheck_poll(priority=PRIORITY_INTERACTIVE)
     if launched:
         messages.success(

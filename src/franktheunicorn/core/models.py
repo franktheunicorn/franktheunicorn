@@ -759,11 +759,24 @@ class SecurityReport(models.Model):
     # so a refresh can ask the API where the run got to.
     fix_base_branch = models.CharField(max_length=100, blank=True, default="")
     fix_branch = models.CharField(max_length=200, blank=True, default="")
+    #: Tip of ``fix_branch`` when it was last seen, which is how a relaunch tells
+    #: "the branch we gave up on" from "that name, repushed by this run".
+    fix_branch_sha = models.CharField(max_length=64, blank=True, default="")
+    #: ``[{"branch": ..., "sha": ...}]`` abandoned by a relaunch. The refresh asks
+    #: the fork rather than this row, so an abandoned branch comes straight back
+    #: and gets reported as the new run's result unless it is remembered here.
+    fix_superseded = models.JSONField(default=list, blank=True)
     fix_agent_id = models.CharField(max_length=100, blank=True, default="")
     fix_run_id = models.CharField(max_length=100, blank=True, default="")
-    #: "" (never launched), "launched", "branch-pushed", "failed".
+    #: "" (never launched), "launched", "branch-pushed", "finished-no-branch"
+    #: (terminal: the run ended with no branch naming the finding), "failed".
     fix_status = models.CharField(max_length=20, blank=True, default="")
     fix_status_detail = models.CharField(max_length=300, blank=True, default="")
+    #: Prompt-injection patterns the report tripped at launch. Its own field
+    #: because ``refuse_on_injection`` defaults False and "recorded on the row"
+    #: is then the whole mitigation — so it has to reach the operator in every
+    #: state, not just the failed one, next to the branch they are about to judge.
+    fix_injection_hits = models.JSONField(default=list, blank=True)
     fix_launched_at = models.DateTimeField(null=True, blank=True)
 
     # The batch "did the last month of commits fix this?" recheck
@@ -843,10 +856,32 @@ class SecurityRecheckRun(models.Model):
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="launched")
     #: How many reports the run was asked about.
     report_count = models.IntegerField(default=0)
+    #: Which slice of the project's backlog this run covers. A backlog past
+    #: ``recheck._MAX_REPORTS_PER_RUN`` is several runs, so it is this — not the
+    #: project alone — that identifies a run within a batch, and it is what makes
+    #: the uniqueness constraint below expressible.
+    chunk_index = models.IntegerField(default=0)
     #: Where it landed: verdict counts on success, the failure reason otherwise.
     detail = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            # One live run per project, enforced rather than checked. The view
+            # read in-flight state and then created rows, so two overlapping
+            # presses of "did recent commits fix these?" both saw an empty
+            # backlog of runs and both launched a full paid agent per project.
+            # Same argument WorkerCommand's partial unique constraints make:
+            # the constraint is the check, because a check-then-create is a race.
+            # Keyed on the chunk too, because one press of a 120-report backlog
+            # is legitimately three launched runs for the one project.
+            models.UniqueConstraint(
+                fields=["project", "chunk_index"],
+                condition=models.Q(status="launched"),
+                name="unique_launched_recheck_per_project_chunk",
+            ),
+        ]
 
     def __str__(self) -> str:
         return f"SecurityRecheckRun: {self.project} ({self.status})"
