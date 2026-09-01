@@ -1,0 +1,49 @@
+{# The fix-agent panel, and the answer to its buttons. Rendered on the detail #}
+{# page and swapped by both endpoints, so it always shows the row's current #}
+{# state: never launched, launched (with the agent link), branch-pushed, or #}
+{# failed — plus whatever the last refresh had to say. #}
+<div class="fix-status">
+    {% if blocked %}
+    <div class="verify-result error-note">{{ blocked }}</div>
+    {% endif %}
+    {% if note %}
+    <div class="verify-result queued-note">{{ note }}</div>
+    {% endif %}
+
+    {% if report.fix_agent_id %}
+    <p>
+        Fix agent
+        <a href="https://cursor.com/agents/{{ report.fix_agent_id }}">{{ report.fix_agent_id }}</a>
+        launched {{ report.fix_launched_at|date:"Y-m-d H:i" }}
+        against <code>{{ report.fix_base_branch }}</code> —
+        {% if report.fix_status == "branch-pushed" %}
+            branch <code>{{ report.fix_branch }}</code> is on the fork.
+        {% elif report.fix_status == "failed" %}
+            <span class="badge badge-warning">failed</span> {{ report.fix_status_detail }}
+            {% if report.fix_branch %}
+            — branch <code>{{ report.fix_branch }}</code> is on the fork anyway; judge it yourself.
+            {% endif %}
+        {% else %}
+            <span class="badge">launched</span> no branch yet.
+        {% endif %}
+    </p>
+    {% elif report.fix_branch %}
+    <p>Fix branch <code>{{ report.fix_branch }}</code> is on the fork.</p>
+    {% endif %}
+
+    <button class="action-btn verify-btn"
+            hx-post="{% url 'dashboard:security_fix' report.pk %}"
+            hx-target="#fix-status-area"
+            hx-swap="innerHTML"
+            hx-confirm="Launch the fix agent? A Cursor cloud agent applies this report's patch, scrubs the wording, reviews itself, and pushes an innocuously-named branch to your fork.">
+        🛠 {% if report.fix_agent_id %}Re-launch fix agent{% else %}Fix with agent{% endif %}
+    </button>
+    {% if report.fix_agent_id or report.fix_branch %}
+    <button class="action-btn"
+            hx-post="{% url 'dashboard:security_fix_refresh' report.pk %}"
+            hx-target="#fix-status-area"
+            hx-swap="innerHTML">
+        ↻ Check for the branch
+    </button>
+    {% endif %}
+</div>
