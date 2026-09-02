@@ -1090,3 +1090,29 @@ class TestMergeQueueConfig:
         )
         assert config.merge_queue.enabled is True
         assert config.merge_queue.merge_script == "/opt/merge_spark_pr.py"
+
+
+class TestBranchScanBounds:
+    """Every knob is a bound on how much git runs, so zero is not a value.
+
+    `max_default_commits: 0` is `git log -n0`, which returns nothing and looks
+    exactly like a default branch with no matching commits — the sweep reports
+    "0 matched" and the cause is a typo in YAML.
+    """
+
+    def test_a_zero_bound_is_rejected(self) -> None:
+        from franktheunicorn.config.models import SecurityBranchScanConfig
+
+        with pytest.raises(ValidationError):
+            SecurityBranchScanConfig(max_default_commits=0)
+
+    def test_a_negative_bound_is_rejected(self) -> None:
+        from franktheunicorn.config.models import SecurityBranchScanConfig
+
+        with pytest.raises(ValidationError):
+            SecurityBranchScanConfig(max_reports_per_scan=-1)
+
+    def test_the_defaults_are_valid(self) -> None:
+        from franktheunicorn.config.models import SecurityBranchScanConfig
+
+        assert SecurityBranchScanConfig().max_branches > 0

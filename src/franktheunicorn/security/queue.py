@@ -161,29 +161,39 @@ def queue_version_follow_on(
     return version_map_queued, verify_queued, ""
 
 
-def queue_recheck_poll(*, priority: int = PRIORITY_BULK, exclude_pk: int | None = None) -> bool:
-    """Queue the wait on launched recheck runs unless one is already in flight.
+def queue_targetless(
+    command: str, *, priority: int = PRIORITY_BULK, exclude_pk: int | None = None
+) -> bool:
+    """Queue a whole-backlog *command* unless one is already waiting or running.
 
-    Targetless, so neither per-target unique constraint covers it and the
-    in-flight check is a SELECT — the pre-flight read ``queue_command`` dropped
-    is fine at this rate: one row per button press, not two thousand per
-    import.
+    The targetless half of this module's one policy. Both partial unique
+    constraints key on ``(command, target)``, so a command with no target is
+    covered by neither and the in-flight check has to be a SELECT — which is fine
+    at this rate: one row per button press, not two thousand per import.
 
-    *exclude_pk* is the poll handler re-queueing itself: its own row is still
-    ``running`` at that moment and would otherwise count as the in-flight one,
-    so every poll after the first would decline and the runs would go unread.
+    Spelled once because it was spelled three times. ``queue_recheck_poll`` and
+    the two git sweeps each re-implemented it, which is exactly what
+    ``queue_command`` exists to prevent for targeted commands, and any change to
+    the policy had to be made in three places.
+
+    *exclude_pk* is a handler re-queueing itself: its own row is still ``running``
+    at that moment and would otherwise count as the in-flight one, so every poll
+    after the first would decline and the recheck runs would go unread.
     """
-    in_flight = WorkerCommand.objects.filter(
-        command="poll_security_rechecks", status__in=_IN_FLIGHT_STATUSES
-    )
+    in_flight = WorkerCommand.objects.filter(command=command, status__in=_IN_FLIGHT_STATUSES)
     if exclude_pk is not None:
         in_flight = in_flight.exclude(pk=exclude_pk)
     if in_flight.exists():
-        logger.info("poll_security_rechecks already in flight")
+        logger.info("%s already in flight", command)
         return False
-    WorkerCommand.objects.create(command="poll_security_rechecks", priority=priority)
-    logger.info("Queued poll_security_rechecks (priority %d)", priority)
+    WorkerCommand.objects.create(command=command, priority=priority)
+    logger.info("Queued %s (priority %d)", command, priority)
     return True
+
+
+def queue_recheck_poll(*, priority: int = PRIORITY_BULK, exclude_pk: int | None = None) -> bool:
+    """Queue the wait on launched recheck runs unless one is already in flight."""
+    return queue_targetless("poll_security_rechecks", priority=priority, exclude_pk=exclude_pk)
 
 
 #: The two git-only backlog sweeps. Targetless like ``poll_security_rechecks``:
@@ -204,12 +214,7 @@ def queue_branch_sweep(command: str, *, priority: int = PRIORITY_BULK) -> bool:
     if command not in _SWEEP_COMMANDS:
         msg = f"queue_branch_sweep only queues {_SWEEP_COMMANDS}, got {command!r}"
         raise ValueError(msg)
-    if WorkerCommand.objects.filter(command=command, status__in=_IN_FLIGHT_STATUSES).exists():
-        logger.info("%s already in flight", command)
-        return False
-    WorkerCommand.objects.create(command=command, priority=priority)
-    logger.info("Queued %s (priority %d)", command, priority)
-    return True
+    return queue_targetless(command, priority=priority)
 
 
 def cancel_pending_for_reports(report_ids: list[int]) -> int:

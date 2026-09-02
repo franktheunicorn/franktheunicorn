@@ -141,11 +141,19 @@ src/franktheunicorn/
                      #   128 is "couldn't parse a patch" and is skipped, not
                      #   reported as "the code moved". The branch checked comes from
                      #   fix_base_branch or, for the whole imported backlog,
-                     #   fix_agent.base_branch_for off the archive name. Two
-                     #   targetless worker commands at bulk priority
-                     #   (match_security_branches, scan_security_fixed) — a
-                     #   300-branch walk in the interactive lane would park the lane
-                     #   that exists so a click doesn't wait behind bulk work.
+                     #   fix_agent.base_branch_for off the archive name.
+                     #   SecurityReport.confirmed_branch_q / has_confirmed_branch is
+                     #   the name for "a branch somebody vouched for" — three
+                     #   readers mean that and each had spelled it as "the field is
+                     #   non-empty", which after the auto-tie silently suppressed the
+                     #   version map and the verifier and shrank the CVE-no-branch
+                     #   worklist. That queue deliberately keeps machine ties (it is
+                     #   the operator's worklist) while recheck.untriaged_by_project
+                     #   deliberately drops them (it is deciding whether to spend a
+                     #   cloud agent). Two targetless worker commands at bulk
+                     #   priority (match_security_branches, scan_security_fixed) —
+                     #   a 300-branch walk in the interactive lane would park the
+                     #   lane that exists so a click doesn't wait behind bulk work.
   curator/           # Textual TUI for curating voice datasets from
                      #   historical comments (used to seed fine-tuning;
                      #   not part of the live review path)

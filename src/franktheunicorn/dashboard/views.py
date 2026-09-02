@@ -1566,11 +1566,18 @@ def security_report_rerun_triage(request: HttpRequest) -> HttpResponse:
                 triage_skipped_inflight += 1
         # Not gated on operator_has_ruled: a valid report *with* a CVE is precisely
         # what version mapping is for, so the general ruled test would turn the
-        # follow-on off for its main case. A recorded fix branch is the narrow signal
-        # that the work is done, and this path is the expensive one — the verifier
-        # bills a coding-agent run per active release branch.
+        # follow-on off for its main case. A *confirmed* fix branch is the narrow
+        # signal that the work is done, and this path is the expensive one — the
+        # verifier bills a coding-agent run per active release branch.
+        #
+        # has_confirmed_branch, not the raw field: branch_scan writes that column
+        # off a branch name, and reading it raw meant a heuristic tie silently
+        # suppressed both the version map and the verifier for a report the
+        # operator had ruled valid and never recorded versions for.
         elif (
-            report.status == "valid" and not report.affected_versions and not report.fixed_in_branch
+            report.status == "valid"
+            and not report.affected_versions
+            and not report.has_confirmed_branch
         ):
             vm, verify, skipped = queue_version_follow_on(report, operator_config)
             if skipped:
@@ -2715,11 +2722,24 @@ def security_scan_fixed(request: HttpRequest) -> HttpResponse:
     so rather than reporting a silent zero.
     """
     from franktheunicorn.config.loader import get_operator_config
+    from franktheunicorn.security.branch_scan import projects_with_open_reports
     from franktheunicorn.security.queue import queue_branch_sweep
 
     reason = _branch_sweep_gate_reason(get_operator_config())
     if reason:
         messages.error(request, reason)
+        return _back_to_security_list(request)
+    if not projects_with_open_reports():
+        # Asked first and separately: the count below also requires a project, so
+        # a backlog of pasted reports that all carry patches and none of which has
+        # a project produced "no report carries a proposed patch" — a false reason,
+        # pointing at a sibling button that cannot run for the same unmentioned
+        # one. The other sweep's button already diagnoses this correctly.
+        messages.info(
+            request,
+            "No open report is attached to a project, so there is no repo to look at. "
+            "A report needs a project before either git sweep can run.",
+        )
         return _back_to_security_list(request)
     patchable = (
         SecurityReport.objects.filter(project__isnull=False, status__in=("new", "valid"))

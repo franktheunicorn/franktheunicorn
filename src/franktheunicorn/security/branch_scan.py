@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from django.db.models import QuerySet
 from django.utils import timezone
 
 from franktheunicorn.core.models import SecurityReport
@@ -44,6 +45,7 @@ from franktheunicorn.security.verifier import (
     _checkout,
     _default_branch,
     _local_checkout,
+    origin_refs_by_recency,
     refresh_from_upstream,
     resolve_verifier_reviewer,
 )
@@ -146,9 +148,6 @@ class BranchEvidence:
     """
 
     name: str
-    #: Lowercased commit messages, kept only so a match can quote the commit
-    #: that produced it.
-    messages: list[str] = field(default_factory=list)
     #: Every token in the branch name alone. Separate from the commit tokens
     #: because a name match is the stronger signal — somebody typed it on
     #: purpose.
@@ -156,19 +155,27 @@ class BranchEvidence:
     name_cves: set[str] = field(default_factory=set)
     tokens: set[str] = field(default_factory=set)
     cves: set[str] = field(default_factory=set)
+    #: needle -> the **original-cased** subject of the first commit carrying it,
+    #: for the reason string. Built in the same pass that fills ``tokens`` and
+    #: ``cves``, which replaced keeping every message around and scanning them.
+    #:
+    #: Both halves of that were wrong. The list was up to 4 MB per branch (2000
+    #: default-branch commits x 2000 chars) and ``quote`` linear-scanned it once
+    #: per matching candidate — and the "hits are rare so a scan is fine"
+    #: defence is exactly backwards for the default branch, whose whole point is
+    #: to match a lot. And it scanned the *lowercased* copy, so the reason read
+    #: "tighten foo validation" for a commit titled "[SPARK-12345][SQL] Tighten
+    #: Foo validation" — which no ``git log --grep`` or GitHub search will find,
+    #: leaving the operator unable to check the one claim the reason exists to
+    #: make checkable.
+    subjects: dict[str, str] = field(default_factory=dict)
     #: Paths the branch's own commits touched. Empty for the default branch —
     #: see :func:`gather_branch_evidence`.
     paths: set[str] = field(default_factory=set)
 
     def quote(self, needle: str) -> str:
-        """The subject of the first commit whose message contains *needle*.
-
-        Only called on a hit, which is why it can afford to be a linear scan.
-        """
-        for message in self.messages:
-            if needle in message:
-                return message.splitlines()[0][:100]
-        return ""
+        """The original-cased subject of the first commit carrying *needle*."""
+        return self.subjects.get(needle, "")
 
 
 @dataclass
@@ -329,7 +336,9 @@ def list_origin_branches(
 
     So the count cap and the activity window are the whole cost control, and the
     window is wider than the verifier's: a fix branch pushed and then forgotten
-    in February is the case this exists for.
+    in February is the case this exists for. The ref listing itself is shared with
+    ``select_branches`` (:func:`origin_refs_by_recency`) — this used to be a copy
+    of it, and what the copy dropped is the paragraph below.
 
     *default_branch* is seeded first and exempt from the cap. Required rather
     than defaulted, because a default of ``""`` is silently the bug this
@@ -343,35 +352,24 @@ def list_origin_branches(
     to reach — is never looked at. The activity window can drop it too, on a
     project dormant longer than a year.
     """
-    listing = executor.run(
-        [
-            "git",
-            "for-each-ref",
-            "--sort=-committerdate",
-            "--format=%(refname:short) %(committerdate:unix)",
-            "refs/remotes/origin",
-        ],
-        cwd=cwd,
-        timeout=_GIT_TIMEOUT_SECONDS,
-    )
-    if listing is None or not listing.ok:
-        detail = "no result" if listing is None else (listing.stderr or "").strip()[:200]
-        logger.warning("Could not list branches in %s (%s)", cwd, detail)
-        return []
+    refs = origin_refs_by_recency(executor, cwd)
+    if refs is None:
+        # Degrade to the default branch, which ``select_branches`` does and the
+        # first version of this did not: ``_prepare`` has already resolved it by
+        # now, and a transient for-each-ref failure otherwise threw away the one
+        # branch most likely to carry a landed fix and failed the whole project's
+        # sweep with "no branches could be listed".
+        logger.warning(
+            "Scanning the default branch (%s) of %s only.",
+            default_branch or "none resolved",
+            cwd,
+        )
+        return [default_branch] if default_branch else []
     cutoff = time.time() - config.branch_active_within_days * 86400
     names: list[str] = [default_branch] if default_branch else []
     seen = set(names)
-    for line in listing.stdout.splitlines():
-        parts = line.split()
-        if len(parts) != 2:
-            continue
-        ref, stamp = parts
-        name = ref.removeprefix("origin/")
-        if name == "HEAD" or name in seen:
-            continue
-        try:
-            committed = int(stamp)
-        except ValueError:
+    for name, committed in refs:
+        if name in seen:
             continue
         if committed < cutoff:
             continue
@@ -446,18 +444,42 @@ def gather_branch_evidence(
     )
     if messages is None or not messages.ok:
         # A branch deleted between the listing and here, or a clone too shallow
-        # to reach the merge base. One branch's evidence, not the run.
+        # to reach the merge base. One branch's evidence, not the run — so DEBUG
+        # for a topic branch.
+        #
+        # Not for the default branch. That is the deepest and most valuable
+        # message range there is, and losing it silently (a shallow clone, a 120s
+        # timeout on a Spark-sized log) leaves the sweep reporting "scanned 300
+        # branch(es), 0 matched" with nothing above DEBUG saying why —
+        # indistinguishable from "no fix exists anywhere", which is the failure
+        # the --no-merges note above is about. A configured tool that can't run
+        # logs at WARNING.
         detail = "no result" if messages is None else (messages.stderr or "").strip()[:200]
-        logger.debug("git log failed for %s in %s: %s", branch, cwd, detail)
+        if branch == default_branch:
+            logger.warning(
+                "git log failed for the DEFAULT branch %s in %s (%s) — the branch sweep's "
+                "main message signal is missing for this project, so a fix that landed on "
+                "%s will not be found.",
+                branch,
+                cwd,
+                detail,
+                branch,
+            )
+        else:
+            logger.debug("git log failed for %s in %s: %s", branch, cwd, detail)
         return evidence
     for chunk in messages.stdout.split("\x1e"):
-        text = chunk.strip().lower()
-        if not text:
+        original = chunk.strip()[:_MAX_MESSAGE_CHARS]
+        if not original:
             continue
-        text = text[:_MAX_MESSAGE_CHARS]
-        evidence.messages.append(text)
-        evidence.tokens.update(_TOKEN_RE.findall(text))
-        evidence.cves.update(_CVE_RE.findall(text))
+        subject = original.splitlines()[0][:100]
+        lowered = original.lower()
+        # First commit carrying a needle wins, and the log is newest-first, so
+        # the quoted commit is the most recent one that mentions it.
+        for needle in (*_TOKEN_RE.findall(lowered), *_CVE_RE.findall(lowered)):
+            evidence.subjects.setdefault(needle, subject)
+        evidence.tokens.update(_TOKEN_RE.findall(lowered))
+        evidence.cves.update(_CVE_RE.findall(lowered))
 
     if want_paths:
         touched = executor.run(
@@ -651,17 +673,23 @@ def match_fix_branches(project: Project, operator_config: OperatorConfig) -> Bra
     """
     run = BranchMatchRun(project=project.full_name)
     config = operator_config.security_triage.branch_scan
+
+    # Before the fetch, not after. `projects_with_open_reports` only promises an
+    # open report exists, not that any of them needs a branch — so a project
+    # whose backlog is fully tied paid for a full `git fetch --all` of a
+    # Spark-sized mirror and then logged "every report already has a branch".
+    # Two buttons times N projects times one pointless fetch each.
+    candidates = _candidates_for(project)
+    run.reports_considered = len(candidates)
+    if not candidates:
+        logger.info("Branch match for %s: every report already has a branch.", project.full_name)
+        return run
+
     checkout = _prepare(project, operator_config)
     run.stale_warning = checkout.stale_warning
     if checkout.error or checkout.executor is None:
         run.error = checkout.error
         logger.info("Branch match skipped for %s: %s", project.full_name, run.error)
-        return run
-
-    candidates = _candidates_for(project)
-    run.reports_considered = len(candidates)
-    if not candidates:
-        logger.info("Branch match for %s: every report already has a branch.", project.full_name)
         return run
 
     branches = list_origin_branches(
@@ -713,19 +741,33 @@ def _apply(candidate: _Candidate, now: datetime) -> bool:
     field is the documented way to reject one; without ``rejected_branch`` the
     same name scored the same 0.95 on the next run and came straight back, which
     is the loop ``fix_agent``'s ``fix_superseded`` exists to avoid.
+
+    Which is why declining a rejected branch leaves ``branch_match_applied``
+    alone. That flag, set with an empty ``fixed_in_branch``, *is* the rejection
+    record — so writing the freshly-computed False over it destroyed the thing
+    the decline was reading. Measured over three sweeps: applied, cleared by the
+    operator, declined-and-forgotten, re-applied. It also stops the templates
+    re-offering the rejected name as a suggestion, since both gate on
+    ``not branch_match_applied``.
+
+    One rejection is remembered, not a list: the two signals that can auto-tie
+    are narrow enough that two branches competing for one report is not a case
+    worth a JSON column for.
     """
     match = candidate.best
     if match is None:
         return False
-    applied = match.confidence >= AUTO_TIE_CONFIDENCE and match.branch != candidate.rejected_branch
+    rejected = bool(candidate.rejected_branch) and match.branch == candidate.rejected_branch
+    applied = match.confidence >= AUTO_TIE_CONFIDENCE and not rejected
     fields: dict[str, object] = {
         "branch_match_branch": match.branch[:200],
         "branch_match_confidence": match.confidence,
         "branch_match_reason": match.reason[:500],
-        "branch_match_applied": applied,
         "branch_matched_at": now,
         "updated_at": now,
     }
+    if not rejected:
+        fields["branch_match_applied"] = applied
     if applied:
         fields["fixed_in_branch"] = match.branch
     written = (
@@ -738,7 +780,7 @@ def _apply(candidate: _Candidate, now: datetime) -> bool:
     return bool(written and applied)
 
 
-def _fixed_scan_candidates(project: Project) -> list[SecurityReport]:
+def _fixed_scan_candidates(project: Project) -> QuerySet[SecurityReport]:
     """Reports of *project* worth asking git whether they are already fixed.
 
     Wider than the agent recheck's set, which is untriaged reports only. This
@@ -748,7 +790,7 @@ def _fixed_scan_candidates(project: Project) -> list[SecurityReport]:
     is worth knowing. A report with a branch recorded is left out: that question
     is already answered.
     """
-    return list(
+    return (
         SecurityReport.objects.filter(project=project, status__in=("new", "valid"))
         .filter(fixed_in_branch="")
         .exclude(proposed_patch="")
@@ -781,6 +823,37 @@ def scan_already_fixed(project: Project, operator_config: OperatorConfig) -> Fix
     reports that were in the set and still couldn't be answered.
     """
     run = FixedScanRun(project=project.full_name)
+    config = operator_config.security_triage.branch_scan
+
+    # Grouping needs three columns, not the whole row. Loading full instances
+    # meant every candidate's `proposed_patch` (up to 400 KB), `raw_text` and
+    # `parsed_poc` were resident before the first git call — hundreds of MB on a
+    # 500-report backlog, for patches each needed for a couple of seconds. The
+    # patch itself is fetched per group, below.
+    shortlist = list(
+        _fixed_scan_candidates(project).only("pk", "fix_base_branch", "source_archive")[
+            : config.max_reports_per_scan
+        ]
+    )
+    if not shortlist:
+        logger.info(
+            "Fixed-scan for %s: no open report carries a proposed patch, so git has "
+            "nothing to check. The cloud-agent recheck is the one that can read commits.",
+            project.full_name,
+        )
+        return run
+    total = _fixed_scan_candidates(project).count()
+    if total > len(shortlist):
+        # Said out loud. A silent top-N reads as "we checked everything".
+        logger.info(
+            "Fixed-scan for %s: checking the %d highest-priority of %d patch-carrying "
+            "report(s) (security_triage.branch_scan.max_reports_per_scan); press again "
+            "after triaging those to reach the rest.",
+            project.full_name,
+            len(shortlist),
+            total,
+        )
+
     checkout = _prepare(project, operator_config)
     run.stale_warning = checkout.stale_warning
     if checkout.error or checkout.executor is None:
@@ -788,35 +861,26 @@ def scan_already_fixed(project: Project, operator_config: OperatorConfig) -> Fix
         logger.info("Fixed-scan skipped for %s: %s", project.full_name, run.error)
         return run
 
-    reports = _fixed_scan_candidates(project)
-    if not reports:
-        logger.info(
-            "Fixed-scan for %s: no open report carries a proposed patch, so git has "
-            "nothing to check. The cloud-agent recheck is the one that can read commits.",
-            project.full_name,
-        )
-        return run
-
-    grouped: dict[str, list[SecurityReport]] = {}
-    for report in reports:
-        branch = (
-            report.fix_base_branch.strip() or base_branch_for(report) or checkout.default_branch
-        )
-        grouped.setdefault(branch, []).append(report)
+    grouped: dict[str, list[int]] = {}
+    for stub in shortlist:
+        branch = stub.fix_base_branch.strip() or base_branch_for(stub) or checkout.default_branch
+        grouped.setdefault(branch, []).append(stub.pk)
 
     logger.info(
         "Reverse-applying %d proposed patch(es) for %s across %d branch(es).",
-        len(reports),
+        len(shortlist),
         project.full_name,
         len(grouped),
     )
     now = timezone.now()
-    for branch, group in grouped.items():
+    for branch, pks in grouped.items():
         if not _checkout(checkout.executor, checkout.cwd, branch):
-            for _ in group:
+            for _ in pks:
                 run.skip(f"origin/{branch} could not be checked out")
             continue
-        for report in group:
+        # One group's patches at a time, so the resident set is a group rather
+        # than the backlog.
+        for report in SecurityReport.objects.filter(pk__in=pks).only("pk", "proposed_patch"):
             if _scan_one(checkout.executor, checkout.cwd, report, branch, run, now):
                 run.reports_considered += 1
     logger.info("%s", run.summary())

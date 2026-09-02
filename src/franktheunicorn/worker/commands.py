@@ -32,7 +32,7 @@ import logging
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from django.db import transaction
 from django.utils import timezone
@@ -40,10 +40,19 @@ from django.utils import timezone
 from franktheunicorn.core.models import WorkerCommand
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from franktheunicorn.backends.base import ForgeClient
     from franktheunicorn.config.models import OperatorConfig, ProjectConfig
+    from franktheunicorn.core.models import Project
 
 logger = logging.getLogger(__name__)
+
+
+class _HasSummary(Protocol):
+    """What both sweeps' run objects have in common: one line for a command log."""
+
+    def summary(self) -> str: ...
 
 
 def _forge_client_for(
@@ -434,13 +443,15 @@ def _run_security_triage(cmd: WorkerCommand, operator_config: OperatorConfig) ->
     # ``fixed_in_branch`` for the same reason as the status check, and it is the
     # cheaper thing to check: the operator recording which branch carries the fix
     # says the question this fan-out answers — which versions are affected, is it
-    # still there — has already been settled by hand. A bulk re-triage queued
+    # still there — has already been settled by hand. By hand is the operative
+    # part, hence has_confirmed_branch: branch_scan writes the same column off a
+    # branch name, and nothing about that settles anything. A bulk re-triage queued
     # before that happens arrives after it, so the guard has to be here and not
     # only at the button.
     if (
         report.auto_triage_status == "valid"
         and report.status in ("new", "triaging", "valid")
-        and not report.fixed_in_branch
+        and not report.has_confirmed_branch
     ):
         from franktheunicorn.security.queue import queue_version_follow_on
 
@@ -549,6 +560,35 @@ def _find_report_introduction(cmd: WorkerCommand, operator_config: OperatorConfi
         )
 
 
+def _sweep_log(
+    cmd: WorkerCommand,
+    projects: list[Project],
+    sweep: Callable[[Project, OperatorConfig], _HasSummary],
+    operator_config: OperatorConfig,
+) -> str:
+    """Run *sweep* over every project, keeping what finished when one doesn't.
+
+    Per project rather than one comprehension, because the comprehension was
+    evaluated in full before ``cmd.log`` was assigned: project 57 of 60 raising
+    — an OSError out of ``prepare_repo``, a database error from an ``.update()``
+    — left the command failed with an empty log and the 56 finished projects'
+    results thrown away. The sweeps' docstrings promise they never raise; nothing
+    enforces that, and a promise is not a reason to lose an hour of git.
+
+    ``cmd.log`` is written as we go as well as returned, so a sweep killed
+    mid-run still shows what it got through.
+    """
+    lines: list[str] = []
+    for project in projects:
+        try:
+            lines.append(sweep(project, operator_config).summary())
+        except Exception:
+            logger.exception("Sweep failed for %s; continuing with the rest", project.full_name)
+            lines.append(f"{project.full_name}: the sweep raised — see the worker log")
+        cmd.log = "\n".join(lines)
+    return "\n".join(lines)
+
+
 def _match_security_branches(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
     """Fetch origin and tie a fix branch to every report that hasn't got one.
 
@@ -562,8 +602,7 @@ def _match_security_branches(cmd: WorkerCommand, operator_config: OperatorConfig
     if not projects:
         cmd.log = "branch match: no project has an open security report"
         return
-    lines = [run.summary() for run in (match_fix_branches(p, operator_config) for p in projects)]
-    cmd.log = "\n".join(lines)
+    cmd.log = _sweep_log(cmd, projects, match_fix_branches, operator_config)
 
 
 def _scan_security_fixed(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
@@ -574,8 +613,7 @@ def _scan_security_fixed(cmd: WorkerCommand, operator_config: OperatorConfig) ->
     if not projects:
         cmd.log = "fixed-scan: no project has an open security report"
         return
-    lines = [run.summary() for run in (scan_already_fixed(p, operator_config) for p in projects)]
-    cmd.log = "\n".join(lines)
+    cmd.log = _sweep_log(cmd, projects, scan_already_fixed, operator_config)
 
 
 def _run_agents(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:

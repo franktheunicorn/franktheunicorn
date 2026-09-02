@@ -917,6 +917,33 @@ class TestGitSweepHandlers:
         assert "2 likely fixed" in cmd.log
 
     @pytest.mark.django_db
+    def test_one_project_raising_keeps_the_others_results(self) -> None:
+        """The whole comprehension used to be evaluated before `cmd.log` was
+        assigned, so project 57 of 60 raising lost the 56 that had finished. The
+        sweeps promise they never raise; nothing enforces that, and a promise is
+        not a reason to throw away an hour of git."""
+        from franktheunicorn.security.branch_scan import BranchMatchRun
+        from tests.factories import ProjectFactory, SecurityReportFactory
+
+        good, bad = ProjectFactory(), ProjectFactory()
+        SecurityReportFactory(project=good)
+        SecurityReportFactory(project=bad)
+        cmd = WorkerCommand.objects.create(command="match_security_branches", status="running")
+
+        def _one_explodes(project: Any, _config: Any) -> BranchMatchRun:
+            if project.pk == bad.pk:
+                raise OSError("prepare_repo blew up")
+            return BranchMatchRun(project=project.full_name, applied=1)
+
+        with patch(
+            "franktheunicorn.security.branch_scan.match_fix_branches", side_effect=_one_explodes
+        ):
+            _dispatch(cmd, make_operator_config())
+
+        assert good.full_name in cmd.log
+        assert "the sweep raised" in cmd.log
+
+    @pytest.mark.django_db
     def test_an_empty_backlog_says_so_rather_than_looking_like_a_clean_sweep(self) -> None:
         """Zero projects and zero findings must not read the same."""
         cmd = WorkerCommand.objects.create(command="match_security_branches", status="running")

@@ -1555,6 +1555,35 @@ class SecurityBranchScanConfig(BaseModel):
     max_default_commits: int = 2000
     #: Paths one branch contributes to the weak path-overlap signal.
     max_paths_per_branch: int = 400
+    #: Reports one already-fixed sweep will reverse-apply, highest priority
+    #: first. The only bound on that half: every knob above caps the branch
+    #: matcher, while the reverse-apply pass is two ``git apply --check`` calls
+    #: per report at a 120s timeout each — a worst case of tens of hours on a
+    #: 500-report backlog, with no config that shortened it and no way to stop it
+    #: short of killing the worker. What it drops is logged rather than silently
+    #: truncated.
+    max_reports_per_scan: int = 250
+
+    @field_validator(
+        "branch_active_within_days",
+        "max_branches",
+        "max_commits_per_branch",
+        "max_default_commits",
+        "max_paths_per_branch",
+        "max_reports_per_scan",
+    )
+    @classmethod
+    def bounds_must_be_positive(cls, v: int) -> int:
+        """Reject a zero or negative bound here, where the operator can see it.
+
+        ``max_default_commits: 0`` is ``git log -n0``, which returns nothing and
+        looks exactly like a project whose default branch has no matching commits
+        — the sweep reports "0 matched" and the reason is a typo in YAML.
+        """
+        if v <= 0:
+            msg = "security_triage.branch_scan bounds must be positive"
+            raise ValueError(msg)
+        return v
 
 
 class SecurityTriageConfig(BaseModel):

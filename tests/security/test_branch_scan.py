@@ -142,11 +142,18 @@ class TestBranchListing:
         branches = list_origin_branches(executor, "/w/spark", SecurityBranchScanConfig(), "dormant")
         assert branches == ["dormant"]
 
-    def test_a_failed_listing_is_empty_not_a_crash(self) -> None:
+    def test_a_failed_listing_degrades_to_the_default_branch(self) -> None:
+        """`select_branches` does this and the first copy of it did not, so a
+        transient for-each-ref failure threw away the branch most likely to carry
+        a landed fix and failed the whole project's sweep."""
         executor = _GitExecutor({"for-each-ref": ExecResult(1, "", "not a repo")})
-        assert (
-            list_origin_branches(executor, "/w/spark", SecurityBranchScanConfig(), "master") == []
-        )
+        assert list_origin_branches(executor, "/w/spark", SecurityBranchScanConfig(), "master") == [
+            "master"
+        ]
+
+    def test_a_failed_listing_with_no_default_branch_is_empty(self) -> None:
+        executor = _GitExecutor({"for-each-ref": ExecResult(1, "", "not a repo")})
+        assert list_origin_branches(executor, "/w/spark", SecurityBranchScanConfig(), "") == []
 
 
 class TestEvidence:
@@ -174,6 +181,8 @@ class TestEvidence:
         assert "cve-2025-12345" in evidence.name_cves
         assert "f0012" in evidence.tokens
         assert evidence.paths == {"sql/core/Foo.scala", "sql/core/Bar.scala"}
+        # Quoted with its original casing, from the same single pass.
+        assert evidence.quote("cve-2025-12345") == "Tighten Foo validation"
 
     def test_the_default_branch_contributes_no_paths(self) -> None:
         """Its range is thousands of commits, so its path set is most of the repo
@@ -224,7 +233,21 @@ class TestEvidence:
         evidence = gather_branch_evidence(
             executor, "/w/spark", "gone", "master", SecurityBranchScanConfig()
         )
-        assert evidence.messages == []
+        assert evidence.subjects == {}
+        assert evidence.cves == set()
+
+    def test_a_failed_log_on_the_default_branch_warns(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A topic branch losing its log is one branch. The default branch losing
+        it means the sweep's main signal is gone and it will report 0 matched —
+        indistinguishable from "no fix exists" if it only whispers at DEBUG."""
+        executor = _GitExecutor({"--format=%s%n%b%n": ExecResult(128, "", "shallow clone")})
+        with caplog.at_level("WARNING"):
+            gather_branch_evidence(
+                executor, "/w/spark", "master", "master", SecurityBranchScanConfig()
+            )
+        assert any("DEFAULT branch" in r.message for r in caplog.records)
 
 
 class TestScoring:
@@ -264,20 +287,21 @@ class TestScoring:
         and at auto-tie strength both wrote fixed_in_branch for an open hole."""
         evidence = BranchEvidence(
             name="topic",
-            messages=["tighten foo validation\n\nfixes cve-2025-12345."],
             cves={"cve-2025-12345"},
+            subjects={"cve-2025-12345": "[SPARK-12345][SQL] Tighten Foo validation"},
         )
         match = score_branch(self._candidate(), evidence)
 
         assert match is not None
         assert match.confidence < AUTO_TIE_CONFIDENCE
-        assert "tighten foo validation" in match.reason
+        # Original casing, so the operator can actually find the commit.
+        assert "[SPARK-12345][SQL] Tighten Foo validation" in match.reason
 
     def test_a_revert_naming_a_cve_cannot_auto_tie(self) -> None:
         evidence = BranchEvidence(
             name="topic",
-            messages=["revert the cve-2025-12345 fix, it broke the build"],
             cves={"cve-2025-12345"},
+            subjects={"cve-2025-12345": "Revert the CVE-2025-12345 fix, it broke the build"},
         )
         match = score_branch(self._candidate(), evidence)
 
@@ -458,6 +482,65 @@ class TestMatchFixBranches:
         assert run.applied == 0
         # Still recorded as a suggestion — we don't pretend we found nothing.
         assert report.branch_match_branch == "fix-cve-2025-12345"
+
+    def test_a_rejection_survives_the_sweep_that_honours_it(self) -> None:
+        """Three sweeps, because two passed while the bug was live. Sweep 2
+        declined correctly but wrote the freshly-computed `branch_match_applied
+        =False` over the flag it had just read, so sweep 3 saw no rejection and
+        re-applied. Measured: applied / cleared / declined-and-forgotten /
+        re-applied."""
+        project = ProjectFactory()
+        report = SecurityReportFactory(project=project, matched_cve_id="CVE-2025-12345")
+        executor = self._executor()
+
+        _run_with(executor, match_fix_branches, project, _operator())
+        report.refresh_from_db()
+        assert report.fixed_in_branch == "fix-cve-2025-12345"
+
+        # The operator clears it, which is the documented rejection.
+        SecurityReport.objects.filter(pk=report.pk).update(fixed_in_branch="")
+
+        for sweep in (2, 3):
+            run = _run_with(executor, match_fix_branches, project, _operator())
+            report.refresh_from_db()
+            assert report.fixed_in_branch == "", f"re-applied on sweep {sweep}"
+            assert run.applied == 0, f"re-applied on sweep {sweep}"
+            # The flag is the record, so it has to still be there for the next one.
+            assert report.branch_match_applied is True, f"record lost on sweep {sweep}"
+
+    def test_a_machine_tie_stays_in_the_cve_without_branch_queue(self) -> None:
+        """That queue is the operator's worklist and its visible count, so
+        retiring rows on the machine's word silently shrinks the work."""
+        project = ProjectFactory()
+        report = SecurityReportFactory(project=project, matched_cve_id="CVE-2025-12345")
+
+        _run_with(self._executor(), match_fix_branches, project, _operator())
+
+        report.refresh_from_db()
+        assert report.fixed_in_branch == "fix-cve-2025-12345"
+        assert SecurityReport.objects.filter(
+            SecurityReport.cve_without_branch_q(), pk=report.pk
+        ).exists()
+
+        # The operator confirming it is what takes it out.
+        SecurityReport.objects.filter(pk=report.pk).update(branch_match_applied=False)
+        assert not SecurityReport.objects.filter(
+            SecurityReport.cve_without_branch_q(), pk=report.pk
+        ).exists()
+
+    def test_a_machine_tie_does_not_suppress_the_expensive_follow_on(self) -> None:
+        """The version map and the verifier skip a report whose fix branch is
+        recorded, on the grounds that a human settled it. A branch name is not a
+        human."""
+        report = SecurityReportFactory(
+            status="valid",
+            fixed_in_branch="fix-cve-2025-12345",
+            branch_match_applied=True,
+        )
+        assert report.has_confirmed_branch is False
+
+        report.branch_match_applied = False
+        assert report.has_confirmed_branch is True
 
     def test_an_auto_tie_is_not_the_operator_having_ruled(self) -> None:
         """It flips fixed_in_branch, which every bulk path reads through
@@ -717,6 +800,44 @@ class TestScanAlreadyFixed:
         assert report.recheck_status == "likely-fixed"
         assert report.recheck_method == "git"
         assert run.fixed == 1
+
+    def test_the_shortlist_is_capped_and_says_what_it_dropped(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The only bound on this half. Two `git apply --check` calls per report at
+        a 120s timeout is tens of hours on a real backlog, and a silent top-N reads
+        as "we checked everything"."""
+        project = ProjectFactory()
+        for n in range(4):
+            self._report(project, priority=float(n))
+
+        with caplog.at_level("INFO"):
+            run = _run_with(
+                self._executor(reverse_ok=True),
+                scan_already_fixed,
+                project,
+                _operator(max_reports_per_scan=2),
+            )
+
+        assert run.reports_considered == 2
+        assert any("highest-priority of 4" in r.message for r in caplog.records)
+
+    def test_the_cap_takes_the_highest_priority_first(self) -> None:
+        project = ProjectFactory()
+        low = self._report(project, priority=1.0)
+        high = self._report(project, priority=9.0)
+
+        _run_with(
+            self._executor(reverse_ok=True),
+            scan_already_fixed,
+            project,
+            _operator(max_reports_per_scan=1),
+        )
+
+        high.refresh_from_db()
+        low.refresh_from_db()
+        assert high.recheck_status == "likely-fixed"
+        assert low.recheck_status == ""
 
     def test_the_archive_name_supplies_the_base_branch(self) -> None:
         """`fix_base_branch` has one writer and it needs a Fix-button press, so for

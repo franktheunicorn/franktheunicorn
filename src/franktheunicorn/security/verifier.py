@@ -409,6 +409,42 @@ def select_branches(
     maintained by fetch, so local branches may not exist at all.
     """
     default = _default_branch(executor, cwd)
+    refs = origin_refs_by_recency(executor, cwd)
+    if refs is None:
+        logger.warning("Verifying the default branch of %s only.", cwd)
+        return [default] if default else []
+
+    patterns = [re.compile(p) for p in verifier.branch_patterns]
+    cutoff = time.time() - verifier.branch_active_within_days * 86400
+    chosen: list[str] = [default] if default else []
+    for name, committed in refs:
+        if name in chosen:
+            continue
+        if committed < cutoff:
+            continue
+        if not any(p.match(name) for p in patterns):
+            continue
+        chosen.append(name)
+        if not unlimited and len(chosen) >= verifier.max_branches + (1 if default else 0):
+            break
+    return chosen
+
+
+def origin_refs_by_recency(executor: ToolExecutor, cwd: str) -> list[tuple[str, int]] | None:
+    """``(short name, committer unix time)`` for every ``origin`` branch, newest first.
+
+    ``None`` means the listing itself failed, which callers distinguish from "no
+    branches matched" — the two want different fallbacks and neither wants the
+    other's.
+
+    Extracted because :func:`select_branches` and
+    :func:`franktheunicorn.security.branch_scan.list_origin_branches` want the
+    same refs and different filters, and the second was a copy of the first. The
+    copy dropped the default-branch fallback on a failed listing, so a transient
+    ``for-each-ref`` failure aborted a whole project's sweep rather than scanning
+    the one branch most likely to carry a landed fix. The argv, the ``HEAD`` skip
+    and the malformed-line guards live here now so there is one of each.
+    """
     listing = executor.run(
         [
             "git",
@@ -421,35 +457,23 @@ def select_branches(
         timeout=_GIT_TIMEOUT_SECONDS,
     )
     if listing is None or not listing.ok:
-        detail = "no result" if listing is None else listing.stderr.strip()[:200]
-        logger.warning(
-            "Could not list branches in %s (%s); verifying the default branch only.", cwd, detail
-        )
-        return [default] if default else []
-
-    patterns = [re.compile(p) for p in verifier.branch_patterns]
-    cutoff = time.time() - verifier.branch_active_within_days * 86400
-    chosen: list[str] = [default] if default else []
+        detail = "no result" if listing is None else (listing.stderr or "").strip()[:200]
+        logger.warning("Could not list branches in %s (%s).", cwd, detail)
+        return None
+    refs: list[tuple[str, int]] = []
     for line in listing.stdout.splitlines():
         parts = line.split()
         if len(parts) != 2:
             continue
         ref, stamp = parts
         name = ref.removeprefix("origin/")
-        if name in chosen or name == "HEAD":
+        if name == "HEAD":
             continue
         try:
-            committed = int(stamp)
+            refs.append((name, int(stamp)))
         except ValueError:
             continue
-        if committed < cutoff:
-            continue
-        if not any(p.match(name) for p in patterns):
-            continue
-        chosen.append(name)
-        if not unlimited and len(chosen) >= verifier.max_branches + (1 if default else 0):
-            break
-    return chosen
+    return refs
 
 
 def refresh_from_upstream(executor: ToolExecutor, cwd: str) -> str:

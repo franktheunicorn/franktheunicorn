@@ -652,6 +652,26 @@ class SecurityReport(models.Model):
         return {key for key, _ in cls.STATUS_CHOICES} | {cls.CVE_NO_BRANCH_FILTER}
 
     @staticmethod
+    def confirmed_branch_q() -> Q:
+        """Match rows whose ``fixed_in_branch`` somebody actually vouched for.
+
+        ``branch_scan`` writes that column itself when a branch name contains the
+        report's CVE id, so "the field is non-empty" stopped meaning "a human
+        settled this". Three readers mean the second thing and each spelled the
+        first: :meth:`operator_has_ruled_q`, the expensive version-map/verifier
+        fan-out in the dashboard and the worker, and
+        :meth:`cve_without_branch_q`. Spelled once, because the next reader will
+        get it wrong the same way — the two that already had were both "skip the
+        expensive work, the operator has an answer" when nobody had answered.
+        """
+        return ~Q(fixed_in_branch="") & Q(branch_match_applied=False)
+
+    @property
+    def has_confirmed_branch(self) -> bool:
+        """:meth:`confirmed_branch_q`, for one instance."""
+        return bool(self.fixed_in_branch and not self.branch_match_applied)
+
+    @staticmethod
     def operator_has_ruled_q() -> Q:
         """:attr:`operator_has_ruled`, for a queryset.
 
@@ -661,11 +681,7 @@ class SecurityReport(models.Model):
         avoid: a run over a few thousand reports takes real wall-clock time, and a
         verdict typed at minute three is invisible to a snapshot taken at minute zero.
         """
-        return (
-            ~Q(operator_notes="")
-            | ~Q(matched_cve_id="")
-            | (~Q(fixed_in_branch="") & Q(branch_match_applied=False))
-        )
+        return ~Q(operator_notes="") | ~Q(matched_cve_id="") | SecurityReport.confirmed_branch_q()
 
     @property
     def operator_has_ruled(self) -> bool:
@@ -686,12 +702,7 @@ class SecurityReport(models.Model):
         CVE, or a fix branch)" — a false statement about a report nobody had
         looked at.
         """
-        machine_tied = self.branch_match_applied
-        return bool(
-            self.operator_notes
-            or self.matched_cve_id
-            or (self.fixed_in_branch and not machine_tied)
-        )
+        return bool(self.operator_notes or self.matched_cve_id or self.has_confirmed_branch)
 
     @staticmethod
     def cve_without_branch_q() -> Q:
@@ -711,10 +722,20 @@ class SecurityReport(models.Model):
         deliberately never sets that status — so a backlog-detected duplicate is
         still ``new``/``valid``, and six findings of one missing check in a shared
         helper would be six rows in the queue.
+
+        "No branch" means no *confirmed* branch — a machine tie from
+        ``branch_scan`` stays in the queue. This is a worklist and a count the
+        operator works through, so retiring rows on evidence this same class says
+        is not a ruling would silently shrink it on the machine's word. The tie is
+        still worth having here: the row renders the branch and the reason that
+        found it, so confirming one is a glance rather than git archaeology, which
+        was the point of the sweep. ``recheck.untriaged_by_project`` draws the
+        line the other way on purpose — that one is deciding whether to spend a
+        cloud agent, not what the operator has to look at.
         """
         return (
             Q(matched_cve_id__gt="")
-            & Q(fixed_in_branch="")
+            & ~SecurityReport.confirmed_branch_q()
             & Q(duplicate_of__isnull=True)
             & ~Q(status__in=SecurityReport.NO_FIX_OWED_STATUSES)
         )
@@ -901,16 +922,41 @@ class SecurityReport(models.Model):
     # report's own proposed patch. The second is proof where the first is a
     # judgement call, so which one answered is worth keeping — see
     # recheck_method. "" is "never checked".
-    #: "" / "still-valid" / "likely-fixed" / "unclear". The last is git-only:
-    #: the patch neither applies nor reverse-applies, so the code moved and
-    #: nothing cheap can say whether it moved because of this.
-    recheck_status = models.CharField(max_length=20, blank=True, default="")
+    #: Declared rather than left to three modules and two templates to agree
+    #: about by hand, which is the house pattern next door (``STATUS_CHOICES``)
+    #: and which this column had outgrown: ``branch_scan`` names three values,
+    #: ``recheck._VERDICTS`` names two of them, and the templates carried all four
+    #: as literals. A fifth added by either writer renders as the detail page's
+    #: ``{% else %}`` badge — "still plausibly valid" beside a reason saying
+    #: something else, the contradiction the ``unclear`` branch was just added to
+    #: stop.
+    RECHECK_STATUS_CHOICES = [
+        ("", "Never checked"),
+        ("still-valid", "Still valid"),
+        ("likely-fixed", "Likely fixed already"),
+        # git-only: the patch neither applies nor reverse-applies, so the code
+        # moved and nothing cheap can say whether it moved because of this.
+        ("unclear", "The code moved — unclear"),
+    ]
+
+    #: Which subsystem answered. See :attr:`recheck_method`.
+    RECHECK_METHOD_CHOICES = [
+        ("", "Never checked"),
+        ("agent", "Cloud agent read the commit log"),
+        ("git", "Reverse-applied the proposed patch"),
+    ]
+
+    recheck_status = models.CharField(
+        max_length=20, blank=True, default="", choices=RECHECK_STATUS_CHOICES
+    )
     recheck_reason = models.TextField(blank=True, default="")
     #: "" (never checked) / "agent" / "git". Not collapsed into recheck_reason,
     #: for the same reason introduced_method isn't collapsed into
     #: introduced_summary: the two answers are worth very different amounts and
     #: a column that hides which is a column nobody can act on.
-    recheck_method = models.CharField(max_length=20, blank=True, default="")
+    recheck_method = models.CharField(
+        max_length=20, blank=True, default="", choices=RECHECK_METHOD_CHOICES
+    )
     rechecked_at = models.DateTimeField(null=True, blank=True)
 
     # Which branch on origin looks like it carries the fix, from git alone

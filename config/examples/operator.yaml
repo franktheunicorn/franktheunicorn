@@ -537,7 +537,16 @@ digest_enabled: false
 #     max_commits_per_branch: 200  # per topic branch, vs the default branch
 #     max_default_commits: 2000    # on the default branch itself, where the
 #                                  # range is the project rather than one branch
-#     max_paths_per_branch: 400    # cap on the weak path-overlap signal
+#     max_paths_per_branch: 400    # cap on the weak path-overlap signal. A branch
+#                                  # that hits it has its path signal dropped
+#                                  # rather than truncated — a set that wide
+#                                  # matches every report and means nothing.
+#     # The only bound on the other half. Everything above caps the branch matcher;
+#     # the reverse-apply pass is two `git apply --check` calls per report at a 120s
+#     # timeout each, so an uncapped 500-report backlog is tens of hours of worker
+#     # time. Highest-priority first, and what it drops is logged rather than
+#     # silently truncated — press again after triaging those to reach the rest.
+#     max_reports_per_scan: 250
 #   email:
 #     enabled: true
 #     # --- Gmail over IMAP ---

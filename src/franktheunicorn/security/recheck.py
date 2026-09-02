@@ -192,8 +192,13 @@ def launch_recheck(
     return runs
 
 
-#: The two answers the prompt allows. Anything else is skipped, not guessed at.
-_VERDICTS = frozenset({"likely-fixed", "still-valid"})
+#: The two answers the prompt allows. Anything else is skipped, not guessed at —
+#: notably ``unclear``, which is real but is git's answer, not something an agent
+#: asked this question can conclude. Derived from the model's choices so a value
+#: renamed there doesn't silently stop parsing here.
+_VERDICTS = frozenset({"likely-fixed", "still-valid"}) & {
+    key for key, _ in SecurityReport.RECHECK_STATUS_CHOICES
+}
 
 #: Stamped on every verdict this module writes. ``branch_scan`` writes ``"git"``,
 #: and the column exists to keep a cloud agent's reading of a commit log from
