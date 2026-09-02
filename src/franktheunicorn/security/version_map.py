@@ -288,8 +288,14 @@ def map_report_versions(report: SecurityReport, operator_config: OperatorConfig)
 MAX_PATCH_CHARS = 400_000
 
 
-def _apply_check_script(patch: str) -> str | None:
+def _apply_check_script(patch: str, *, reverse: bool = False) -> str | None:
     """Shell to write *patch* to a temp file and ``git apply --check`` it.
+
+    *reverse* adds ``-R``, which flips the question from "does this fix still
+    apply" to "is this fix already in the tree" — see
+    :func:`franktheunicorn.security.branch_scan.scan_already_fixed`, which is
+    the only caller that wants that and the reason this takes a flag rather
+    than growing a near-copy in another module.
 
     Written to a file rather than piped, which was the ticket this module opened
     against itself: a remote driven over stdin (``command_mode: stdin``) has that
@@ -326,23 +332,34 @@ def _apply_check_script(patch: str) -> str | None:
         f"cat > \"$__frank_p\" <<'{delimiter}'\n"
         f"{body}\n"
         f"{delimiter}\n"
-        f'git apply --check --whitespace=nowarn "$__frank_p"\n'
+        f'git apply --check{" -R" if reverse else ""} --whitespace=nowarn "$__frank_p"\n'
         f"__frank_rc=$?\n"
         f'rm -f "$__frank_p"\n'
         f"exit $__frank_rc\n"
     )
 
 
-def _patch_applies(executor: ToolExecutor, cwd: str, branch: str, patch: str) -> bool | None:
-    """Whether ``git apply --check`` accepts *patch* on *branch*.
+def patch_apply_check(
+    executor: ToolExecutor, cwd: str, patch: str, *, reverse: bool = False
+) -> bool | None:
+    """Whether ``git apply --check`` accepts *patch* against whatever is checked out.
 
-    None if we could not even try (checkout failed, the patch is too big, or the
-    executor died). ``--check`` does not write the tree.
+    Does **not** check anything out — the caller decides which branch it is
+    asking about, which is what lets a sweep check out once and then ask about
+    every report in that group. None means we could not even try, which is not
+    the same answer as "no". ``--check`` never writes the tree either way.
+
+    Only exit 0 and 1 are answers. ``git apply`` exits **128** for input it could
+    not parse at all — measured against git 2.55 for prose, whitespace, an empty
+    file and a header-only diff, in both directions — and ``ExecResult.ok`` is
+    ``returncode == 0``, so reading the bool alone reports "does not apply" for a
+    patch git never read. That is the wrong answer twice over for the
+    already-fixed sweep, whose caller turns a double no into the confident
+    verdict "the code moved": nothing moved, and there was no patch.
     """
-    commit = _checkout(executor, cwd, branch)
-    if not commit:
+    if not patch.strip():
         return None
-    script = _apply_check_script(patch)
+    script = _apply_check_script(patch, reverse=reverse)
     if script is None:
         return None
     result = executor.run(
@@ -350,9 +367,16 @@ def _patch_applies(executor: ToolExecutor, cwd: str, branch: str, patch: str) ->
         cwd=cwd,
         timeout=_GIT_TIMEOUT_SECONDS,
     )
-    if result is None:
+    if result is None or result.returncode not in (0, 1):
         return None
-    return result.ok
+    return result.returncode == 0
+
+
+def _patch_applies(executor: ToolExecutor, cwd: str, branch: str, patch: str) -> bool | None:
+    """Whether *patch* still applies on *branch*. Checks it out first."""
+    if not _checkout(executor, cwd, branch):
+        return None
+    return patch_apply_check(executor, cwd, patch)
 
 
 def _map_one_branch(

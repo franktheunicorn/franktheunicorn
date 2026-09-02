@@ -868,3 +868,61 @@ class TestPollSecurityRechecks:
         ):
             _dispatch(cmd, make_operator_config())
         assert "nothing to wait on" in cmd.log
+
+
+class TestGitSweepHandlers:
+    """The two targetless git sweeps. One command, every project.
+
+    Targetless because the expensive part — the fetch and the branch walk — is
+    per project, and one command per report would pay for it several hundred
+    times over.
+    """
+
+    @pytest.mark.django_db
+    def test_the_branch_sweep_covers_every_project_and_logs_each(self) -> None:
+        from franktheunicorn.security.branch_scan import BranchMatchRun
+        from tests.factories import ProjectFactory, SecurityReportFactory
+
+        first, second = ProjectFactory(), ProjectFactory()
+        SecurityReportFactory(project=first)
+        SecurityReportFactory(project=second)
+        cmd = WorkerCommand.objects.create(command="match_security_branches", status="running")
+
+        with patch(
+            "franktheunicorn.security.branch_scan.match_fix_branches",
+            side_effect=lambda p, _c: BranchMatchRun(project=p.full_name, applied=1),
+        ) as matcher:
+            _dispatch(cmd, make_operator_config())
+
+        assert matcher.call_count == 2
+        assert first.full_name in cmd.log
+        assert second.full_name in cmd.log
+
+    @pytest.mark.django_db
+    def test_the_fixed_sweep_covers_every_project(self) -> None:
+        from franktheunicorn.security.branch_scan import FixedScanRun
+        from tests.factories import ProjectFactory, SecurityReportFactory
+
+        project = ProjectFactory()
+        SecurityReportFactory(project=project)
+        cmd = WorkerCommand.objects.create(command="scan_security_fixed", status="running")
+
+        with patch(
+            "franktheunicorn.security.branch_scan.scan_already_fixed",
+            side_effect=lambda p, _c: FixedScanRun(project=p.full_name, fixed=2),
+        ) as scanner:
+            _dispatch(cmd, make_operator_config())
+
+        assert scanner.call_count == 1
+        assert "2 likely fixed" in cmd.log
+
+    @pytest.mark.django_db
+    def test_an_empty_backlog_says_so_rather_than_looking_like_a_clean_sweep(self) -> None:
+        """Zero projects and zero findings must not read the same."""
+        cmd = WorkerCommand.objects.create(command="match_security_branches", status="running")
+
+        with patch("franktheunicorn.security.branch_scan.match_fix_branches") as matcher:
+            _dispatch(cmd, make_operator_config())
+
+        assert not matcher.called
+        assert "no project has an open security report" in cmd.log

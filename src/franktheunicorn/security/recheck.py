@@ -67,10 +67,18 @@ def untriaged_by_project() -> dict[Project, list[SecurityReport]]:
     priority so the prompt leads with what matters.
 
     So are reports with a fix branch recorded: this run asks "did the last month of
-    commits fix this?", which the operator has already answered by hand for those.
-    They otherwise consumed slots of the per-run cap — 50 of them buy an extra cloud
-    agent run per project — and came back with a "still-valid" verdict the list page
-    renders directly beside the operator's branch.
+    commits fix this?", which is already answered for those. They otherwise consumed
+    slots of the per-run cap — 50 of them buy an extra cloud agent run per project —
+    and came back with a "still-valid" verdict the list page renders directly beside
+    the recorded branch.
+
+    "Already answered" now covers two writers, deliberately. It used to be only the
+    operator's own typing; :mod:`franktheunicorn.security.branch_scan` also writes
+    the field when a branch name contains the report's CVE id, and excluding those
+    is the point rather than a leak — git found the branch for free, so paying a
+    cloud agent to wonder about the same report is the spend this filter exists to
+    avoid. ``operator_has_ruled`` draws the line the other way for its own purposes;
+    see its docstring for why the two disagree.
     """
     reports = (
         SecurityReport.objects.filter(status="new", project__isnull=False, fixed_in_branch="")
@@ -187,6 +195,14 @@ def launch_recheck(
 #: The two answers the prompt allows. Anything else is skipped, not guessed at.
 _VERDICTS = frozenset({"likely-fixed", "still-valid"})
 
+#: Stamped on every verdict this module writes. ``branch_scan`` writes ``"git"``,
+#: and the column exists to keep a cloud agent's reading of a commit log from
+#: being displayed with the authority of a reverse-apply. Leaving it unset here
+#: made ``""`` mean both "never checked" and "the agent answered" — and let a
+#: stale ``"git"`` survive an agent overwrite, so the list rendered "likely fixed
+#: already (git)" for an LLM's guess.
+AGENT_METHOD = "agent"
+
 
 def _verdicts_from(result: str) -> list[dict[str, Any]]:
     """The JSON array out of a run's final text, tolerating prose around it.
@@ -241,6 +257,7 @@ def apply_recheck_results(run: SecurityRecheckRun, result: str) -> int:
         ).update(
             recheck_status=verdict,
             recheck_reason=str(row.get("reason", ""))[:2000],
+            recheck_method=AGENT_METHOD,
             rechecked_at=now,
             updated_at=now,
         )

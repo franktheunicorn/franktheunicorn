@@ -70,6 +70,27 @@
             ↻ Check Untriaged vs Recent Changes
         </button>
     </form>
+    {# The two git-only sweeps. No agent and no model, so cents rather than #}
+    {# dollars — but slow: a fetch plus two git logs per branch per project. #}
+    {# Worker commands at bulk priority; the flash says where to watch. #}
+    <form method="post" action="{% url 'dashboard:security_match_branches' %}" style="display: inline;">
+        {% csrf_token %}
+        <button type="submit" class="action-btn"
+                style="font-size: 0.85rem; padding: 0.4rem 0.8rem;"
+                hx-post="{% url 'dashboard:security_match_branches' %}"
+                hx-confirm="Fetch origin and look for the branch carrying each report's fix? Git only, no agent — but it walks every recently-touched branch of every project, so it takes a while. Only a branch NAME containing the CVE id, or a branch frank itself pushed for the report, is recorded as the fix branch — marked as auto-filled, and clearing it rejects it. Everything softer, including a CVE merely mentioned in a commit, is left as a suggestion.">
+            ⑃ Find Fix Branches
+        </button>
+    </form>
+    <form method="post" action="{% url 'dashboard:security_scan_fixed' %}" style="display: inline;">
+        {% csrf_token %}
+        <button type="submit" class="action-btn"
+                style="font-size: 0.85rem; padding: 0.4rem 0.8rem;"
+                hx-post="{% url 'dashboard:security_scan_fixed' %}"
+                hx-confirm="Reverse-apply every proposed patch to see which fixes already landed? Git only, no agent, and it's proof rather than a guess — a patch that reverse-applies is already in the tree. Slow: a checkout per branch. Reports with no patch are skipped; the cloud recheck above is the one for those.">
+            ⑃ Check Fixed (git)
+        </button>
+    </form>
 </div>
 
 {# Bulk import. Reports land as untriaged drafts exactly like a pasted one, and #}
@@ -319,10 +340,14 @@
             {% endif %}
             {# The batch recheck's per-report answer, so "likely fixed already" #}
             {# is visible in the queue rather than one click into each detail. #}
+            {# Which of the two answered is in the tooltip, because a patch that #}
+            {# reverse-applies is proof and an agent reading a commit log is not. #}
             {% if report.recheck_status == "likely-fixed" %} &middot;
-                <span class="muted" title="{{ report.recheck_reason }}">✓ likely fixed already</span>
+                <span class="muted" title="{{ report.recheck_reason }}">✓ likely fixed already{% if report.recheck_method == "git" %} (git){% endif %}</span>
             {% elif report.recheck_status == "still-valid" %} &middot;
                 <span class="muted" title="{{ report.recheck_reason }}">rechecked: still valid</span>
+            {% elif report.recheck_status == "unclear" %} &middot;
+                <span class="muted" title="{{ report.recheck_reason }}">recheck: code moved, unclear</span>
             {% endif %}
             {% if report.fix_branch %} &middot;
                 <span class="muted" title="Fix branch on the fork">🛠 {{ report.fix_branch }}</span>
@@ -330,8 +355,21 @@
             {# The operator's answer, distinct from the agent's branch above. Shown #}
             {# because the tab beside it counts rows where this is missing, and a #}
             {# count you can't account for row by row is a count nobody believes. #}
+            {# Whose answer this is, said in the row. A branch the git sweep wrote #}
+            {# itself is the machine's answer and must not read as the operator's — #}
+            {# it is also why operator_has_ruled deliberately doesn't count it. #}
             {% if report.fixed_in_branch %} &middot;
+                {% if report.branch_match_applied %}
+                <span class="muted" title="Written by the branch sweep, not by you: {{ report.branch_match_reason }}">⑃ fixed in {{ report.fixed_in_branch }} (auto)</span>
+                {% else %}
                 <span class="muted" title="Branch carrying the fix">fixed in {{ report.fixed_in_branch }}</span>
+                {% endif %}
+            {% endif %}
+            {# The sweep's suggestion, shown only when it did NOT become the answer — #}
+            {# once it has, the line above says the same thing and two copies of one #}
+            {# branch name read as two different findings. #}
+            {% if report.branch_match_branch and not report.branch_match_applied and not report.fixed_in_branch %} &middot;
+                <span class="muted" title="{{ report.branch_match_reason }}">⑃ maybe {{ report.branch_match_branch }} ({{ report.branch_match_confidence|floatformat:2 }})</span>
             {% endif %}
         </div>
     </li>

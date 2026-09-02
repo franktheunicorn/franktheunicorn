@@ -16,6 +16,12 @@ Commands supported:
   on every active release branch, no agent. Minutes for a backlog, not hours.
 - ``find_report_introduction``: date the vulnerable code with a git pickaxe walk
   and list the release tags containing that commit. Git only, no agent.
+- ``match_security_branches``: fetch origin and tie a branch to every report
+  that has none, by matching CVE and finding ids against branch names and commit
+  messages. Git only, no agent, and slow — one fetch plus two ``git log`` calls
+  per branch per project.
+- ``scan_security_fixed``: reverse-apply each report's proposed patch to find the
+  ones already fixed. Git only, and proof rather than the cloud recheck's guess.
 - ``run_agents``: force-run the review pipeline on a PR (no trusted-author
   gate, no dedup against existing drafts).
 """
@@ -288,6 +294,8 @@ def _dispatch(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
         "map_report_versions": _map_report_versions,
         "find_report_introduction": _find_report_introduction,
         "poll_security_rechecks": _poll_security_rechecks,
+        "match_security_branches": _match_security_branches,
+        "scan_security_fixed": _scan_security_fixed,
         "run_agents": _run_agents,
     }
     handler = handlers.get(cmd.command)
@@ -539,6 +547,35 @@ def _find_report_introduction(cmd: WorkerCommand, operator_config: OperatorConfi
             cmd.security_report.pk,
             run.error,
         )
+
+
+def _match_security_branches(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
+    """Fetch origin and tie a fix branch to every report that hasn't got one.
+
+    Targetless: it sweeps every project with an open report, because the
+    expensive part (the fetch, the branch walk) is per project and doing it once
+    per report would be the same work several hundred times.
+    """
+    from franktheunicorn.security.branch_scan import match_fix_branches, projects_with_open_reports
+
+    projects = projects_with_open_reports()
+    if not projects:
+        cmd.log = "branch match: no project has an open security report"
+        return
+    lines = [run.summary() for run in (match_fix_branches(p, operator_config) for p in projects)]
+    cmd.log = "\n".join(lines)
+
+
+def _scan_security_fixed(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
+    """Reverse-apply proposed patches to find the reports a fix already landed for."""
+    from franktheunicorn.security.branch_scan import projects_with_open_reports, scan_already_fixed
+
+    projects = projects_with_open_reports()
+    if not projects:
+        cmd.log = "fixed-scan: no project has an open security report"
+        return
+    lines = [run.summary() for run in (scan_already_fixed(p, operator_config) for p in projects)]
+    cmd.log = "\n".join(lines)
 
 
 def _run_agents(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:

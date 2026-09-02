@@ -86,6 +86,19 @@ urlpatterns = [
         views.security_recheck_fixed,
         name="security_recheck_fixed",
     ),
+    # The two git-only backlog sweeps: which branch carries each fix, and which
+    # reports a fix already landed for. Both fetch origin first; both are worker
+    # commands because both are minutes of git per project.
+    path(
+        "security/match-branches/",
+        views.security_match_branches,
+        name="security_match_branches",
+    ),
+    path(
+        "security/scan-fixed/",
+        views.security_scan_fixed,
+        name="security_scan_fixed",
+    ),
     # Bulk import: a zip of report files, same importer as import_security_zip.
     path("security/upload/", views.security_report_upload, name="security_upload"),
     # The undo for one: delete every report that came from a named archive.

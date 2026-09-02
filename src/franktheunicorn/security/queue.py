@@ -95,16 +95,16 @@ def queue_introduction_scan(report: SecurityReport, *, priority: int = PRIORITY_
     return queue_command("find_report_introduction", report=report, priority=priority)
 
 
-def _verifier_gate_reason(operator_config: OperatorConfig) -> str:
+def verifier_gate_reason(operator_config: OperatorConfig) -> str:
     """Why the deep verifier (and the version map, which shares its checkout)
     can't run, or "" when they can.
 
     The two checks ``verifier.enabled`` and a resolvable reviewer, the same two
     zip_import's ``_queue_verifications``/``_queue_git_scan`` make. Lifted here
-    so the worker's triage follow-on and the dashboard's bulk re-triage button
-    get the same answer without each re-deriving it — and without queuing a
-    command the worker would no-op on, which is noise that reads as "the button
-    did nothing".
+    so the worker's triage follow-on, the dashboard's bulk re-triage button and
+    the two git sweeps get the same answer without each re-deriving it — and
+    without queuing a command the worker would no-op on, which is noise that
+    reads as "the button did nothing".
     """
     verifier = operator_config.security_triage.verifier
     if not verifier.enabled:
@@ -147,7 +147,7 @@ def queue_version_follow_on(
     """
     if report.project_id is None:
         return False, False, "report has no project, so there is no repo to check it against"
-    reason = _verifier_gate_reason(operator_config)
+    reason = verifier_gate_reason(operator_config)
     if reason:
         return False, False, reason
     version_map_queued = queue_version_map(report, priority=priority)
@@ -183,6 +183,32 @@ def queue_recheck_poll(*, priority: int = PRIORITY_BULK, exclude_pk: int | None 
         return False
     WorkerCommand.objects.create(command="poll_security_rechecks", priority=priority)
     logger.info("Queued poll_security_rechecks (priority %d)", priority)
+    return True
+
+
+#: The two git-only backlog sweeps. Targetless like ``poll_security_rechecks``:
+#: each one loops every project, so neither per-target unique constraint applies
+#: and the in-flight check has to be a SELECT.
+_SWEEP_COMMANDS = ("match_security_branches", "scan_security_fixed")
+
+
+def queue_branch_sweep(command: str, *, priority: int = PRIORITY_BULK) -> bool:
+    """Queue one of the git-only sweeps unless the same one is already in flight.
+
+    Both are minutes-to-tens-of-minutes of git per project — a fetch, two
+    ``git log`` calls per branch, a checkout per branch group — so they go in at
+    :data:`PRIORITY_BULK` even though a person pressed the button. The
+    interactive lane exists so a click doesn't queue behind bulk work, and
+    parking it behind a 300-branch walk defeats the entire point of having it.
+    """
+    if command not in _SWEEP_COMMANDS:
+        msg = f"queue_branch_sweep only queues {_SWEEP_COMMANDS}, got {command!r}"
+        raise ValueError(msg)
+    if WorkerCommand.objects.filter(command=command, status__in=_IN_FLIGHT_STATUSES).exists():
+        logger.info("%s already in flight", command)
+        return False
+    WorkerCommand.objects.create(command=command, priority=priority)
+    logger.info("Queued %s (priority %d)", command, priority)
     return True
 
 

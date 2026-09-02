@@ -514,6 +514,30 @@ digest_enabled: false
 #                                  # injection patterns instead of launching
 #     recheck_lookback_days: 30    # how far back "recent changes" means
 #     recheck_timeout_seconds: 3600  # how long the worker waits on a run
+#
+#   # The two git-only backlog sweeps, both behind their own button on the
+#   # security page: "Find Fix Branches" fetches origin and ties a branch to
+#   # every report that hasn't got one (matching CVE ids, scanner finding ids and
+#   # cited paths against branch names and commit messages), and "Check Fixed
+#   # (git)" reverse-applies each report's proposed patch — which succeeds only if
+#   # the fix is already in the tree, so it is proof where the cloud recheck above
+#   # is a judgement call.
+#   #
+#   # No `enabled` here on purpose: they borrow verifier.enabled and its
+#   # agent_cli_reviewers entry for the checkout, and the button press is the
+#   # consent. Everything below is a bound on how much git gets run, which is the
+#   # only expensive thing about them.
+#   branch_scan:
+#     # Wider than verifier.branch_active_within_days, because the target is
+#     # different: that one wants release lines you ship from, this one wants the
+#     # fix branch somebody pushed in February and forgot.
+#     branch_active_within_days: 365
+#     max_branches: 300            # per project, newest-committed first. Two
+#                                  # `git log` calls each — the wall-clock knob.
+#     max_commits_per_branch: 200  # per topic branch, vs the default branch
+#     max_default_commits: 2000    # on the default branch itself, where the
+#                                  # range is the project rather than one branch
+#     max_paths_per_branch: 400    # cap on the weak path-overlap signal
 #   email:
 #     enabled: true
 #     # --- Gmail over IMAP ---

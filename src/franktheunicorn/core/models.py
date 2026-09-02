@@ -661,7 +661,11 @@ class SecurityReport(models.Model):
         avoid: a run over a few thousand reports takes real wall-clock time, and a
         verdict typed at minute three is invisible to a snapshot taken at minute zero.
         """
-        return ~Q(operator_notes="") | ~Q(matched_cve_id="") | ~Q(fixed_in_branch="")
+        return (
+            ~Q(operator_notes="")
+            | ~Q(matched_cve_id="")
+            | (~Q(fixed_in_branch="") & Q(branch_match_applied=False))
+        )
 
     @property
     def operator_has_ruled(self) -> bool:
@@ -672,8 +676,22 @@ class SecurityReport(models.Model):
         inline. Spelled once because every new operator-owned field has to join it:
         ``fixed_in_branch`` did not, and a report with a branch recorded was re-billed
         for two LLM calls and had a fresh suggestion staged over the operator's work.
+
+        ``branch_match_applied`` is the exception, and it is load-bearing:
+        :mod:`franktheunicorn.security.branch_scan` writes ``fixed_in_branch``
+        itself when a branch name contains the report's CVE id. That is the
+        machine's answer, not the operator's, so counting it here made a git sweep
+        silently retire an untriaged report from every bulk path *and* made the
+        procedural-close flash report it under "skipped (operator-ruled: notes, a
+        CVE, or a fix branch)" — a false statement about a report nobody had
+        looked at.
         """
-        return bool(self.operator_notes or self.matched_cve_id or self.fixed_in_branch)
+        machine_tied = self.branch_match_applied
+        return bool(
+            self.operator_notes
+            or self.matched_cve_id
+            or (self.fixed_in_branch and not machine_tied)
+        )
 
     @staticmethod
     def cve_without_branch_q() -> Q:
@@ -877,13 +895,41 @@ class SecurityReport(models.Model):
     # would not have followed — plus a rejection htmx never showed the operator.
     fixed_in_branch = models.TextField(blank=True, default="")
 
-    # The batch "did the last month of commits fix this?" recheck
-    # (security.recheck): one agent run per project over the untriaged
-    # backlog, per-report verdict stored here. "" is "never checked".
-    #: "" / "still-valid" / "likely-fixed".
+    # The batch "did the last month of commits fix this?" recheck. Two things
+    # write it, because it is one question: security.recheck puts a cloud agent
+    # on a month of commit log, and security.branch_scan reverse-applies the
+    # report's own proposed patch. The second is proof where the first is a
+    # judgement call, so which one answered is worth keeping — see
+    # recheck_method. "" is "never checked".
+    #: "" / "still-valid" / "likely-fixed" / "unclear". The last is git-only:
+    #: the patch neither applies nor reverse-applies, so the code moved and
+    #: nothing cheap can say whether it moved because of this.
     recheck_status = models.CharField(max_length=20, blank=True, default="")
     recheck_reason = models.TextField(blank=True, default="")
+    #: "" (never checked) / "agent" / "git". Not collapsed into recheck_reason,
+    #: for the same reason introduced_method isn't collapsed into
+    #: introduced_summary: the two answers are worth very different amounts and
+    #: a column that hides which is a column nobody can act on.
+    recheck_method = models.CharField(max_length=20, blank=True, default="")
     rechecked_at = models.DateTimeField(null=True, blank=True)
+
+    # Which branch on origin looks like it carries the fix, from git alone
+    # (security.branch_scan). Distinct from fix_branch above, which is what
+    # frank's own cloud agent pushed, and from fixed_in_branch below, which is
+    # the operator's answer: this is a *scan* of every branch origin has,
+    # matching CVE ids and finding ids in branch names and commit messages.
+    #
+    # A confident match is copied into fixed_in_branch and branch_match_applied
+    # records that we did it — that is the "tie the branches in automatically"
+    # the sweep exists for. A softer one stays here alone, where the list page
+    # offers it and the operator can ignore it. Either way the reason is stored,
+    # because a bare branch name with a 0.85 next to it is not something anybody
+    # can check, and an unheld heuristic link is worse than none.
+    branch_match_branch = models.CharField(max_length=200, blank=True, default="")
+    branch_match_confidence = models.FloatField(null=True, blank=True)
+    branch_match_reason = models.CharField(max_length=500, blank=True, default="")
+    branch_match_applied = models.BooleanField(default=False)
+    branch_matched_at = models.DateTimeField(null=True, blank=True)
 
     # Build dependencies between findings of the same archive, parsed from the
     # scanner's own composition notes ("bug_86 depends on bug_83's conf —

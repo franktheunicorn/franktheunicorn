@@ -10,7 +10,9 @@ import pytest
 from franktheunicorn.config.models import OperatorConfig, SecurityTriageConfig
 from franktheunicorn.core.models import WorkerCommand
 from franktheunicorn.security.queue import (
+    PRIORITY_BULK,
     cancel_pending_for_reports,
+    queue_branch_sweep,
     queue_triage,
     queue_triage_if_enabled,
     queue_triage_on_request,
@@ -223,3 +225,39 @@ class TestQueueVersionFollowOn:
         assert (vm, verify) == (False, False)
         assert "verifier.enabled is false" in skipped
         assert not WorkerCommand.objects.filter(security_report=report).exists()
+
+
+@pytest.mark.django_db
+class TestBranchSweepQueue:
+    """The door for the two git sweeps. Targetless, so dedup is a SELECT."""
+
+    def test_one_press_is_one_command(self) -> None:
+        assert queue_branch_sweep("match_security_branches") is True
+        assert queue_branch_sweep("match_security_branches") is False
+        assert WorkerCommand.objects.filter(command="match_security_branches").count() == 1
+
+    def test_a_running_sweep_also_blocks_a_second(self) -> None:
+        WorkerCommand.objects.create(command="scan_security_fixed", status="running")
+        assert queue_branch_sweep("scan_security_fixed") is False
+
+    def test_a_finished_sweep_does_not_block_the_next_one(self) -> None:
+        WorkerCommand.objects.create(command="scan_security_fixed", status="completed")
+        assert queue_branch_sweep("scan_security_fixed") is True
+
+    def test_the_two_sweeps_are_independent(self) -> None:
+        assert queue_branch_sweep("match_security_branches") is True
+        assert queue_branch_sweep("scan_security_fixed") is True
+
+    def test_bulk_priority_by_default(self) -> None:
+        """A 300-branch walk in the interactive lane parks the lane whose whole
+        purpose is that a click doesn't wait behind bulk work."""
+        queue_branch_sweep("match_security_branches")
+        assert (
+            WorkerCommand.objects.get(command="match_security_branches").priority == PRIORITY_BULK
+        )
+
+    def test_it_refuses_a_command_it_does_not_own(self) -> None:
+        """Not a general-purpose targetless queue: without the guard, a typo here
+        creates a row nothing dispatches and the button silently does nothing."""
+        with pytest.raises(ValueError, match="only queues"):
+            queue_branch_sweep("run_agents")

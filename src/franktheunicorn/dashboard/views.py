@@ -1447,6 +1447,22 @@ def _back_to_security_list(request: HttpRequest) -> HttpResponse:
     return redirect(target)
 
 
+def _branch_sweep_gate_reason(operator_config: OperatorConfig) -> str:
+    """Why neither git sweep can run, or "" when they can.
+
+    They borrow the verifier's checkout, so they inherit exactly its two
+    prerequisites — and asked here rather than in the worker so a press that
+    cannot possibly work says why on the page, instead of queuing a command that
+    no-ops into a log nobody is tailing.
+    """
+    from franktheunicorn.security.queue import verifier_gate_reason
+
+    reason = verifier_gate_reason(operator_config)
+    if reason:
+        return f"The git sweeps borrow the verifier's checkout, and it can't run: {reason}."
+    return ""
+
+
 def _still_unruled(report: SecurityReport) -> bool:
     """Whether *report* is still unruled **as stored**, not as this loop last saw it.
 
@@ -2346,7 +2362,13 @@ def security_report_versions(request: HttpRequest, report_id: int) -> HttpRespon
 #: What Save Verdict writes. Named once because the two save paths below differ
 #: only by ``auto_triage_status``, and a field added to one list and not the other
 #: is a field that silently doesn't persist on half the reports.
-_VERDICT_FIELDS = ("status", "operator_notes", "matched_cve_id", "fixed_in_branch")
+_VERDICT_FIELDS = (
+    "status",
+    "operator_notes",
+    "matched_cve_id",
+    "fixed_in_branch",
+    "branch_match_applied",
+)
 
 
 @require_POST
@@ -2429,7 +2451,20 @@ def security_report_verdict(request: HttpRequest, report_id: int) -> HttpRespons
     if "fixed_in_branch" in request.POST:
         from franktheunicorn.security.sheet_sync import clean_single_line
 
-        report.fixed_in_branch = clean_single_line(request.POST["fixed_in_branch"])
+        submitted_branch = clean_single_line(request.POST["fixed_in_branch"])
+        # Whose answer the field now holds. ``branch_match_applied`` means "the git
+        # sweep wrote this", and ``operator_has_ruled`` reads it to decide that a
+        # machine tie is not a ruling — so a branch the operator typed over the
+        # top of one has to clear the flag, or their own answer keeps not counting
+        # and the report stays in every bulk path.
+        #
+        # Submitting it *empty* deliberately leaves the flag set: that is the
+        # documented rejection, and the flag plus an empty field is the only record
+        # that the sweep already offered this branch and was told no. See
+        # ``branch_scan._apply``, which reads exactly that pair.
+        if submitted_branch and submitted_branch != report.branch_match_branch:
+            report.branch_match_applied = False
+        report.fixed_in_branch = submitted_branch
 
     # The operator ruled, so the machine's staged suggestion is consumed:
     # leaving it would re-offer an Agree button for a verdict the operator just
@@ -2627,6 +2662,90 @@ def security_report_fix_refresh(request: HttpRequest, report_id: int) -> HttpRes
 
     note = refresh_fix_status(report, get_operator_config())
     return render(request, "dashboard/_security_fix_status.html", {"report": report, "note": note})
+
+
+@require_POST
+def security_match_branches(request: HttpRequest) -> HttpResponse:
+    """Queue the git sweep that ties a fix branch to every report lacking one.
+
+    Fetches origin and matches CVE ids, scanner finding ids and cited paths
+    against every recently-touched branch. Git only — no agent, no model — but
+    slow: a fetch plus two ``git log`` calls per branch per project, and there
+    can be a few hundred branches. So it is a worker command at bulk priority
+    rather than in-request work, and the flash says where to watch for it.
+    """
+    from franktheunicorn.config.loader import get_operator_config
+    from franktheunicorn.security.branch_scan import projects_with_open_reports
+    from franktheunicorn.security.queue import queue_branch_sweep
+
+    reason = _branch_sweep_gate_reason(get_operator_config())
+    if reason:
+        messages.error(request, reason)
+        return _back_to_security_list(request)
+    if not projects_with_open_reports():
+        messages.info(
+            request,
+            "No open report is attached to a project, so there is no repo to look at. "
+            "A report needs a project before either git sweep can run.",
+        )
+        return _back_to_security_list(request)
+
+    if queue_branch_sweep("match_security_branches"):
+        messages.success(
+            request,
+            "Queued the branch sweep: frank will fetch origin and look for the branch "
+            "carrying each report's fix. Slow — a few hundred branches per project — and "
+            "it runs at bulk priority, so it waits behind nothing but other bulk work. "
+            "Confident matches are recorded as the fix branch; the rest show as "
+            "suggestions on the reports.",
+        )
+    else:
+        messages.info(request, "A branch sweep is already queued or running.")
+    return _back_to_security_list(request)
+
+
+@require_POST
+def security_scan_fixed(request: HttpRequest) -> HttpResponse:
+    """Queue the git sweep that reverse-applies proposed patches to find fixed reports.
+
+    The cheap, definitive sibling of :func:`security_recheck_fixed`: where that
+    one pays a cloud agent to read a month of commits and form an opinion,
+    ``git apply --check -R`` succeeds only when the patch's change is already in
+    the tree. It only works on reports that shipped a patch, and the flash says
+    so rather than reporting a silent zero.
+    """
+    from franktheunicorn.config.loader import get_operator_config
+    from franktheunicorn.security.queue import queue_branch_sweep
+
+    reason = _branch_sweep_gate_reason(get_operator_config())
+    if reason:
+        messages.error(request, reason)
+        return _back_to_security_list(request)
+    patchable = (
+        SecurityReport.objects.filter(project__isnull=False, status__in=("new", "valid"))
+        .filter(fixed_in_branch="")
+        .exclude(proposed_patch="")
+        .count()
+    )
+    if not patchable:
+        messages.info(
+            request,
+            "No open report carries a proposed patch, and reverse-applying one is the "
+            "whole trick here. Use “Check Untriaged vs Recent Changes” for reports "
+            "without a patch — that one reads commits with a cloud agent.",
+        )
+        return _back_to_security_list(request)
+
+    if queue_branch_sweep("scan_security_fixed"):
+        messages.success(
+            request,
+            f"Queued the already-fixed sweep over {patchable} report(s) with a proposed "
+            "patch. It fetches origin and reverse-applies each patch, which is proof "
+            "rather than a guess — but it is a checkout per branch, so give it a while.",
+        )
+    else:
+        messages.info(request, "An already-fixed sweep is already queued or running.")
+    return _back_to_security_list(request)
 
 
 @require_POST

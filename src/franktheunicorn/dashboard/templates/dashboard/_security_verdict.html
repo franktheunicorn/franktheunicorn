@@ -38,6 +38,32 @@
                    placeholder="branch carrying the fix, e.g. master, branch-3.5">
         </div>
 
+        {# What the git branch sweep found, shown where the operator types the #}
+        {# answer rather than only in the list. Only the ones it wasn't confident #}
+        {# enough to record itself get here — a confident match is already in the #}
+        {# field above, and repeating it as a suggestion reads as a disagreement. #}
+        {# No accept button on purpose: what lands here is the weak path-overlap #}
+        {# hint, and a branch that merely touched the same file is exactly the #}
+        {# claim that wants somebody to look before it becomes the answer. #}
+        {% if report.branch_match_branch and not report.branch_match_applied and not report.fixed_in_branch %}
+        <p class="muted" style="font-size: 0.8rem; margin: 0 0 0.5rem 5rem;">
+            Branch sweep suggests <code>{{ report.branch_match_branch }}</code>
+            ({{ report.branch_match_confidence|floatformat:2 }}):
+            {{ report.branch_match_reason }}
+        </p>
+        {% endif %}
+
+        {# The other half: the sweep filled the field in above. Said out loud, #}
+        {# because a branch name in an input the operator didn't type is the one #}
+        {# thing on this form that isn't theirs — and clearing the field is how #}
+        {# they reject it, which the sweep then remembers and won't re-apply. #}
+        {% if report.branch_match_applied and report.fixed_in_branch %}
+        <p class="muted" style="font-size: 0.8rem; margin: 0 0 0.5rem 5rem;">
+            Filled in by the branch sweep, not by you:
+            {{ report.branch_match_reason }}. Clear the field to reject it.
+        </p>
+        {% endif %}
+
         {# What came back from the shared sheet (security.sheet_sync), when #}
         {# anything did. Shown here rather than nowhere: an import that lands a #}
         {# PMC's ruling in a field no page displays is worse than not importing #}

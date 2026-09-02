@@ -1526,6 +1526,37 @@ class SecurityFixAgentConfig(BaseModel):
     recheck_timeout_seconds: int = 3600
 
 
+class SecurityBranchScanConfig(BaseModel):
+    """Cost control for the two git-only backlog sweeps.
+
+    See :mod:`franktheunicorn.security.branch_scan`. There is no ``enabled``
+    here on purpose: both sweeps are a button press, which is the consent, and
+    both borrow the verifier's checkout config — so the flag that would gate
+    them already exists one level up and a second one would be the invisible
+    half of two gates in series.
+
+    Every knob is a bound on how much git gets run, because that is the only
+    thing about these that is expensive.
+    """
+
+    #: How stale a branch's last commit can be and still be scanned. Wider than
+    #: the verifier's 180 because the target is different: the verifier wants
+    #: release lines somebody is shipping from, this wants the fix branch
+    #: somebody pushed in February and forgot.
+    branch_active_within_days: int = 365
+    #: Branches examined per project, most-recently-committed first. Two
+    #: ``git log`` calls each, so this is the wall-clock knob.
+    max_branches: int = 300
+    #: Commits read per topic branch (its own, versus the default branch).
+    max_commits_per_branch: int = 200
+    #: Commits read on the default branch. Deeper because the range is the whole
+    #: project rather than one branch's handful, and a fix that landed on master
+    #: three months ago is the case worth reaching.
+    max_default_commits: int = 2000
+    #: Paths one branch contributes to the weak path-overlap signal.
+    max_paths_per_branch: int = 400
+
+
 class SecurityTriageConfig(BaseModel):
     """Config for security report triage feature.
 
@@ -1571,6 +1602,7 @@ class SecurityTriageConfig(BaseModel):
     verifier: SecurityVerifierConfig = Field(default_factory=SecurityVerifierConfig)
     duplicates: SecurityDuplicateConfig = Field(default_factory=SecurityDuplicateConfig)
     fix_agent: SecurityFixAgentConfig = Field(default_factory=SecurityFixAgentConfig)
+    branch_scan: SecurityBranchScanConfig = Field(default_factory=SecurityBranchScanConfig)
 
 
 class ForgeRegistryEntry(BaseModel):

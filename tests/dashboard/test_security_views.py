@@ -2935,3 +2935,180 @@ class TestTheInjectionNoteReachesTheOperator:
         report = self._report_with_hits("launched")
         response = client.get(f"/security/{report.pk}/")
         assert b"prompt-injection patterns" in response.content
+
+
+class TestVerdictOverAnAutoTie:
+    """Whose answer `fixed_in_branch` holds after the operator saves.
+
+    `operator_has_ruled` reads `branch_match_applied` to decide a machine tie is
+    not a ruling, so the flag has to track reality across the verdict form or the
+    operator's own typing keeps not counting.
+    """
+
+    def _tied(self) -> Any:
+        return SecurityReportFactory(
+            status="new",
+            fixed_in_branch="fix-cve-2025-12345",
+            branch_match_branch="fix-cve-2025-12345",
+            branch_match_applied=True,
+        )
+
+    def test_typing_a_different_branch_makes_it_the_operators(
+        self, client: Client, db: Any
+    ) -> None:
+        report = self._tied()
+
+        client.post(
+            f"/security/{report.pk}/verdict/",
+            {"status": "valid", "fixed_in_branch": "branch-3.5", "operator_notes": ""},
+        )
+
+        report.refresh_from_db()
+        assert report.fixed_in_branch == "branch-3.5"
+        assert report.branch_match_applied is False
+        assert report.operator_has_ruled is True
+
+    def test_clearing_it_keeps_the_rejection_record(self, client: Client, db: Any) -> None:
+        """The flag plus an empty field is the only record the sweep already
+        offered this branch and was told no."""
+        report = self._tied()
+
+        client.post(
+            f"/security/{report.pk}/verdict/",
+            {"status": "new", "fixed_in_branch": "", "operator_notes": ""},
+        )
+
+        report.refresh_from_db()
+        assert report.fixed_in_branch == ""
+        assert report.branch_match_applied is True
+
+    def test_saving_without_touching_the_branch_leaves_it_the_machines(
+        self, client: Client, db: Any
+    ) -> None:
+        report = self._tied()
+
+        client.post(
+            f"/security/{report.pk}/verdict/",
+            {
+                "status": "new",
+                "fixed_in_branch": "fix-cve-2025-12345",
+                "operator_notes": "still looking",
+            },
+        )
+
+        report.refresh_from_db()
+        assert report.branch_match_applied is True
+        # The notes are theirs, so this is ruled — just not via the branch.
+        assert report.operator_has_ruled is True
+
+
+class TestGitSweepButtons:
+    """The two git-only sweeps: fetch origin, tie in branches / find the fixed ones.
+
+    Both are worker commands, so the button's whole job is to queue exactly one
+    and to say something true when it can't. The interesting cases are the
+    can'ts: a press that queues a command the worker will no-op on is the
+    "the button did nothing" failure this codebase keeps writing rules about.
+    """
+
+    def _operator(self) -> Any:
+        from franktheunicorn.config.models import AgentCLIReviewerConfig, OperatorConfig
+
+        config = OperatorConfig()
+        config.agent_cli_reviewers = [AgentCLIReviewerConfig(name="claude", cli_path="claude")]
+        return config
+
+    def _queued(self, command: str) -> Any:
+        from franktheunicorn.core.models import WorkerCommand
+
+        return WorkerCommand.objects.filter(command=command)
+
+    def _post(self, client: Client, path: str, operator: Any = None) -> Any:
+        with patch(
+            "franktheunicorn.config.loader.get_operator_config",
+            return_value=operator or self._operator(),
+        ):
+            return client.post(path, follow=True)
+
+    def test_the_branch_sweep_queues_one_command(self, client: Client, db: Any) -> None:
+        SecurityReportFactory(status="new")
+
+        response = self._post(client, "/security/match-branches/")
+
+        assert response.status_code == 200
+        assert self._queued("match_security_branches").filter(status="pending").count() == 1
+
+    def test_a_second_press_does_not_queue_a_second_sweep(self, client: Client, db: Any) -> None:
+        SecurityReportFactory(status="new")
+
+        self._post(client, "/security/match-branches/")
+        response = self._post(client, "/security/match-branches/")
+
+        assert b"already queued or running" in response.content
+        assert self._queued("match_security_branches").count() == 1
+
+    def test_the_sweeps_go_in_at_bulk_priority(self, client: Client, db: Any) -> None:
+        """A 300-branch walk in the interactive lane parks the lane that exists
+        so a click doesn't wait behind bulk work."""
+        from franktheunicorn.security.queue import PRIORITY_INTERACTIVE
+
+        SecurityReportFactory(status="new")
+        self._post(client, "/security/match-branches/")
+
+        assert self._queued("match_security_branches").get().priority < PRIORITY_INTERACTIVE
+
+    def test_a_project_less_backlog_says_so_rather_than_queueing(
+        self, client: Client, db: Any
+    ) -> None:
+        SecurityReportFactory(project=None, status="new")
+
+        response = self._post(client, "/security/match-branches/")
+
+        assert b"needs a project" in response.content
+        assert not self._queued("match_security_branches").exists()
+
+    def test_no_reviewer_configured_names_the_setting(self, client: Client, db: Any) -> None:
+        from franktheunicorn.config.models import OperatorConfig
+
+        SecurityReportFactory(status="new")
+        bare = OperatorConfig()
+        bare.agent_cli_reviewers = []
+
+        response = self._post(client, "/security/match-branches/", bare)
+
+        assert b"agent_cli_reviewers" in response.content
+        assert not self._queued("match_security_branches").exists()
+
+    def test_the_fixed_sweep_queues_one_command(self, client: Client, db: Any) -> None:
+        SecurityReportFactory(status="new", proposed_patch="--- a/x\n+++ b/x\n")
+
+        response = self._post(client, "/security/scan-fixed/")
+
+        assert b"1 report(s) with a proposed patch" in response.content
+        assert self._queued("scan_security_fixed").filter(status="pending").count() == 1
+
+    def test_no_patch_in_the_backlog_points_at_the_button_that_can(
+        self, client: Client, db: Any
+    ) -> None:
+        """Reverse-applying a patch is the whole trick; without one, git has
+        nothing to say and the cloud recheck is the answer."""
+        SecurityReportFactory(status="new", proposed_patch="")
+
+        response = self._post(client, "/security/scan-fixed/")
+
+        assert b"Check Untriaged vs Recent Changes" in response.content
+        assert not self._queued("scan_security_fixed").exists()
+
+    def test_the_two_sweeps_do_not_block_each_other(self, client: Client, db: Any) -> None:
+        SecurityReportFactory(status="new", proposed_patch="--- a/x\n+++ b/x\n")
+
+        self._post(client, "/security/match-branches/")
+        self._post(client, "/security/scan-fixed/")
+
+        assert self._queued("match_security_branches").count() == 1
+        assert self._queued("scan_security_fixed").count() == 1
+
+    def test_both_buttons_are_on_the_page(self, client: Client, db: Any) -> None:
+        response = client.get("/security/")
+        assert b"/security/match-branches/" in response.content
+        assert b"/security/scan-fixed/" in response.content

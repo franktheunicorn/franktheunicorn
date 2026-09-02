@@ -531,3 +531,15 @@ class TestApplyCheckScript:
         from franktheunicorn.security.version_map import _apply_check_script
 
         assert _apply_check_script("binary\x00patch") is None
+
+    def test_reverse_flips_the_question_to_is_the_fix_already_in(self) -> None:
+        """``-R`` is what security.branch_scan's already-fixed sweep asks with, and
+        it must not leak into the forward check the version mapper makes."""
+        from franktheunicorn.security.version_map import _apply_check_script
+
+        patch_text = "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n"
+        forward = _apply_check_script(patch_text)
+        backward = _apply_check_script(patch_text, reverse=True)
+        assert forward is not None and backward is not None
+        assert "git apply --check --whitespace=nowarn" in forward
+        assert "git apply --check -R --whitespace=nowarn" in backward

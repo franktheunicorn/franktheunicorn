@@ -99,11 +99,18 @@
 {% if report.recheck_status %}
 <div class="dup-note">
     <strong>Recent-changes check{% if report.rechecked_at %} ({{ report.rechecked_at|date:"Y-m-d" }}){% endif %}:</strong>
+    {# Three verdicts, not two. This was an if/else, so the git sweep's #}
+    {# "unclear" rendered as the affirmative "still plausibly valid" directly #}
+    {# above a reason reading "the code moved" — two contradictory statements #}
+    {# in one box, and the badge is the half people read. #}
     {% if report.recheck_status == "likely-fixed" %}
     <span class="score-badge mid">likely fixed already</span>
+    {% elif report.recheck_status == "unclear" %}
+    <span class="score-badge">the code moved — unclear</span>
     {% else %}
     <span class="score-badge">still plausibly valid</span>
     {% endif %}
+    {% if report.recheck_method %}<span class="muted">({{ report.recheck_method }})</span>{% endif %}
     <div class="dup-why">{{ report.recheck_reason }}</div>
 </div>
 {% endif %}

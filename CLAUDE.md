@@ -110,6 +110,42 @@ src/franktheunicorn/
                      #   (still-valid / likely-fixed) — a triage-order pointer,
                      #   never a close. The launch is in-request; the waiting is
                      #   the poll_security_rechecks worker command.
+                     #   branch_scan.py does both of those questions with git and
+                     #   no agent, which makes it cents and, for the second one,
+                     #   proof rather than a guess. match_fix_branches fetches
+                     #   origin and ties a branch to every report lacking one by
+                     #   matching CVE ids, scanner finding ids and cited paths
+                     #   against branch names and commit messages — every branch
+                     #   origin has, not select_branches' version branches, since
+                     #   a fix lives on a topic branch, and merge commits
+                     #   included, since on GitHub flow the CVE is named in the
+                     #   merge and --no-merges hid every message signal there is.
+                     #   Only two signals write fixed_in_branch: the CVE id in a
+                     #   branch NAME, and a branch frank pushed itself. A CVE
+                     #   *mentioned* in a commit does not — reverts and regression
+                     #   tests name CVEs they don't fix. An auto-tie sets
+                     #   branch_match_applied, which operator_has_ruled
+                     #   deliberately does not count (otherwise a heuristic
+                     #   silently retires an untriaged report and the UI calls it
+                     #   operator-ruled) and which the verdict form clears when the
+                     #   operator types their own branch over it. Clearing the
+                     #   field is the rejection, and the sweep remembers it.
+                     #   scan_already_fixed reverse-applies each report's proposed
+                     #   patch: git apply --check -R succeeds only if the change is
+                     #   already in the tree, so it writes the same recheck_status
+                     #   column the cloud agent does with recheck_method saying
+                     #   which answered ("agent" / "git"), and "unclear" when the
+                     #   patch neither applies nor reverse-applies — which never
+                     #   overwrites an existing verdict, since a non-answer must
+                     #   not replace a paid one. Only git exit 0 and 1 are answers;
+                     #   128 is "couldn't parse a patch" and is skipped, not
+                     #   reported as "the code moved". The branch checked comes from
+                     #   fix_base_branch or, for the whole imported backlog,
+                     #   fix_agent.base_branch_for off the archive name. Two
+                     #   targetless worker commands at bulk priority
+                     #   (match_security_branches, scan_security_fixed) — a
+                     #   300-branch walk in the interactive lane would park the lane
+                     #   that exists so a click doesn't wait behind bulk work.
   curator/           # Textual TUI for curating voice datasets from
                      #   historical comments (used to seed fine-tuning;
                      #   not part of the live review path)
