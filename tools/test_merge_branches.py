@@ -23,6 +23,8 @@ from merge_branches import (
     parse_branch_file,
     parse_verdict,
     ref_slug,
+    is_sibling_cut,
+    redo_revision,
     sibling_coverage,
     squash_output,
     suffix_target,
@@ -344,6 +346,205 @@ class Families(unittest.TestCase):
     def test_a_sibling_for_a_target_not_in_play_is_ignored(self):
         listed = ["thing-aok", "thing-4.3-aok"]
         self.assertEqual(sibling_coverage("thing-aok", ALL_TARGETS, listed), {})
+
+
+class UnlistedSiblings(unittest.TestCase):
+    """The pair that arrives when a change will not apply to every release."""
+
+    def make(self, listed, on_fork, targets=("master", "branch-4.1", "branch-3.5"),
+             local=(), base="master", held=()):
+        import merge_branches
+        from types import SimpleNamespace
+
+        bp = object.__new__(merge_branches.Backporter)
+        bp.cfg = SimpleNamespace(strip_suffixes=["-aok", "-squashed"],
+                                 fork_remote="origin", targets=list(targets),
+                                 branch_file="branches_to_merge.txt",
+                                 hold_list="HELD_BRANCHES.txt",
+                                 adopt_siblings=True)
+        bp.listed = list(listed)
+        bp.held = {name: "listed" for name in held}
+        # the base the listed branch was cut from decides where it goes, and so
+        # decides which of its siblings are wanted
+        bp.pick_base = lambda src: ("abc123", base) if base else None
+        bp._branch_names = (list(on_fork), list(local))
+        refs = {f"refs/remotes/origin/{name}" for name in on_fork}
+        refs |= {f"refs/heads/{name}" for name in local}
+        bp.git = SimpleNamespace(has_ref=lambda ref: ref in refs)
+        return bp
+
+    def test_a_pinned_branch_has_no_siblings_to_look_for(self):
+        # it owns that one release; every name generated for it here is just
+        # another spelling of itself, which is what used to be reported
+        name = "22-zk-recovery-branch-4.0-aok"
+        bp = self.make([name], ["22-zk-recovery-branch-4.0"], targets=["branch-4.0"])
+        self.assertIsNone(bp.unlisted_sibling(Source(name), "branch-4.0"))
+        self.assertEqual(bp.adopt_siblings([Source(name)]), [])
+
+    def test_a_sibling_listed_under_a_different_marker_is_not_missing(self):
+        # the branch file has the local rewrite, the fork has the plain name
+        bp = self.make(["myfix-aok", "myfix-4.1-aok"], ["myfix", "myfix-4.1"])
+        self.assertIsNone(bp.unlisted_sibling(Source("myfix-aok"), "branch-4.1"))
+
+    def test_a_cut_that_really_is_missing_is_found(self):
+        bp = self.make(["myfix-aok"], ["myfix", "myfix-branch-3.5"])
+        self.assertEqual(bp.unlisted_sibling(Source("myfix-aok"), "branch-3.5"),
+                         "myfix-branch-3.5")
+
+    def test_a_missing_cut_is_taken_in(self):
+        bp = self.make(["myfix-aok"], ["myfix", "myfix-branch-3.5"])
+        self.assertEqual([src.name for src in bp.adopt_siblings([Source("myfix-aok")])],
+                         ["myfix-branch-3.5"])
+
+    def test_it_is_taken_in_under_the_local_rewrite_name(self):
+        # squash-magic leaves the rewrite as -aok and never touches the original,
+        # so adopting the fork spelling would make resolve_pick_ref() pick from
+        # that untouched, un-squashed original
+        bp = self.make(["myfix-aok"], ["myfix", "myfix-4.1"], local=["myfix-4.1-aok"])
+        self.assertEqual([src.name for src in bp.adopt_siblings([Source("myfix-aok")])],
+                         ["myfix-4.1-aok"])
+
+    def test_without_a_local_rewrite_the_fork_name_is_used(self):
+        bp = self.make(["myfix-aok"], ["myfix", "myfix-4.1"])
+        self.assertEqual([src.name for src in bp.adopt_siblings([Source("myfix-aok")])],
+                         ["myfix-4.1"])
+
+    def test_it_is_taken_in_once_however_many_branches_point_at_it(self):
+        # two cuts of the same work in the list, one sibling between them
+        bp = self.make(["myfix-aok", "myfix-squashed"], ["myfix", "myfix-branch-3.5"])
+        taken = bp.adopt_siblings([Source("myfix-aok"), Source("myfix-squashed")])
+        self.assertEqual([src.name for src in taken], ["myfix-branch-3.5"])
+
+    def test_a_branch_of_unrelated_work_is_not_swept_up(self):
+        bp = self.make(["myfix-aok"], ["myfix", "somethingelse-branch-3.5"])
+        self.assertEqual(bp.adopt_siblings([Source("myfix-aok")]), [])
+
+    def test_a_cut_for_a_release_the_parent_never_goes_to_is_left_alone(self):
+        # cut from branch-3.5, so it is 3.5-only; a stale myfix-4.1 on the fork
+        # is somebody's abandoned attempt, not the cut branch-4.1 needs, and the
+        # listed branch was never going to try branch-4.1 anyway
+        bp = self.make(["myfix-aok"], ["myfix", "myfix-4.1"], base="branch-3.5")
+        self.assertEqual(bp.adopt_siblings([Source("myfix-aok")]), [])
+
+    def test_a_cut_for_a_release_the_parent_does_go_to_is_taken(self):
+        bp = self.make(["myfix-aok"], ["myfix", "myfix-4.1"], base="master")
+        self.assertEqual([src.name for src in bp.adopt_siblings([Source("myfix-aok")])],
+                         ["myfix-4.1"])
+
+    def test_nothing_is_adopted_when_the_base_cannot_be_worked_out(self):
+        bp = self.make(["myfix-aok"], ["myfix", "myfix-4.1"], base=None)
+        self.assertEqual(bp.adopt_siblings([Source("myfix-aok")]), [])
+
+    def test_a_held_branch_does_not_bring_its_family_in(self):
+        bp = self.make(["myfix-aok"], ["myfix", "myfix-4.1"], held=["myfix-aok"])
+        self.assertEqual(bp.adopt_siblings([Source("myfix-aok")]), [])
+
+    def test_a_held_cut_is_not_adopted(self):
+        # you held it because you know it is wrong; adopting it would also take
+        # branch-4.1 off the listed branch, so the held cut would be the only
+        # thing landing there
+        bp = self.make(["myfix-aok"], ["myfix", "myfix-4.1"], held=["myfix-4.1"])
+        self.assertEqual(bp.adopt_siblings([Source("myfix-aok")]), [])
+
+    def test_a_redone_cut_on_the_fork_is_found(self):
+        # -r2 is understood everywhere else; a generator that never emitted it
+        # made the redone cut invisible to the one check meant to find it
+        bp = self.make(["myfix-aok"], ["myfix", "myfix-4.1-r2"])
+        self.assertEqual(bp.unlisted_sibling(Source("myfix-aok"), "branch-4.1"),
+                         "myfix-4.1-r2")
+
+    def test_the_newest_redo_wins_when_both_are_lying_about(self):
+        # -r2 exists because -r1 was superseded, and both usually survive
+        bp = self.make(["myfix-aok"], ["myfix", "myfix-4.1", "myfix-4.1-r2"])
+        self.assertEqual(bp.unlisted_sibling(Source("myfix-aok"), "branch-4.1"),
+                         "myfix-4.1-r2")
+
+    def test_a_redone_cut_still_counts_as_listed(self):
+        # -r2 marks a cut that was redone, so the first one is exactly the stale
+        # ref lying around -- and the redo is the branch you listed
+        bp = self.make(["myfix-aok", "myfix-4.1-r2-aok"], ["myfix", "myfix-4.1"])
+        self.assertIsNone(bp.unlisted_sibling(Source("myfix-aok"), "branch-4.1"))
+        self.assertEqual(bp.adopt_siblings([Source("myfix-aok")]), [])
+
+    def test_a_held_cut_is_recognised_under_any_spelling(self):
+        # you hold the name squash-magic gave you, the fork carries another
+        bp = self.make(["myfix-aok"], ["myfix", "myfix-4.1"], held=["myfix-4.1-aok"])
+        self.assertEqual(bp.adopt_siblings([Source("myfix-aok")]), [])
+
+    def test_the_fork_copy_wins_over_a_stale_local_ref(self):
+        # a local myfix-4.1 is generated first, but only a fork ref can be
+        # adopted -- returning the local one hides the cut that is really there
+        bp = self.make(["myfix-aok"], ["myfix", "myfix-branch-4.1"],
+                       local=["myfix-4.1"])
+        self.assertEqual(bp.unlisted_sibling(Source("myfix-aok"), "branch-4.1"),
+                         "myfix-branch-4.1")
+        self.assertEqual([src.name for src in bp.adopt_siblings([Source("myfix-aok")])],
+                         ["myfix-branch-4.1"])
+
+    def test_a_listed_cut_wins_over_a_stale_ref_spelled_differently(self):
+        # myfix-4.1 is generated before myfix-branch-4.1, so a stale ref under
+        # the first spelling must not beat the cut you actually listed
+        bp = self.make(["myfix-aok", "myfix-branch-4.1-aok"],
+                       ["myfix", "myfix-branch-4.1", "myfix-4.1"])
+        self.assertIsNone(bp.unlisted_sibling(Source("myfix-aok"), "branch-4.1"))
+        self.assertEqual(bp.adopt_siblings([Source("myfix-aok")]), [])
+
+    def test_a_local_only_cut_is_reported_rather_than_adopted(self):
+        # adopting it would take branch-4.1 off the listed branch and then drop
+        # the sibling for having no CI, leaving nobody on that release
+        bp = self.make(["myfix-aok"], ["myfix"], local=["myfix-4.1"])
+        self.assertEqual(bp.adopt_siblings([Source("myfix-aok")]), [])
+        self.assertEqual(bp.unlisted_sibling(Source("myfix-aok"), "branch-4.1"),
+                         "myfix-4.1")          # still worth warning about
+
+
+class AdoptionIsOptIn(unittest.TestCase):
+    def test_it_is_off_unless_asked_for(self):
+        import merge_branches
+        self.assertFalse(merge_branches.parse_args([]).adopt_siblings)
+        self.assertTrue(merge_branches.parse_args(["--adopt-siblings"]).adopt_siblings)
+
+
+class IsSiblingCut(unittest.TestCase):
+    """Which existing branch names are a cut of this work for this release."""
+
+    def test_every_spelling_of_the_same_cut_counts(self):
+        for name in ("myfix-3.5", "myfix-3.5-aok", "myfix-3.5-squashed",
+                     "myfix-branch-3.5", "myfix-branch-3.5-aok", "myfix-3.5-r2",
+                     "myfix-branch-3.5-r7-squashed"):
+            with self.subTest(name=name):
+                self.assertTrue(is_sibling_cut(name, "myfix", "branch-3.5"))
+
+    def test_both_spellings_of_4x_count(self):
+        for name in ("myfix-4x", "myfix-4.x", "myfix-branch-4.x"):
+            with self.subTest(name=name):
+                self.assertTrue(is_sibling_cut(name, "myfix", "branch-4.x"))
+
+    def test_a_cut_for_another_release_does_not(self):
+        self.assertFalse(is_sibling_cut("myfix-4.1", "myfix", "branch-3.5"))
+
+    def test_unrelated_work_does_not(self):
+        self.assertFalse(is_sibling_cut("somethingelse-3.5", "myfix", "branch-3.5"))
+
+    def test_a_pinned_branch_has_no_siblings(self):
+        self.assertFalse(is_sibling_cut("myfix-3.5", "myfix-4.1", "branch-3.5"))
+
+    def test_the_branch_is_never_its_own_sibling(self):
+        # a --strip-suffix that swallows a version makes the branch read as
+        # unpinned, and it would then match as a cut of itself
+        self.assertFalse(is_sibling_cut("myfix-3.5", "myfix-3.5", "branch-3.5", ["-3.5"]))
+
+
+class RedoRevision(unittest.TestCase):
+    def test_a_plain_cut_is_revision_zero(self):
+        self.assertEqual(redo_revision("myfix-4.1"), 0)
+
+    def test_a_redo_carries_its_number(self):
+        self.assertEqual(redo_revision("myfix-4.1-r2"), 2)
+        self.assertEqual(redo_revision("myfix-branch-4.1-r10-aok"), 10)
+
+    def test_a_name_that_merely_ends_in_r_is_not_a_redo(self):
+        self.assertEqual(redo_revision("myfix-refactor"), 0)
 
 
 class Ledger(unittest.TestCase):
@@ -726,24 +927,21 @@ class BuildInsteadOfWaiting(unittest.TestCase):
         from types import SimpleNamespace
 
         bp = object.__new__(merge_branches.Backporter)
-        bp.cfg = SimpleNamespace(
-            dry_run=False,
-            fork_remote="fork",
-            fork_repo="holdenk/spark",
-            ci_poll_minutes=0,
-            ci_wait_hours=0,
-            local_stand_in=stand_in,
-            do_compile=compile_,
-        )
+        bp.cfg = SimpleNamespace(dry_run=False, fork_remote="fork", fork_repo="holdenk/spark",
+                                 ci_poll_minutes=0, ci_wait_hours=0,
+                                 local_stand_in=stand_in, do_compile=compile_,
+                                 ci_standin_tasks=["test"])
         self.events = []
         bp.git = SimpleNamespace(run=lambda *a, **k: None)
         bp.reports = SimpleNamespace(write=lambda name, *cols: None)
         bp.record = lambda name, target, why: None
         bp.warn_if_untested = lambda src: None
         bp.merge_all = lambda work: self.events.extend(f"merge:{src.name}" for src, _ in work)
-        bp.execute = lambda src, targets: self.events.append(f"build:{src.name}")
+        bp.execute = lambda src, targets, ci_stand_in=False: self.events.append(
+            f"build:{src.name}:{'ci-stand-in' if ci_stand_in else 'backport-check'}")
         bp.resolve_on_fork = lambda name: (name, name + "-head")
         bp.ci_status_of = lambda sha: states[sha]
+        bp._gh_complained = set()
         return bp
 
     def source(self, name):
@@ -757,23 +955,24 @@ class BuildInsteadOfWaiting(unittest.TestCase):
     def test_a_queued_branch_is_built_here_instead_of_waited_on(self):
         bp = self.make({"a-head": "running"})
         self.assertEqual(bp.revisit(self.work("a")), [])
-        self.assertEqual(self.events, ["build:a"])
+        self.assertEqual(self.events, ["build:a:ci-stand-in"])
 
     def test_it_works_its_way_down_the_queue_one_at_a_time(self):
         bp = self.make({"a-head": "running", "b-head": "running", "c-head": "running"})
         bp.revisit(self.work("a", "b", "c"))
-        self.assertEqual(self.events, ["build:a", "build:b", "build:c"])
+        self.assertEqual(self.events, ["build:a:ci-stand-in", "build:b:ci-stand-in",
+                                       "build:c:ci-stand-in"])
 
     def test_a_branch_that_went_green_is_merged_before_anything_is_built(self):
         bp = self.make({"a-head": "passing", "b-head": "running"})
         bp.revisit(self.work("a", "b"))
-        self.assertEqual(self.events, ["merge:a", "build:b"])
+        self.assertEqual(self.events, ["merge:a", "build:b:ci-stand-in"])
 
     def test_a_late_failure_is_still_handed_back_not_built(self):
         bp = self.make({"a-head": "failing", "b-head": "running"})
         late = bp.revisit(self.work("a", "b"))
         self.assertEqual([src.name for src, _ in late], ["a"])
-        self.assertEqual(self.events, ["build:b"])
+        self.assertEqual(self.events, ["build:b:ci-stand-in"])
 
     def test_turning_it_off_leaves_the_old_polling_alone(self):
         bp = self.make({"a-head": "running", "b-head": "passing"}, stand_in=False)
@@ -959,7 +1158,7 @@ class WaitingForCi(unittest.TestCase):
         bp.cfg = SimpleNamespace(dry_run=False, fork_remote="fork",
                                  fork_repo="holdenk/spark", ci_poll_minutes=0,
                                  ci_wait_hours=0, local_stand_in=False,
-                                 do_compile=False)
+                                 do_compile=False, ci_standin_tasks=["test"])
         bp.git = SimpleNamespace(run=lambda *a, **k: None)
         self.written = []
         self.merged = []
@@ -970,6 +1169,7 @@ class WaitingForCi(unittest.TestCase):
         queues = {sha: list(states) for sha, states in answers.items()}
         bp.ci_status_of = lambda sha: queues[sha].pop(0)
         bp.resolve_on_fork = lambda name: (name, name + "-head")
+        bp._gh_complained = set()
         return bp
 
     def source(self, name):
@@ -999,6 +1199,116 @@ class WaitingForCi(unittest.TestCase):
         bp = self.make({"a-head": answers})
         bp.revisit([(self.source("a"), ["master"])])
         self.assertEqual((self.merged, self.written), (["a"], []))
+
+    def test_a_misread_branch_is_not_built_in_place_of_its_ci(self):
+        # the local build stands in for CI that is queued, not for CI that is
+        # not there at all -- a branch we are only re-asking about has no tick
+        # to stand in for
+        bp = self.make({"a-head": ["none", "none", "none"]})
+        bp.cfg.local_stand_in = True
+        bp.cfg.do_compile = True
+        nudged = []
+        bp.build_instead_of_waiting = lambda queue: nudged.append(
+            [src.name for src, _ in queue]) or None
+        bp.revisit([(self.source("a"), ["master"])])
+        self.assertEqual(nudged, [[], []])       # asked twice, offered nobody
+        self.assertEqual((self.merged, self.written), ([], ["TO_MERGE_LATER.txt"]))
+
+    def test_a_branch_with_a_failed_job_leaves_the_poll(self):
+        # "running-with-failures" means GitHub has already failed a job on this
+        # commit, and the jobs still going cannot unfail it.  Polling it waits
+        # out the whole --ci-wait for a state that never resolves; a local build
+        # does not answer it either.  It goes to the end-of-run retry, where a
+        # re-run of the red job is what would be picked up.
+        bp = self.make({"a-head": ["running-with-failures"]})
+        bp.cfg.local_stand_in = True
+        bp.cfg.do_compile = True
+        nudged = []
+        bp.build_instead_of_waiting = lambda queue: nudged.append(
+            [src.name for src, _ in queue]) or None
+        late = bp.revisit([(self.source("a"), ["master"])])
+        self.assertEqual(nudged, [])              # never offered to a local build
+        self.assertEqual(self.merged, [])
+        self.assertEqual([src.name for src, _ in late], ["a"])   # kept for the retry
+
+    def test_a_branch_that_really_is_building_can_be_stood_in_for(self):
+        bp = self.make({"a-head": ["running", "passing"]})
+        bp.cfg.local_stand_in = True
+        bp.cfg.do_compile = True
+        nudged = []
+        bp.build_instead_of_waiting = lambda queue: nudged.append(
+            [src.name for src, _ in queue]) or None
+        bp.revisit([(self.source("a"), ["master"])])
+        self.assertEqual(nudged, [["a"]])
+        self.assertEqual(self.merged, ["a"])
+
+    def test_the_failing_endpoint_is_named_once(self):
+        # "could not read CI" is the same line whichever half broke, and the fix
+        # for one of them is a token scope that nothing in the log points at
+        import merge_branches
+        from types import SimpleNamespace
+        from unittest import mock
+
+        bp = object.__new__(merge_branches.Backporter)
+        bp.cfg = SimpleNamespace(fork_repo="holdenk/spark")
+        bp._gh_complained = set()
+        bp._gh_lines = lambda path, jq: [] if "check-runs" in path else None
+        said = []
+        with mock.patch.object(merge_branches, "warn", said.append):
+            for _ in range(5):
+                bp.ci_status_of("deadbeef")
+        self.assertEqual(len(said), 1)                 # said once, not per branch
+        self.assertIn("commit statuses", said[0])
+        self.assertIn("Commit statuses: read", said[0])
+
+    def test_an_unreadable_legacy_status_is_an_error_not_an_absence(self):
+        # check-runs can legitimately be empty -- some jobs only report through
+        # the older commit-status API -- so a failure of that second call must
+        # not come back as "this branch has no CI"
+        import merge_branches
+        from types import SimpleNamespace
+
+        bp = object.__new__(merge_branches.Backporter)
+        bp.cfg = SimpleNamespace(fork_repo="holdenk/spark")
+        bp._gh_complained = set()
+        bp._gh_lines = lambda path, jq: [] if "check-runs" in path else None
+        self.assertEqual(bp.ci_status_of("deadbeef"), "error")
+
+    def test_a_conclusive_failure_survives_an_unreadable_legacy_status(self):
+        # nothing in the legacy statuses can turn a red check-run green, so
+        # there is no reason to throw the answer away and poll again
+        import merge_branches
+        from types import SimpleNamespace
+
+        bp = object.__new__(merge_branches.Backporter)
+        bp.cfg = SimpleNamespace(fork_repo="holdenk/spark")
+        bp._gh_complained = set()
+        red = '{"status": "completed", "conclusion": "failure"}'
+        bp._gh_lines = lambda path, jq: [red] if "check-runs" in path else None
+        self.assertEqual(bp.ci_status_of("deadbeef"), "failing")
+
+    def test_a_green_check_run_does_not_survive_one(self):
+        # it might have: a red legacy status would be invisible in the half we
+        # did read, and this is the verdict that pushes
+        import merge_branches
+        from types import SimpleNamespace
+
+        bp = object.__new__(merge_branches.Backporter)
+        bp.cfg = SimpleNamespace(fork_repo="holdenk/spark")
+        bp._gh_complained = set()
+        green = '{"status": "completed", "conclusion": "success"}'
+        bp._gh_lines = lambda path, jq: [green] if "check-runs" in path else None
+        self.assertEqual(bp.ci_status_of("deadbeef"), "error")
+
+    def test_an_empty_pair_of_answers_really_is_no_ci(self):
+        import merge_branches
+        from types import SimpleNamespace
+
+        bp = object.__new__(merge_branches.Backporter)
+        bp.cfg = SimpleNamespace(fork_repo="holdenk/spark")
+        bp._gh_complained = set()
+        bp._gh_lines = lambda path, jq: []
+        self.assertEqual(bp.ci_status_of("deadbeef"), "none")
 
     def test_an_api_error_is_asked_again_before_it_is_believed(self):
         import merge_branches
@@ -1091,7 +1401,7 @@ class MasterAlreadyCarriesIt(unittest.TestCase):
         bp.on_master_already = lambda src: list(on_master)
         self.picked_from = {}
 
-        def backport(src, target, from_commits=None):
+        def backport(src, target, from_commits=None, ci_stand_in=False):
             self.picked_from[target] = from_commits
             return list(master_result) if target == "master" else ["landed"]
 
@@ -1203,6 +1513,66 @@ class CherryPickTrailer(unittest.TestCase):
     def test_the_single_commit_case_still_works(self):
         bp, src = self.make(["c1"], {"c1": True})
         self.assertEqual(bp.already_landed("master", src)[0], "skip")
+
+
+class WhatTheBuildIsAsked(unittest.TestCase):
+    """A backport is asked whether it still builds; a CI stand-in is asked more."""
+
+    def compile_with(self, ci_stand_in):
+        import merge_branches
+        from types import SimpleNamespace
+        from unittest import mock
+
+        bp = object.__new__(merge_branches.Backporter)
+        bp.cfg = SimpleNamespace(do_compile=True, dry_run=False, clean_retry=False,
+                                 sbt_tasks=["compile", "Test/compile"],
+                                 ci_standin_tasks=["test"],
+                                 sbt_timeout=7200, ci_standin_timeout=21600,
+                                 log_dir=Path(tempfile.mkdtemp()), sbt=None)
+        bp.stamp = "stamp"
+        bp.git = SimpleNamespace(root=Path("."), short=lambda rev: "abc1234",
+                                 out=lambda *a: "", run=lambda *a, **k: None)
+        bp.sbt_launcher = lambda: Path("/bin/true")
+        seen = {}
+
+        def fake_run(argv, **kwargs):
+            seen["argv"] = list(argv)
+            seen["timeout"] = kwargs.get("timeout")
+            return SimpleNamespace(returncode=0)
+
+        with mock.patch.object(merge_branches.subprocess, "run", fake_run):
+            bp.compile_target("topic", "master", "HEAD~1", ci_stand_in)
+        return seen
+
+    def test_a_backport_only_has_to_build(self):
+        seen = self.compile_with(False)
+        self.assertEqual(seen["argv"][1:], ["-batch", "compile", "Test/compile"])
+        self.assertEqual(seen["timeout"], 7200)
+
+    def test_a_ci_stand_in_runs_the_tests(self):
+        # nothing here has been run anywhere, so a compile answers none of what
+        # CI would have
+        seen = self.compile_with(True)
+        self.assertEqual(seen["argv"][1:], ["-batch", "test"])
+        self.assertEqual(seen["timeout"], 21600)
+
+
+class RemovedFlags(unittest.TestCase):
+    def test_assume_yes_is_refused_with_a_reason(self):
+        import contextlib, io
+        import merge_branches
+        stderr = io.StringIO()
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(stderr):
+            merge_branches.parse_args(["-y"])
+        self.assertIn("was removed", stderr.getvalue())
+
+    def test_it_is_not_advertised_in_the_help(self):
+        import contextlib, io
+        import merge_branches
+        stdout = io.StringIO()
+        with self.assertRaises(SystemExit), contextlib.redirect_stdout(stdout):
+            merge_branches.parse_args(["--help"])
+        self.assertNotIn("assume-yes", stdout.getvalue())
 
 
 class RefSlug(unittest.TestCase):

@@ -401,10 +401,17 @@ run_add_coauthor() {
   echo "    running $COAUTHOR_SCRIPT over ${base}..HEAD ..."
   local runner=("$COAUTHOR_SCRIPT")
   [ -x "$COAUTHOR_SCRIPT" ] || runner=(bash "$COAUTHOR_SCRIPT")
-  "${runner[@]}" "$base" >/dev/null 2>&1 || {
+  # Keep its stderr.  It warns rather than fails when it has to fall back to a
+  # placement that can drop the trailers already on a commit, and throwing that
+  # away is how a whole run degrades without anybody hearing about it.
+  if ! "${runner[@]}" "$base" >/dev/null 2>"$ERR_FILE"; then
     echo "    !! $COAUTHOR_SCRIPT failed on $(git rev-parse --abbrev-ref HEAD)" >&2
+    sed -n '1,8p' "$ERR_FILE" | sed 's/^/       /' >&2
     return 1
-  }
+  fi
+  if [ -s "$ERR_FILE" ]; then      # it warned; the lines carry their own marker
+    sed -n '1,8p' "$ERR_FILE" | sed 's/^/    /' >&2
+  fi
 }
 
 for branch in "${BRANCHES[@]}"; do
