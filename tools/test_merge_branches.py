@@ -947,6 +947,264 @@ class BackporterAttributes(unittest.TestCase):
         self.assertEqual(read - defined, set(), "read but never assigned in Backporter")
 
 
+class WaitingForCi(unittest.TestCase):
+    """revisit() polls until CI settles; a blip is not a settlement."""
+
+    def make(self, answers):
+        """`answers` maps a sha to the states it returns, one per look."""
+        import merge_branches
+        from types import SimpleNamespace
+
+        bp = object.__new__(merge_branches.Backporter)
+        bp.cfg = SimpleNamespace(dry_run=False, fork_remote="fork",
+                                 fork_repo="holdenk/spark", ci_poll_minutes=0,
+                                 ci_wait_hours=0, local_stand_in=False,
+                                 do_compile=False)
+        bp.git = SimpleNamespace(run=lambda *a, **k: None)
+        self.written = []
+        self.merged = []
+        bp.reports = SimpleNamespace(write=lambda name, *cols: self.written.append(name))
+        bp.record = lambda *a: None
+        bp.warn_if_untested = lambda src: None
+        bp.merge_all = lambda work: self.merged.extend(src.name for src, _ in work)
+        queues = {sha: list(states) for sha, states in answers.items()}
+        bp.ci_status_of = lambda sha: queues[sha].pop(0)
+        bp.resolve_on_fork = lambda name: (name, name + "-head")
+        return bp
+
+    def source(self, name):
+        src = Source(name)
+        src.fork_name, src.fork_head = name, name + "-head"
+        return src
+
+    def test_a_blip_does_not_end_a_wait(self):
+        # GitHub between workflow runs reads as "no runs at all"; the branch was
+        # building a moment ago, so ask again rather than write it off.
+        bp = self.make({"a-head": ["none", "running", "passing"]})
+        bp.revisit([(self.source("a"), ["master"])])
+        self.assertEqual((self.merged, self.written), (["a"], []))
+
+    def test_a_blip_that_never_clears_is_given_up_on(self):
+        import merge_branches
+        bp = self.make({"a-head": ["none"] * merge_branches.CI_MISREADS_ALLOWED})
+        bp.revisit([(self.source("a"), ["master"])])
+        self.assertEqual((self.merged, self.written), ([], ["TO_MERGE_LATER.txt"]))
+
+    def test_a_usable_answer_in_between_resets_the_count(self):
+        import merge_branches
+        answers = (["none"] * (merge_branches.CI_MISREADS_ALLOWED - 1)
+                   + ["running"]
+                   + ["none"] * (merge_branches.CI_MISREADS_ALLOWED - 1)
+                   + ["passing"])
+        bp = self.make({"a-head": answers})
+        bp.revisit([(self.source("a"), ["master"])])
+        self.assertEqual((self.merged, self.written), (["a"], []))
+
+    def test_an_api_error_is_asked_again_before_it_is_believed(self):
+        import merge_branches
+        from types import SimpleNamespace
+        from unittest import mock
+
+        bp = object.__new__(merge_branches.Backporter)
+        answers = ["error", "error", "passing"]
+        bp.ci_status_of = lambda sha: answers.pop(0)
+        with mock.patch.object(merge_branches.time, "sleep"):
+            self.assertEqual(bp.ci_status_settled("deadbeef"), "passing")
+        self.assertEqual(answers, [])
+
+    def test_an_error_that_never_clears_is_still_an_error(self):
+        import merge_branches
+        from unittest import mock
+
+        bp = object.__new__(merge_branches.Backporter)
+        looks = []
+        bp.ci_status_of = lambda sha: looks.append(sha) or "error"
+        with mock.patch.object(merge_branches.time, "sleep"):
+            self.assertEqual(bp.ci_status_settled("deadbeef", tries=3), "error")
+        self.assertEqual(len(looks), 3)
+
+
+class PickedFromMaster(unittest.TestCase):
+    """A backport's trailer has to name a sha that exists in apache/spark."""
+
+    def backporter(self, landings=None, upstream_hits=()):
+        import merge_branches
+        from types import SimpleNamespace
+
+        bp = object.__new__(merge_branches.Backporter)
+        bp.cfg = SimpleNamespace(upstream="apache-github")
+        bp.ledger_commits = {}
+        bp.master_landings = dict(landings or {})
+        # every commit here is "the same change" except where the id says not
+        bp.commit_patch_id = lambda commit: "patch-1" if commit != "unrelated" else "other"
+        bp.git = SimpleNamespace(
+            has_ref=lambda ref: True,
+            subject=lambda rev: "a subject long enough to be specific",
+            lines=lambda *args: list(upstream_hits),
+        )
+        return bp
+
+    def source(self):
+        src = Source("my-fix")
+        src.base, src.commits = "base", ["local-sha"]
+        return src
+
+    def test_a_landing_from_this_run_is_found_by_patch_id(self):
+        # upstream/master is as stale as the fetch at the start of the run, so
+        # nothing pushed since is in it -- but we know what we pushed.
+        bp = self.backporter(landings={"patch-1": "master-sha"})
+        self.assertEqual(bp.on_master_already(self.source()), ["master-sha"])
+
+    def test_without_one_it_falls_back_to_searching_upstream(self):
+        bp = self.backporter(upstream_hits=["upstream-sha"])
+        self.assertEqual(bp.on_master_already(self.source()), ["upstream-sha"])
+
+    def test_a_different_change_with_the_same_subject_is_not_it(self):
+        bp = self.backporter(upstream_hits=["unrelated"])
+        self.assertEqual(bp.on_master_already(self.source()), [])
+
+    def test_remembering_a_landing_keys_it_by_patch_id(self):
+        bp = self.backporter()
+        bp.remember_master_landing(self.source(), ["master-sha"])
+        self.assertEqual(bp.master_landings, {"patch-1": "master-sha"})
+
+    def test_a_short_landing_list_is_not_paired_up_blindly(self):
+        bp = self.backporter()
+        src = self.source()
+        src.commits = ["one", "two"]
+        bp.remember_master_landing(src, ["only-one"])
+        self.assertEqual(bp.master_landings, {})
+
+
+class MasterAlreadyCarriesIt(unittest.TestCase):
+    """master adding nothing is not the same as master not having it."""
+
+    def run_execute(self, master_result, on_master):
+        import merge_branches
+        from types import SimpleNamespace
+
+        bp = object.__new__(merge_branches.Backporter)
+        bp.cfg = SimpleNamespace(upstream="apache-github")
+        bp.reports = SimpleNamespace(write=lambda *a: None)
+        bp.record = lambda *a: None
+        bp.ensure_target = lambda target: True
+        bp.on_master_already = lambda src: list(on_master)
+        self.picked_from = {}
+
+        def backport(src, target, from_commits=None):
+            self.picked_from[target] = from_commits
+            return list(master_result) if target == "master" else ["landed"]
+
+        bp.backport = backport
+        src = Source("my-fix")
+        src.base, src.commits = "base", ["local-sha"]
+        bp.execute(src, ["master", "branch-4.1"])
+        return self.picked_from
+
+    def test_the_release_branch_is_picked_from_what_landed_on_master(self):
+        picked = self.run_execute(master_result=["fresh-master-sha"], on_master=[])
+        self.assertEqual(picked["branch-4.1"], ["fresh-master-sha"])
+
+    def test_master_adding_nothing_falls_back_to_the_sha_already_there(self):
+        # backport() found the change already on master and moved on; the
+        # release branches still have to name that commit, not a local one.
+        picked = self.run_execute(master_result=[], on_master=["older-master-sha"])
+        self.assertEqual(picked["branch-4.1"], ["older-master-sha"])
+
+    def test_a_rolled_back_master_leaves_the_trailer_off(self):
+        # nothing on master and nothing to find: no sha to point at, so the
+        # release branch is picked from the local commit with no -x line.
+        picked = self.run_execute(master_result=[], on_master=[])
+        self.assertIsNone(picked["branch-4.1"])
+
+
+class ReviewGate(unittest.TestCase):
+    """Nothing is pushed that no reviewer -- claude or human -- has looked at."""
+
+    def gate(self, **flags):
+        import merge_branches
+        from types import SimpleNamespace
+
+        bp = object.__new__(merge_branches.Backporter)
+        bp.cfg = SimpleNamespace(sanity=True, dry_run=False, jobs=1,
+                                 operator_review=True, **flags)
+        bp.claude_alive = False
+        self.written = []
+        bp.reports = SimpleNamespace(write=lambda name, *cols: self.written.append(name))
+        bp.claude_verdict = lambda *a: self.fail("claude was asked for a verdict")
+        return bp
+
+    def test_your_up_front_approval_stands_in_for_claude(self):
+        bp = self.gate()
+        self.assertTrue(bp.sanity_check("topic", "master", "a..b"))
+        self.assertEqual(self.written, [])
+
+    def test_with_no_reviewer_at_all_nothing_is_pushed(self):
+        # --no-operator-review means no diff was shown, and -j >1 means there is
+        # no terminal to fall back on: claude was the only reviewer left.
+        bp = self.gate()
+        bp.cfg.operator_review = False
+        bp.cfg.jobs = 4
+        self.assertFalse(bp.sanity_check("topic", "master", "a..b"))
+        self.assertEqual(self.written, ["NEEDS_REVIEW.txt"])
+
+    def test_a_dry_run_stands_in_a_verdict_instead_of_paying_for_one(self):
+        bp = self.gate()
+        bp.cfg.dry_run = True
+        bp.claude_alive = True          # even so, it is not asked
+        self.assertTrue(bp.sanity_check("topic", "master", "a..b"))
+        self.assertEqual(self.written, [])
+
+    def test_the_gate_can_be_switched_off_outright(self):
+        bp = self.gate()
+        bp.cfg.sanity = False
+        bp.claude_alive = True
+        self.assertTrue(bp.sanity_check("topic", "master", "a..b"))
+        self.assertEqual(self.written, [])
+
+
+class CherryPickTrailer(unittest.TestCase):
+    """The -x trailer check has to say which commit each trailer names."""
+
+    def make(self, commits, grepped):
+        """`grepped` maps a sha to whether the target carries a trailer for it."""
+        import merge_branches
+        from types import SimpleNamespace
+
+        bp = object.__new__(merge_branches.Backporter)
+        bp.cfg = SimpleNamespace(upstream="apache-github")
+        bp.ledger_commits = {}
+        bp.on_master_already = lambda src: []
+        bp.commit_patch_id = lambda commit: None
+
+        def lines(*args):
+            grep = next(a for a in args if a.startswith("--grep="))
+            sha = grep.rsplit(" ", 1)[-1]
+            return ["found"] if grepped.get(sha) else []
+
+        bp.git = SimpleNamespace(
+            has_ref=lambda ref: True,
+            lines=lambda *args: [] if args[0] == "cherry" else lines(*args),
+            subject=lambda rev: "",
+        )
+        src = Source("topic")
+        src.fork_name, src.fork_head = "topic", commits[-1]
+        src.base, src.commits = "base", list(commits)
+        return bp, src
+
+    def test_a_trailer_for_every_commit_is_a_skip(self):
+        bp, src = self.make(["c1", "c2"], {"c1": True, "c2": True})
+        self.assertEqual(bp.already_landed("master", src)[0], "skip")
+
+    def test_a_trailer_for_one_commit_does_not_cover_the_others(self):
+        bp, src = self.make(["c1", "c2"], {"c2": True})
+        self.assertIsNone(bp.already_landed("master", src))
+
+    def test_the_single_commit_case_still_works(self):
+        bp, src = self.make(["c1"], {"c1": True})
+        self.assertEqual(bp.already_landed("master", src)[0], "skip")
+
+
 class RefSlug(unittest.TestCase):
     def test_slashes_and_spaces_become_underscores(self):
         self.assertEqual(ref_slug("feature/my branch--master"), "feature_my_branch--master")

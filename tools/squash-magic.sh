@@ -31,7 +31,9 @@
 #      handle_probably_merged, since the branch appears already merged.)
 #   4. Ask the `claude` CLI for a vague, no-security commit message when squashing.
 #      If `claude` isn't available (or returns nothing), prompt the human via /dev/tty.
-#   5. Check out the resulting branch and run ./add_coauthor.sh.
+#   5. Check out the resulting branch and run add_coauthor.sh over just the
+#      commits above $base -- the base is passed in, so the script never has
+#      to guess where your work starts.
 #   6. Append the resulting branch name to $OUTPUT_FILE (default: branches_to_merge.txt).
 #
 # The original local branches are NEVER modified — only new refs are created.
@@ -53,7 +55,7 @@
 #   UNKNOWN_FILE    default: unknown_source.txt
 #   WTFBBQ_FILE     default: wtfbbq.txt
 #   IDK_FILE        default: idk.txt
-#   COAUTHOR_SCRIPT default: ./add_coauthor.sh
+#   COAUTHOR_SCRIPT default: add_coauthor.sh beside this script
 
 set -euo pipefail
 
@@ -75,7 +77,10 @@ OUTPUT_FILE="${OUTPUT_FILE:-branches_to_merge.txt}"
 UNKNOWN_FILE="${UNKNOWN_FILE:-unknown_source.txt}"
 WTFBBQ_FILE="${WTFBBQ_FILE:-wtfbbq.txt}"
 IDK_FILE="${IDK_FILE:-idk.txt}"
-COAUTHOR_SCRIPT="${COAUTHOR_SCRIPT:-./add_coauthor.sh}"
+# Beside this script, not in $PWD: squash-magic.sh is run from whatever repo
+# is being squashed, which is not where these helpers live.
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+COAUTHOR_SCRIPT="${COAUTHOR_SCRIPT:-$SCRIPT_DIR/add_coauthor.sh}"
 
 usage() {
   cat >&2 <<EOF
@@ -382,24 +387,24 @@ handle_probably_merged() {
   fi
 }
 
-# Run ./add_coauthor.sh on the currently-checked-out branch.
+# Run add_coauthor.sh on the currently-checked-out branch, rewriting only what
+# sits above $1.  We know exactly where the branch was cut from, so say so
+# rather than let the script guess -- its guess is "the newest commit not by
+# you", and on a project you commit to that can be one of your own upstream
+# commits, sending the rewrite off into history that is not yours to rewrite.
 run_add_coauthor() {
+  local base="$1"
   if [ ! -x "$COAUTHOR_SCRIPT" ] && [ ! -f "$COAUTHOR_SCRIPT" ]; then
     echo "    (skipping add_coauthor: $COAUTHOR_SCRIPT not found)" >&2
     return 0
   fi
-  echo "    running $COAUTHOR_SCRIPT ..."
-  if [ -x "$COAUTHOR_SCRIPT" ]; then
-    "$COAUTHOR_SCRIPT" >/dev/null 2>&1 || {
-      echo "    !! $COAUTHOR_SCRIPT failed on $(git rev-parse --abbrev-ref HEAD)" >&2
-      return 1
-    }
-  else
-    bash "$COAUTHOR_SCRIPT" >/dev/null 2>&1 || {
-      echo "    !! $COAUTHOR_SCRIPT failed on $(git rev-parse --abbrev-ref HEAD)" >&2
-      return 1
-    }
-  fi
+  echo "    running $COAUTHOR_SCRIPT over ${base}..HEAD ..."
+  local runner=("$COAUTHOR_SCRIPT")
+  [ -x "$COAUTHOR_SCRIPT" ] || runner=(bash "$COAUTHOR_SCRIPT")
+  "${runner[@]}" "$base" >/dev/null 2>&1 || {
+    echo "    !! $COAUTHOR_SCRIPT failed on $(git rev-parse --abbrev-ref HEAD)" >&2
+    return 1
+  }
 }
 
 for branch in "${BRANCHES[@]}"; do
@@ -525,7 +530,7 @@ for branch in "${BRANCHES[@]}"; do
     git_s checkout --quiet --detach HEAD >/dev/null 2>&1 || true
     git branch -f "$target" "$work"
     git_s checkout --quiet "$target"
-    run_add_coauthor || true
+    run_add_coauthor "$base" || true
     git branch -D "$work" >/dev/null 2>&1 || true
     echo "$target" >> "$OUTPUT_FILE"
     echo "    -> $target (${#mine[@]} of mine, nothing to squash)"
@@ -555,7 +560,7 @@ for branch in "${BRANCHES[@]}"; do
   git update-ref "refs/heads/$target" "$new_commit"
   git_s checkout --quiet "$target"
 
-  run_add_coauthor || true
+  run_add_coauthor "$parent" || true
   git branch -D "$work" >/dev/null 2>&1 || true
 
   echo "$target" >> "$OUTPUT_FILE"
@@ -563,7 +568,8 @@ for branch in "${BRANCHES[@]}"; do
 done
 
 git_s checkout --quiet "$ORIG_BRANCH"
-trap - EXIT
+# The EXIT trap stays armed: it is what removes $ERR_FILE and any leftover
+# work branches, and on this path it has nothing else left to undo.
 
 nm=$(wc -l < "$OUTPUT_FILE"  | tr -d ' ')
 nu=$(wc -l < "$UNKNOWN_FILE" | tr -d ' ')
