@@ -14,10 +14,14 @@ cut from, otherwise it is auto-detected).  For each branch it:
        * still running / queued -> re-checked until it settles, then merged.
                                    When a whole round goes by with nothing
                                    going green, the branch at the head of the
-                                   queue is built locally instead of waiting on
-                                   it, and merged if that build is clean; the
-                                   next round asks GitHub again first, so this
-                                   works down the queue one branch at a time
+                                   queue has the full test suite run on it here
+                                   instead (--ci-standin-tasks: standing in for
+                                   CI means running what CI runs, not the
+                                   compile that is enough for a backport, so
+                                   this is hours rather than minutes), and is
+                                   merged if that is clean; the next round asks
+                                   GitHub again first, so this works down the
+                                   queue one branch at a time
                                    (--no-local-build-stand-in to just poll,
                                    and --no-compile disables it outright --
                                    there is nothing to stand in with).
@@ -77,9 +81,12 @@ cut from, otherwise it is auto-detected).  For each branch it:
      for a verdict, and anything it calls QUESTIONABLE is put to the human.  If
      claude is not available the human is asked directly.  Series that are not
      approved are rolled back and listed in NEEDS_REVIEW.txt.
-  9. Builds the target with sbt ("compile Test/compile", retried once as "clean
-     compile Test/compile" in case the first failure was stale build state) and
-     only pushes if that succeeds.  The build is skipped for the branch the
+  9. Builds the target with sbt (--sbt-tasks, "compile Test/compile" by default,
+     retried once with a leading "clean" in case the first failure was stale
+     build state) and only pushes if that succeeds.  That is the right question
+     for a backport: the change went green on the fork, so what is left to ask is
+     whether it still builds here.  A branch merged with no green tick at all is
+     a different question and gets --ci-standin-tasks instead.  The build is skipped for the branch the
      work was cut from, since the fork's CI already ran there (--no-ci-shortcut).  A failed build is rolled back and recorded in
      COMPILE_FAILED.txt, keeping the full log, the extracted errors and a ref
      pointing at the tree that failed so it can be checked out later.
@@ -254,6 +261,49 @@ def sibling_coverage(branch: str, targets: list[str], all_branches: list[str],
     return covered
 
 
+def cut_identity(branch: str, strip: list[str] | None = None) -> tuple[str, str | None]:
+    """Which cut of which work a name describes: (stem, the release it is pinned to).
+
+    The same cut is written a dozen ways -- foo-4.1, foo-branch-4.1, foo-4x,
+    foo-4.1-aok, foo-4.1-squashed, and the redone foo-4.1-r2 -- and comparing the
+    names as written tells you nothing about which of them are the same branch.
+    Every question this file asks about a sibling ("did you already list one?",
+    "is one held?") is really a question about this pair.
+    """
+    return family_stem(branch, strip), suffix_target(branch, strip)
+
+
+REDO = re.compile(r"-r(\d+)$")
+
+
+def redo_revision(branch: str, strip: list[str] | None = None) -> int:
+    """The -rN of a redone cut; 0 for the original.
+
+    foo-4.1 is the first cut and foo-4.1-r2 the redo of it.  When both are still
+    lying about on the fork, the redo is the one that was meant.
+    """
+    found = REDO.search(logical_name(branch, strip))
+    return int(found.group(1)) if found else 0
+
+
+def is_sibling_cut(candidate: str, branch: str, target: str,
+                   strip: list[str] | None = None) -> bool:
+    """Is `candidate` a cut of `branch`'s work aimed at `target`?
+
+    Asked of names that exist rather than answered by generating the names a cut
+    might go by.  Generating them means knowing every spelling in advance, and
+    the spellings keep turning out to have one more in them: the -rN of a redone
+    cut is understood by cut_identity and by VERSION_SUFFIX, and was missing from
+    the generator, so a redone cut was invisible to the very check that exists to
+    find it.  Reading the refs that are there cannot go out of step that way.
+    """
+    if suffix_target(branch, strip):        # pinned: it owns one release, not others
+        return False
+    if logical_name(candidate, strip) == logical_name(branch, strip):
+        return False                        # itself, under some other spelling
+    return cut_identity(candidate, strip) == (family_stem(branch, strip), target)
+
+
 def targets_for(branch: str, base_branch: str, default_targets: list[str],
                 strip: list[str] | None = None) -> list[str]:
     """Where this branch is allowed to land."""
@@ -271,8 +321,11 @@ def ci_status(runs: list[tuple[str, str]]) -> str:
     if not runs:
         return "none"
     if any(status != "completed" for status, _ in runs):
-        # Still building is "come back later", not "rejected" -- but say so if
-        # something has already failed, or it looks like a clean pending run.
+        # Still building is "come back later", not "rejected" -- unless a job has
+        # already finished red, which the jobs still going cannot undo.  Say which,
+        # because the two are waited on differently: one is polled, the other has
+        # failed once already and wants the end-of-run retry, where a re-run of
+        # the red job would be picked up.
         if any(conclusion in BAD_CONCLUSIONS for _, conclusion in runs):
             return "running-with-failures"
         return "running"
@@ -574,6 +627,7 @@ class Config:
     max_commits: int
     strip_suffixes: list[str]
     pick_from_fork: bool
+    adopt_siblings: bool
     operator_review: bool
     ci_shortcut: bool
     review_diff_lines: int
@@ -581,8 +635,10 @@ class Config:
     dry_run: bool
     sbt: Path | None          # None: use each worktree's own build/sbt
     sbt_tasks: list[str]
+    ci_standin_tasks: list[str]
     clean_retry: bool
     sbt_timeout: int
+    ci_standin_timeout: int
     log_dir: Path
     ledger: Path
     approvals: Path
@@ -635,6 +691,8 @@ class Backporter:
         # The record of the run -- shared with the workers.
         self.outcomes: list[tuple[str, str, str]] = []   # (source, target, what happened)
         self.listed: list[str] = []       # every branch name in this run
+        self._branch_names: tuple[list[str], list[str]] | None = None
+        self._gh_complained: set[str] = set()
         self.claude_alive = False
         self.ledger_lock = threading.Lock()
         # Workers all push to the same handful of branches; queueing per target
@@ -720,6 +778,29 @@ class Backporter:
                 return candidate, head
         return None
 
+    def locate(self, src: Source) -> bool:
+        """Find the branch on the fork and settle what we would pick from it.
+
+        Its own step because adoption needs it done -- where a branch was cut
+        from decides which of its siblings are wanted, and that cannot be worked
+        out before the branch has a head.
+        """
+        found = self.resolve_on_fork(src.name)
+        if not found:
+            tried = " or ".join(dict.fromkeys(
+                [src.name, logical_name(src.name, self.cfg.strip_suffixes)]))
+            warn(f"{src.name}: not found on {self.cfg.fork_remote} "
+                 f"(tried {tried}) -- skipping")
+            self.reports.write("TO_MERGE_LATER.txt", src.name, "",
+                               f"NOT_ON_FORK: tried {tried}")
+            self.record(src.name, "-", "skipped, not on the fork")
+            return False
+        src.fork_name, src.fork_head = found
+        if src.fork_name != src.name:
+            log(f"{src.name}: CI checked on {self.cfg.fork_remote}/{src.fork_name}")
+        src.pick_name, src.head = self.resolve_pick_ref(src)
+        return True
+
     def resolve_pick_ref(self, src: Source) -> tuple[str, str]:
         """Where the commits come from: the local branch under the listed name.
 
@@ -799,11 +880,26 @@ class Backporter:
             return None
         return [line for line in result.stdout.splitlines() if line.strip()]
 
+    def _gh_once(self, what: str, hint: str) -> None:
+        """Name a failing endpoint the first time it fails, and only then.
+
+        "could not read CI" is the same message whichever call broke, and the
+        two break for different reasons -- a token with Checks but not Commit
+        statuses reads one and 403s the other, all run long, and nothing in the
+        log points at the scope that would fix it.
+        """
+        if what in self._gh_complained:
+            return
+        self._gh_complained.add(what)
+        warn(f"gh could not read {what} from {self.cfg.fork_repo} -- {hint}")
+
     def ci_status_of(self, sha: str) -> str:
         repo = self.cfg.fork_repo
         checks = self._gh_lines(f"repos/{repo}/commits/{sha}/check-runs",
                                 ".check_runs[] | @json")
         if checks is None:
+            self._gh_once("check-runs", "a token without 'Checks: read', or the API "
+                                        "is having a moment")
             return "error"
         runs: list[tuple[str, str]] = []
         for line in checks:
@@ -814,7 +910,22 @@ class Backporter:
             runs.append((item.get("status") or "", item.get("conclusion") or ""))
         # Some jobs report through the older commit-statuses API instead.
         statuses = self._gh_lines(f"repos/{repo}/commits/{sha}/status",
-                                  ".statuses[] | @json") or []
+                                  ".statuses[] | @json")
+        if statuses is None:
+            self._gh_once("commit statuses",
+                          "a token without 'Commit statuses: read'? the check-runs "
+                          "half answered, so every branch will read as unreadable "
+                          "until this one does too")
+            # gh could not answer.  A conclusive answer from the check-runs is
+            # still conclusive: nothing in the legacy statuses can turn a
+            # failure green, and a branch still building gets asked about again
+            # anyway.  It is "passing" and "no CI here" that the half we could
+            # not read might have contradicted, and those two must not stand --
+            # the first pushes, the second drops the branch from the run.
+            verdict = ci_status(runs)
+            if verdict == "failing" or verdict.startswith("running"):
+                return verdict
+            return "error"
         for line in statuses:
             try:
                 item = json.loads(line)
@@ -965,8 +1076,8 @@ class Backporter:
                                       f"--grep=cherry picked from commit {sha}", span)
                        for sha in spellings if sha)
 
-        if all(picked_already(index, commit)
-               for index, commit in enumerate(src.commits)):
+        if src.commits and all(picked_already(index, commit)
+                               for index, commit in enumerate(src.commits)):
             return "skip", "already cherry-picked (-x trailer)"
 
         # 3. Same subject.  A matching title is not enough on its own: the target
@@ -1252,11 +1363,22 @@ Diff (may be truncated):
         return False
 
     # -- build -------------------------------------------------------------
-    def compile_target(self, src: str, target: str, pre_pick: str) -> CompileFailure | None:
-        """None means it built (or the build is switched off)."""
+    def compile_target(self, src: str, target: str, pre_pick: str,
+                       ci_stand_in: bool = False) -> CompileFailure | None:
+        """None means it built (or the build is switched off).
+
+        Two jobs, and they are not the same question.  A backport is asked "does
+        this still build here", and compiling it and its tests answers that --
+        the change itself already went green on the fork.  A branch merged
+        because its CI never started is asked the question CI would have asked,
+        and a compile answers none of it: nothing here has been run.  So that one
+        gets the tests, all of them, and the time to do it in.
+        """
+        tasks = self.cfg.ci_standin_tasks if ci_stand_in else self.cfg.sbt_tasks
+        timeout = self.cfg.ci_standin_timeout if ci_stand_in else self.cfg.sbt_timeout
         if not self.cfg.do_compile:
             tag = "[dry-run]" if self.cfg.dry_run else "[no-compile]"
-            log(f"  {tag} would build {target} with: sbt {' '.join(self.cfg.sbt_tasks)}")
+            log(f"  {tag} would build {target} with: sbt {' '.join(tasks)}")
             return None
 
         self.cfg.log_dir.mkdir(parents=True, exist_ok=True)
@@ -1278,14 +1400,15 @@ Diff (may be truncated):
 
         # Incremental first; a failure there may just be stale sbt state left by
         # the previous branch, so fall back to a clean build before believing it.
-        attempts = [self.cfg.sbt_tasks]
-        if self.cfg.clean_retry and "clean" not in self.cfg.sbt_tasks:
-            attempts.append(["clean", *self.cfg.sbt_tasks])
+        attempts = [tasks]
+        if self.cfg.clean_retry and "clean" not in tasks:
+            attempts.append(["clean", *tasks])
 
         for number, tasks in enumerate(attempts, start=1):
             joined = " ".join(tasks)
             if number == 1:
-                log(f"  {target}: sbt {joined}  (log: {log_path})")
+                what = "standing in for CI" if ci_stand_in else "checking the backport"
+                log(f"  {target}: sbt {joined}  ({what}; log: {log_path})")
             else:
                 warn(f"  {target}: retrying from scratch -- sbt {joined}")
             with log_path.open("a", encoding="utf-8") as handle:
@@ -1294,7 +1417,7 @@ Diff (may be truncated):
                 try:
                     completed = subprocess.run(
                         [str(self.sbt_launcher()), "-batch", *tasks],
-                        cwd=self.git.root, env=env, timeout=self.cfg.sbt_timeout,
+                        cwd=self.git.root, env=env, timeout=timeout,
                         stdout=handle, stderr=subprocess.STDOUT,
                     )
                     returncode, timed_out = completed.returncode, False
@@ -1316,8 +1439,8 @@ Diff (may be truncated):
         tail = text.rsplit("### attempt ", 1)[-1]
         errors = [line for line in tail.splitlines() if line.startswith("[error]")]
         if timed_out:
-            warn(f"  {target}: sbt timed out after {self.cfg.sbt_timeout}s")
-            first_error = f"timed out after {self.cfg.sbt_timeout}s"
+            warn(f"  {target}: sbt timed out after {timeout}s")
+            first_error = f"timed out after {timeout}s"
         else:
             warn(f"  {target}: sbt failed (exit {returncode}) even after a clean rebuild"
                  if len(attempts) > 1 else f"  {target}: sbt failed (exit {returncode})")
@@ -1477,7 +1600,8 @@ Diff (may be truncated):
         return not self.git.out("status", "--porcelain", "--untracked-files=no")
 
     def backport(self, src: Source, target: str,
-                 from_commits: list[str] | None = None) -> list[str]:
+                 from_commits: list[str] | None = None,
+                 ci_stand_in: bool = False) -> list[str]:
         """Land the branch on `target`; returns the commits it created there.
 
         `from_commits` is the series as it landed on master.  Release branches
@@ -1561,12 +1685,14 @@ Diff (may be truncated):
             self.record(src.name, target, "held for review")
             return []
 
-        if self.ci_stands_in_for_build(src, target):
+        if not ci_stand_in and self.ci_stands_in_for_build(src, target):
             log(f"  {target}: CI already passed on {self.cfg.fork_remote}/{src.fork_name}, "
                 f"which is cut from {target} -- not rebuilding")
             failure = None
         else:
-            failure = self.compile_target(src.name, target, pre_pick)
+            # ...and never that shortcut when this build *is* the CI: there is no
+            # tick to lean on, which is the whole reason we are running one.
+            failure = self.compile_target(src.name, target, pre_pick, ci_stand_in)
         if failure:
             self.reports.write("COMPILE_FAILED.txt", src.name, target, failure.log,
                                failure.kept_ref, failure.first_error)
@@ -1586,6 +1712,15 @@ Diff (may be truncated):
         self.record(src.name, target, "would push" if not self.cfg.do_push else "pushed")
         landed = self.find_landed(created)
         if target == "master":
+            # Deliberately not guarded on do_push, unlike remember_merge().  The
+            # ledger is a record of what left the machine, so a row for an
+            # unpushed merge would be a lie a later run acts on.  This is not
+            # that: the push is HEAD:refs/heads/<target>, which sends the commit
+            # object unchanged, so the sha found here is the sha a real run
+            # would publish.  Recording it makes --no-push preview the trailer
+            # the real run writes, and skipping it would leave the preview
+            # disagreeing with the same run's own single-branch path, which
+            # takes this sha from landed_as either way.
             self.remember_master_landing(src, landed)
         if not landed:
             warn(f"  {target}: cannot find the commit that landed -- the release "
@@ -1616,23 +1751,141 @@ Diff (may be truncated):
         if landed:      # keep the in-memory view of the ledger with the file
             self.ledger_commits[(src.name, target)] = landed[-1]
 
-    def unlisted_sibling(self, src: Source, target: str) -> str | None:
+    def known_cuts(self) -> set[tuple[str, str | None]]:
+        """Every cut this run already has, by identity rather than by spelling.
+
+        The branch file lists the local rewrite, foo-aok, while the fork carries
+        it as foo; a redone cut is foo-4.1-r2 where the first was foo-4.1; the
+        same release is written -4.1 and -branch-4.1.  Anything comparing the
+        names as written reports each of those as a sibling of the other that you
+        forgot to list -- which is what this used to do.
+        """
+        return {cut_identity(name, self.cfg.strip_suffixes) for name in self.listed}
+
+    def branch_names(self) -> tuple[list[str], list[str]]:
+        """(on the fork, local) -- every branch name, read once and kept."""
+        if self._branch_names is None:
+            prefix = f"{self.cfg.fork_remote}/"
+            fork = [name[len(prefix):] for name in
+                    self.git.lines("for-each-ref", "--format=%(refname:short)",
+                                   f"refs/remotes/{self.cfg.fork_remote}/")
+                    if name.startswith(prefix)]
+            local = self.git.lines("for-each-ref", "--format=%(refname:short)",
+                                   "refs/heads/")
+            self._branch_names = (fork, local)
+        return self._branch_names
+
+    def unlisted_sibling(self, src: Source, target: str,
+                         known: set[tuple[str, str | None]] | None = None) -> str | None:
         """A sibling cut for `target` that exists but was not put in the list."""
-        stem = family_stem(src.name, self.cfg.strip_suffixes)
-        for suffix, mapped in SUFFIX_TARGETS:
-            if mapped != target:
-                continue
-            # Same spellings suffix_target() reads back, written out: a sibling
-            # named foo-branch-4.x is no less a sibling than foo-4.x.
-            for spelling in (suffix, f"-branch{suffix}"):
-                for marker in ["", *self.cfg.strip_suffixes]:
-                    candidate = f"{stem}{spelling}{marker}"
-                    if candidate in self.listed or candidate == src.name:
-                        return None
-                    if (self.git.has_ref(f"refs/remotes/{self.cfg.fork_remote}/{candidate}")
-                            or self.git.has_ref(f"refs/heads/{candidate}")):
-                        return candidate
+        known = self.known_cuts() if known is None else known
+        if (family_stem(src.name, self.cfg.strip_suffixes), target) in known:
+            return None       # you listed a cut for this release, whatever it is called
+        strip = self.cfg.strip_suffixes
+        # The fork first: it is the only place a cut can be adopted from, and a
+        # stale local ref must not hide the copy that has CI behind it.  Then the
+        # newest redo, since an -r2 exists precisely because -r1 was superseded
+        # and both are usually still sitting there.
+        for names in self.branch_names():
+            matches = [name for name in names if is_sibling_cut(name, src.name, target, strip)]
+            if matches:
+                return max(matches, key=lambda name: (redo_revision(name, strip), name))
         return None
+
+    def parent_targets(self, src: Source) -> list[str]:
+        """Where the listed branch itself would go.
+
+        The only targets a sibling of it is wanted for: adoption exists because
+        the plain branch would otherwise try that release and conflict on it, and
+        that reasoning says nothing about a release it was never going to try.
+        A base we cannot work out means we cannot say, and cannot say is not a
+        licence -- an unlisted branch is somebody's abandoned attempt as often as
+        it is the cut you meant to list.
+        """
+        found = self.pick_base(src)
+        if not isinstance(found, tuple):
+            return []
+        return targets_for(src.name, found[1], list(dict.fromkeys(self.cfg.targets)),
+                           self.cfg.strip_suffixes)
+
+    def adoption_name(self, sibling: str) -> str:
+        """The name the branch file would have carried for this cut.
+
+        squash-magic leaves its rewrite locally as <name>-aok or <name>-squashed
+        and never touches the original, so the branch file names the rewrite and
+        resolve_pick_ref() picks from it.  Adopting the fork's spelling instead
+        would pick from that untouched original -- the stale, un-squashed series
+        that a listed entry never names, and that plan() then refuses for having
+        more than one commit, after sibling_coverage has already taken the
+        release off the branch that was listed.
+        """
+        _, local = self.branch_names()
+        for marker in self.cfg.strip_suffixes:
+            if f"{sibling}{marker}" in local:
+                return f"{sibling}{marker}"
+        return sibling
+
+    def adopt_siblings(self, sources: list[Source]) -> list[Source]:
+        """Take in cuts of the listed work that the branch file missed.
+
+        A change that will not apply to every release arrives as a pair: the
+        plain branch, and a -3.5 (or -4.1, ...) cut of the same work.  Listing
+        one and not the other is a slip rather than a decision -- left alone the
+        plain branch tries that release itself and conflicts on it, which is why
+        this used to be a warning.  An adopted branch is trusted no further than
+        a listed one: it is looked up on the fork, CI-checked, put to you for
+        approval and built like everything else, and it is skipped if the hold
+        list or the ledger says so.
+        """
+        known = self.known_cuts()       # everything listed, resolved or not
+        held = {cut_identity(name, self.cfg.strip_suffixes) for name in self.held}
+        adopted: list[Source] = []
+        for src in sources:
+            if src.name in self.held:      # hands off means hands off its family
+                continue
+            hits = {}
+            for target in dict.fromkeys(self.cfg.targets):
+                sibling = self.unlisted_sibling(src, target, known)
+                if sibling:
+                    hits[target] = sibling
+            if not hits:
+                continue      # nothing to adopt, so do not pay for the base below
+            allowed = set(self.parent_targets(src))
+            for target, sibling in hits.items():
+                if target not in allowed:
+                    log(f"{src.name}: there is a {sibling} on the fork, but {src.name} "
+                        f"does not go to {target} -- leaving it alone")
+                    continue
+                if cut_identity(sibling, self.cfg.strip_suffixes) in held:
+                    # Held means you know about it and want it left alone.  Say
+                    # what that costs: adopting it would also take the target
+                    # off the listed branch, so the held cut would be the only
+                    # thing landing there.
+                    log(f"{src.name}: {sibling} is the cut {target} needs but it is "
+                        f"held in {self.cfg.hold_list} -- "
+                        f"leaving {target} to {src.name}")
+                    continue
+                if not self.git.has_ref(
+                        f"refs/remotes/{self.cfg.fork_remote}/{sibling}"):
+                    # Adopting it would take `target` off the listed branch (that
+                    # is what sibling_coverage does with a sibling) and then drop
+                    # the sibling itself for having no CI -- leaving nobody on it.
+                    warn(f"{src.name}: {sibling} is only a local branch -- push it to "
+                         f"{self.cfg.fork_remote} or list it, or {target} goes to "
+                         f"{src.name} as it is")
+                    continue
+                name = self.adoption_name(sibling)
+                extra = f" (as the local rewrite {name})" if name != sibling else ""
+                log(f"{src.name}: {sibling} is the cut {target} needs and is not in "
+                    f"{self.cfg.branch_file} -- taking it too{extra}")
+                # Deliberately no explicit_base, even when the listed branch has
+                # one pinned in the branch file.  That pin says where *that* cut
+                # was made from; a cut aimed at another release was almost
+                # certainly made from somewhere else, so copying it over would be
+                # a confident wrong answer where best_base() gives a checked one.
+                adopted.append(Source(name))
+                known.add(cut_identity(sibling, self.cfg.strip_suffixes))
+        return adopted
 
     # -- one source branch -------------------------------------------------
     def plan(self, src: Source) -> list[str] | None:
@@ -1719,11 +1972,13 @@ Diff (may be truncated):
         if not targets:
             log(f"  {src.name}: every target belongs to a sibling branch")
             return None
-        for target in targets:
-            unlisted = self.unlisted_sibling(src, target)
-            if unlisted:
-                warn(f"  {target}: there is a branch {unlisted} you have not listed -- "
-                     f"add it if that is the cut {target} needs")
+        if not self.cfg.adopt_siblings:
+            for target in targets:
+                unlisted = self.unlisted_sibling(src, target)
+                if unlisted:
+                    warn(f"  {target}: there is a branch {unlisted} you have not listed "
+                         f"-- add it if that is the cut {target} needs "
+                         "(--adopt-siblings takes it in automatically)")
 
         # Before the diff prompt: nothing to look at if it is all done already.
         done = [target for target in targets if (src.name, target) in self.merged]
@@ -1760,8 +2015,13 @@ Diff (may be truncated):
 
         return targets
 
-    def execute(self, src: Source, targets: list[str]) -> None:
-        """Do the merging.  Runs in this Backporter's worktree."""
+    def execute(self, src: Source, targets: list[str],
+                ci_stand_in: bool = False) -> None:
+        """Do the merging.  Runs in this Backporter's worktree.
+
+        `ci_stand_in` says this branch is being merged without a green tick, so
+        the build has to answer what CI would have -- see compile_target().
+        """
         # master first: what lands there is what the release branches get picked
         # from, so their cherry-pick trailers name a commit that exists upstream.
         # If master is not in this run it may still have landed earlier; the
@@ -1778,7 +2038,8 @@ Diff (may be truncated):
                                    f"pinned target missing on {self.cfg.upstream}")
                 self.record(src.name, target, "pinned target does not exist")
                 continue
-            landed_as = self.backport(src, target, from_commits=on_master or None)
+            landed_as = self.backport(src, target, from_commits=on_master or None,
+                                      ci_stand_in=ci_stand_in)
             if target == "master":
                 # Nothing new on master means one of two things.  Either the
                 # backport was rolled back -- a conflict, a red build, a failed
@@ -1805,30 +2066,31 @@ Diff (may be truncated):
         self.listed = [src.name for src in sources]
         if self.held:
             log(f"{len(self.held)} branch(es) are held in {self.cfg.hold_list}")
-        green: list[Source] = []
-        waiting: list[Source] = []       # CI still running; revisited at the end
-        failed: list[Source] = []        # CI red once; looked at once more at the end
+
+        located: list[Source] = []
         for src in sources:
             if src.name in self.held:
                 log(f"{src.name}: held in {self.cfg.hold_list} ({self.held[src.name]}) "
                     "-- skipping it")
                 self.record(src.name, "-", "held, listed in " + str(self.cfg.hold_list))
                 continue
-            found = self.resolve_on_fork(src.name)
-            if not found:
-                tried = " or ".join(dict.fromkeys(
-                    [src.name, logical_name(src.name, self.cfg.strip_suffixes)]))
-                warn(f"{src.name}: not found on {self.cfg.fork_remote} "
-                     f"(tried {tried}) -- skipping")
-                self.reports.write("TO_MERGE_LATER.txt", src.name, "",
-                                   f"NOT_ON_FORK: tried {tried}")
-                self.record(src.name, "-", "skipped, not on the fork")
-                continue
-            src.fork_name, src.fork_head = found
-            if src.fork_name != src.name:
-                log(f"{src.name}: CI checked on {self.cfg.fork_remote}/{src.fork_name}")
-            src.pick_name, src.head = self.resolve_pick_ref(src)
+            if self.locate(src):
+                located.append(src)
 
+        # Adopted branches are located the same way, and only then does anything
+        # else -- CI, planning, your approval, the build -- see any of them.
+        if self.cfg.adopt_siblings:
+            taken = [src for src in self.adopt_siblings(located) if self.locate(src)]
+            if taken:
+                located += taken
+                self.listed = self.listed + [src.name for src in taken]
+                log(f"took in {len(taken)} unlisted sibling cut(s); they go through "
+                    "CI, your approval and the build like the rest")
+
+        green: list[Source] = []
+        waiting: list[Source] = []       # CI still running; revisited at the end
+        failed: list[Source] = []        # CI red once; looked at once more at the end
+        for src in located:
             if self.cfg.skip_ci:
                 log(f"{src.name}: CI check skipped")
                 green.append(src)
@@ -1840,13 +2102,13 @@ Diff (may be truncated):
                 log(f"{src.name}: CI green ({src.fork_head[:9]})")
                 src.ci_green = True
                 green.append(src)
-            elif state.startswith("running"):
-                note = ("still running" if state == "running"
-                        else "still running, but some jobs have already failed")
-                log(f"{src.name}: CI {note} -- will come back to it")
+            elif state == "running":
+                log(f"{src.name}: CI still running -- will come back to it")
                 waiting.append(src)
-            elif state == "failing":
-                log(f"{src.name}: CI failing -- one more look at the end")
+            elif state == "running-with-failures" or state == "failing":
+                note = ("failing" if state == "failing"
+                        else "still running, but a job has already failed")
+                log(f"{src.name}: CI {note} -- one more look at the end")
                 failed.append(src)
             elif state == "error":
                 warn(f"{src.name}: could not read CI status from GitHub -> TO_MERGE_LATER.txt")
@@ -1966,7 +2228,14 @@ Diff (may be truncated):
         while pending:
             log(f"checking CI for {len(pending)} branch(es) that were still building")
             self.git.run("fetch", self.cfg.fork_remote)
-            ready, still = [], []
+            # `still` is everything to ask about again next round; `building`
+            # is the subset GitHub says is cleanly queued or running.  Only
+            # those may have a local build stand in for their CI.  A branch kept
+            # on for a misread has no CI result to stand in for, and one that is
+            # "running-with-failures" has something better than a local build
+            # already: GitHub has failed a job on this very commit, and a clean
+            # compile here does not answer that.
+            ready, still, building = [], [], []
             for src, targets in pending:
                 found = self.resolve_on_fork(src.name)
                 if not found:
@@ -1989,11 +2258,18 @@ Diff (may be truncated):
                     src.ci_green = True
                     self.warn_if_untested(src)
                     ready.append((src, targets))
-                elif state.startswith("running"):
+                elif state == "running":
                     misreads.pop(src.name, None)
                     still.append((src, targets))
-                elif state == "failing":
-                    log(f"{src.name}: CI failed in the end -- one more look later")
+                    building.append((src, targets))
+                elif state == "running-with-failures" or state == "failing":
+                    # Not left in the poll: the jobs still going cannot unfail the
+                    # one that is red, so this would be waited on until the whole
+                    # --ci-wait ran out and never resolve.  It has failed once,
+                    # which is what the end-of-run look is for.
+                    note = ("failed in the end" if state == "failing"
+                            else "has a failed job while the rest run")
+                    log(f"{src.name}: CI {note} -- one more look later")
                     late_failures.append((src, targets))
                 else:
                     # Neither running, green nor red.  This branch had runs a
@@ -2033,7 +2309,7 @@ Diff (may be truncated):
                 # first and only comes back here if everything is still queued,
                 # so this works its way down the list instead of sitting on one
                 # branch.
-                nudged = self.build_instead_of_waiting(pending)
+                nudged = self.build_instead_of_waiting(building)
                 if nudged:
                     pending = [pair for pair in pending if pair[0].name != nudged]
                     continue                     # straight back to the CI check
@@ -2043,24 +2319,29 @@ Diff (may be truncated):
         return late_failures
 
     def build_instead_of_waiting(self, pending: list[tuple[Source, list[str]]]) -> str | None:
-        """Merge the next queued branch on a local build instead of a green tick.
+        """Merge the next queued branch on a local test run instead of a green tick.
 
-        The operator approved all of these in the same sitting, and a build here
-        is the same build CI would run, so a clean one is reason enough to get
-        on with it.  Returns the branch name that had its turn -- merged, or
-        found wanting by the build and recorded as such -- so the caller can
-        take it off the queue.  Nothing happens without a local build to lean
-        on: with --no-compile there is no second opinion to have.
+        The operator approved all of these in the same sitting, so what is
+        missing is CI, and the way to stand in for CI is to run what CI runs:
+        the tests, across every module, not the compile that is enough for a
+        backport whose change already went green on the fork.  That is
+        --ci-standin-tasks, and it takes hours rather than minutes.
+
+        Returns the branch name that had its turn -- merged, or found wanting and
+        recorded as such -- so the caller can take it off the queue.  Nothing
+        happens without a build to lean on: with --no-compile there is no second
+        opinion to have.
         """
         if not (self.cfg.local_stand_in and self.cfg.do_compile and pending):
             return None
         src, targets = pending[0]
         log(f"{src.name}: CI has not started on {self.cfg.fork_remote}/{src.fork_name} "
-            "-- building it here, and merging it if the build is clean")
+            f"-- running sbt {' '.join(self.cfg.ci_standin_tasks)} here instead, and "
+            "merging it if that is clean")
         # True either way, and honest either way: the per-target rows that
-        # execute() writes say whether it went in or the build stopped it.
-        self.record(src.name, "-", "built here while its CI was still queued")
-        self.execute(src, targets)
+        # execute() writes say whether it went in or the tests stopped it.
+        self.record(src.name, "-", "tested here while its CI was still queued")
+        self.execute(src, targets, ci_stand_in=True)
         return src.name
 
     # -- re-cutting the local rewrites ------------------------------------
@@ -2319,6 +2600,18 @@ Diff (may be truncated):
 
 
 # ------------------------------------------------------------------------ main
+class _Removed(argparse.Action):
+    """A flag that used to exist, refused with a reason rather than a shrug."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        parser.error(
+            f"{option_string} was removed: it skipped the diff prompt but still "
+            "counted as your approval, so a run with claude unavailable pushed "
+            "unreviewed. For an unattended run, approve the diffs up front (the "
+            "default) and leave the rest to it, or use -j 2 or more, where a "
+            "doubtful series goes to NEEDS_REVIEW.txt instead of stopping to ask.")
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -2345,15 +2638,34 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--review-model", default="sonnet", help="model for the review")
     parser.add_argument("--review-timeout", type=int, default=300)
     parser.add_argument("--max-diff-bytes", type=int, default=100_000)
+    # Removed, not renamed.  It skipped the diff prompt while sanity_check() still
+    # read the operator_review *flag* as "you approved this", so -y with claude
+    # unavailable pushed to apache with nothing having reviewed anything.  An
+    # invocation carrying it should stop and say so rather than quietly mean
+    # something else now.
+    parser.add_argument("-y", "--assume-yes", action=_Removed, nargs=0,
+                        help=argparse.SUPPRESS)
     parser.add_argument("--no-ci-shortcut", action="store_true",
                         help="build every target, even one the fork's CI already covered")
     parser.add_argument("--no-operator-review", action="store_true",
-                        help="do not show each branch's diff and ask before merging it")
+                        help="do not show each branch's diff and ask before merging it. "
+                             "The review gate then has nothing of yours to lean on, so a "
+                             "QUESTIONABLE verdict stops and asks -- with -j >1, or no "
+                             "terminal, it goes to NEEDS_REVIEW.txt instead and the run "
+                             "carries on")
     parser.add_argument("--review-diff-lines", type=int, default=400,
                         help="how much of the diff to show before asking (default: %(default)s)")
     parser.add_argument("--pick-from-fork", action="store_true",
                         help="cherry-pick from the fork's copy instead of the local "
                              "branch under the listed name")
+    parser.add_argument("--adopt-siblings", action="store_true",
+                        help="take in an unlisted -3.5/-4.1/... cut of a listed branch "
+                             "instead of only warning about it. It is then treated exactly "
+                             "as if you had listed it: located on the fork, CI-checked, put "
+                             "to you for approval, built, and skipped if the hold list or "
+                             "the ledger says so -- including carrying its release, so a "
+                             "cut that drops out of the run takes that release with it, "
+                             "the same as a listed one does")
     parser.add_argument("--strip-suffix", action="append", metavar="SUFFIX",
                         help="ignore this suffix when matching a branch name to a target "
                              "(default: -aok and -squashed; repeatable)")
@@ -2362,10 +2674,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-compile", action="store_true", help="skip the sbt build")
     parser.add_argument("--sbt", type=Path, help="sbt launcher (default: <repo>/build/sbt)")
     parser.add_argument("--sbt-tasks", default="compile Test/compile",
-                        help="sbt tasks to run (default: %(default)s)")
+                        help="sbt tasks that check a backport (default: %(default)s). The "
+                             "change itself already went green on the fork, so this only "
+                             "has to answer whether it still builds on the target")
+    parser.add_argument("--ci-standin-tasks", default="test", metavar="TASKS",
+                        help="sbt tasks that stand in for CI when a branch is merged "
+                             "without a green tick (default: %(default)s). Nothing here "
+                             "has been run anywhere, so a compile answers none of what CI "
+                             "would have: this is the whole test suite, every module, and "
+                             "it takes hours. Only used by the queued-branch stand-in "
+                             "(see --no-local-build-stand-in)")
     parser.add_argument("--no-clean-retry", action="store_true",
                         help="do not retry a failed build with a leading clean")
-    parser.add_argument("--sbt-timeout", type=int, default=7200)
+    parser.add_argument("--sbt-timeout", type=int, default=7200, metavar="SECONDS",
+                        help="how long --sbt-tasks may take (default: %(default)s)")
+    parser.add_argument("--ci-standin-timeout", type=int, default=21600, metavar="SECONDS",
+                        help="how long --ci-standin-tasks may take (default: %(default)s, "
+                             "six hours). A clean retry doubles it, so with --ci-wait at "
+                             "its default one stand-in can use most of the wait")
     parser.add_argument("--log-dir", type=Path, default=Path("merge_logs"))
     parser.add_argument("--ledger", type=Path, default=Path(LEDGER_FILE),
                         help="csv of merges already pushed, skipped on a rerun "
@@ -2392,7 +2718,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="do the merges again even if the ledger says they are done")
     parser.add_argument("--no-local-build-stand-in", action="store_true",
                         help="while waiting on CI, do not merge a queued branch on the "
-                             "strength of a local build; just keep polling")
+                             "strength of a local test run; just keep polling")
     parser.add_argument("--no-refresh-before-retry", action="store_true",
                         help="do not re-run update-bases.sh and squash-magic.sh before the "
                              "last look at the branches whose CI was red")
@@ -2442,11 +2768,15 @@ def main(argv: list[str] | None = None) -> int:
         max_diff_bytes=args.max_diff_bytes,
         max_commits=args.max_commits, strip_suffixes=args.strip_suffix or STRIP_SUFFIXES,
         pick_from_fork=args.pick_from_fork,
+        adopt_siblings=args.adopt_siblings,
         operator_review=not args.no_operator_review, review_diff_lines=args.review_diff_lines,
         ci_shortcut=not args.no_ci_shortcut,
         do_compile=do_compile, dry_run=args.dry_run, sbt=sbt,
-        sbt_tasks=args.sbt_tasks.split(), clean_retry=not args.no_clean_retry,
-        sbt_timeout=args.sbt_timeout, log_dir=args.log_dir,
+        sbt_tasks=args.sbt_tasks.split(),
+        ci_standin_tasks=args.ci_standin_tasks.split(),
+        clean_retry=not args.no_clean_retry,
+        sbt_timeout=args.sbt_timeout, ci_standin_timeout=args.ci_standin_timeout,
+        log_dir=args.log_dir,
         ledger=args.ledger, approvals=args.approvals, ignore_ledger=args.ignore_ledger,
         hold_list=args.hold_list, ignore_hold_list=args.ignore_hold_list,
         jobs=1 if args.dry_run else max(1, args.jobs),
@@ -2486,8 +2816,10 @@ def main(argv: list[str] | None = None) -> int:
         git.run("checkout", started_on)
 
     if args.dry_run:
-        log("done (dry run). Nothing was pushed, built or written; re-run without "
-            "--dry-run to do it for real.")
+        log("done (dry run). Nothing was pushed, built or written, and claude was "
+            "not asked -- so this says what would be attempted, not which "
+            "backports the review gate would hold back. Re-run without --dry-run "
+            "to do it for real.")
     else:
         log("done. see TO_MERGE_LATER.txt, FAILING_CI.txt, rejects.txt, NEEDS_REVIEW.txt,")
         log(f"          skipped.txt, already_landed.txt, {SQUASH_FILE},")
