@@ -155,6 +155,14 @@ TERMINAL_FAILURES = {"failure", "timed_out", "startup_failure", "error"}
 # hours left in it.
 CI_MISREADS_ALLOWED = 3
 
+# How many polling rounds have to go by with nothing going green before a local
+# test run is worth starting.  It used to be one, when standing in for CI meant a
+# compile and cost minutes.  At --ci-standin-tasks it costs hours, and revisit()
+# polls nothing while it runs -- so a queue that is merely slow this minute (ten
+# branches behind a busy runner pool, all of them about to go green) must not
+# buy a six-hour commitment on the strength of a single quiet round.
+IDLE_ROUNDS_BEFORE_STANDING_IN = 3
+
 
 # --------------------------------------------------------------------- logging
 _worker = threading.local()
@@ -454,7 +462,11 @@ def load_hold_list(path: Path) -> dict[str, str]:
         fields = [field.strip() for field in line.split("\t")]
         branch = fields[0]
         if branch:
-            held.setdefault(branch, fields[-1] if len(fields) > 1 else "listed")
+            # Never an empty reason: callers ask "is this held" and would read
+            # one as "no".  A held branch with nothing written after the tab is
+            # held exactly as much as one with a paragraph.
+            reason = fields[-1] if len(fields) > 1 and fields[-1] else "listed"
+            held.setdefault(branch, reason)
     return held
 
 
@@ -701,6 +713,7 @@ class Backporter:
         self.listed: list[str] = []       # every branch name in this run
         self._branch_names: tuple[list[str], list[str]] | None = None
         self._gh_complained: set[str] = set()
+        self._checkout_failed: set[str] = set()
         self.claude_alive = False
         self.ledger_lock = threading.Lock()
         # Workers all push to the same handful of branches; queueing per target
@@ -722,6 +735,21 @@ class Backporter:
         self.master_landings: dict[str, str] = {}
         # Written by earlier runs, and by you: either way, hands off.
         self.held = {} if cfg.ignore_hold_list else load_hold_list(cfg.hold_list)
+
+    def is_held(self, name: str) -> str | None:
+        """Why this branch is held, if it is -- under any spelling of its name.
+
+        You hold whatever name you have in front of you, which is as likely to be
+        the fork's foo as the branch file's foo-aok.  They are one branch, and
+        this file knows that everywhere else.
+        """
+        if name in self.held:
+            return self.held[name] or "listed"
+        wanted = cut_identity(name, self.cfg.strip_suffixes)
+        for held, why in self.held.items():
+            if cut_identity(held, self.cfg.strip_suffixes) == wanted:
+                return why or "listed"
+        return None
 
     def already_approved(self, src: Source) -> bool:
         """Have you seen this exact change before and said yes?"""
@@ -786,6 +814,27 @@ class Backporter:
                 return candidate, head
         return None
 
+    def fork_ref_of(self, src: Source) -> tuple[str, str] | None:
+        """Where this branch is on the fork now, under the name we already know.
+
+        An adopted cut is *named* for its local rewrite -- myfix-4.1-aok where
+        the fork carries myfix-branch-4.1 -- so re-deriving the fork name from
+        src.name finds nothing and reads back as "the branch is gone".  Every
+        place that goes looking for it again has to ask this, not resolve_on_fork.
+        """
+        if src.fork_name:
+            head = self.git.rev_parse(
+                f"refs/remotes/{self.cfg.fork_remote}/{src.fork_name}^{{commit}}")
+            return (src.fork_name, head) if head else None
+        return self.resolve_on_fork(src.name)
+
+    def refresh_name(self, src: Source) -> str:
+        """What to call this branch when handing it to squash-magic.
+
+        The name the fork has it under, for the same reason.
+        """
+        return src.fork_name or logical_name(src.name, self.cfg.strip_suffixes)
+
     def locate(self, src: Source) -> bool:
         """Find the branch on the fork and settle what we would pick from it.
 
@@ -793,18 +842,17 @@ class Backporter:
         from decides which of its siblings are wanted, and that cannot be worked
         out before the branch has a head.
         """
-        if not src.fork_head:      # an adopted cut already knows which ref it is
-            found = self.resolve_on_fork(src.name)
-            if not found:
-                tried = " or ".join(dict.fromkeys(
-                    [src.name, logical_name(src.name, self.cfg.strip_suffixes)]))
-                warn(f"{src.name}: not found on {self.cfg.fork_remote} "
-                     f"(tried {tried}) -- skipping")
-                self.reports.write("TO_MERGE_LATER.txt", src.name, "",
-                                   f"NOT_ON_FORK: tried {tried}")
-                self.record(src.name, "-", "skipped, not on the fork")
-                return False
-            src.fork_name, src.fork_head = found
+        found = self.fork_ref_of(src)
+        if not found:
+            tried = src.fork_name or " or ".join(dict.fromkeys(
+                [src.name, logical_name(src.name, self.cfg.strip_suffixes)]))
+            warn(f"{src.name}: not found on {self.cfg.fork_remote} "
+                 f"(tried {tried}) -- skipping")
+            self.reports.write("TO_MERGE_LATER.txt", src.name, "",
+                               f"NOT_ON_FORK: tried {tried}")
+            self.record(src.name, "-", "skipped, not on the fork")
+            return False
+        src.fork_name, src.fork_head = found
         if src.fork_name != src.name:
             log(f"{src.name}: CI checked on {self.cfg.fork_remote}/{src.fork_name}")
         src.pick_name, src.head = self.resolve_pick_ref(src)
@@ -932,8 +980,13 @@ class Backporter:
             # what the local stand-in merges and pushes from, so a half-read
             # state would reach the push remote without a red legacy status ever
             # having been looked at.
-            if ci_status(runs) == "failing":
-                return "failing"
+            verdict = ci_status(runs)
+            if verdict in ("failing", "running-with-failures"):
+                # Both mean a job has finished red on this very commit, which
+                # nothing in the half we could not read can undo.  Returning
+                # "error" for the second would drop the branch to
+                # TO_MERGE_LATER.txt instead of into the end-of-run retry.
+                return verdict
             return "error"
         for line in statuses:
             try:
@@ -1391,7 +1444,9 @@ Diff (may be truncated):
             return None
 
         self.cfg.log_dir.mkdir(parents=True, exist_ok=True)
-        slug = ref_slug(f"{src}--{target}")
+        # The stand-in and the backport check can land on the same target, and
+        # the stand-in's log is the only record that the tests were ever run.
+        slug = ref_slug(f"{src}--{target}" + ("--ci-standin" if ci_stand_in else ""))
         log_path = self.cfg.log_dir / f"{self.stamp}-{slug}.log"
 
         env = os.environ.copy()
@@ -1838,12 +1893,21 @@ Diff (may be truncated):
         # two are the same cut under different spellings.  A name that loses
         # something to logical_name() is a rewrite; one that does not is the
         # untouched original, which is the ref this exists to avoid picking from.
+        # ...and of this revision of it.  cut_identity drops the -rN by design,
+        # so the rewrite of a superseded r1 answers to the same identity as the r2
+        # we picked off the fork.  Taking it would merge r1's content under r2's
+        # green tick: fork_head says r2, the commits come from r1, and
+        # warn_if_untested notices but only writes a row.  No rewrite of this
+        # revision means picking from the fork ref, which is at least the thing
+        # the tick was for.
+        wanted_redo = redo_revision(sibling, strip)
         rewrites = [name for name in local
                     if logical_name(name, strip) != name
-                    and cut_identity(name, strip) == wanted]
+                    and cut_identity(name, strip) == wanted
+                    and redo_revision(name, strip) == wanted_redo]
         if not rewrites:
             return sibling
-        return max(rewrites, key=lambda name: (redo_revision(name, strip), name))
+        return max(rewrites)
 
     def adopt_siblings(self, sources: list[Source]) -> list[Source]:
         """Take in cuts of the listed work that the branch file missed.
@@ -1858,10 +1922,9 @@ Diff (may be truncated):
         list or the ledger says so.
         """
         known = self.known_cuts()       # everything listed, resolved or not
-        held = {cut_identity(name, self.cfg.strip_suffixes) for name in self.held}
         adopted: list[Source] = []
         for src in sources:
-            if src.name in self.held:      # hands off means hands off its family
+            if self.is_held(src.name) is not None:   # hands off, family included
                 continue
             hits = {}
             for target in dict.fromkeys(self.cfg.targets):
@@ -1876,13 +1939,14 @@ Diff (may be truncated):
                     log(f"{src.name}: there is a {sibling} on the fork, but {src.name} "
                         f"does not go to {target} -- leaving it alone")
                     continue
-                if cut_identity(sibling, self.cfg.strip_suffixes) in held:
+                why_held = self.is_held(sibling)
+                if why_held is not None:
                     # Held means you know about it and want it left alone.  Say
                     # what that costs: adopting it would also take the target
                     # off the listed branch, so the held cut would be the only
                     # thing landing there.
                     log(f"{src.name}: {sibling} is the cut {target} needs but it is "
-                        f"held in {self.cfg.hold_list} -- "
+                        f"held in {self.cfg.hold_list} ({why_held}) -- "
                         f"leaving {target} to {src.name}")
                     continue
                 if not self.git.has_ref(
@@ -2052,10 +2116,13 @@ Diff (may be truncated):
         # from, so their cherry-pick trailers name a commit that exists upstream.
         # If master is not in this run it may still have landed earlier; the
         # release branches are picked from that commit either way.
-        on_master: list[str] = [] if "master" in targets else self.on_master_already(src)
-        if on_master:
-            log(f"  {src.name}: already on master as {on_master[-1][:9]} -- the backports "
-                "will be picked from there")
+        on_master: list[str] = []
+        # Asked as late as we can, at the first target that would use it, rather
+        # than up front.  Another cut of this same work may be pushing to master
+        # right now -- master_landings only has the sha once it has -- and under
+        # -j >1 the two run side by side in different worktrees, so the later the
+        # question the likelier the answer.  Asked once, not once per target.
+        asked = "master" in targets      # master's own result will fill it in
         for target in sorted(targets, key=lambda name: name != "master"):
             if target == src.name:
                 continue
@@ -2063,7 +2130,19 @@ Diff (may be truncated):
                 self.reports.write("NEEDS_REVIEW.txt", src.name, target, "NO_SUCH_TARGET",
                                    f"pinned target missing on {self.cfg.upstream}")
                 self.record(src.name, target, "pinned target does not exist")
+                if target == "master":
+                    # We skipped the up-front look because master was in the list;
+                    # now it is not going to happen, so ask after all.  The change
+                    # may be up there from an earlier run, and the release
+                    # branches still want to name that sha rather than a local one.
+                    on_master = self.on_master_already(src)
                 continue
+            if not asked:
+                on_master = self.on_master_already(src)
+                asked = True
+                if on_master:
+                    log(f"  {src.name}: already on master as {on_master[-1][:9]} -- the "
+                        "backports will be picked from there")
             landed_as = self.backport(src, target, from_commits=on_master or None)
             if target == "master":
                 # Nothing new on master means one of two things.  Either the
@@ -2094,8 +2173,9 @@ Diff (may be truncated):
 
         located: list[Source] = []
         for src in sources:
-            if src.name in self.held:
-                log(f"{src.name}: held in {self.cfg.hold_list} ({self.held[src.name]}) "
+            why_held = self.is_held(src.name)
+            if why_held is not None:
+                log(f"{src.name}: held in {self.cfg.hold_list} ({why_held}) "
                     "-- skipping it")
                 self.record(src.name, "-", "held, listed in " + str(self.cfg.hold_list))
                 continue
@@ -2224,6 +2304,15 @@ Diff (may be truncated):
     def merge_all(self, work: list[tuple[Source, list[str]]]) -> None:
         if not work:
             return
+        # A -master cut lands the sha the other cuts of the same work want to
+        # name in their "(cherry picked from commit ...)" lines, and
+        # master_landings only has it once that cut has actually pushed, so give
+        # it a head start.  Serial only: under -j >1 everything is handed to the
+        # pool at once and the order is a hint at best, which is why execute()
+        # also leaves the question as late as it can.  Getting it wrong costs the
+        # trailer, never a wrong sha -- backport() only passes -x when it has one.
+        work = sorted(work, key=lambda item: suffix_target(
+            item[0].name, self.cfg.strip_suffixes) != "master")
         if self.cfg.jobs > 1 and len(work) > 1:
             self.run_in_parallel(work)
         else:
@@ -2246,10 +2335,19 @@ Diff (may be truncated):
             for src, _ in pending:
                 self.record(src.name, "-", "would wait for CI")
             return []
-        deadline = (time.time() + self.cfg.ci_wait_hours * 3600
+        started_at = time.time()
+        deadline = (started_at + self.cfg.ci_wait_hours * 3600
                     if self.cfg.ci_wait_hours else None)
+        # ...and an outer bound that no amount of credit moves.  Giving a
+        # stand-in's merge time back to the others keeps one of them from writing
+        # the rest off, but a credit per round compounds: ten branches queued
+        # behind unstarted CI would run for days and then print "gave up after
+        # 12h".  The most stand-ins there can be is one per branch.
+        hard_deadline = (deadline + len(pending) * self.cfg.ci_standin_timeout
+                         if deadline else None)
         late_failures: list[tuple[Source, list[str]]] = []
         misreads: dict[str, int] = defaultdict(int)
+        idle_rounds = 0
         while pending:
             log(f"checking CI for {len(pending)} branch(es) that were still building")
             self.git.run("fetch", self.cfg.fork_remote)
@@ -2262,7 +2360,7 @@ Diff (may be truncated):
             # compile here does not answer that.
             ready, still, building = [], [], []
             for src, targets in pending:
-                found = self.resolve_on_fork(src.name)
+                found = self.fork_ref_of(src)
                 if not found:
                     warn(f"{src.name}: gone from {self.cfg.fork_remote} -- giving up on it")
                     self.reports.write("TO_MERGE_LATER.txt", src.name, "",
@@ -2317,15 +2415,18 @@ Diff (may be truncated):
             if not pending:
                 log("nothing left building")
                 return late_failures
-            if deadline and time.time() >= deadline:
+            if deadline and (time.time() >= deadline
+                             or time.time() >= hard_deadline):
+                waited = (time.time() - started_at) / 3600
                 warn(f"gave up waiting on {len(pending)} branch(es) after "
-                     f"{self.cfg.ci_wait_hours}h")
+                     f"{waited:.1f}h")
                 for src, _ in pending:
                     self.reports.write("TO_MERGE_LATER.txt", src.name, src.fork_head,
                                        "still building when the run ended")
                     self.record(src.name, "-", "still building at the end")
                 return late_failures
-            if not ready:
+            idle_rounds = 0 if ready else idle_rounds + 1
+            if idle_rounds >= IDLE_ROUNDS_BEFORE_STANDING_IN:
                 # Nothing went green this round: everything left is queued
                 # behind somebody else's CI.  Rather than sleep through the
                 # interval, take the one at the head of the queue and let the
@@ -2334,8 +2435,25 @@ Diff (may be truncated):
                 # first and only comes back here if everything is still queued,
                 # so this works its way down the list instead of sitting on one
                 # branch.
-                nudged = self.build_instead_of_waiting(building, deadline)
+                started = time.time()
+                # Against the outer bound, not the wait.  The wait is what the
+                # branches are being polled for; the outer bound is what the run
+                # is allowed to take, and it already has room for one stand-in
+                # per branch.  Measured against the wait, a 6h cap refused every
+                # stand-in in the last 6h of a 12h wait -- and with --ci-wait 6
+                # or less it refused all of them, for a run the operator never
+                # asked to switch the feature off in.
+                nudged = self.build_instead_of_waiting(building, hard_deadline)
                 if nudged:
+                    idle_rounds = 0
+                    # Give the others back the time this took.  --ci-wait is how
+                    # long to keep coming back to a branch whose CI is still
+                    # going, and the merging we chose to do in the middle of that
+                    # is not them being slow -- charged to them, one stand-in
+                    # writes every other branch off as "still building when the
+                    # run ended" when they were only queued behind us.
+                    if deadline is not None:
+                        deadline += time.time() - started
                     pending = [pair for pair in pending if pair[0].name != nudged]
                     continue                     # straight back to the CI check
             log(f"{len(pending)} branch(es) still building -- looking again in "
@@ -2373,12 +2491,19 @@ Diff (may be truncated):
         """
         if not (self.cfg.local_stand_in and self.cfg.do_compile and pending):
             return None
-        src, targets = pending[0]
+        # Past anything we already could not check out.  It keeps its place in
+        # the poll, but always taking pending[0] meant one branch blocked by, say,
+        # untracked files the target tracks stopped every other branch from ever
+        # getting a stand-in.  If they have all failed, try again anyway -- the
+        # tree that blocked it may have been cleaned up since.
+        candidates = [pair for pair in pending
+                      if pair[0].name not in self._checkout_failed] or pending
+        src, targets = candidates[0]
         # Nothing else is polled while the tests run, so do not start a run that
         # cannot finish inside the wait.
         if deadline is not None and time.time() + self.cfg.ci_standin_timeout > deadline:
-            log(f"{src.name}: CI has not started, but a stand-in test run would not "
-                f"finish inside the {self.cfg.ci_wait_hours}h wait -- polling instead")
+            log(f"{src.name}: no room left in this run for a stand-in test run "
+                "-- polling instead")
             return None
         # Before anything is called a failure: not being able to check the branch
         # out is not a red test run.  Nothing was built, nothing was run, and
@@ -2388,9 +2513,11 @@ Diff (may be truncated):
         if not self.git.ok("checkout", "--detach", src.head):
             warn(f"{src.name}: cannot check it out to test it ({self.git.why()}) "
                  "-- leaving it in the queue rather than calling it failed")
+            self._checkout_failed.add(src.name)
             return None
-        log(f"{src.name}: CI has not started on {self.cfg.fork_remote}/{src.fork_name} "
-            f"-- running sbt {' '.join(self.cfg.ci_standin_tasks)} on it here instead")
+        log(f"{src.name}: nothing has gone green in {IDLE_ROUNDS_BEFORE_STANDING_IN} "
+            f"rounds and {self.cfg.fork_remote}/{src.fork_name} is still queued -- "
+            f"running sbt {' '.join(self.cfg.ci_standin_tasks)} on it here instead")
         failure = self.stand_in_for_ci(src)
         if failure:
             warn(f"{src.name}: the tests do not pass here -- not merging it, and not "
@@ -2471,8 +2598,7 @@ Diff (may be truncated):
             log("--pick-from-fork: the local rewrites are not picked from, "
                 "so they are left alone")
             return work
-        names = list(dict.fromkeys(logical_name(src.name, self.cfg.strip_suffixes)
-                                   for src, _ in work))
+        names = list(dict.fromkeys(self.refresh_name(src) for src, _ in work))
         if self.cfg.dry_run:
             log(f"  [dry-run] would run {self.cfg.update_bases} and then "
                 f"{self.cfg.squash_magic} for: {' '.join(names)}")
@@ -2501,7 +2627,7 @@ Diff (may be truncated):
 
         refreshed: list[tuple[Source, list[str]]] = []
         for src, targets in work:
-            cut = made.get(logical_name(src.name, self.cfg.strip_suffixes))
+            cut = made.get(self.refresh_name(src))
             if cut is None:
                 # It went to squash-magic's unknown/wtfbbq pile instead: no clean
                 # base, or somebody else's commits on it.  Its own log says which.
@@ -2559,7 +2685,7 @@ Diff (may be truncated):
         self.git.run("fetch", self.cfg.fork_remote)
         ready: list[tuple[Source, list[str]]] = []
         for src, targets in work:
-            found = self.resolve_on_fork(src.name)
+            found = self.fork_ref_of(src)
             if not found:
                 warn(f"{src.name}: gone from {self.cfg.fork_remote} -- giving up on it")
                 self.reports.write("TO_MERGE_LATER.txt", src.name, "",
@@ -2584,7 +2710,11 @@ Diff (may be truncated):
                 src.ci_green = True
                 self.warn_if_untested(src)
                 ready.append((src, targets))
-            elif state == "failing":
+            elif state in ("failing", "running-with-failures"):
+                # Red twice.  The second time it may still have jobs going, but
+                # one of them has finished red on this very commit both times we
+                # looked, and telling you to come back later for that is telling
+                # you to give it another retry it has already spent.
                 log(f"{src.name}: CI still failing -> FAILING_CI.txt")
                 self.reports.write("FAILING_CI.txt", src.name, fork_head, url)
                 self.record(src.name, "-", "skipped, CI failing twice")
@@ -2753,10 +2883,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--ci-standin-timeout", type=int, default=21600, metavar="SECONDS",
                         help="how long --ci-standin-tasks may take (default: %(default)s, "
                              "six hours). Bounds the test run itself, which happens once "
-                             "on the branch and has no clean retry; the merging that "
-                             "follows a clean run costs what any merge costs. A run is "
-                             "not started unless it fits inside --ci-wait, since nothing "
-                             "else is polled while it goes")
+                             "on the branch and has no clean retry. Note what this does to "
+                             "the length of a run: --ci-wait bounds the waiting, and a "
+                             "stand-in is work rather than waiting, so the outer bound is "
+                             "--ci-wait plus one of these per branch still queued. Ten "
+                             "branches at the defaults is 12h of waiting and up to 60h of "
+                             "testing. --no-local-build-stand-in if that is not what you "
+                             "want left running")
     parser.add_argument("--log-dir", type=Path, default=Path("merge_logs"))
     parser.add_argument("--ledger", type=Path, default=Path(LEDGER_FILE),
                         help="csv of merges already pushed, skipped on a rerun "
