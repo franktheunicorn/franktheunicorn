@@ -12,16 +12,20 @@ cut from, otherwise it is auto-detected).  For each branch it:
      commits themselves are taken from the local branch under the listed name
      (the squashed -aok rewrite) when there is one, or the fork's copy otherwise.
        * still running / queued -> re-checked until it settles, then merged.
-                                   When a whole round goes by with nothing
-                                   going green, the branch at the head of the
-                                   queue has the full test suite run on it here
-                                   instead (--ci-standin-tasks: standing in for
-                                   CI means running what CI runs, not the
-                                   compile that is enough for a backport, so
-                                   this is hours rather than minutes), and is
-                                   merged if that is clean; the next round asks
-                                   GitHub again first, so this works down the
-                                   queue one branch at a time
+                                   When three rounds in a row go by with
+                                   nothing going green, the branch at the head
+                                   of the queue has the full test suite run on
+                                   it here instead (--ci-standin-tasks:
+                                   standing in for CI means running what CI
+                                   runs, not the compile that is enough for a
+                                   backport, so this is hours rather than
+                                   minutes), and is merged if that is clean.
+                                   The next round asks GitHub again first and,
+                                   if nothing has gone green meanwhile, goes
+                                   straight on to the next branch, so this
+                                   works down the queue one at a time.  Every
+                                   round says whether a test run is starting
+                                   and, if not, why
                                    (--no-local-build-stand-in to just poll,
                                    and --no-compile disables it outright --
                                    there is nothing to stand in with).
@@ -162,6 +166,29 @@ CI_MISREADS_ALLOWED = 3
 # branches behind a busy runner pool, all of them about to go green) must not
 # buy a six-hour commitment on the strength of a single quiet round.
 IDLE_ROUNDS_BEFORE_STANDING_IN = 3
+
+# What each ci_status() answer means for the run.  Four places sort branches by
+# these strings -- the first look, the poll, the second look at the red ones and
+# the half-read case in ci_status_of -- and a state added to three of them is a
+# branch that goes one way or the other depending on when it was looked at.  So
+# they all ask ci_verdict() instead.
+#   green     merge it
+#   building  cleanly queued or running: keep polling, and a local test run may
+#             stand in for it
+#   red       a job has finished red on this very commit, which the jobs still
+#             going cannot undo and a clean run here does not answer: the
+#             end-of-run retry, never the poll
+#   unknown   gh could not answer, or there are no runs at all
+CI_VERDICTS = {
+    "passing": "green",
+    "running": "building",
+    "running-with-failures": "red",
+    "failing": "red",
+}
+
+
+def ci_verdict(state: str) -> str:
+    return CI_VERDICTS.get(state, "unknown")
 
 
 # --------------------------------------------------------------------- logging
@@ -350,6 +377,35 @@ def ci_status(runs: list[tuple[str, str]]) -> str:
     if any(conclusion in GOOD_CONCLUSIONS for _, conclusion in runs):
         return "passing"
     return "none"  # everything skipped
+
+
+def why_no_stand_in(*, enabled: bool, can_build: bool, quiet_rounds: int,
+                    went_green: int, building: int) -> str | None:
+    """Why this round polls instead of starting a local test run; None to start one.
+
+    The whole "when" of the stand-in, in one place and in words, because it is
+    printed every round: "still building -- looking again in 30 min" on its own
+    reads the same whether a test run is one round from starting, switched off,
+    or being reset every round by a queue that is slowly draining on its own.
+    Whether the branch it would pick can actually be tested -- room left in the
+    run, a checkout that works -- is build_instead_of_waiting()'s question, and
+    it says so itself when the answer is no.
+    """
+    if not enabled:
+        return "no local test run: --no-local-build-stand-in, polling only"
+    if not can_build:
+        return "no local test run: --no-compile, so there is nothing to stand in for CI with"
+    if quiet_rounds < IDLE_ROUNDS_BEFORE_STANDING_IN:
+        if went_green:
+            return (f"no local test run: {went_green} went green this round, so CI is "
+                    f"moving -- one starts after {IDLE_ROUNDS_BEFORE_STANDING_IN} rounds "
+                    "in a row with nothing going green, and that count starts over")
+        return (f"no local test run yet: {quiet_rounds} quiet round(s) so far, one starts "
+                f"after {IDLE_ROUNDS_BEFORE_STANDING_IN} in a row with nothing going green")
+    if not building:
+        return ("no local test run: nothing left reads as cleanly queued or running on "
+                "GitHub -- the rest are being asked about again before they are believed")
+    return None
 
 
 def parse_branch_file(text: str) -> list[tuple[str, str | None]]:
@@ -697,6 +753,64 @@ class Source:
     commits: list[str] = field(default_factory=list)
 
 
+# A branch and the targets plan() gave it.
+Planned = tuple[Source, list[str]]
+
+
+@dataclass
+class Round:
+    """One look at GitHub for the branches still building, sorted by what is next.
+
+    `still` is everything to ask about again next round, in queue order;
+    `building` is the subset GitHub says is cleanly queued or running, and the
+    only branches a local test run may stand in for -- one kept on for a misread
+    has no CI result to stand in for.  `red` has a job finished red on this very
+    commit and leaves the poll for the end-of-run retry.  Anything written off
+    (gone from the fork, pushed again, misread too many rounds running) was
+    reported where it was found and is in none of these.
+    """
+    green: list[Planned] = field(default_factory=list)
+    still: list[Planned] = field(default_factory=list)
+    building: list[Planned] = field(default_factory=list)
+    red: list[Planned] = field(default_factory=list)
+
+
+class WaitBudget:
+    """How long revisit() may keep coming back, kept in one place.
+
+    Two bounds.  The wait (--ci-wait) is how long a branch whose CI is still
+    going is polled for.  Time spent on a local stand-in in the middle of it is
+    credited back: that is us merging, not them being slow, and charged to them
+    one stand-in wrote every other branch off as "still building when the run
+    ended" when they were only queued behind us.  The outer bound is the wait
+    plus one stand-in per branch, and no credit moves it: credited per round
+    the wait compounds, and ten branches queued behind unstarted CI ran for
+    days and then printed "gave up after 12h".  No wait means no bound at all.
+    """
+
+    def __init__(self, wait_hours: float, standin_seconds: float, branches: int):
+        self.started_at = time.time()
+        self.deadline: float | None = None
+        self.hard_deadline: float | None = None
+        if wait_hours:
+            self.deadline = self.started_at + wait_hours * 3600
+            self.hard_deadline = self.deadline + branches * standin_seconds
+
+    def over(self) -> bool:
+        if self.deadline is None or self.hard_deadline is None:
+            return False
+        now = time.time()
+        return now >= self.deadline or now >= self.hard_deadline
+
+    def credit(self, seconds: float) -> None:
+        """Give the wait back the time a stand-in took.  The outer bound stays put."""
+        if self.deadline is not None:
+            self.deadline += seconds
+
+    def waited_hours(self) -> float:
+        return (time.time() - self.started_at) / 3600
+
+
 class Backporter:
     def __init__(self, cfg: Config, git: Git, reports: Reports, stamp: str):
         self.cfg = cfg
@@ -980,13 +1094,13 @@ class Backporter:
             # what the local stand-in merges and pushes from, so a half-read
             # state would reach the push remote without a red legacy status ever
             # having been looked at.
-            verdict = ci_status(runs)
-            if verdict in ("failing", "running-with-failures"):
-                # Both mean a job has finished red on this very commit, which
-                # nothing in the half we could not read can undo.  Returning
-                # "error" for the second would drop the branch to
-                # TO_MERGE_LATER.txt instead of into the end-of-run retry.
-                return verdict
+            state = ci_status(runs)
+            if ci_verdict(state) == "red":
+                # A job has finished red on this very commit, which nothing in
+                # the half we could not read can undo.  Handed on as read, so a
+                # "running-with-failures" goes into the end-of-run retry rather
+                # than being dropped to TO_MERGE_LATER.txt as an "error".
+                return state
             return "error"
         for line in statuses:
             try:
@@ -2203,14 +2317,15 @@ Diff (may be truncated):
 
             # CI ran on the fork's commit, never on the local -aok rewrite.
             state = self.ci_status_settled(src.fork_head)
-            if state == "passing":
+            verdict = ci_verdict(state)
+            if verdict == "green":
                 log(f"{src.name}: CI green ({src.fork_head[:9]})")
                 src.ci_green = True
                 green.append(src)
-            elif state == "running":
+            elif verdict == "building":
                 log(f"{src.name}: CI still running -- will come back to it")
                 waiting.append(src)
-            elif state == "running-with-failures" or state == "failing":
+            elif verdict == "red":
                 note = ("failing" if state == "failing"
                         else "still running, but a job has already failed")
                 log(f"{src.name}: CI {note} -- one more look at the end")
@@ -2319,11 +2434,14 @@ Diff (may be truncated):
             for src, targets in work:
                 self.execute(src, targets)
 
-    def revisit(self, pending: list[tuple[Source, list[str]]]) -> list[tuple[Source, list[str]]]:
+    def revisit(self, pending: list[Planned]) -> list[Planned]:
         """Come back to the branches that were still building, until none are.
 
         They were approved in the same sitting as everything else, so this needs
-        nobody: check CI, merge whatever has gone green, sleep, repeat.
+        nobody: check CI, merge whatever has gone green, sleep, repeat.  A round
+        is one poll_once(); what it found decides between merging, a local test
+        run standing in for a CI that is not moving, and sleeping -- and which
+        of those, and why, is printed every round.
 
         Returns the ones whose build ended red, for retry_failed() to look at
         once more -- a build that finishes red here has failed exactly once,
@@ -2335,131 +2453,127 @@ Diff (may be truncated):
             for src, _ in pending:
                 self.record(src.name, "-", "would wait for CI")
             return []
-        started_at = time.time()
-        deadline = (started_at + self.cfg.ci_wait_hours * 3600
-                    if self.cfg.ci_wait_hours else None)
-        # ...and an outer bound that no amount of credit moves.  Giving a
-        # stand-in's merge time back to the others keeps one of them from writing
-        # the rest off, but a credit per round compounds: ten branches queued
-        # behind unstarted CI would run for days and then print "gave up after
-        # 12h".  The most stand-ins there can be is one per branch.
-        hard_deadline = (deadline + len(pending) * self.cfg.ci_standin_timeout
-                         if deadline else None)
-        late_failures: list[tuple[Source, list[str]]] = []
+        budget = WaitBudget(self.cfg.ci_wait_hours, self.cfg.ci_standin_timeout, len(pending))
+        late_failures: list[Planned] = []
         misreads: dict[str, int] = defaultdict(int)
-        idle_rounds = 0
+        # Rounds in a row in which nothing went green: the evidence that CI is
+        # stalled rather than slow, which is what a test run costing hours is
+        # bought on.  A round that goes green starts it over.  A round spent on
+        # a stand-in leaves it alone -- the poll straight after a six-hour test
+        # run that finds nothing new green is the strongest sign of a stalled
+        # queue there is, and starting the count over there left the box idle
+        # for three rounds between every two branches it tested.
+        quiet_rounds = 0
         while pending:
             log(f"checking CI for {len(pending)} branch(es) that were still building")
-            self.git.run("fetch", self.cfg.fork_remote)
-            # `still` is everything to ask about again next round; `building`
-            # is the subset GitHub says is cleanly queued or running.  Only
-            # those may have a local build stand in for their CI.  A branch kept
-            # on for a misread has no CI result to stand in for, and one that is
-            # "running-with-failures" has something better than a local build
-            # already: GitHub has failed a job on this very commit, and a clean
-            # compile here does not answer that.
-            ready, still, building = [], [], []
-            for src, targets in pending:
-                found = self.fork_ref_of(src)
-                if not found:
-                    warn(f"{src.name}: gone from {self.cfg.fork_remote} -- giving up on it")
-                    self.reports.write("TO_MERGE_LATER.txt", src.name, "",
-                                       "disappeared from the fork while we waited")
-                    self.record(src.name, "-", "vanished while waiting")
-                    continue
-                _, fork_head = found
-                if fork_head != src.fork_head:
-                    warn(f"{src.name}: pushed again while we waited ({src.fork_head[:9]} "
-                         f"-> {fork_head[:9]}) -- leaving it for the next run")
-                    self.reports.write("TO_MERGE_LATER.txt", src.name, fork_head,
-                                       "moved while we waited; re-run to pick it up")
-                    self.record(src.name, "-", "moved while waiting")
-                    continue
-                state = self.ci_status_settled(fork_head)
-                if state == "passing":
-                    log(f"{src.name}: CI went green -- merging it now")
-                    src.ci_green = True
-                    self.warn_if_untested(src)
-                    ready.append((src, targets))
-                elif state == "running":
-                    misreads.pop(src.name, None)
-                    still.append((src, targets))
-                    building.append((src, targets))
-                elif state == "running-with-failures" or state == "failing":
-                    # Not left in the poll: the jobs still going cannot unfail the
-                    # one that is red, so this would be waited on until the whole
-                    # --ci-wait ran out and never resolve.  It has failed once,
-                    # which is what the end-of-run look is for.
-                    note = ("failed in the end" if state == "failing"
-                            else "has a failed job while the rest run")
-                    log(f"{src.name}: CI {note} -- one more look later")
-                    late_failures.append((src, targets))
-                else:
-                    # Neither running, green nor red.  This branch had runs a
-                    # round ago, so the likeliest reading is that GitHub is
-                    # between them, not that the CI has gone away.  Keep waiting
-                    # for a few rounds before believing it.
-                    misreads[src.name] += 1
-                    if misreads[src.name] < CI_MISREADS_ALLOWED:
-                        log(f"{src.name}: CI {state} ({misreads[src.name]} of "
-                            f"{CI_MISREADS_ALLOWED}) -- asking again next round")
-                        still.append((src, targets))
-                        continue
-                    log(f"{src.name}: CI {state} {CI_MISREADS_ALLOWED} rounds running "
-                        "-> TO_MERGE_LATER.txt")
-                    self.reports.write("TO_MERGE_LATER.txt", src.name, fork_head, state)
-                    self.record(src.name, "-", f"skipped, CI {state}")
-
-            self.merge_all(ready)
-            pending = still
+            seen = self.poll_once(pending, misreads)
+            late_failures += seen.red
+            self.merge_all(seen.green)
+            pending = seen.still
             if not pending:
                 log("nothing left building")
                 return late_failures
-            if deadline and (time.time() >= deadline
-                             or time.time() >= hard_deadline):
-                waited = (time.time() - started_at) / 3600
+            if budget.over():
                 warn(f"gave up waiting on {len(pending)} branch(es) after "
-                     f"{waited:.1f}h")
+                     f"{budget.waited_hours():.1f}h")
                 for src, _ in pending:
                     self.reports.write("TO_MERGE_LATER.txt", src.name, src.fork_head,
                                        "still building when the run ended")
                     self.record(src.name, "-", "still building at the end")
                 return late_failures
-            idle_rounds = 0 if ready else idle_rounds + 1
-            if idle_rounds >= IDLE_ROUNDS_BEFORE_STANDING_IN:
-                # Nothing went green this round: everything left is queued
-                # behind somebody else's CI.  Rather than sleep through the
-                # interval, take the one at the head of the queue and let the
-                # build this script runs anyway stand in for the CI that has not
-                # started.  One per round -- the next round asks GitHub again
-                # first and only comes back here if everything is still queued,
-                # so this works its way down the list instead of sitting on one
-                # branch.
+            quiet_rounds = 0 if seen.green else quiet_rounds + 1
+            why = why_no_stand_in(enabled=self.cfg.local_stand_in,
+                                  can_build=self.cfg.do_compile, quiet_rounds=quiet_rounds,
+                                  went_green=len(seen.green), building=len(seen.building))
+            if why is None:
+                # Everything left is queued behind somebody else's CI, and has
+                # been for a while.  Rather than sleep through another interval,
+                # take the one at the head of the queue and let a test run here
+                # stand in for the CI that has not started.  One per round: the
+                # next round asks GitHub again first.
+                log(f"{quiet_rounds} round(s) in a row with nothing going green -- a local "
+                    "test run stands in for CI on the next queued branch")
                 started = time.time()
-                # Against the outer bound, not the wait.  The wait is what the
-                # branches are being polled for; the outer bound is what the run
-                # is allowed to take, and it already has room for one stand-in
-                # per branch.  Measured against the wait, a 6h cap refused every
-                # stand-in in the last 6h of a 12h wait -- and with --ci-wait 6
-                # or less it refused all of them, for a run the operator never
-                # asked to switch the feature off in.
-                nudged = self.build_instead_of_waiting(building, hard_deadline)
+                # The outer bound is what a stand-in has to fit inside, not the
+                # wait: the wait is what the branches are polled for, and it is
+                # the outer bound that has room for one stand-in per branch by
+                # construction.  Measured against the wait, a 6h cap refused
+                # every stand-in in the last 6h of a 12h wait, and all of them
+                # under --ci-wait 6 or less.
+                nudged = self.build_instead_of_waiting(seen.building, budget.hard_deadline)
                 if nudged:
-                    idle_rounds = 0
-                    # Give the others back the time this took.  --ci-wait is how
-                    # long to keep coming back to a branch whose CI is still
-                    # going, and the merging we chose to do in the middle of that
-                    # is not them being slow -- charged to them, one stand-in
-                    # writes every other branch off as "still building when the
-                    # run ended" when they were only queued behind us.
-                    if deadline is not None:
-                        deadline += time.time() - started
+                    budget.credit(time.time() - started)
                     pending = [pair for pair in pending if pair[0].name != nudged]
                     continue                     # straight back to the CI check
+                # ...and if not, build_instead_of_waiting has just said why.
+            else:
+                log(why)
             log(f"{len(pending)} branch(es) still building -- looking again in "
                 f"{self.cfg.ci_poll_minutes} min")
             time.sleep(self.cfg.ci_poll_minutes * 60)
         return late_failures
+
+    def poll_once(self, pending: list[Planned], misreads: dict[str, int]) -> Round:
+        """Ask GitHub about every branch still building, once, and sort the answers.
+
+        `misreads` counts, per branch, the rounds running its CI has read as
+        neither running, green nor red -- kept across rounds by the caller, so a
+        blip costs a branch a round and not its place in the queue.
+        """
+        seen = Round()
+        self.git.run("fetch", self.cfg.fork_remote)
+        for src, targets in pending:
+            found = self.fork_ref_of(src)
+            if not found:
+                warn(f"{src.name}: gone from {self.cfg.fork_remote} -- giving up on it")
+                self.reports.write("TO_MERGE_LATER.txt", src.name, "",
+                                   "disappeared from the fork while we waited")
+                self.record(src.name, "-", "vanished while waiting")
+                continue
+            _, fork_head = found
+            if fork_head != src.fork_head:
+                warn(f"{src.name}: pushed again while we waited ({src.fork_head[:9]} "
+                     f"-> {fork_head[:9]}) -- leaving it for the next run")
+                self.reports.write("TO_MERGE_LATER.txt", src.name, fork_head,
+                                   "moved while we waited; re-run to pick it up")
+                self.record(src.name, "-", "moved while waiting")
+                continue
+            state = self.ci_status_settled(fork_head)
+            verdict = ci_verdict(state)
+            if verdict == "green":
+                log(f"{src.name}: CI went green -- merging it now")
+                src.ci_green = True
+                self.warn_if_untested(src)
+                seen.green.append((src, targets))
+            elif verdict == "building":
+                misreads.pop(src.name, None)
+                seen.still.append((src, targets))
+                seen.building.append((src, targets))
+            elif verdict == "red":
+                # Not left in the poll: the jobs still going cannot unfail the
+                # one that is red, so this would be waited on until the whole
+                # --ci-wait ran out and never resolve.  It has failed once,
+                # which is what the end-of-run look is for.
+                note = ("failed in the end" if state == "failing"
+                        else "has a failed job while the rest run")
+                log(f"{src.name}: CI {note} -- one more look later")
+                seen.red.append((src, targets))
+            else:
+                # Neither running, green nor red.  This branch had runs a
+                # round ago, so the likeliest reading is that GitHub is
+                # between them, not that the CI has gone away.  Keep waiting
+                # for a few rounds before believing it.
+                misreads[src.name] += 1
+                if misreads[src.name] < CI_MISREADS_ALLOWED:
+                    log(f"{src.name}: CI {state} ({misreads[src.name]} of "
+                        f"{CI_MISREADS_ALLOWED}) -- asking again next round")
+                    seen.still.append((src, targets))
+                    continue
+                log(f"{src.name}: CI {state} {CI_MISREADS_ALLOWED} rounds running "
+                    "-> TO_MERGE_LATER.txt")
+                self.reports.write("TO_MERGE_LATER.txt", src.name, fork_head, state)
+                self.record(src.name, "-", f"skipped, CI {state}")
+        return seen
 
     def stand_in_for_ci(self, src: Source) -> CompileFailure | None:
         """Run what CI would have run, on what CI would have run it on.
@@ -2474,7 +2588,7 @@ Diff (may be truncated):
         return self.compile_target(src.name, src.base_branch or "its base", src.base,
                                    ci_stand_in=True)
 
-    def build_instead_of_waiting(self, pending: list[tuple[Source, list[str]]],
+    def build_instead_of_waiting(self, pending: list[Planned],
                                  deadline: float | None = None) -> str | None:
         """Merge the next queued branch on a local test run instead of a green tick.
 
@@ -2484,12 +2598,13 @@ Diff (may be truncated):
         backport whose change already went green on the fork.  That is
         --ci-standin-tasks, and it takes hours rather than minutes.
 
-        Returns the branch name that had its turn -- merged, or found wanting and
-        recorded as such -- so the caller can take it off the queue.  Nothing
-        happens without a build to lean on: with --no-compile there is no second
-        opinion to have.
+        Whether now is the time is why_no_stand_in()'s question and revisit()
+        asks it first; this one answers which branch, and whether it can be
+        tested at all.  Returns the branch name that had its turn -- merged, or
+        found wanting and recorded as such -- so the caller can take it off the
+        queue; None, with a line saying why, when no turn was taken.
         """
-        if not (self.cfg.local_stand_in and self.cfg.do_compile and pending):
+        if not pending:
             return None
         # Past anything we already could not check out.  It keeps its place in
         # the poll, but always taking pending[0] meant one branch blocked by, say,
@@ -2515,8 +2630,7 @@ Diff (may be truncated):
                  "-- leaving it in the queue rather than calling it failed")
             self._checkout_failed.add(src.name)
             return None
-        log(f"{src.name}: nothing has gone green in {IDLE_ROUNDS_BEFORE_STANDING_IN} "
-            f"rounds and {self.cfg.fork_remote}/{src.fork_name} is still queued -- "
+        log(f"{src.name}: {self.cfg.fork_remote}/{src.fork_name} is still queued -- "
             f"running sbt {' '.join(self.cfg.ci_standin_tasks)} on it here instead")
         failure = self.stand_in_for_ci(src)
         if failure:
@@ -2705,12 +2819,13 @@ Diff (may be truncated):
                 self.record(src.name, "-", "moved after failing CI")
                 continue
             state = self.ci_status_settled(fork_head)
-            if state == "passing":
+            verdict = ci_verdict(state)
+            if verdict == "green":
                 log(f"{src.name}: CI is green on the second look -- merging it")
                 src.ci_green = True
                 self.warn_if_untested(src)
                 ready.append((src, targets))
-            elif state in ("failing", "running-with-failures"):
+            elif verdict == "red":
                 # Red twice.  The second time it may still have jobs going, but
                 # one of them has finished red on this very commit both times we
                 # looked, and telling you to come back later for that is telling
