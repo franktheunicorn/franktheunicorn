@@ -730,14 +730,10 @@ class FailingCiGetsOneRetry(unittest.TestCase):
         from types import SimpleNamespace
 
         bp = object.__new__(merge_branches.Backporter)
-        bp.cfg = SimpleNamespace(
-            dry_run=False,
-            fork_remote="fork",
-            fork_repo="holdenk/spark",
-            ci_poll_minutes=0,
-            ci_wait_hours=0,
-            refresh_before_retry=False,
-        )
+        bp.cfg = SimpleNamespace(dry_run=False, fork_remote="fork",
+                                 fork_repo="holdenk/spark", ci_poll_minutes=0,
+                                 ci_wait_hours=0, ci_standin_timeout=21600,
+                                 refresh_before_retry=False)
         bp.git = SimpleNamespace(run=lambda *a, **k: None)
         self.written = []
         self.recorded = []
@@ -2119,6 +2115,340 @@ class RefSlug(unittest.TestCase):
         self.assertEqual(
             ref_slug("xss-fix-branch-3.5--branch-3.5"), "xss-fix-branch-3.5--branch-3.5"
         )
+
+
+class CiVerdicts(unittest.TestCase):
+    """One mapping from a CI state to what the run does with it."""
+
+    def test_every_state_ci_status_can_return_has_a_verdict(self):
+        from merge_branches import ci_verdict
+
+        self.assertEqual(ci_verdict("passing"), "green")
+        self.assertEqual(ci_verdict("running"), "building")
+        self.assertEqual(ci_verdict("running-with-failures"), "red")
+        self.assertEqual(ci_verdict("failing"), "red")
+        self.assertEqual(ci_verdict("none"), "unknown")
+        self.assertEqual(ci_verdict("error"), "unknown")
+
+    def test_a_state_nobody_has_heard_of_is_not_a_reason_to_merge(self):
+        from merge_branches import ci_verdict
+
+        self.assertEqual(ci_verdict("queued"), "unknown")
+
+
+class WhyNoStandIn(unittest.TestCase):
+    """The stand-in's "when", in words, so the log can say it every round."""
+
+    def why(self, **overrides):
+        from merge_branches import IDLE_ROUNDS_BEFORE_STANDING_IN, why_no_stand_in
+
+        args = dict(enabled=True, can_build=True,
+                    quiet_rounds=IDLE_ROUNDS_BEFORE_STANDING_IN, went_green=0, building=5)
+        args.update(overrides)
+        return why_no_stand_in(**args)
+
+    def test_a_stalled_queue_gets_a_test_run(self):
+        self.assertIsNone(self.why())
+
+    def test_switched_off_names_the_flag(self):
+        self.assertIn("--no-local-build-stand-in", self.why(enabled=False))
+
+    def test_no_build_says_there_is_nothing_to_stand_in_with(self):
+        self.assertIn("--no-compile", self.why(can_build=False))
+
+    def test_too_few_quiet_rounds_says_how_many_it_takes(self):
+        from merge_branches import IDLE_ROUNDS_BEFORE_STANDING_IN
+
+        why = self.why(quiet_rounds=1)
+        self.assertIn("1 quiet round", why)
+        self.assertIn(f"after {IDLE_ROUNDS_BEFORE_STANDING_IN}", why)
+
+    def test_a_green_round_says_the_count_started_over(self):
+        why = self.why(quiet_rounds=0, went_green=2)
+        self.assertIn("2 went green", why)
+        self.assertIn("starts over", why)
+
+    def test_only_misreads_left_says_nothing_is_cleanly_queued(self):
+        self.assertIn("cleanly queued", self.why(building=0))
+
+    def test_the_flags_come_before_the_count(self):
+        # "1 quiet round so far" under --no-compile promises a test run that
+        # can never come
+        self.assertIn("--no-compile", self.why(can_build=False, quiet_rounds=1))
+
+
+class WaitBudgetRules(unittest.TestCase):
+    """The two bounds on a wait, and what a stand-in's time does to each."""
+
+    def budget(self, wait_hours, standin_seconds=60, branches=3):
+        from unittest import mock
+
+        import merge_branches
+
+        self.clock = [1000.0]
+        self.patch = mock.patch.object(merge_branches.time, "time", lambda: self.clock[0])
+        self.patch.start()
+        self.addCleanup(self.patch.stop)
+        return merge_branches.WaitBudget(wait_hours, standin_seconds, branches)
+
+    def test_no_wait_is_no_bound(self):
+        budget = self.budget(0)
+        self.clock[0] += 10 ** 9
+        self.assertFalse(budget.over())
+
+    def test_the_wait_runs_out(self):
+        budget = self.budget(1.0)
+        self.clock[0] = 1000 + 3599
+        self.assertFalse(budget.over())
+        self.clock[0] = 1000 + 3600
+        self.assertTrue(budget.over())
+
+    def test_a_stand_in_is_credited_back_to_the_wait(self):
+        budget = self.budget(1.0, standin_seconds=7200)
+        budget.credit(3600)
+        self.clock[0] = 1000 + 3600
+        self.assertFalse(budget.over())
+        self.clock[0] = 1000 + 7200
+        self.assertTrue(budget.over())
+
+    def test_the_outer_bound_takes_no_credit(self):
+        # 1h of waiting plus three 60s stand-ins is the most this run may take,
+        # however much the wait is credited back
+        budget = self.budget(1.0, standin_seconds=60, branches=3)
+        budget.credit(3600)
+        budget.credit(3600)
+        self.clock[0] = 1000 + 3600 + 180
+        self.assertTrue(budget.over())
+
+    def test_the_outer_bound_has_room_for_one_stand_in_per_branch(self):
+        budget = self.budget(1.0, standin_seconds=21600, branches=10)
+        self.assertEqual(budget.hard_deadline, budget.deadline + 10 * 21600)
+
+    def test_it_reports_how_long_it_has_waited(self):
+        budget = self.budget(12.0)
+        self.clock[0] = 1000 + 5400
+        self.assertAlmostEqual(budget.waited_hours(), 1.5)
+
+
+class OneRoundOfPolling(unittest.TestCase):
+    """poll_once() sorts one look at GitHub by what happens to each branch next."""
+
+    def make(self, states):
+        from types import SimpleNamespace
+
+        import merge_branches
+
+        bp = object.__new__(merge_branches.Backporter)
+        bp.cfg = SimpleNamespace(fork_remote="fork", fork_repo="holdenk/spark")
+        bp.git = SimpleNamespace(run=lambda *a, **k: None)
+        self.written = []
+        bp.reports = SimpleNamespace(
+            write=lambda name, branch, *cols: self.written.append((name, branch)))
+        bp.record = lambda *a: None
+        bp.warn_if_untested = lambda src: None
+        bp.resolve_on_fork = lambda name: (name, name + "-head")
+        bp.git.rev_parse = lambda ref: ref.rsplit("/", 1)[-1].split("^")[0] + "-head"
+        bp.ci_status_settled = lambda sha: states[sha]
+        return bp
+
+    def source(self, name, fork_head=None):
+        src = Source(name)
+        src.fork_name, src.fork_head = name, fork_head or name + "-head"
+        return src
+
+    def names(self, pairs):
+        return [src.name for src, _ in pairs]
+
+    def test_each_answer_goes_to_its_own_pile(self):
+        from collections import defaultdict
+
+        bp = self.make({"a-head": "passing", "b-head": "running",
+                        "c-head": "running-with-failures", "d-head": "failing",
+                        "e-head": "none"})
+        pending = [(self.source(n), ["master"]) for n in "abcde"]
+        seen = bp.poll_once(pending, defaultdict(int))
+        self.assertEqual(self.names(seen.green), ["a"])
+        self.assertEqual(self.names(seen.red), ["c", "d"])
+        # the misread stays in the queue but is not offered to a local build
+        self.assertEqual(self.names(seen.still), ["b", "e"])
+        self.assertEqual(self.names(seen.building), ["b"])
+        self.assertEqual(self.written, [])
+
+    def test_a_branch_that_went_green_is_marked_so(self):
+        from collections import defaultdict
+
+        bp = self.make({"a-head": "passing"})
+        src = self.source("a")
+        bp.poll_once([(src, ["master"])], defaultdict(int))
+        self.assertTrue(src.ci_green)
+
+    def test_a_branch_that_moved_or_vanished_is_written_off_in_place(self):
+        from collections import defaultdict
+
+        bp = self.make({"a-head": "running", "b-head": "running"})
+        bp.git.rev_parse = lambda ref: (None if "/gone^" in ref
+                                        else ref.rsplit("/", 1)[-1].split("^")[0] + "-head")
+        moved = self.source("a", fork_head="a-old")     # the fork now has a-head
+        gone = self.source("gone")
+        seen = bp.poll_once([(moved, ["master"]), (gone, ["master"]),
+                             (self.source("b"), ["master"])], defaultdict(int))
+        self.assertEqual(self.names(seen.still), ["b"])
+        self.assertEqual(self.written, [("TO_MERGE_LATER.txt", "a"),
+                                        ("TO_MERGE_LATER.txt", "gone")])
+
+    def test_misreads_are_counted_across_rounds_and_a_good_read_clears_them(self):
+        from collections import defaultdict
+
+        import merge_branches
+
+        misreads = defaultdict(int)
+        pending = [(self.source("a"), ["master"])]
+        bp = self.make({"a-head": "none"})
+        for _ in range(merge_branches.CI_MISREADS_ALLOWED - 1):
+            seen = bp.poll_once(pending, misreads)
+            self.assertEqual(self.names(seen.still), ["a"])
+        bp.ci_status_settled = lambda sha: "running"
+        bp.poll_once(pending, misreads)
+        self.assertNotIn("a", misreads)
+        bp.ci_status_settled = lambda sha: "none"
+        for _ in range(merge_branches.CI_MISREADS_ALLOWED - 1):
+            seen = bp.poll_once(pending, misreads)
+        self.assertEqual(self.names(seen.still), ["a"])           # still not given up on
+        seen = bp.poll_once(pending, misreads)
+        self.assertEqual(seen.still, [])
+        self.assertEqual(self.written, [("TO_MERGE_LATER.txt", "a")])
+
+
+class TheQuietCountSurvivesAStandIn(unittest.TestCase):
+    """The poll straight after a test run is the strongest evidence there is."""
+
+    def make(self, answers):
+        from collections import defaultdict
+        from types import SimpleNamespace
+
+        import merge_branches
+
+        bp = object.__new__(merge_branches.Backporter)
+        bp.cfg = SimpleNamespace(dry_run=False, fork_remote="fork",
+                                 fork_repo="holdenk/spark", ci_poll_minutes=0,
+                                 ci_wait_hours=0, local_stand_in=True,
+                                 do_compile=True, ci_standin_tasks=["test"],
+                                 ci_standin_timeout=21600)
+        bp.git = SimpleNamespace(run=lambda *a, **k: None)
+        bp.reports = SimpleNamespace(write=lambda *a: None)
+        bp._checkout_failed = set()
+        bp.record = lambda *a: None
+        bp.warn_if_untested = lambda src: None
+        self.merged = []
+        bp.merge_all = lambda work: self.merged.extend(src.name for src, _ in work)
+        self.polls = defaultdict(int)
+        queues = {sha: list(states) for sha, states in answers.items()}
+
+        def status(sha):
+            self.polls[sha] += 1
+            return queues[sha].pop(0) if len(queues[sha]) > 1 else queues[sha][0]
+
+        bp.ci_status_of = status
+        bp.resolve_on_fork = lambda name: (name, name + "-head")
+        bp.git.rev_parse = lambda ref: ref.rsplit("/", 1)[-1].split("^")[0] + "-head"
+        bp._gh_complained = set()
+        self.tested = []
+        bp.build_instead_of_waiting = lambda queue, deadline=None: (
+            self.tested.append(queue[0][0].name) or queue[0][0].name)
+        return bp
+
+    def source(self, name):
+        src = Source(name)
+        src.fork_name, src.fork_head = name, name + "-head"
+        return src
+
+    def test_a_stalled_queue_is_worked_through_back_to_back(self):
+        # Neither ever goes green.  The three quiet rounds buy the first test
+        # run; the round after it finds nothing green either, and that is the
+        # second -- not three more rounds of sleeping first.
+        import merge_branches
+
+        quiet = merge_branches.IDLE_ROUNDS_BEFORE_STANDING_IN
+        bp = self.make({"a-head": ["running"], "b-head": ["running"]})
+        bp.revisit([(self.source("a"), ["master"]), (self.source("b"), ["master"])])
+        self.assertEqual(self.tested, ["a", "b"])
+        self.assertEqual(dict(self.polls), {"a-head": quiet, "b-head": quiet + 1})
+
+    def test_a_green_round_still_starts_the_count_over(self):
+        # a goes green on the second look: CI is moving, so b waits for three
+        # quiet rounds from there before hours are spent on it
+        import merge_branches
+
+        quiet = merge_branches.IDLE_ROUNDS_BEFORE_STANDING_IN
+        bp = self.make({"a-head": ["running", "passing"], "b-head": ["running"]})
+        bp.revisit([(self.source("a"), ["master"]), (self.source("b"), ["master"])])
+        self.assertEqual(self.merged, ["a"])
+        self.assertEqual(self.tested, ["b"])
+        self.assertEqual(self.polls["b-head"], 2 + quiet)
+
+
+class EveryRoundSaysWhy(unittest.TestCase):
+    """A round that only waits says what it is waiting for."""
+
+    def make(self, answers, **cfg):
+        from types import SimpleNamespace
+
+        import merge_branches
+
+        bp = object.__new__(merge_branches.Backporter)
+        settings = dict(dry_run=False, fork_remote="fork", fork_repo="holdenk/spark",
+                        ci_poll_minutes=0, ci_wait_hours=0, local_stand_in=True,
+                        do_compile=True, ci_standin_tasks=["test"], ci_standin_timeout=21600)
+        settings.update(cfg)
+        bp.cfg = SimpleNamespace(**settings)
+        bp.git = SimpleNamespace(run=lambda *a, **k: None)
+        bp.reports = SimpleNamespace(write=lambda *a: None)
+        bp._checkout_failed = set()
+        bp.record = lambda *a: None
+        bp.warn_if_untested = lambda src: None
+        bp.merge_all = lambda work: None
+        queues = {sha: list(states) for sha, states in answers.items()}
+        bp.ci_status_of = lambda sha: queues[sha].pop(0)
+        bp.resolve_on_fork = lambda name: (name, name + "-head")
+        bp.git.rev_parse = lambda ref: ref.rsplit("/", 1)[-1].split("^")[0] + "-head"
+        bp._gh_complained = set()
+        bp.build_instead_of_waiting = lambda queue, deadline=None: None
+        return bp
+
+    def run_it(self, bp):
+        import contextlib
+        import io
+
+        src = Source("a")
+        src.fork_name, src.fork_head = "a", "a-head"
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            bp.revisit([(src, ["master"])])
+        return out.getvalue()
+
+    def test_the_first_quiet_round_says_how_many_it_takes(self):
+        import merge_branches
+
+        out = self.run_it(self.make({"a-head": ["running", "passing"]}))
+        self.assertIn("1 quiet round(s) so far", out)
+        self.assertIn(f"after {merge_branches.IDLE_ROUNDS_BEFORE_STANDING_IN}", out)
+        self.assertIn("looking again in", out)
+
+    def test_a_run_that_cannot_build_says_so_rather_than_counting(self):
+        out = self.run_it(self.make({"a-head": ["running", "passing"]}, do_compile=False))
+        self.assertIn("--no-compile", out)
+        self.assertNotIn("quiet round", out)
+
+    def test_polling_only_names_its_flag(self):
+        out = self.run_it(self.make({"a-head": ["running", "passing"]}, local_stand_in=False))
+        self.assertIn("--no-local-build-stand-in", out)
+
+    def test_a_stand_in_that_starts_says_so(self):
+        import merge_branches
+
+        quiet = merge_branches.IDLE_ROUNDS_BEFORE_STANDING_IN
+        out = self.run_it(self.make({"a-head": ["running"] * quiet + ["passing"]}))
+        self.assertIn(f"{quiet} round(s) in a row with nothing going green", out)
 
 
 if __name__ == "__main__":
