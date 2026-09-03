@@ -188,20 +188,70 @@ ORIG_BRANCH=$(git rev-parse --abbrev-ref HEAD)
 : > "$WTFBBQ_FILE"
 : > "$IDK_FILE"
 
-WORK_PREFIX="_squash_magic_tmp"
+# Unique to this run.  The lock-retry logic upstairs exists because another
+# squash-magic may be working in this same checkout, and the work-branch name is
+# derived from the branch being squashed -- so two runs with any branch in common
+# used to land on the same name, force-move each other's probe mid-rebase, and
+# delete it on the way out.  Tracking which names we made does not help when the
+# name is the collision; the pid does.
+WORK_PREFIX="_squash_magic_tmp_$$"
 ERR_FILE=$(mktemp)
+# Set while our own rebase is in flight.  Rebase state lives in the shared .git,
+# so an unconditional "rebase --abort" on the way out reaches into a second
+# squash-magic's probe and makes it look like a conflict -- which sends somebody
+# else's branch to idk.txt for no reason.  The pid in WORK_PREFIX fixes the
+# branch-name half of that hazard; this is the other half.
+REBASE_IN_FLIGHT=0
+
+# Is that pid still around?  /proc where there is one, because `kill -0` cannot
+# tell "no such process" from "not yours to signal" and guessing wrong here
+# deletes a live run's work.
+pid_alive() {
+  if [ -d /proc ]; then
+    [ -d "/proc/$1" ]
+  else
+    kill -0 "$1" 2>/dev/null
+  fi
+}
+
+# The pid in the prefix stops two live runs colliding, but it also means a run
+# that is killed leaves branches no later cleanup will ever glob.  So sweep the
+# ones whose owner is gone -- and the bare-prefixed ones from before the pid was
+# in the name -- once, at the start, while we know we are the only thing here
+# that cares.
+sweep_dead_work_branches() {
+  local ref pid swept=0
+  while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    pid=${ref#_squash_magic_tmp_}
+    pid=${pid%%_*}
+    if [[ "$pid" =~ ^[0-9]+$ ]] && pid_alive "$pid"; then
+      continue                       # somebody else is using it right now
+    fi
+    git branch -D "$ref" >/dev/null 2>&1 && swept=$((swept + 1))
+  done < <(git for-each-ref --format='%(refname:lstrip=2)' \
+             'refs/heads/_squash_magic_tmp*' 2>/dev/null || true)
+  [ "$swept" = 0 ] || echo "==> swept $swept work branch(es) left by a run that died"
+  return 0
+}
+sweep_dead_work_branches
 
 cleanup() {
   rm -f "$ERR_FILE"
-  git rebase --abort >/dev/null 2>&1 || true
+  if [ "$REBASE_IN_FLIGHT" = "1" ]; then
+    git rebase --abort >/dev/null 2>&1 || true
+  fi
   local cur
   cur=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
   if [ "$cur" != "$ORIG_BRANCH" ]; then
     git checkout --quiet "$ORIG_BRANCH" >/dev/null 2>&1 || true
   fi
+  # Our own prefix, so this sweeps up anything we made -- including after a
+  # crash mid-branch -- and nothing anybody else did.
   while IFS= read -r b; do
     [ -n "$b" ] && git branch -D "$b" >/dev/null 2>&1 || true
-  done < <(git for-each-ref --format='%(refname:short)' "refs/heads/${WORK_PREFIX}_*" 2>/dev/null || true)
+  done < <(git for-each-ref --format='%(refname:lstrip=2)' \
+             "refs/heads/${WORK_PREFIX}_*" 2>/dev/null || true)
 }
 trap cleanup EXIT
 
@@ -315,14 +365,26 @@ try_rebase() {
       sed -n '1,8p' "$ERR_FILE" | sed 's/^/       /' >&2
       return 1
     fi
+    REBASE_IN_FLIGHT=1
     if git_s rebase --quiet "$base" >/dev/null 2>"$ERR_FILE"; then
+      REBASE_IN_FLIGHT=0
       return 0
     fi
-    git rebase --abort >/dev/null 2>&1 || true
-    if lock_error "$ERR_FILE" && [ "$attempt" -lt "$LOCK_RETRIES" ]; then
-      echo "    (lost the lock race rebasing onto $base; going again)" >&2
-      sleep "$attempt"; attempt=$((attempt + 1)); continue
+    # The lock check comes first, and there is no abort on that path.  A rebase
+    # that lost the race for index.lock never started, so there is no state of
+    # ours to clean up -- and .git/rebase-merge is shared, so aborting would take
+    # down the rebase of the very run we lost the race to, which is the thing
+    # this retry loop exists to cooperate with.
+    if lock_error "$ERR_FILE"; then
+      REBASE_IN_FLIGHT=0
+      if [ "$attempt" -lt "$LOCK_RETRIES" ]; then
+        echo "    (lost the lock race rebasing onto $base; going again)" >&2
+        sleep "$attempt"; attempt=$((attempt + 1)); continue
+      fi
+      return 1
     fi
+    git rebase --abort >/dev/null 2>&1 || true
+    REBASE_IN_FLIGHT=0
     return 1
   done
 }
@@ -575,8 +637,10 @@ for branch in "${BRANCHES[@]}"; do
 done
 
 git_s checkout --quiet "$ORIG_BRANCH"
-# The EXIT trap stays armed: it is what removes $ERR_FILE and any leftover
-# work branches, and on this path it has nothing else left to undo.
+# Past here there is nothing of ours left to undo, and cleanup's "rebase --abort"
+# would reach into a second squash-magic working in this same checkout and make
+# its in-flight probe look like a conflict.  Keep the part that is still wanted.
+trap 'rm -f "$ERR_FILE"' EXIT
 
 nm=$(wc -l < "$OUTPUT_FILE"  | tr -d ' ')
 nu=$(wc -l < "$UNKNOWN_FILE" | tr -d ' ')
