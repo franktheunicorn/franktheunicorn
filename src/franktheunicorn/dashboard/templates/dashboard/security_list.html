@@ -203,10 +203,12 @@
         Export this list as a spreadsheet, share it with whoever rules on these
         reports, then import their edits back. Only
         <code>status</code>, <code>severity</code>, <code>duplicate_of_cve</code>,
-        <code>external_notes</code> and <code>operator_notes</code> come back in —
-        every other column is read-only context. Keep the <code>check</code>
-        column: it's what stops a stale sheet overwriting a ruling you made after
-        exporting it.
+        <code>external_notes</code>, <code>operator_notes</code>,
+        <code>fix_branch_primary</code>, <code>fix_branch_all</code> and
+        <code>fix_merged_upstream</code> come back in — every other column is
+        read-only context. A column you delete on the way back is "no instruction",
+        not "blank the field". Keep the <code>check</code> column: it's what stops a
+        stale sheet overwriting a ruling you made after exporting it.
     </p>
 
     {# Said at the button, not just in docs/security-design.md §4.9. This is the #}
@@ -256,6 +258,21 @@
         </label>
         <button type="submit" class="action-btn post">⬆ Import edits</button>
     </form>
+
+    {# One level back, no redo. Shows only when the last import left a snapshot, #}
+    {# so the operator isn't offered a press that does nothing. Restores only the #}
+    {# writable fields the sheet owns — a worker triage run or a dashboard verdict #}
+    {# typed between the export and the import is left alone. #}
+    {% if has_undo %}
+    <form method="post" action="{% url 'dashboard:security_undo_import' %}" class="sheet-sync-undo">
+        {% csrf_token %}
+        <button type="submit" class="action-btn reject"
+                hx-post="{% url 'dashboard:security_undo_import' %}"
+                hx-confirm="Restore the writable state of every report the last sheet import changed? This goes back one import only — there is no redo, and anything the sheet didn't own (triage runs, dashboard verdicts) is left as it is.">
+            ↩ Undo last import
+        </button>
+    </form>
+    {% endif %}
 
     <p class="zip-import-hint">
         Download the sheet as <em>Comma-separated values</em> — not .xlsx.

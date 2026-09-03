@@ -1749,6 +1749,41 @@ class TestSecurityCsvRoundTrip:
         assert "From the review sheet" in body
         assert "PMC: this is a real one, CVE it" in body
 
+    def test_the_undo_button_only_shows_when_there_is_a_snapshot(self, client: Client) -> None:
+        """The button is the whole affordance — a press that does nothing teaches
+        the operator to ignore it. So it renders only when an undo is real."""
+        assert "Undo last import" not in client.get("/security/").content.decode()
+
+        report = SecurityReportFactory(status="new")
+        edited = self._csv(client).replace(",new,", ",invalid,")
+        upload = SimpleUploadedFile("reviewed.csv", edited.encode(), content_type="text/csv")
+        client.post("/security/import-csv/", {"csv_file": upload}, follow=True)
+        report.refresh_from_db()
+        assert report.status == "invalid"  # the import landed, so a snapshot exists
+
+        assert "Undo last import" in client.get("/security/").content.decode()
+
+    def test_undo_restores_the_state_before_the_import(self, client: Client) -> None:
+        report = SecurityReportFactory(status="new", operator_notes="mine")
+        edited = self._csv(client).replace(",new,", ",invalid,")
+        upload = SimpleUploadedFile("reviewed.csv", edited.encode(), content_type="text/csv")
+        client.post("/security/import-csv/", {"csv_file": upload}, follow=True)
+        report.refresh_from_db()
+        assert report.status == "invalid"
+
+        client.post("/security/undo-import/", follow=True)
+
+        report.refresh_from_db()
+        assert report.status == "new"
+        assert report.operator_notes == "mine"
+
+    def test_undo_is_post_only(self, client: Client) -> None:
+        assert client.get("/security/undo-import/").status_code == 405
+
+    def test_undo_with_nothing_to_undo_is_a_no_op_flash(self, client: Client) -> None:
+        response = client.post("/security/undo-import/", follow=True)
+        assert "Nothing to undo" in response.content.decode()
+
 
 @pytest.mark.django_db
 class TestSecurityVerifyButton:

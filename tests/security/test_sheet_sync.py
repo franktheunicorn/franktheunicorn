@@ -987,3 +987,379 @@ class TestForcedCountIsNotDerivedFromProse:
         # Independent of the wording: blanking the detail must not change the count.
         object.__setattr__(result.rows[0], "detail", "")
         assert result.forced == 1
+
+
+@pytest.mark.django_db
+class TestFixBranchColumns:
+    """The three scan-derived fix-branch columns: export, import, and the
+    absent-column rule that an update without them leaves the fields alone."""
+
+    def test_blank_for_a_fresh_report(self) -> None:
+        report = SecurityReportFactory()
+        row = _rows(_export([report]))[0]
+        assert row["fix_branch_primary"] == ""
+        assert row["fix_branch_all"] == ""
+        assert row["fix_merged_upstream"] == ""
+
+    def test_populated_values_round_trip(self) -> None:
+        report = SecurityReportFactory(
+            fix_branch_primary="f003-r2",
+            fix_branch_all="f003-r2; f003-r2-branch-3.5",
+            fix_merged_upstream="merged:master+branch-4.x",
+        )
+        row = _rows(_export([report]))[0]
+        assert row["fix_branch_primary"] == "f003-r2"
+        assert row["fix_branch_all"] == "f003-r2; f003-r2-branch-3.5"
+        assert row["fix_merged_upstream"] == "merged:master+branch-4.x"
+
+    def test_import_populates_all_three(self) -> None:
+        report = SecurityReportFactory(status="new")
+        text = _export([report])
+        text = _edit(text, report.pk, "fix_branch_primary", "f037-ui-acls-jws-filter")
+        text = _edit(
+            text,
+            report.pk,
+            "fix_branch_all",
+            "f037-ui-acls-jws-filter; f037-ui-acls-jws-filter-branch-3.5",
+        )
+        text = _edit(text, report.pk, "fix_merged_upstream", "not-merged")
+
+        result = _apply(text, force=True)
+
+        assert result.applied == 1
+        report.refresh_from_db()
+        assert report.fix_branch_primary == "f037-ui-acls-jws-filter"
+        assert (
+            report.fix_branch_all == "f037-ui-acls-jws-filter; f037-ui-acls-jws-filter-branch-3.5"
+        )
+        assert report.fix_merged_upstream == "not-merged"
+
+    def test_a_with_fix_branches_csv_loads_with_force(self) -> None:
+        """The real artifact: a frank full export with three columns appended by
+        an external tool. Its check tokens predate these fields, so the first load
+        needs force — the honest expression of 'the sheet knows something the DB
+        doesn't yet'."""
+        report = SecurityReportFactory(
+            status="valid", fix_branch_primary="", fix_branch_all="", fix_merged_upstream=""
+        )
+        rows = _rows(_export([report], full=True))
+        rows[0]["fix_branch_primary"] = "f003-r2"
+        rows[0]["fix_branch_all"] = "f003-r2; f003-r2-branch-3.5"
+        rows[0]["fix_merged_upstream"] = "merged:master+branch-4.x"
+        out = io.StringIO()
+        writer = csv.DictWriter(out, fieldnames=list(rows[0].keys()), lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+
+        result = _apply(out.getvalue(), force=True)
+
+        assert result.applied == 1
+        report.refresh_from_db()
+        assert report.fix_branch_primary == "f003-r2"
+        assert report.fix_merged_upstream == "merged:master+branch-4.x"
+
+    def test_absent_columns_do_not_blank_the_fields(self) -> None:
+        """An update sheet that omits the fix-branch columns — e.g. a re-export
+        that didn't carry them, or a reviewer who deleted them — must not wipe
+        what's stored. Absence is no instruction."""
+        report = SecurityReportFactory(
+            status="new",
+            fix_branch_primary="f003-r2",
+            fix_branch_all="f003-r2; f003-r2-branch-3.5",
+            fix_merged_upstream="merged:master+branch-4.x",
+        )
+        rows = _rows(_export([report]))
+        header = [
+            c
+            for c in rows[0]
+            if c not in ("fix_branch_primary", "fix_branch_all", "fix_merged_upstream")
+        ]
+        out = io.StringIO()
+        writer = csv.DictWriter(out, fieldnames=header, lineterminator="\n", extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            row["status"] = "invalid"
+            writer.writerow(row)
+
+        result = _apply(out.getvalue())
+
+        assert result.applied == 1
+        report.refresh_from_db()
+        assert report.status == "invalid"
+        # Untouched: the columns weren't there to instruct anything.
+        assert report.fix_branch_primary == "f003-r2"
+        assert report.fix_branch_all == "f003-r2; f003-r2-branch-3.5"
+        assert report.fix_merged_upstream == "merged:master+branch-4.x"
+
+    def test_a_short_row_does_not_blank_the_fix_branch_fields(self) -> None:
+        """A sheet that drops trailing empty cells stops short of the fix-branch
+        columns; DictReader fills them with None, which is no instruction, not
+        'clear them'."""
+        report = SecurityReportFactory(
+            status="new",
+            fix_branch_primary="f003-r2",
+            fix_merged_upstream="not-merged",
+        )
+        text = _export([report])
+        header, row = text.splitlines()[:2]
+        # Truncate the row before the fix_branch columns land.
+        keep = header.split(",").index("fix_branch_primary")
+        short = ",".join(row.split(",")[:keep])
+
+        result = _apply(f"{header}\n{short}\n")
+
+        assert result.unchanged == 1
+        report.refresh_from_db()
+        assert report.fix_branch_primary == "f003-r2"
+        assert report.fix_merged_upstream == "not-merged"
+
+    def test_rejects_an_unknown_merged_value(self) -> None:
+        report = SecurityReportFactory()
+        text = _edit(_export([report]), report.pk, "fix_merged_upstream", "maybe-merged-ish")
+
+        result = _apply(text, force=True)
+
+        assert result.failed == 1
+        assert "isn't one of" in result.rows[0].detail
+        report.refresh_from_db()
+        assert report.fix_merged_upstream == ""
+
+    def test_a_blank_merged_cell_clears_the_field(self) -> None:
+        report = SecurityReportFactory(fix_merged_upstream="not-merged", status="new")
+        text = _edit(_export([report]), report.pk, "fix_merged_upstream", "")
+
+        result = _apply(text, force=True)
+
+        assert result.applied == 1
+        report.refresh_from_db()
+        assert report.fix_merged_upstream == ""
+
+    def test_a_newline_in_branch_all_is_collapsed_not_stored(self) -> None:
+        """A branch list is one row; a newline snuck into it used to store as a
+        single branch with the two names run together."""
+        report = SecurityReportFactory(status="new")
+        text = _edit(_export([report]), report.pk, "fix_branch_all", "branch-3.5\nbranch-4.0")
+
+        result = _apply(text, force=True)
+
+        assert result.applied == 1
+        report.refresh_from_db()
+        assert report.fix_branch_all == "branch-3.5 branch-4.0"
+
+    def test_a_branch_name_starting_with_a_dash_round_trips(self) -> None:
+        """The scan emits "-branch-3.5" style entries; a leading "-" is a formula
+        trigger, so the cell goes out escaped and has to read as unchanged back."""
+        report = SecurityReportFactory(fix_branch_primary="-branch-3.5", status="new")
+
+        result = _apply(_export([report]))
+
+        assert result.unchanged == 1
+        report.refresh_from_db()
+        assert report.fix_branch_primary == "-branch-3.5"
+
+    def test_a_stored_branch_list_with_double_spaces_is_not_a_phantom_edit(self) -> None:
+        """``clean_single_line`` collapses internal whitespace runs in the cell; the
+        stored value has to be collapsed the same way for the comparison, or a
+        list written with a double space by another importer reads as an edit on
+        every import and burns the check token for no reason."""
+        report = SecurityReportFactory(fix_branch_all="branch-3.5  branch-4.0", status="new")
+
+        result = _apply(_export([report]))
+
+        assert result.unchanged == 1
+        report.refresh_from_db()
+        assert report.fix_branch_all == "branch-3.5  branch-4.0"
+
+    def test_the_fingerprint_covers_the_new_fields(self) -> None:
+        """A sheet exported, then the operator changes a fix-branch field in the
+        dashboard, then the unedited sheet comes back — that's a conflict, not a
+        silent overwrite."""
+        report = SecurityReportFactory(fix_branch_primary="f003-r2")
+        text = _export([report])
+        report.fix_branch_primary = "f003-r2-v2"
+        report.save()
+
+        result = _apply(text)
+
+        assert result.conflicts == 1
+
+
+@pytest.mark.django_db
+class TestUndo:
+    """The one-level undo for the sheet round trip."""
+
+    def test_an_import_can_be_undone(self) -> None:
+        from franktheunicorn.security.sheet_sync import undo_last_import
+
+        report = SecurityReportFactory(status="new", operator_notes="my ruling")
+        text = _edit(_export([report]), report.pk, "status", "invalid")
+        _apply(text)
+
+        result = undo_last_import()
+
+        assert result.undone
+        assert result.restored == 1
+        report.refresh_from_db()
+        assert report.status == "new"
+        assert report.operator_notes == "my ruling"
+
+    def test_undo_restores_the_new_fix_branch_fields(self) -> None:
+        from franktheunicorn.security.sheet_sync import undo_last_import
+
+        report = SecurityReportFactory(
+            status="new", fix_branch_primary="f003-r2", fix_merged_upstream="not-merged"
+        )
+        text = _edit(
+            _export([report]), report.pk, "fix_merged_upstream", "merged:master+branch-4.x"
+        )
+        _apply(text, force=True)
+        report.refresh_from_db()
+        assert report.fix_merged_upstream == "merged:master+branch-4.x"
+
+        undo_last_import()
+
+        report.refresh_from_db()
+        assert report.fix_merged_upstream == "not-merged"
+        assert report.fix_branch_primary == "f003-r2"
+
+    def test_undo_leaves_non_writable_fields_alone(self) -> None:
+        """A worker triage run or a dashboard verdict typed between the export and
+        the undo touches fields the sheet never owns; the snapshot does not store
+        them, so the restore must not revert them."""
+        from franktheunicorn.security.sheet_sync import undo_last_import
+
+        report = SecurityReportFactory(status="new", triage_summary="before")
+        text = _edit(_export([report]), report.pk, "status", "invalid")
+        _apply(text)
+        # The worker triages in the meantime.
+        report.refresh_from_db()
+        report.triage_summary = "the worker ran since"
+        report.priority = 99.0
+        report.save()
+
+        undo_last_import()
+
+        report.refresh_from_db()
+        assert report.status == "new"
+        # Not reverted: the snapshot never owned these.
+        assert report.triage_summary == "the worker ran since"
+        assert report.priority == 99.0
+
+    def test_undo_is_one_level_only(self) -> None:
+        from franktheunicorn.security.sheet_sync import undo_last_import
+
+        report = SecurityReportFactory(status="new")
+        text = _edit(_export([report]), report.pk, "status", "invalid")
+        _apply(text)
+
+        first = undo_last_import()
+        assert first.undone
+        report.refresh_from_db()
+        assert report.status == "new"
+
+        second = undo_last_import()
+        assert not second.undone
+        # Still new — nothing to restore to.
+        report.refresh_from_db()
+        assert report.status == "new"
+
+    def test_undo_with_no_snapshot_is_a_no_op_not_an_error(self) -> None:
+        from franktheunicorn.security.sheet_sync import undo_last_import
+
+        result = undo_last_import()
+        assert not result.undone
+        assert "Nothing to undo" in result.summary()
+
+    def test_a_new_import_replaces_the_previous_undo_set(self) -> None:
+        from franktheunicorn.security.sheet_sync import latest_snapshot_import_id, undo_last_import
+
+        report = SecurityReportFactory(status="new")
+        text = _edit(_export([report]), report.pk, "status", "invalid")
+        _apply(text)
+        first_id = latest_snapshot_import_id()
+        assert first_id
+
+        # A second import, changing something else.
+        report.refresh_from_db()
+        text2 = _edit(_export([report]), report.pk, "operator_notes", "ruled")
+        _apply(text2)
+        second_id = latest_snapshot_import_id()
+        assert second_id and second_id != first_id
+
+        # Undo refers to the *second* import now.
+        result = undo_last_import()
+        assert result.import_id == second_id
+        report.refresh_from_db()
+        assert report.status == "invalid"  # the first import's change stays
+        assert report.operator_notes == ""  # the second import's change reverted
+
+    def test_an_all_unchanged_import_keeps_the_previous_undo(self) -> None:
+        """Re-importing an untouched sheet writes no snapshots, so it must not wipe
+        the undo for the real import before it."""
+        from franktheunicorn.security.sheet_sync import latest_snapshot_import_id
+
+        report = SecurityReportFactory(status="new")
+        text = _edit(_export([report]), report.pk, "status", "invalid")
+        _apply(text)
+        real_id = latest_snapshot_import_id()
+
+        # Re-export (token moved) and re-import the same state — nothing changes.
+        report.refresh_from_db()
+        _apply(_export([report]))
+
+        assert latest_snapshot_import_id() == real_id
+
+    def test_a_dry_run_leaves_no_snapshot(self) -> None:
+        from franktheunicorn.security.sheet_sync import latest_snapshot_import_id
+
+        report = SecurityReportFactory(status="new")
+        text = _edit(_export([report]), report.pk, "status", "invalid")
+        _apply(text, dry_run=True)
+
+        assert latest_snapshot_import_id() == ""
+
+    def test_a_failed_import_leaves_the_previous_undo(self) -> None:
+        """A malformed CSV rolls the whole transaction back, so the snapshots it
+        would have written are gone and the previous undo is intact."""
+        from franktheunicorn.security.sheet_sync import latest_snapshot_import_id, undo_last_import
+
+        report = SecurityReportFactory(status="new")
+        text = _edit(_export([report]), report.pk, "status", "invalid")
+        _apply(text)
+        real_id = latest_snapshot_import_id()
+
+        # A second import that blows up mid-file.
+        good = _export([SecurityReportFactory(status="new")])
+        header = good.splitlines()[0]
+        giant = f'{report.pk},fpdeadbeef01,,0,"{"x" * (csv.field_size_limit() + 10)}'
+        _apply(f"{header}\n{giant}\n")
+
+        assert latest_snapshot_import_id() == real_id
+        # And the real undo still works.
+        undo_last_import()
+        report.refresh_from_db()
+        assert report.status == "new"
+
+
+@pytest.mark.django_db
+class TestUndoCommand:
+    def test_the_command_restores_and_reports(self) -> None:
+        from django.core.management import call_command
+
+        report = SecurityReportFactory(status="new")
+        text = _edit(_export([report]), report.pk, "status", "invalid")
+        _apply(text)
+
+        out = io.StringIO()
+        call_command("undo_security_import", stdout=out)
+
+        report.refresh_from_db()
+        assert report.status == "new"
+        assert "restored" in out.getvalue()
+
+    def test_the_command_with_nothing_to_undo_is_notice(self) -> None:
+        from django.core.management import call_command
+
+        out = io.StringIO()
+        call_command("undo_security_import", stdout=out)
+        assert "Nothing to undo" in out.getvalue()

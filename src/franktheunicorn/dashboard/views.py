@@ -1095,8 +1095,19 @@ def security_report_list(request: HttpRequest) -> HttpResponse:
             "export_cap": MAX_SECURITY_CSV_EXPORT_ROWS,
             "export_total": filtered_count,
             "export_capped": filtered_count > MAX_SECURITY_CSV_EXPORT_ROWS,
+            # The undo button only renders when there's a snapshot to restore, so
+            # the operator isn't offered a press that does nothing. Cheap to check
+            # (one indexed lookup) and done once per page load, not per row.
+            "has_undo": _has_sheet_undo(),
         },
     )
+
+
+def _has_sheet_undo() -> bool:
+    """Whether the last sheet import left snapshots an undo could restore."""
+    from franktheunicorn.security.sheet_sync import latest_snapshot_import_id
+
+    return bool(latest_snapshot_import_id())
 
 
 def _imported_archives() -> list[dict[str, object]]:
@@ -1910,6 +1921,27 @@ def security_report_import_csv(request: HttpRequest) -> HttpResponse:
     for warning in result.warnings:
         messages.warning(request, warning)
     _report_rejected_rows(request, result)
+    return _back_to_security_list(request)
+
+
+@require_POST
+def security_report_undo_import(request: HttpRequest) -> HttpResponse:
+    """Restore the writable state captured before the most recent sheet import.
+
+    One level back, no redo. The button only shows when there's a snapshot to
+    restore (see :func:`security_report_list`), so a press with nothing to undo
+    is a stale tab, not a workflow — handled as a no-op flash rather than an
+    error. In-request like the import itself: a restore is a handful of writes
+    against the rows the import touched, bounded by that count, no container and
+    no LLM call.
+    """
+    from franktheunicorn.security.sheet_sync import undo_last_import
+
+    result = undo_last_import()
+    if result.undone:
+        messages.success(request, result.summary())
+    else:
+        messages.info(request, result.summary())
     return _back_to_security_list(request)
 
 

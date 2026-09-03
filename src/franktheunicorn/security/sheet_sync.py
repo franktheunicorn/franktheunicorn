@@ -52,6 +52,7 @@ import io
 import logging
 import re
 import unicodedata
+import uuid
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -59,7 +60,7 @@ from typing import TYPE_CHECKING
 from django.db import transaction
 from django.utils import timezone
 
-from franktheunicorn.core.models import SecurityReport
+from franktheunicorn.core.models import SecurityReport, SecuritySheetSnapshot
 
 if TYPE_CHECKING:
     # Structural, not TextIO: the export writes to a real file, to a StringIO and
@@ -111,12 +112,23 @@ CHECK_COLUMN = "check"
 #: Everything else round-trips as read-only context. Keep the block contiguous
 #: and near the left: a reviewer should not have to scroll to find the cells
 #: they're meant to touch.
+#:
+#: The three fix-branch columns are writable on purpose: they come from a tool
+#: that walked origin's branches (a fetch plus two git logs per branch) and the
+#: natural way to land that data is the same review sheet the PMC already has
+#: open. A column the reviewer deletes on the way back is "no instruction", never
+#: "blank the field" — see :func:`_proposed_changes`, which only looks at columns
+#: in ``present``. Distinct from ``fixed_in_branch`` (the operator's one-line
+#: verdict), which stays read-only on the sheet.
 WRITABLE_COLUMNS = (
     "status",
     "severity",
     "duplicate_of_cve",
     "external_notes",
     "operator_notes",
+    "fix_branch_primary",
+    "fix_branch_all",
+    "fix_merged_upstream",
 )
 
 #: Full header order. `check` sits second so it's visible rather than hidden off
@@ -150,6 +162,13 @@ _HEADER = (
     # contract is exactly the importable fields, or the staleness guard goes blind
     # to it.
     "fixed_in_branch",
+    # The scan's evidence for the verdict above: which branch carries the fix,
+    # all of them, and whether the fix commit landed upstream. Writable (so a
+    # "with fix branches" CSV populates them) but kept beside fixed_in_branch
+    # because they answer the same question — "where does the fix live".
+    "fix_branch_primary",
+    "fix_branch_all",
+    "fix_merged_upstream",
     "introduced",
     "reporter",
     "priority_reason",
@@ -290,6 +309,9 @@ def report_fingerprint(report: SecurityReport) -> str:
             report.matched_cve_id,
             report.external_notes,
             report.operator_notes,
+            report.fix_branch_primary,
+            report.fix_branch_all,
+            report.fix_merged_upstream,
         ]
     )
     return "fp" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:10]
@@ -338,6 +360,9 @@ def _row_for(report: SecurityReport, *, full: bool) -> dict[str, str]:
         "duplicate_of_report": str(report.duplicate_of_id or ""),
         "affected_versions": _truncate(report.affected_versions, MAX_CELL_CHARS),
         "fixed_in_branch": report.fixed_in_branch,
+        "fix_branch_primary": report.fix_branch_primary,
+        "fix_branch_all": report.fix_branch_all,
+        "fix_merged_upstream": report.fix_merged_upstream,
         "introduced": _truncate(report.introduced_summary, MAX_CELL_CHARS),
         # Name, not email: who filed it bears on credibility, but the sheet is
         # shared by link-holding humans and an address book is not the decision.
@@ -778,6 +803,41 @@ def _proposed_changes(
             continue
         changes[column] = text
 
+    # The scan's fix-branch evidence. Single-line cleaned: a branch list is one
+    # row, and a newline snuck into "branch-3.5\nbranch-4.0" used to store as the
+    # single branch "branch-3.5branch-4.0". The comparison runs the stored value
+    # through ``clean_single_line`` too, so a stored list with an internal
+    # whitespace run (double space, written by another importer) doesn't read as
+    # a phantom edit on every import — the notes path avoids this by comparing the
+    # raw cell, but these fields are single-line, so both sides collapse the same
+    # way. ``_same_text`` handles the leading-"-" escaping a branch name like
+    # "-branch-3.5" picks up on export.
+    for column in ("fix_branch_primary", "fix_branch_all"):
+        if column not in present:
+            continue
+        cell = _cell(row, column)
+        if cell is None:
+            continue
+        cleaned = clean_single_line(cell)
+        stored = getattr(report, column)
+        if _same_text(cleaned, stored) or cleaned == clean_single_line(stored):
+            continue
+        changes[column] = cleaned
+
+    if "fix_merged_upstream" in present:
+        raw = _cell(row, "fix_merged_upstream")
+        if raw is not None:
+            merged = _match_choice(raw, SecurityReport.FIX_MERGED_CHOICES)
+            if raw.strip() and merged is None:
+                allowed = ", ".join(key for key, _ in SecurityReport.FIX_MERGED_CHOICES if key)
+                return (
+                    {},
+                    f"fix_merged_upstream {raw!r} isn't one of: {allowed}",
+                    notes,
+                )
+            if (merged or "") != report.fix_merged_upstream:
+                changes["fix_merged_upstream"] = merged or ""
+
     return changes, "", notes
 
 
@@ -890,6 +950,10 @@ def import_reports_csv(
         force=force,
         dry_run=dry_run,
         columns=set(header),
+        # A real run gets a fresh tag for its snapshots; a dry run leaves it empty
+        # so _write never snapshots (it checks both). One uuid per import, not per
+        # row, so the whole import's undo set is one delete away.
+        import_id="" if dry_run else uuid.uuid4().hex,
     )
     with transaction.atomic():
         # Inside the transaction, not before it. The staleness guard compares the
@@ -905,6 +969,15 @@ def import_reports_csv(
             # +2: one for the header, one because spreadsheets count from 1, so
             # the number in a message is the number in the reviewer's window.
             result.rows.append(importer.apply(raw_row, offset + 2))
+        # Keep only this import's undo set. Done at the end, inside the
+        # transaction, so a run that wrote nothing (every row unchanged, or the
+        # whole thing rolled back) leaves the previous undo intact — "undo" keeps
+        # meaning "the last import that changed something", not "the last import".
+        # Only when there's a new set to replace the old one with, so re-importing
+        # an untouched sheet doesn't quietly wipe the undo for the real import
+        # before it.
+        if importer.import_id and importer.snapshotted:
+            SecuritySheetSnapshot.objects.exclude(import_id=importer.import_id).delete()
     result.unguarded = importer.unguarded
     result.forced_count = importer.forced
 
@@ -934,6 +1007,7 @@ class _Importer:
         force: bool,
         dry_run: bool,
         columns: set[str] | None = None,
+        import_id: str = "",
     ) -> None:
         self.present = present
         #: Every column the sheet actually has, writable or not. ``present`` is the
@@ -943,8 +1017,14 @@ class _Importer:
         self.guarded = guarded
         self.force = force
         self.dry_run = dry_run
+        #: Tags this import's snapshots. Empty on a dry run (nothing to undo) and
+        #: until the importer is told it's a real run — see :func:`import_reports_csv`.
+        self.import_id = import_id
         self.unguarded = 0
         self.forced = 0
+        #: How many snapshots this import wrote, so the caller can drop the
+        #: previous import's undo set only when there is a new one to replace it.
+        self.snapshotted = 0
         self._seen: set[int] = set()
         self._reports: dict[int, SecurityReport] = {}
 
@@ -1044,6 +1124,12 @@ class _Importer:
             # First, because it's the one that overwrote somebody's work.
             parts.insert(0, "forced over a newer state")
         note = "; ".join(parts)
+        # Freeze the report's writable state before the writes land, so an undo
+        # can put it back. Only on a real run, and only when there's an import_id
+        # to tag it with — a dry run writes nothing, by definition. The snapshot
+        # captures the OLD values, so it has to be taken before the setattr loop.
+        if self.import_id and not self.dry_run:
+            self._snapshot(report)
         for attribute, value in changes.items():
             setattr(report, attribute, value)
         fields = list(changes)
@@ -1061,6 +1147,35 @@ class _Importer:
             detail=note,
             changed=tuple(sorted(changes)),
         )
+
+    def _snapshot(self, report: SecurityReport) -> None:
+        """Write one :class:`SecuritySheetSnapshot` of the report's current state.
+
+        ``get_or_create`` rather than ``create``: a sheet with two rows for one
+        report is caught later as ``duplicate-row``, but the first row may already
+        have snapshotted, and ``get_or_create`` keeps that earliest snapshot — the
+        state before *any* of this import's rows touched the report — rather than
+        overwriting it with the post-first-row state, which would be "halfway
+        through the import". The ``created`` flag drives the count so a duplicate
+        row doesn't inflate it.
+        """
+        _, created = SecuritySheetSnapshot.objects.get_or_create(
+            import_id=self.import_id,
+            report=report,
+            defaults={
+                "status": report.status,
+                "assessed_severity": report.assessed_severity,
+                "matched_cve_id": report.matched_cve_id,
+                "external_notes": report.external_notes,
+                "operator_notes": report.operator_notes,
+                "external_notes_at": report.external_notes_at,
+                "fix_branch_primary": report.fix_branch_primary,
+                "fix_branch_all": report.fix_branch_all,
+                "fix_merged_upstream": report.fix_merged_upstream,
+            },
+        )
+        if created:
+            self.snapshotted += 1
 
 
 #: Export orderings, keyed the same as the list page's ``sort`` parameter so the
@@ -1108,3 +1223,102 @@ def reports_for_export(
     if limit is not None:
         reports = reports[:limit]
     return reports
+
+
+# --------------------------------------------------------------------------- #
+# Undo
+# --------------------------------------------------------------------------- #
+
+
+#: The writable fields a snapshot stores, in the order they're written back on
+#: undo. Kept as a tuple of (model attribute, snapshot attribute) so a new
+#: writable column added to WRITABLE_COLUMNS *and* the snapshot model has to be
+#: added here too — the one place this list lives, rather than spread across a
+#: restore loop that would silently skip a new field.
+_SNAPSHOT_FIELDS: tuple[tuple[str, str], ...] = (
+    ("status", "status"),
+    ("assessed_severity", "assessed_severity"),
+    ("matched_cve_id", "matched_cve_id"),
+    ("external_notes", "external_notes"),
+    ("operator_notes", "operator_notes"),
+    ("external_notes_at", "external_notes_at"),
+    ("fix_branch_primary", "fix_branch_primary"),
+    ("fix_branch_all", "fix_branch_all"),
+    ("fix_merged_upstream", "fix_merged_upstream"),
+)
+
+
+@dataclass(frozen=True)
+class UndoResult:
+    """What an undo did, for the flash message."""
+
+    #: Whether there was an import to undo. False when the table was empty —
+    #: "nothing to undo" is not an error, just a nothing-to-press button.
+    undone: bool
+    #: How many reports had their writable state restored.
+    restored: int = 0
+    #: The import id whose snapshots were applied, for the audit line.
+    import_id: str = ""
+
+    def summary(self) -> str:
+        if not self.undone:
+            return "Nothing to undo — no sheet import has a snapshot to restore."
+        return f"Undid the last sheet import ({self.import_id[:8]}): {self.restored} report(s) restored."
+
+
+def latest_snapshot_import_id() -> str:
+    """The import_id of the most recent sheet import that left snapshots, or "".
+
+    Public so the dashboard can show the button only when there's something to
+    undo, without counting rows.
+    """
+    latest = SecuritySheetSnapshot.objects.order_by("-created_at").only("import_id").first()
+    return latest.import_id if latest else ""
+
+
+def undo_last_import() -> UndoResult:
+    """Restore the writable state captured before the most recent applied import.
+
+    One level only: after this, the snapshots are gone, so a second press finds
+    nothing. That is the whole design — "it will only go back one" — and saying
+    so out loud (the button disappears once there's no snapshot left) is better
+    than a redo nobody asked for.
+
+    Restores only the fields a snapshot stores, so a worker triage run or a
+    dashboard verdict typed between the import and the undo is left alone: those
+    touch fields the sheet never owns. The restore is its own transaction, so a
+    crash mid-undo doesn't leave half the backlog reverted and the snapshots
+    already deleted.
+
+    The snapshot lookup happens *inside* the transaction: a sheet import landing
+    between the lookup and the restore would otherwise wipe the snapshots this
+    undo is about to apply (its own ``exclude(import_id=...).delete()``) and leave
+    this undo restoring a stale in-memory list over the newer import's just-written
+    changes. SQLite's default serialized writes make the transaction block the
+    import's delete long enough to close that gap.
+    """
+    with transaction.atomic():
+        import_id = latest_snapshot_import_id()
+        if not import_id:
+            return UndoResult(undone=False)
+
+        snapshots = list(
+            SecuritySheetSnapshot.objects.filter(import_id=import_id).select_related("report")
+        )
+        for snapshot in snapshots:
+            report = snapshot.report
+            update_fields: list[str] = []
+            for report_attr, snapshot_attr in _SNAPSHOT_FIELDS:
+                setattr(report, report_attr, getattr(snapshot, snapshot_attr))
+                update_fields.append(report_attr)
+            report.save(update_fields=[*update_fields, "updated_at"])
+        # Gone after the restore, so the button can't be pressed twice and "undo"
+        # can't mean "undo the undo". Deleted inside the transaction: a crash
+        # before the commit leaves both the restored rows and the snapshots, and
+        # the next press is a no-op restore of the same state.
+        SecuritySheetSnapshot.objects.filter(import_id=import_id).delete()
+
+    logger.info(
+        "Security sheet undo: restored %d report(s) from import %s", len(snapshots), import_id
+    )
+    return UndoResult(undone=True, restored=len(snapshots), import_id=import_id)

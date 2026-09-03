@@ -916,6 +916,41 @@ class SecurityReport(models.Model):
     # would not have followed — plus a rejection htmx never showed the operator.
     fixed_in_branch = models.TextField(blank=True, default="")
 
+    # Where the fix actually lives, from a tool that walked origin's branches and
+    # matched the report's CVE id / finding id against branch names and commit
+    # messages (see NOTES in the scan-output tree). Three columns that tool emits,
+    # imported through the review sheet rather than recomputed here: the walk is a
+    # fetch plus two git logs per branch and belongs on a box with the checkout,
+    # not in the request that serves the dashboard.
+    #
+    # Writable through the sheet on purpose — the whole point of carrying them is
+    # that a CSV with these columns (the "with fix branches" export a PMC reviews)
+    # round-trips: import populates them, export sends them back out, and a column
+    # the reviewer deletes on the way back is "no instruction", never "blank it"
+    # (see sheet_sync._proposed_changes). Distinct from fixed_in_branch above,
+    # which is the operator's own one-line answer; these are the machine's evidence
+    # for it, kept separately so the operator's verdict and the scan's finding can
+    # disagree and both be visible.
+    fix_branch_primary = models.CharField(max_length=300, blank=True, default="")
+    # Semicolon-separated, rollups annotated "(rollup)". TextField because a fix
+    # that landed on every release line is a long list and a CharField bound
+    # would just truncate it silently.
+    fix_branch_all = models.TextField(blank=True, default="")
+    #: Whether the finding's own fix commit (by git patch-id) has landed upstream.
+    #: Survives Spark's squash-merge, where the merged SHA differs from the branch
+    #: tip. Empty means "the scan never ran"; ``no-fix-branch`` is the scan's
+    #: answer for a report it had no branch to check.
+    FIX_MERGED_CHOICES = [
+        ("", "Never checked"),
+        ("merged:master+branch-4.x", "Merged into master and branch-4.x"),
+        ("merged:branch-4.x", "Merged into branch-4.x only"),
+        ("not-merged", "Not merged upstream"),
+        ("no-fix-branch", "No fix branch found"),
+    ]
+    fix_merged_upstream = models.CharField(
+        max_length=40, blank=True, default="", choices=FIX_MERGED_CHOICES
+    )
+
     # The batch "did the last month of commits fix this?" recheck. Two things
     # write it, because it is one question: security.recheck puts a cloud agent
     # on a month of commit log, and security.branch_scan reverse-applies the
@@ -1018,6 +1053,68 @@ class SecurityReport(models.Model):
 
     def __str__(self) -> str:
         return f"SecurityReport: {self.title or self.raw_text[:60]}"
+
+
+class SecuritySheetSnapshot(models.Model):
+    """One report's writable state, frozen just before a sheet import overwrote it.
+
+    The undo for the review-sheet round trip. An import is one transaction that
+    can touch hundreds of rows, and a PMC's edits landing on top of an operator's
+    later ruling is exactly the clobber the staleness guard exists to refuse —
+    but ``--force`` / "let the sheet win" is a real, used path, and a misclick
+    there used to be unrecoverable short of a backup restore. So: before every
+    applied import, snapshot the writable fields of every report it changed, tag
+    them with the import's id, and keep only the latest import's set. One undo
+    restores that set; there is no redo and no second level back, which is enough
+    for "I imported the wrong sheet" and honest about being a safety net rather
+    than version control.
+
+    Only the fields :mod:`franktheunicorn.security.sheet_sync` can write, so the
+    snapshot is exactly what an undo can put back. A worker triage run or a
+    dashboard verdict typed between the export and the import is not reverted —
+    those touch fields the sheet never owns, and the snapshot does not store them.
+    """
+
+    #: Groups the rows from one import. A fresh uuid per import; the older set is
+    #: deleted when a new import lands, so the table holds at most one import's
+    #: worth of rows.
+    import_id = models.CharField(max_length=36, db_index=True)
+    report = models.ForeignKey(
+        SecurityReport,
+        on_delete=models.CASCADE,
+        related_name="sheet_snapshots",
+    )
+    # The writable set, copied verbatim before the import's writes. Kept as real
+    # columns rather than a JSON blob so a future "what did the last import change?"
+    # view can query them without unpacking, and so a column added to
+    # WRITABLE_COLUMNS is a column that has to be added here too — the migration
+    # makes the omission loud, where a JSON blob would drop it silently.
+    status = models.CharField(max_length=20, blank=True, default="")
+    assessed_severity = models.CharField(max_length=20, blank=True, default="")
+    matched_cve_id = models.CharField(max_length=50, blank=True, default="")
+    external_notes = models.TextField(blank=True, default="")
+    operator_notes = models.TextField(blank=True, default="")
+    external_notes_at = models.DateTimeField(null=True, blank=True)
+    fix_branch_primary = models.CharField(max_length=300, blank=True, default="")
+    fix_branch_all = models.TextField(blank=True, default="")
+    fix_merged_upstream = models.CharField(max_length=40, blank=True, default="")
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            # One snapshot per report per import. The importer writes a snapshot
+            # before each apply, and a sheet with two rows for one report (caught
+            # later as "duplicate-row") would otherwise leave two snapshots and
+            # an undo would restore the older one first for no reason.
+            models.UniqueConstraint(
+                fields=["import_id", "report"],
+                name="unique_sheet_snapshot_per_import_report",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"SecuritySheetSnapshot(import={self.import_id[:8]}, report={self.report_id})"
 
 
 class SecurityRecheckRun(models.Model):

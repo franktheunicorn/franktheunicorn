@@ -107,6 +107,7 @@ urlpatterns = [
     # ".csv" in the path so a browser and a shell both name the download sensibly.
     path("security/export.csv", views.security_report_export_csv, name="security_export_csv"),
     path("security/import-csv/", views.security_report_import_csv, name="security_import_csv"),
+    path("security/undo-import/", views.security_report_undo_import, name="security_undo_import"),
     # Read-only transparency: everything the email scanner has looked at.
     path("security/email-activity/", views.email_activity, name="email_activity"),
     # Learned triage guidance overview (iterative learning loop), and the button
