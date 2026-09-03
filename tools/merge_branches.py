@@ -134,6 +134,12 @@ BAD_CONCLUSIONS = {
 }
 GOOD_CONCLUSIONS = {"success", "neutral"}
 
+# How many rounds running a branch may read as neither running, green nor red
+# before revisit() gives up on it.  A workflow being re-created reads as "no
+# runs at all" for a moment, and one such moment should not end a wait that has
+# hours left in it.
+CI_MISREADS_ALLOWED = 3
+
 
 # --------------------------------------------------------------------- logging
 _worker = threading.local()
@@ -565,7 +571,6 @@ class Config:
     review_model: str
     review_timeout: int
     max_diff_bytes: int
-    assume_yes: bool
     max_commits: int
     strip_suffixes: list[str]
     pick_from_fork: bool
@@ -642,6 +647,13 @@ class Backporter:
         self.approvals = set() if cfg.ignore_ledger else load_approvals(cfg.approvals)
         self.merged_heads = set() if cfg.ignore_ledger else load_ledger_heads(cfg.ledger)
         self.ledger_commits = load_ledger_commits(cfg.ledger)
+        # Our commits as they landed on master *this run*, keyed by patch id.
+        # refs/remotes/<upstream>/master is only as fresh as the fetch at the
+        # start of the run, so nothing pushed since is visible there -- and the
+        # release branches of a later branch in the same run need exactly that
+        # sha for their "(cherry picked from commit ...)" line.  Shared with the
+        # worktree twins, which push from a detached HEAD and update no branch.
+        self.master_landings: dict[str, str] = {}
         # Written by earlier runs, and by you: either way, hands off.
         self.held = {} if cfg.ignore_hold_list else load_hold_list(cfg.hold_list)
 
@@ -812,6 +824,23 @@ class Backporter:
             runs.append(("in_progress", "") if state == "pending" else ("completed", state))
         return ci_status(runs)
 
+    def ci_status_settled(self, sha: str, tries: int = 3) -> str:
+        """ci_status_of, but "error" gets another go before it is believed.
+
+        "error" means gh could not answer -- a rate limit, a network blip, a 502
+        -- and not that the branch has no CI.  Taking it at face value drops a
+        branch out of the whole run over a hiccup, so ask again.
+        """
+        for attempt in range(1, tries + 1):
+            state = self.ci_status_of(sha)
+            if state != "error":
+                return state
+            if attempt < tries:
+                warn(f"  could not read CI for {sha[:9]} (try {attempt} of {tries}) "
+                     "-- asking again")
+                time.sleep(2 * attempt)
+        return "error"
+
     # -- targets -----------------------------------------------------------
     def use_target(self, target: str) -> bool:
         """Put HEAD on `target`, ready to be picked onto."""
@@ -920,17 +949,24 @@ class Backporter:
         # it landed on master, older backports recorded the topic branch's.
         # -x records the master-landed sha these days, the topic branch's before
         # that; look for whichever this change might have been recorded as.
-        spellings = {src.fork_head, *src.commits, *self.on_master_already(src)}
+        on_master = self.on_master_already(src)     # same order as src.commits, or []
         remembered = self.ledger_commits.get((src.name, "master"))
-        if remembered:
-            spellings.add(remembered)
-        trailers = [
-            commit for commit in src.commits
-            if any(self.git.lines("log", "--format=%H", "--fixed-strings",
-                                  f"--grep=cherry picked from commit {sha}", span)
-                   for sha in spellings)
-        ]
-        if trailers and len(trailers) == len(src.commits):
+        # These two name the branch *tip*, so they only stand in for its last
+        # commit -- a trailer naming the tip says nothing about the ones under it.
+        tip_spellings = {src.fork_head, remembered}
+
+        def picked_already(index: int, commit: str) -> bool:
+            spellings = {commit}
+            if on_master:
+                spellings.add(on_master[index])
+            if index == len(src.commits) - 1:
+                spellings |= tip_spellings
+            return any(self.git.lines("log", "--format=%H", "--fixed-strings",
+                                      f"--grep=cherry picked from commit {sha}", span)
+                       for sha in spellings if sha)
+
+        if all(picked_already(index, commit)
+               for index, commit in enumerate(src.commits)):
             return "skip", "already cherry-picked (-x trailer)"
 
         # 3. Same subject.  A matching title is not enough on its own: the target
@@ -1035,7 +1071,7 @@ Diff (may be truncated):
         -4.1 / ... siblings.  They differ only in what each release needed, so
         one diff is the question and [a] shows the other cuts.
         """
-        if not self.cfg.operator_review or self.cfg.assume_yes:
+        if not self.cfg.operator_review:
             return True
 
         names = ", ".join(src.name for src, _ in members)
@@ -1159,34 +1195,29 @@ Diff (may be truncated):
         workers running in parallel -- the whole point is that the rest of the run
         needs nobody.  Anything doubtful goes to NEEDS_REVIEW.txt instead.
         """
-        return not (self.cfg.assume_yes or self.cfg.dry_run
-                    or self.cfg.operator_review or self.cfg.jobs > 1)
+        return not (self.cfg.dry_run or self.cfg.operator_review or self.cfg.jobs > 1)
 
     def sanity_check(self, src: str, target: str, rng: str) -> bool:
         if not self.cfg.sanity:
+            return True
+
+        if self.cfg.dry_run:
+            # A preview asks claude nothing.  A real review costs real money and
+            # several minutes a series, and nothing is going to be pushed on the
+            # strength of it, so stand a clean verdict in and say so -- the rest
+            # of the run then reads the same shape as the real one.
+            log(f"  [dry-run] {target}: standing in a clean verdict for the {src} backport")
             return True
 
         if not self.claude_alive:
             # You looked at this diff and approved it up front; claude was the
             # second pair of eyes, not the only one.  Missing it is worth saying
             # out loud, but it is not a reason to drop the whole run on the floor.
-            if self.cfg.operator_review and not self.cfg.dry_run:
+            if self.cfg.operator_review:
                 warn(f"  {target}: claude unavailable -- going on your approval alone")
                 return True
-            if not self.may_prompt() and not self.cfg.dry_run:
+            if not self.may_prompt():
                 warn(f"  {target}: claude unavailable and nobody to ask -- not pushing")
-                self.reports.write("NEEDS_REVIEW.txt", src, target, "NO_REVIEWER",
-                                   "claude unavailable")
-                return False
-            if self.cfg.dry_run:
-                log(f"  [dry-run] would ask you to eyeball {src} -> {target} "
-                    "(claude is not available)")
-                self.reports.write("NEEDS_REVIEW.txt", src, target, "NO_REVIEWER",
-                                   "claude unavailable")
-                return False
-            if self.cfg.assume_yes:
-                warn(f"  {target}: claude unavailable and --assume-yes is only for clean "
-                     "verdicts -- not pushing")
                 self.reports.write("NEEDS_REVIEW.txt", src, target, "NO_REVIEWER",
                                    "claude unavailable")
                 return False
@@ -1204,29 +1235,18 @@ Diff (may be truncated):
 
         if verdict == "QUESTIONABLE":
             warn(f"  {target}: claude flagged the {src} backport: {reason}")
-            if self.cfg.dry_run or not self.may_prompt():
-                if self.cfg.dry_run:
-                    log(f"  [dry-run] would stop and ask you about {src} -> {target}")
-                self.reports.write("NEEDS_REVIEW.txt", src, target, "QUESTIONABLE", reason)
-                return False
-            if self.cfg.assume_yes:
-                self.reports.write("NEEDS_REVIEW.txt", src, target, "QUESTIONABLE", reason)
-                return False
-            if self.ask_human(f"{src} -> {target}: claude says QUESTIONABLE: {reason}\n"
-                              "Push it anyway?", rng):
+            if self.may_prompt() and self.ask_human(
+                    f"{src} -> {target}: claude says QUESTIONABLE: {reason}\n"
+                    "Push it anyway?", rng):
                 log(f"  {target}: you approved it")
                 return True
             self.reports.write("NEEDS_REVIEW.txt", src, target, "QUESTIONABLE", reason)
             return False
 
         warn(f"  {target}: no usable verdict from claude ({reason})")
-        if self.cfg.dry_run or not self.may_prompt():
-            if self.cfg.dry_run:
-                log(f"  [dry-run] would stop and ask you about {src} -> {target}")
-        elif self.cfg.assume_yes:
-            warn(f"  {target}: --assume-yes only covers a clean OK -- not pushing")
-        elif self.ask_human(f"{src} -> {target}: claude could not review this ({reason}).\n"
-                            "Push it anyway?", rng):
+        if self.may_prompt() and self.ask_human(
+                f"{src} -> {target}: claude could not review this ({reason}).\n"
+                "Push it anyway?", rng):
             return True
         self.reports.write("NEEDS_REVIEW.txt", src, target, "NO_VERDICT", reason)
         return False
@@ -1318,6 +1338,21 @@ Diff (may be truncated):
         """Each worktree has its own build/sbt and its own build state."""
         return self.cfg.sbt or (self.git.root / "build" / "sbt")
 
+    def remember_master_landing(self, src: Source, landed: list[str]) -> None:
+        """Note our commits as they landed on master, keyed by patch id.
+
+        Keyed by patch id rather than by branch because the branch that needs
+        this is often not the one that pushed: a -master cut lands the change,
+        and the general cut of the same work -- same patch, different name --
+        then wants to name that sha in its release-branch trailers.
+        """
+        if len(landed) != len(src.commits):
+            return
+        for mine, there in zip(src.commits, landed):
+            patch_id = self.commit_patch_id(mine)
+            if patch_id:
+                self.master_landings[patch_id] = there
+
     def on_master_already(self, src: Source) -> list[str]:
         """This branch's commits as they exist on upstream master, if they do.
 
@@ -1329,6 +1364,8 @@ Diff (may be truncated):
         for commit in src.commits:
             mine = self.commit_patch_id(commit)
             candidates = []
+            if mine and mine in self.master_landings:
+                candidates.append(self.master_landings[mine])
             remembered = self.ledger_commits.get((src.name, "master"))
             if remembered:
                 candidates.append(remembered)
@@ -1467,6 +1504,12 @@ Diff (may be truncated):
         }
 
         # (the commit as it is on this branch, the one to actually pick)
+        if from_commits and len(from_commits) != len(src.commits):
+            # zip() would quietly drop the tail of the series; pick the whole
+            # thing from the local branch instead and go without the -x trailer.
+            warn(f"  {target}: only {len(from_commits)} of {len(src.commits)} commit(s) "
+                 "were found on master -- picking from the local branch instead")
+            from_commits = None
         pairs = list(zip(src.commits, from_commits or src.commits))
         flags = ["-x"] if from_commits else []
 
@@ -1542,6 +1585,8 @@ Diff (may be truncated):
             return []
         self.record(src.name, target, "would push" if not self.cfg.do_push else "pushed")
         landed = self.find_landed(created)
+        if target == "master":
+            self.remember_master_landing(src, landed)
         if not landed:
             warn(f"  {target}: cannot find the commit that landed -- the release "
                  "branches will be picked from the local branch instead")
@@ -1568,6 +1613,8 @@ Diff (may be truncated):
                              src.name, target, landed[-1] if landed else "",
                              src.head, self.cfg.push_remote])
         self.merged.add((src.name, target))
+        if landed:      # keep the in-memory view of the ledger with the file
+            self.ledger_commits[(src.name, target)] = landed[-1]
 
     def unlisted_sibling(self, src: Source, target: str) -> str | None:
         """A sibling cut for `target` that exists but was not put in the list."""
@@ -1733,7 +1780,19 @@ Diff (may be truncated):
                 continue
             landed_as = self.backport(src, target, from_commits=on_master or None)
             if target == "master":
-                on_master = landed_as
+                # Nothing new on master means one of two things.  Either the
+                # backport was rolled back -- a conflict, a red build, a failed
+                # push -- and there is nothing there to point at, or the change
+                # was already on master and backport() said so and moved on.
+                # on_master_already() tells the two apart by patch id, and in
+                # the second case it hands back the sha the release branches
+                # should be naming in their trailer.  Without this they would be
+                # picked from the local branch instead, and the "(cherry picked
+                # from commit ...)" line would name a sha that exists only here.
+                on_master = landed_as or self.on_master_already(src)
+                if on_master and not landed_as:
+                    log(f"  {src.name}: master already carries this as "
+                        f"{on_master[-1][:9]} -- the backports are picked from there")
 
     # -- the run -----------------------------------------------------------
     def run(self, sources: list[Source]) -> None:
@@ -1775,9 +1834,8 @@ Diff (may be truncated):
                 green.append(src)
                 continue
 
-            url = f"https://github.com/{self.cfg.fork_repo}/tree/{src.fork_name}"
             # CI ran on the fork's commit, never on the local -aok rewrite.
-            state = self.ci_status_of(src.fork_head)
+            state = self.ci_status_settled(src.fork_head)
             if state == "passing":
                 log(f"{src.name}: CI green ({src.fork_head[:9]})")
                 src.ci_green = True
@@ -1808,8 +1866,9 @@ Diff (may be truncated):
             log("still building: " + " ".join(src.name for src in waiting))
         if failed:
             log("CI red, one retry each: " + " ".join(src.name for src in failed))
-        for src in green:
-            self.warn_if_untested(src)
+        if not self.cfg.skip_ci:      # no tick was consulted, so none can fail to cover
+            for src in green:
+                self.warn_if_untested(src)
 
         for target in dict.fromkeys(self.cfg.targets):   # de-dup, keep order
             if self.ensure_target(target):
@@ -1817,8 +1876,10 @@ Diff (may be truncated):
         if not self.valid_targets:
             raise Bail(f"none of the target branches exist on {self.cfg.upstream}")
 
-        if self.cfg.sanity:
+        if self.cfg.sanity and not self.cfg.dry_run:
             self.claude_ping()
+        elif self.cfg.sanity:
+            log("[dry-run] claude is not asked anything -- every series gets a stand-in OK")
 
         # 1. Audit everything first, so the questions come before the long work.
         #    In-flight branches are audited and approved now too, then merged
@@ -1852,7 +1913,7 @@ Diff (may be truncated):
             log("nothing approved")
             self.summary()
             return
-        if self.cfg.operator_review and not self.cfg.assume_yes:
+        if self.cfg.operator_review:
             log(f"{len(approved)} branch(es) approved -- the rest of the run needs "
                 "nothing from you")
 
@@ -1901,6 +1962,7 @@ Diff (may be truncated):
         deadline = (time.time() + self.cfg.ci_wait_hours * 3600
                     if self.cfg.ci_wait_hours else None)
         late_failures: list[tuple[Source, list[str]]] = []
+        misreads: dict[str, int] = defaultdict(int)
         while pending:
             log(f"checking CI for {len(pending)} branch(es) that were still building")
             self.git.run("fetch", self.cfg.fork_remote)
@@ -1913,7 +1975,7 @@ Diff (may be truncated):
                                        "disappeared from the fork while we waited")
                     self.record(src.name, "-", "vanished while waiting")
                     continue
-                fork_name, fork_head = found
+                _, fork_head = found
                 if fork_head != src.fork_head:
                     warn(f"{src.name}: pushed again while we waited ({src.fork_head[:9]} "
                          f"-> {fork_head[:9]}) -- leaving it for the next run")
@@ -1921,20 +1983,31 @@ Diff (may be truncated):
                                        "moved while we waited; re-run to pick it up")
                     self.record(src.name, "-", "moved while waiting")
                     continue
-                state = self.ci_status_of(fork_head)
-                url = f"https://github.com/{self.cfg.fork_repo}/tree/{fork_name}"
+                state = self.ci_status_settled(fork_head)
                 if state == "passing":
                     log(f"{src.name}: CI went green -- merging it now")
                     src.ci_green = True
                     self.warn_if_untested(src)
                     ready.append((src, targets))
                 elif state.startswith("running"):
+                    misreads.pop(src.name, None)
                     still.append((src, targets))
                 elif state == "failing":
                     log(f"{src.name}: CI failed in the end -- one more look later")
                     late_failures.append((src, targets))
                 else:
-                    log(f"{src.name}: no usable CI result -> TO_MERGE_LATER.txt")
+                    # Neither running, green nor red.  This branch had runs a
+                    # round ago, so the likeliest reading is that GitHub is
+                    # between them, not that the CI has gone away.  Keep waiting
+                    # for a few rounds before believing it.
+                    misreads[src.name] += 1
+                    if misreads[src.name] < CI_MISREADS_ALLOWED:
+                        log(f"{src.name}: CI {state} ({misreads[src.name]} of "
+                            f"{CI_MISREADS_ALLOWED}) -- asking again next round")
+                        still.append((src, targets))
+                        continue
+                    log(f"{src.name}: CI {state} {CI_MISREADS_ALLOWED} rounds running "
+                        "-> TO_MERGE_LATER.txt")
                     self.reports.write("TO_MERGE_LATER.txt", src.name, fork_head, state)
                     self.record(src.name, "-", f"skipped, CI {state}")
 
@@ -2162,7 +2235,7 @@ Diff (may be truncated):
                                    "moved after its CI failed; re-run to pick it up")
                 self.record(src.name, "-", "moved after failing CI")
                 continue
-            state = self.ci_status_of(fork_head)
+            state = self.ci_status_settled(fork_head)
             if state == "passing":
                 log(f"{src.name}: CI is green on the second look -- merging it")
                 src.ci_green = True
@@ -2260,7 +2333,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--push", action="store_true", help="actually push (default: dry run)")
     parser.add_argument("--dry-run", action="store_true",
                         help="only say what would happen: no push, no sbt build, no report "
-                             "files written, no prompts. Local git state IS still changed: "
+                             "files written, no prompts, and claude is not asked for a "
+                             "verdict (a clean one is stood in). Local git state IS still "
+                             "changed: "
                              "the target branches are reset to upstream (anything ahead is "
                              "saved under refs/backup/merge_branches/) and the cherry-picks "
                              "are tried on them, so the conflicts reported are real")
@@ -2270,9 +2345,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--review-model", default="sonnet", help="model for the review")
     parser.add_argument("--review-timeout", type=int, default=300)
     parser.add_argument("--max-diff-bytes", type=int, default=100_000)
-    parser.add_argument("-y", "--assume-yes", action="store_true",
-                        help="never prompt: push what claude calls OK, everything else goes "
-                             "to NEEDS_REVIEW.txt")
     parser.add_argument("--no-ci-shortcut", action="store_true",
                         help="build every target, even one the fork's CI already covered")
     parser.add_argument("--no-operator-review", action="store_true",
@@ -2367,7 +2439,7 @@ def main(argv: list[str] | None = None) -> int:
         fork_remote=args.fork_remote, upstream=args.upstream, push_remote=args.push_remote,
         do_push=do_push, skip_ci=args.skip_ci, sanity=not args.no_sanity_check,
         review_model=args.review_model, review_timeout=args.review_timeout,
-        max_diff_bytes=args.max_diff_bytes, assume_yes=args.assume_yes,
+        max_diff_bytes=args.max_diff_bytes,
         max_commits=args.max_commits, strip_suffixes=args.strip_suffix or STRIP_SUFFIXES,
         pick_from_fork=args.pick_from_fork,
         operator_review=not args.no_operator_review, review_diff_lines=args.review_diff_lines,
