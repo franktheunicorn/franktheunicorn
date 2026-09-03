@@ -1211,6 +1211,11 @@ def reports_for_export(
         # "export what I'm looking at", and that tab is the one worth sending to
         # a PMC: the holes that are public by assignment and still open.
         reports = reports.filter(SecurityReport.cve_without_branch_q())
+    elif status == SecurityReport.VALID_NO_CVE_FILTER:
+        # The other cross-cutting tab: confirmed real, not yet CVE'd. The queue
+        # to push for CVE assignment, and the one a reviewer asks "is this worth
+        # a CVE?" of — so it exports too.
+        reports = reports.filter(SecurityReport.valid_without_cve_q())
     elif status:
         reports = reports.filter(status=status)
     if project:

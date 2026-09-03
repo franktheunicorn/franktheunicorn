@@ -318,6 +318,63 @@ class TestSecurityCveWithoutBranchTab:
 
 
 @pytest.mark.django_db
+class TestSecurityValidNoCveTab:
+    """Ruled valid but no CVE id yet — the queue to push for CVE assignment."""
+
+    def test_the_tab_lists_a_valid_report_with_no_cve(self, client: Client) -> None:
+        SecurityReportFactory(title="Real but unfiled", status="valid", matched_cve_id="")
+
+        content = client.get("/security/?status=valid-no-cve").content.decode()
+
+        assert "Real but unfiled" in content
+
+    def test_a_valid_report_with_a_cve_is_not_listed(self, client: Client) -> None:
+        SecurityReportFactory(title="Already filed", status="valid", matched_cve_id="CVE-2026-1111")
+
+        content = client.get("/security/?status=valid-no-cve").content.decode()
+
+        assert "Already filed" not in content
+
+    @pytest.mark.parametrize("status", ["new", "invalid", "expected-behavior", "duplicate"])
+    def test_a_non_valid_report_is_not_listed(self, client: Client, status: str) -> None:
+        """Only the operator's "valid" ruling belongs here — a "new" report hasn't
+        been ruled on, and the others owe no CVE."""
+        SecurityReportFactory(title=f"Status {status}", status=status, matched_cve_id="")
+
+        content = client.get("/security/?status=valid-no-cve").content.decode()
+
+        assert f"Status {status}" not in content
+
+    def test_the_tab_count_matches_what_the_tab_lists(self, client: Client) -> None:
+        SecurityReportFactory(title="Listed", status="valid", matched_cve_id="")
+        SecurityReportFactory(title="Has CVE", status="valid", matched_cve_id="CVE-2026-2222")
+        SecurityReportFactory(title="Not valid", status="new", matched_cve_id="")
+
+        response = client.get("/security/?status=valid-no-cve")
+
+        tabs = {tab["key"]: tab["count"] for tab in response.context["status_tabs"]}
+        assert tabs["valid-no-cve"] == 1
+        assert [report.title for report in response.context["reports"]] == ["Listed"]
+
+    def test_the_tab_renders_in_the_tab_bar(self, client: Client) -> None:
+        SecurityReportFactory(status="valid", matched_cve_id="")
+
+        content = client.get("/security/").content.decode()
+
+        assert "Valid, No CVE" in content
+
+    def test_the_export_honours_the_tab(self, client: Client) -> None:
+        SecurityReportFactory(title="export me", status="valid", matched_cve_id="")
+        SecurityReportFactory(title="has a cve", status="valid", matched_cve_id="CVE-2026-3333")
+
+        response = client.get("/security/export.csv?status=valid-no-cve")
+        body = b"".join(response.streaming_content).decode()
+
+        assert "export me" in body
+        assert "has a cve" not in body
+
+
+@pytest.mark.django_db
 class TestSecurityArchiveDrop:
     """The undo for a bad import."""
 

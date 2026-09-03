@@ -963,10 +963,13 @@ def merge_pr(request: HttpRequest, pr_id: int) -> HttpResponse:
 SECURITY_STATUS_TABS: list[dict[str, str]] = [
     {"key": "all", "label": "All"},
     *[{"key": k, "label": v} for k, v in SecurityReport.STATUS_CHOICES],
-    # Last, after the status tabs, because it cuts across them rather than being
-    # one more status: the thing an operator with a CVE id in hand needs is the
-    # list of holes that are public-by-assignment and still unfixed.
+    # Last, after the status tabs, because they cut across them rather than being
+    # one more status. CVE, No Branch is the thing an operator with a CVE id in
+    # hand needs: the holes public-by-assignment and still unfixed. Valid, No CVE
+    # is the one before that: confirmed real, not yet CVE'd — the queue to push
+    # for assignment.
     {"key": SecurityReport.CVE_NO_BRANCH_FILTER, "label": "CVE, No Branch"},
+    {"key": SecurityReport.VALID_NO_CVE_FILTER, "label": "Valid, No CVE"},
 ]
 
 
@@ -985,6 +988,8 @@ def _security_tab_q(key: str) -> Q:
         return Q()
     if key == SecurityReport.CVE_NO_BRANCH_FILTER:
         return SecurityReport.cve_without_branch_q()
+    if key == SecurityReport.VALID_NO_CVE_FILTER:
+        return SecurityReport.valid_without_cve_q()
     # Unknown keys included: a garbage ?status= has always returned an empty list
     # rather than 400ing, and the tab bar still renders to click out of.
     return Q(status=key)

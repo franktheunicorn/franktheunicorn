@@ -41,8 +41,9 @@ class Command(BaseCommand):
             help=(
                 "Only reports matching this filter: "
                 f"{', '.join(sorted(SecurityReport.list_filters()))}. "
-                f"{SecurityReport.CVE_NO_BRANCH_FILTER} is the cross-cutting one — "
-                "reports with a CVE and no branch recorded as fixing them."
+                f"{SecurityReport.CVE_NO_BRANCH_FILTER} (CVE, no branch fixing it) "
+                f"and {SecurityReport.VALID_NO_CVE_FILTER} (valid, no CVE yet) "
+                "are the cross-cutting ones."
             ),
         )
         parser.add_argument("--limit", type=int, help="Only the top N by priority")

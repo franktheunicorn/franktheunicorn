@@ -929,6 +929,19 @@ class TestSelection:
 
         assert [report.title for report in selected] == ["unfixed"]
 
+    def test_export_selection_understands_the_valid_no_cve_filter(self) -> None:
+        """The other cross-cutting tab: confirmed real, not yet CVE'd. Exports
+        too, so the operator can hand a reviewer exactly that worklist."""
+        from franktheunicorn.security.sheet_sync import reports_for_export
+
+        SecurityReportFactory(status="valid", matched_cve_id="", title="needs a cve")
+        SecurityReportFactory(status="valid", matched_cve_id="CVE-2026-2222", title="has one")
+        SecurityReportFactory(status="new", matched_cve_id="", title="not ruled")
+
+        selected = reports_for_export(status=SecurityReport.VALID_NO_CVE_FILTER)
+
+        assert [report.title for report in selected] == ["needs a cve"]
+
     def test_export_honours_the_newest_sort(self) -> None:
         """A trickle of emailed reports all rank 0.0, so arrival order is the right
         one for an inbox — and an export that silently re-ranks means the row cap

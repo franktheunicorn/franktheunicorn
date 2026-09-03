@@ -630,6 +630,13 @@ class SecurityReport(models.Model):
     #: the Export button.
     CVE_NO_BRANCH_FILTER = "cve-no-branch"
 
+    #: The other cross-cutting filter: reports ruled valid but with no CVE id yet.
+    #: The worklist for "confirmed real, not yet CVE'd" — the queue an operator
+    #: works through to push for CVE assignment. Lives on the model for the same
+    #: reason ``CVE_NO_BRANCH_FILTER`` does: the tab and the export have to mean
+    #: the same thing by it, or the Export button 400s on a tab the page offered.
+    VALID_NO_CVE_FILTER = "valid-no-cve"
+
     #: Statuses that owe no fix, so no branch is the answer rather than a gap.
     #: ``duplicate`` is here because that is what ``matched_cve_id`` was built for —
     #: without it the queue on a real backlog is almost entirely "dup of CVE-X", and
@@ -649,7 +656,10 @@ class SecurityReport(models.Model):
         ``export_security_csv`` each validate the same parameter, and the two that
         hand-copied the set are the two that would disagree after the next filter.
         """
-        return {key for key, _ in cls.STATUS_CHOICES} | {cls.CVE_NO_BRANCH_FILTER}
+        return {key for key, _ in cls.STATUS_CHOICES} | {
+            cls.CVE_NO_BRANCH_FILTER,
+            cls.VALID_NO_CVE_FILTER,
+        }
 
     @staticmethod
     def confirmed_branch_q() -> Q:
@@ -739,6 +749,19 @@ class SecurityReport(models.Model):
             & Q(duplicate_of__isnull=True)
             & ~Q(status__in=SecurityReport.NO_FIX_OWED_STATUSES)
         )
+
+    @staticmethod
+    def valid_without_cve_q() -> Q:
+        """Match reports ruled valid but carrying no CVE id.
+
+        The "confirmed real, not yet CVE'd" worklist — the queue an operator works
+        through to push for CVE assignment. ``status="valid"`` is the operator's
+        ruling that the report is a real hole, and ``matched_cve_id=""`` is the gap
+        this tab exists to surface. ``__gt=""`` is not used here because the empty
+        case is the one we want, and there is no index on this column to lose by
+        negating; the ``status="valid"`` half is the selective one anyway.
+        """
+        return Q(status="valid") & Q(matched_cve_id="")
 
     project = models.ForeignKey(
         Project,
