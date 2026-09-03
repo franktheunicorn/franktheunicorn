@@ -226,6 +226,39 @@ class TestSecurityCveWithoutBranchTab:
 
         assert "Linked twin" not in content
 
+    def test_a_report_the_scan_found_a_branch_for_is_not_listed(self, client: Client) -> None:
+        """The scan's fix_branch_primary is the operator-endorsed answer to "which
+        branch carries the fix" (imported via the sheet), so a non-empty value drops
+        the report from the "no branch" queue — even with fixed_in_branch empty."""
+        SecurityReportFactory(
+            title="Scan found one",
+            status="valid",
+            matched_cve_id="CVE-2026-7777",
+            fix_branch_primary="f101-security-agg-injection-master",
+        )
+
+        content = client.get("/security/?status=cve-no-branch").content.decode()
+
+        assert "Scan found one" not in content
+
+    def test_a_report_whose_scan_branch_is_the_none_sentinel_is_listed(
+        self, client: Client
+    ) -> None:
+        """The "(none)" sentinel is normalised to empty on import, so it doesn't
+        read as a branch name and the report stays in the queue where it belongs."""
+        report = SecurityReportFactory(
+            title="No branch found",
+            status="valid",
+            matched_cve_id="CVE-2026-6666",
+            fix_branch_primary="",
+        )
+        # The importer normalises "(none)"; simulate the post-import state.
+        assert report.fix_branch_primary == ""
+
+        content = client.get("/security/?status=cve-no-branch").content.decode()
+
+        assert "No branch found" in content
+
     def test_the_row_cap_is_said_on_the_page(self, client: Client) -> None:
         """The badge counts the whole set; the page shows 100. On a queue meant to
         reach zero, a count the rows can't account for is the wrong kind of wrong."""
@@ -635,6 +668,27 @@ class TestSecurityReportDetail:
     def test_detail_404_for_missing(self, client: Client, db: Any) -> None:
         response = client.get("/security/99999/")
         assert response.status_code == 404
+
+    def test_detail_shows_the_scan_fix_branches(self, client: Client, db: Any) -> None:
+        """The scan's fix_branch_primary/all/merged are sheet-imported, so they
+        have to be visible on the report — otherwise an import that drops a row
+        from the "CVE, No Branch" queue does so for a reason the page doesn't show."""
+        report = SecurityReportFactory(
+            title="Has a scan branch",
+            fix_branch_primary="f101-security-agg-injection-master",
+            fix_branch_all="f101-security-agg-injection-master; -branch-3.5",
+            fix_merged_upstream="not-merged",
+        )
+        body = client.get(f"/security/{report.pk}/").content.decode()
+
+        assert "Fix Branches" in body
+        assert "f101-security-agg-injection-master" in body
+        assert "Not merged upstream" in body
+
+    def test_detail_hides_the_scan_block_when_there_is_none(self, client: Client, db: Any) -> None:
+        report = SecurityReportFactory(title="No scan data")
+        body = client.get(f"/security/{report.pk}/").content.decode()
+        assert "Fix Branches" not in body
 
 
 @pytest.mark.django_db

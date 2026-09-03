@@ -388,6 +388,13 @@
             {% if report.branch_match_branch and not report.branch_match_applied and not report.fixed_in_branch %} &middot;
                 <span class="muted" title="{{ report.branch_match_reason }}">⑃ maybe {{ report.branch_match_branch }} ({{ report.branch_match_confidence|floatformat:2 }})</span>
             {% endif %}
+            {# The scan's fix-branch evidence, when it found a branch the operator #}
+            {# hasn't recorded as the verdict above. Shown because it is what drops #}
+            {# this row from the "CVE, No Branch" queue, and a row that left the #}
+            {# queue for a reason the row doesn't show is a queue nobody trusts. #}
+            {% if report.fix_branch_primary and not report.fixed_in_branch %} &middot;
+                <span class="muted" title="From the scan, imported via the review sheet{% if report.fix_merged_upstream %}; merged: {{ report.get_fix_merged_upstream_display }}{% endif %}">⑃ scan: {{ report.fix_branch_primary }}</span>
+            {% endif %}
         </div>
     </li>
     {% empty %}

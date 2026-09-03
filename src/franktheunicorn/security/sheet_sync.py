@@ -812,6 +812,12 @@ def _proposed_changes(
     # raw cell, but these fields are single-line, so both sides collapse the same
     # way. ``_same_text`` handles the leading-"-" escaping a branch name like
     # "-branch-3.5" picks up on export.
+    #
+    # ``fix_branch_primary`` normalises the scan's "(none)" sentinel to empty, so a
+    # non-empty value means a real branch — which is what ``cve_without_branch_q``
+    # reads to drop a report from the "CVE, No Branch" queue. Without this the
+    # queue would keep a row the scan explicitly said has no branch, on the
+    # strength of a literal "(none)".
     for column in ("fix_branch_primary", "fix_branch_all"):
         if column not in present:
             continue
@@ -819,6 +825,8 @@ def _proposed_changes(
         if cell is None:
             continue
         cleaned = clean_single_line(cell)
+        if column == "fix_branch_primary" and cleaned.lower() == "(none)":
+            cleaned = ""
         stored = getattr(report, column)
         if _same_text(cleaned, stored) or cleaned == clean_single_line(stored):
             continue

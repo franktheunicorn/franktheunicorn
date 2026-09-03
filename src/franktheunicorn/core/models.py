@@ -742,10 +742,21 @@ class SecurityReport(models.Model):
         was the point of the sweep. ``recheck.untriaged_by_project`` draws the
         line the other way on purpose — that one is deciding whether to spend a
         cloud agent, not what the operator has to look at.
+
+        ``fix_branch_primary`` counts here too: it is the scan's own answer to
+        "which branch carries the fix", imported through the review sheet by the
+        operator, so a non-empty value is a branch the operator endorsed by
+        importing — not a machine tie like ``branch_match_applied``. Without this,
+        a report the scan found a branch for stayed in the "no branch" queue on the
+        strength of an empty ``fixed_in_branch``, which is the field the operator
+        types but not the only one that records a branch. The "(none)" sentinel the
+        scan emits for "no branch" is normalised to empty on import, so it doesn't
+        read as a branch name.
         """
         return (
             Q(matched_cve_id__gt="")
             & ~SecurityReport.confirmed_branch_q()
+            & Q(fix_branch_primary="")
             & Q(duplicate_of__isnull=True)
             & ~Q(status__in=SecurityReport.NO_FIX_OWED_STATUSES)
         )

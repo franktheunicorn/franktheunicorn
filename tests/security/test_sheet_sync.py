@@ -1196,6 +1196,20 @@ class TestFixBranchColumns:
 
         assert result.conflicts == 1
 
+    def test_the_scan_none_sentinel_is_normalised_to_empty(self) -> None:
+        """The scan writes "(none)" for findings with no fix branch. Storing it
+        literally would read as a branch name and drop the report from the
+        "CVE, No Branch" queue on the strength of a sentinel, so it normalises to
+        empty on the way in — clearing a real branch the scan later retracts."""
+        report = SecurityReportFactory(status="new", fix_branch_primary="f003-r2")
+        text = _edit(_export([report]), report.pk, "fix_branch_primary", "(none)")
+
+        result = _apply(text, force=True)
+
+        assert result.applied == 1
+        report.refresh_from_db()
+        assert report.fix_branch_primary == ""
+
 
 @pytest.mark.django_db
 class TestUndo:

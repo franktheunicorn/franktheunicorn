@@ -362,6 +362,35 @@
     {% endif %}
 </section>
 
+<!-- Fix branches from the scan -->
+{# The scan's own answer to "which branch carries the fix", imported through the #}
+{# review sheet. Read-only here: the sheet is the source of truth for these, and #}
+{# a non-empty fix_branch_primary is what drops a report from the "CVE, No #}
+{# Branch" queue — so showing it lets the operator see why a row left (or stayed). #}
+{% if report.fix_branch_primary or report.fix_branch_all or report.fix_merged_upstream %}
+<div style="background: var(--card); border: 1px solid var(--border); border-radius: 4px; padding: 0.75rem; margin-bottom: 1rem;">
+    <h3 style="font-size: 0.9rem; margin-bottom: 0.5rem;">Fix Branches <span class="muted" style="font-weight: 400; font-size: 0.8rem;">from the scan</span></h3>
+    <dl>
+        {% if report.fix_branch_primary %}
+        <dt>Primary:</dt><dd><code>{{ report.fix_branch_primary }}</code></dd>
+        {% else %}
+        <dt>Primary:</dt><dd class="muted">none recorded</dd>
+        {% endif %}
+        {% if report.fix_branch_all %}
+        <dt>All branches:</dt><dd><code>{{ report.fix_branch_all }}</code></dd>
+        {% endif %}
+        {% if report.fix_merged_upstream %}
+        <dt>Merged upstream:</dt>
+        <dd>{{ report.get_fix_merged_upstream_display }}</dd>
+        {% endif %}
+    </dl>
+    <p class="pr-meta" style="margin: 0.4rem 0 0; font-size: 0.8rem;">
+        Imported from the review sheet, not recomputed here. A non-empty primary
+        branch drops this report from the "CVE, No Branch" queue.
+    </p>
+</div>
+{% endif %}
+
 <!-- Operator Verdict -->
 <div id="verdict-area" style="margin-bottom: 1rem;">
     {% include "dashboard/_security_verdict.html" %}
