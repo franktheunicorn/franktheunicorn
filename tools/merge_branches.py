@@ -19,7 +19,9 @@ cut from, otherwise it is auto-detected).  For each branch it:
                                    standing in for CI means running what CI
                                    runs, not the compile that is enough for a
                                    backport, so this is hours rather than
-                                   minutes), and is merged if that is clean.
+                                   minutes; --ci-standin-timeout, six hours by
+                                   default, bounds one run), and is merged if
+                                   that is clean.
                                    The next round asks GitHub again first and,
                                    if nothing has gone green meanwhile, goes
                                    straight on to the next branch, so this
@@ -85,12 +87,14 @@ cut from, otherwise it is auto-detected).  For each branch it:
      for a verdict, and anything it calls QUESTIONABLE is put to the human.  If
      claude is not available the human is asked directly.  Series that are not
      approved are rolled back and listed in NEEDS_REVIEW.txt.
-  9. Builds the target with sbt (--sbt-tasks, "compile Test/compile" by default,
-     retried once with a leading "clean" in case the first failure was stale
-     build state) and only pushes if that succeeds.  That is the right question
+  9. Builds the target with sbt (--sbt-tasks, "compile Test/compile" by default)
+     and only pushes if that succeeds.  That is the right question
      for a backport: the change went green on the fork, so what is left to ask is
      whether it still builds here.  A branch merged with no green tick at all is
-     a different question and gets --ci-standin-tasks instead.  The build is skipped for the branch the
+     a different question and gets --ci-standin-tasks instead.  Either one that
+     fails is run once more from clean before it is believed, since the
+     worktree's sbt state is left over from the previous branch; a timeout is
+     not, since a clean run only takes longer.  The build is skipped for the branch the
      work was cut from, since the fork's CI already ran there (--no-ci-shortcut).  A failed build is rolled back and recorded in
      COMPILE_FAILED.txt, keeping the full log, the extracted errors and a ref
      pointing at the tree that failed so it can be checked out later.
@@ -164,7 +168,8 @@ CI_MISREADS_ALLOWED = 3
 # compile and cost minutes.  At --ci-standin-tasks it costs hours, and revisit()
 # polls nothing while it runs -- so a queue that is merely slow this minute (ten
 # branches behind a busy runner pool, all of them about to go green) must not
-# buy a six-hour commitment on the strength of a single quiet round.
+# buy a commitment of hours -- two runs of --ci-standin-timeout, if the first
+# fails -- on the strength of a single quiet round.
 IDLE_ROUNDS_BEFORE_STANDING_IN = 3
 
 # What each ci_status() answer means for the run.  Four places sort branches by
@@ -406,6 +411,31 @@ def why_no_stand_in(*, enabled: bool, can_build: bool, quiet_rounds: int,
         return ("no local test run: nothing left reads as cleanly queued or running on "
                 "GitHub -- the rest are being asked about again before they are believed")
     return None
+
+
+def build_attempts(tasks: list[str]) -> list[list[str]]:
+    """The sbt invocations one build gets: as asked, then once more from clean.
+
+    A failure may be stale state left in the worktree by the previous branch --
+    an incremental compile against the wrong classfiles, a test run against a
+    jar that was not rebuilt -- so nothing is called a failure, a red test no
+    more than a broken compile, until it has failed from clean too.  A build
+    already asked to run from clean gets no second run: there is no staler
+    state to discount.
+    """
+    if "clean" in tasks:
+        return [list(tasks)]
+    return [list(tasks), ["clean", *tasks]]
+
+
+def stand_in_seconds(cfg: Config) -> float:
+    """The most one CI stand-in can take: every run it may make, each at the cap.
+
+    The one number the wait arithmetic uses for "a stand-in" -- the outer bound
+    of the run, and whether there is room to start one -- so the run from clean
+    a failed test suite gets is paid for where it is promised.
+    """
+    return len(build_attempts(cfg.ci_standin_tasks)) * cfg.ci_standin_timeout
 
 
 def parse_branch_file(text: str) -> list[tuple[str, str | None]]:
@@ -712,7 +742,6 @@ class Config:
     sbt: Path | None          # None: use each worktree's own build/sbt
     sbt_tasks: list[str]
     ci_standin_tasks: list[str]
-    clean_retry: bool
     sbt_timeout: int
     ci_standin_timeout: int
     log_dir: Path
@@ -785,7 +814,9 @@ class WaitBudget:
     ended" when they were only queued behind us.  The outer bound is the wait
     plus one stand-in per branch, and no credit moves it: credited per round
     the wait compounds, and ten branches queued behind unstarted CI ran for
-    days and then printed "gave up after 12h".  No wait means no bound at all.
+    days and then printed "gave up after 12h".  A stand-in is both of its runs,
+    the second from clean, which is stand_in_seconds()'s sum to make.  No wait
+    means no bound at all.
     """
 
     def __init__(self, wait_hours: float, standin_seconds: float, branches: int):
@@ -1576,21 +1607,19 @@ Diff (may be truncated):
                 handle.write(f"### JAVA_HOME={java_home} (from {java_var})\n")
             handle.write(self.git.out("log", "--oneline", f"{pre_pick}..HEAD") + "\n\n")
 
-        # Incremental first; a failure there may just be stale sbt state left by
-        # the previous branch, so fall back to a clean build before believing it.
-        # Not for a CI stand-in: that failure is usually a red test, which a clean
-        # rebuild does not answer, and it would double a run measured in hours.
-        attempts = [tasks]
-        if self.cfg.clean_retry and not ci_stand_in and "clean" not in tasks:
-            attempts.append(["clean", *tasks])
-
+        # As asked first; a failure there may be stale sbt state left in this
+        # worktree by the previous branch, so nothing is believed -- a red test
+        # no more than a broken compile -- until it has failed from clean too.
+        # A timeout is not run again: from clean it only takes longer.
+        attempts = build_attempts(tasks)
+        flag = "--ci-standin-timeout" if ci_stand_in else "--sbt-timeout"
+        what = "standing in for CI" if ci_stand_in else "checking the backport"
         for number, tasks in enumerate(attempts, start=1):
             joined = " ".join(tasks)
             if number == 1:
-                what = "standing in for CI" if ci_stand_in else "checking the backport"
                 log(f"  {target}: sbt {joined}  ({what}; log: {log_path})")
             else:
-                warn(f"  {target}: retrying from scratch -- sbt {joined}")
+                warn(f"  {target}: running it again from clean -- sbt {joined}")
             with log_path.open("a", encoding="utf-8") as handle:
                 handle.write(f"\n### attempt {number}: sbt {joined}\n")
                 handle.flush()
@@ -1605,25 +1634,31 @@ Diff (may be truncated):
                     returncode, timed_out = -1, True
             if not timed_out and returncode == 0:
                 if number == 1:
-                    log(f"  {target}: sbt build is clean")
+                    log(f"  {target}: sbt {joined} passed")
                 else:
-                    log(f"  {target}: sbt build is clean after the clean rebuild "
-                        "(the first failure was stale state)")
+                    log(f"  {target}: sbt {joined} passed -- the first failure was "
+                        "stale build state")
                 return None
             if timed_out:
-                break   # a clean rebuild only takes longer; do not double the budget
+                warn(f"  {target}: sbt timed out after {timeout}s ({flag}) -- not running "
+                     "it again from clean, that only takes longer")
+                break
+            if number < len(attempts):
+                warn(f"  {target}: sbt failed (exit {returncode}) -- may be stale build state")
+            elif number == 1:
+                warn(f"  {target}: sbt failed (exit {returncode}); it already ran from "
+                     "clean, so there is no stale state left to discount")
+            else:
+                warn(f"  {target}: sbt failed (exit {returncode}) from clean too")
 
         # Only the last attempt's errors: attempt 1 may have failed on stale state,
-        # which is exactly what the clean rebuild was there to discount.
+        # which is exactly what the run from clean was there to discount.
         text = log_path.read_text(encoding="utf-8", errors="replace")
         tail = text.rsplit("### attempt ", 1)[-1]
         errors = [line for line in tail.splitlines() if line.startswith("[error]")]
         if timed_out:
-            warn(f"  {target}: sbt timed out after {timeout}s")
             first_error = f"timed out after {timeout}s"
         else:
-            warn(f"  {target}: sbt failed (exit {returncode}) even after a clean rebuild"
-                 if len(attempts) > 1 else f"  {target}: sbt failed (exit {returncode})")
             first_error = errors[0][:160] if errors else f"exit {returncode}, no [error] line"
         # Keep the errors on their own so they are readable without the whole log.
         log_path.with_suffix(".errors").write_text("\n".join(errors) + "\n", encoding="utf-8")
@@ -2453,14 +2488,14 @@ Diff (may be truncated):
             for src, _ in pending:
                 self.record(src.name, "-", "would wait for CI")
             return []
-        budget = WaitBudget(self.cfg.ci_wait_hours, self.cfg.ci_standin_timeout, len(pending))
+        budget = WaitBudget(self.cfg.ci_wait_hours, stand_in_seconds(self.cfg), len(pending))
         late_failures: list[Planned] = []
         misreads: dict[str, int] = defaultdict(int)
         # Rounds in a row in which nothing went green: the evidence that CI is
         # stalled rather than slow, which is what a test run costing hours is
         # bought on.  A round that goes green starts it over.  A round spent on
-        # a stand-in leaves it alone -- the poll straight after a six-hour test
-        # run that finds nothing new green is the strongest sign of a stalled
+        # a stand-in leaves it alone -- the poll straight after a test run of
+        # hours that finds nothing new green is the strongest sign of a stalled
         # queue there is, and starting the count over there left the box idle
         # for three rounds between every two branches it tested.
         quiet_rounds = 0
@@ -2615,8 +2650,9 @@ Diff (may be truncated):
                       if pair[0].name not in self._checkout_failed] or pending
         src, targets = candidates[0]
         # Nothing else is polled while the tests run, so do not start a run that
-        # cannot finish inside the wait.
-        if deadline is not None and time.time() + self.cfg.ci_standin_timeout > deadline:
+        # cannot finish inside the wait -- counting the run from clean a failed
+        # one gets, since a failure is when it is needed.
+        if deadline is not None and time.time() + stand_in_seconds(self.cfg) > deadline:
             log(f"{src.name}: no room left in this run for a stand-in test run "
                 "-- polling instead")
             return None
@@ -2910,13 +2946,12 @@ Diff (may be truncated):
 class _Removed(argparse.Action):
     """A flag that used to exist, refused with a reason rather than a shrug."""
 
+    def __init__(self, option_strings, dest, reason: str, **kwargs):
+        super().__init__(option_strings, dest, nargs=0, help=argparse.SUPPRESS, **kwargs)
+        self.reason = reason
+
     def __call__(self, parser, namespace, values, option_string=None):
-        parser.error(
-            f"{option_string} was removed: it skipped the diff prompt but still "
-            "counted as your approval, so a run with claude unavailable pushed "
-            "unreviewed. For an unattended run, approve the diffs up front (the "
-            "default) and leave the rest to it, or use -j 2 or more, where a "
-            "doubtful series goes to NEEDS_REVIEW.txt instead of stopping to ask.")
+        parser.error(f"{option_string} was removed: {self.reason}")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -2950,8 +2985,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # unavailable pushed to apache with nothing having reviewed anything.  An
     # invocation carrying it should stop and say so rather than quietly mean
     # something else now.
-    parser.add_argument("-y", "--assume-yes", action=_Removed, nargs=0,
-                        help=argparse.SUPPRESS)
+    parser.add_argument("-y", "--assume-yes", action=_Removed,
+                        reason="it skipped the diff prompt but still counted as your "
+                               "approval, so a run with claude unavailable pushed "
+                               "unreviewed. For an unattended run, approve the diffs up "
+                               "front (the default) and leave the rest to it, or use -j 2 "
+                               "or more, where a doubtful series goes to NEEDS_REVIEW.txt "
+                               "instead of stopping to ask.")
     parser.add_argument("--no-ci-shortcut", action="store_true",
                         help="build every target, even one the fork's CI already covered")
     parser.add_argument("--no-operator-review", action="store_true",
@@ -2991,20 +3031,31 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                              "would have: this is the whole test suite, every module, and "
                              "it takes hours. Only used by the queued-branch stand-in "
                              "(see --no-local-build-stand-in)")
-    parser.add_argument("--no-clean-retry", action="store_true",
-                        help="do not retry a failed build with a leading clean")
+    # A build that fails is always run once more from clean before it is
+    # believed, the tests included: the worktree's sbt state is whatever the
+    # previous branch left, and a failure on that is not a failure of the change.
+    parser.add_argument("--no-clean-retry", action=_Removed,
+                        reason="a failed build, or a failed test run standing in for CI, "
+                               "is always run once more from clean before it is believed: "
+                               "the worktree's sbt state is whatever the previous branch "
+                               "left, and a failure on that is not a failure of the change. "
+                               "Put clean in --sbt-tasks or --ci-standin-tasks to run from "
+                               "clean every time instead, which gets no second run.")
     parser.add_argument("--sbt-timeout", type=int, default=7200, metavar="SECONDS",
-                        help="how long --sbt-tasks may take (default: %(default)s)")
+                        help="how long one --sbt-tasks run may take (default: %(default)s, "
+                             "two hours). A run that fails gets one more from clean, with "
+                             "the same budget")
     parser.add_argument("--ci-standin-timeout", type=int, default=21600, metavar="SECONDS",
-                        help="how long --ci-standin-tasks may take (default: %(default)s, "
-                             "six hours). Bounds the test run itself, which happens once "
-                             "on the branch and has no clean retry. Note what this does to "
-                             "the length of a run: --ci-wait bounds the waiting, and a "
-                             "stand-in is work rather than waiting, so the outer bound is "
-                             "--ci-wait plus one of these per branch still queued. Ten "
-                             "branches at the defaults is 12h of waiting and up to 60h of "
-                             "testing. --no-local-build-stand-in if that is not what you "
-                             "want left running")
+                        help="how long one --ci-standin-tasks run may take (default: "
+                             "%(default)s, six hours). A run that fails gets one more from "
+                             "clean, with the same budget, so a stand-in can cost twice "
+                             "this; a run that times out is not run again. Note what this "
+                             "does to the length of a run: --ci-wait bounds the waiting, "
+                             "and a stand-in is work rather than waiting, so the outer "
+                             "bound is --ci-wait plus two of these per branch still "
+                             "queued. Ten branches at the defaults is 12h of waiting and "
+                             "up to 120h of testing. --no-local-build-stand-in if that is "
+                             "not what you want left running")
     parser.add_argument("--log-dir", type=Path, default=Path("merge_logs"))
     parser.add_argument("--ledger", type=Path, default=Path(LEDGER_FILE),
                         help="csv of merges already pushed, skipped on a rerun "
@@ -3087,7 +3138,6 @@ def main(argv: list[str] | None = None) -> int:
         do_compile=do_compile, dry_run=args.dry_run, sbt=sbt,
         sbt_tasks=args.sbt_tasks.split(),
         ci_standin_tasks=args.ci_standin_tasks.split(),
-        clean_retry=not args.no_clean_retry,
         sbt_timeout=args.sbt_timeout, ci_standin_timeout=args.ci_standin_timeout,
         log_dir=args.log_dir,
         ledger=args.ledger, approvals=args.approvals, ignore_ledger=args.ignore_ledger,

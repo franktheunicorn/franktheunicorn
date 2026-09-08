@@ -732,8 +732,8 @@ class FailingCiGetsOneRetry(unittest.TestCase):
         bp = object.__new__(merge_branches.Backporter)
         bp.cfg = SimpleNamespace(dry_run=False, fork_remote="fork",
                                  fork_repo="holdenk/spark", ci_poll_minutes=0,
-                                 ci_wait_hours=0, ci_standin_timeout=21600,
-                                 refresh_before_retry=False)
+                                 ci_wait_hours=0, ci_standin_tasks=["test"],
+                                 ci_standin_timeout=21600, refresh_before_retry=False)
         bp.git = SimpleNamespace(run=lambda *a, **k: None)
         self.written = []
         self.recorded = []
@@ -1714,7 +1714,7 @@ class WhatTheBuildIsAsked(unittest.TestCase):
         from unittest import mock
 
         bp = object.__new__(merge_branches.Backporter)
-        bp.cfg = SimpleNamespace(do_compile=True, dry_run=False, clean_retry=False,
+        bp.cfg = SimpleNamespace(do_compile=True, dry_run=False,
                                  sbt_tasks=["compile", "Test/compile"],
                                  ci_standin_tasks=["test"],
                                  sbt_timeout=7200, ci_standin_timeout=21600,
@@ -1752,6 +1752,115 @@ class WhatTheBuildIsAsked(unittest.TestCase):
         seen = self.compile_with(True)
         self.assertEqual(seen["argv"][1:], ["-batch", "test"])
         self.assertEqual(seen["timeout"], 21600)
+
+
+class NothingFailsUntilItFailsFromClean(unittest.TestCase):
+    """The worktree's sbt state is whatever the previous branch left, so a failed
+    build -- and a failed test run, which is the one that costs hours -- is run
+    once more from clean before it is believed.  A timeout is not: from clean it
+    only takes longer."""
+
+    def compile_with(self, ci_stand_in, outcomes, tasks=None):
+        """outcomes: one per sbt run, a return code or ("timeout"|"[error] line", code)."""
+        from types import SimpleNamespace
+        from unittest import mock
+
+        import merge_branches
+
+        bp = object.__new__(merge_branches.Backporter)
+        bp.cfg = SimpleNamespace(do_compile=True, dry_run=False,
+                                 sbt_tasks=tasks or ["compile", "Test/compile"],
+                                 ci_standin_tasks=tasks or ["test"],
+                                 sbt_timeout=7200, ci_standin_timeout=21600,
+                                 log_dir=Path(tempfile.mkdtemp()), sbt=None)
+        bp.stamp = "stamp"
+        bp.git = SimpleNamespace(root=Path("."), short=lambda rev: "abc1234",
+                                 out=lambda *a: "", run=lambda *a, **k: None)
+        bp.sbt_launcher = lambda: Path("/bin/true")
+        runs = []
+
+        def fake_run(argv, **kwargs):
+            runs.append(list(argv)[1:])
+            outcome = outcomes[len(runs) - 1]
+            if outcome == "timeout":
+                raise merge_branches.subprocess.TimeoutExpired(argv, kwargs["timeout"])
+            if isinstance(outcome, tuple):
+                kwargs["stdout"].write(outcome[0] + "\n")
+                outcome = outcome[1]
+            return SimpleNamespace(returncode=outcome)
+
+        with mock.patch.object(merge_branches.subprocess, "run", fake_run):
+            failure = bp.compile_target("topic", "master", "HEAD~1", ci_stand_in)
+        return failure, runs
+
+    def test_a_failed_build_is_run_again_from_clean(self):
+        failure, runs = self.compile_with(False, [1, 0])
+        self.assertIsNone(failure)
+        self.assertEqual(runs, [["-batch", "compile", "Test/compile"],
+                                ["-batch", "clean", "compile", "Test/compile"]])
+
+    def test_a_failed_test_run_is_run_again_from_clean_too(self):
+        # it used to be the compile only, on the grounds that a red test is
+        # usually real; a test run against a jar the previous branch left is not
+        failure, runs = self.compile_with(True, [1, 0])
+        self.assertIsNone(failure)
+        self.assertEqual(runs, [["-batch", "test"], ["-batch", "clean", "test"]])
+
+    def test_failing_from_clean_too_is_believed(self):
+        failure, runs = self.compile_with(True, [1, 1])
+        self.assertIsNotNone(failure)
+        self.assertEqual(len(runs), 2)
+
+    def test_the_errors_kept_are_from_the_run_from_clean(self):
+        # the first run may have failed on the stale state, which is exactly
+        # what the second was there to discount
+        failure, _ = self.compile_with(True, [("[error] stale", 1), ("[error] real", 1)])
+        self.assertEqual(failure.first_error, "[error] real")
+
+    def test_a_timeout_is_not_run_again(self):
+        # from clean it only takes longer, and the budget is per run
+        failure, runs = self.compile_with(True, ["timeout"])
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(failure.first_error, "timed out after 21600s")
+
+    def test_a_build_already_from_clean_is_not_run_twice(self):
+        failure, runs = self.compile_with(True, [1], tasks=["clean", "test"])
+        self.assertIsNotNone(failure)
+        self.assertEqual(runs, [["-batch", "clean", "test"]])
+
+    def test_it_cannot_be_switched_off(self):
+        import contextlib
+        import io
+
+        import merge_branches
+        stderr = io.StringIO()
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(stderr):
+            merge_branches.parse_args(["--no-clean-retry"])
+        self.assertIn("--no-clean-retry was removed", stderr.getvalue())
+
+
+class AStandInIsBothOfItsRuns(unittest.TestCase):
+    """The wait arithmetic charges a stand-in for the run from clean it may need."""
+
+    def test_the_cost_counts_the_run_from_clean(self):
+        from types import SimpleNamespace
+
+        import merge_branches
+        cfg = SimpleNamespace(ci_standin_tasks=["test"], ci_standin_timeout=100)
+        self.assertEqual(merge_branches.stand_in_seconds(cfg), 200)
+
+    def test_unless_the_tasks_already_run_from_clean(self):
+        from types import SimpleNamespace
+
+        import merge_branches
+        cfg = SimpleNamespace(ci_standin_tasks=["clean", "test"], ci_standin_timeout=100)
+        self.assertEqual(merge_branches.stand_in_seconds(cfg), 100)
+
+    def test_one_run_is_six_hours_by_default(self):
+        import merge_branches
+        self.assertEqual(merge_branches.parse_args([]).ci_standin_timeout, 21600)
+        self.assertEqual(merge_branches.parse_args(["--ci-standin-timeout", "18000"])
+                         .ci_standin_timeout, 18000)
 
 
 class TheStandInGatesTheMerge(unittest.TestCase):
@@ -1932,6 +2041,13 @@ class TheStandInFitsTheWait(unittest.TestCase):
         # every other branch out of its own CI check too
         import time
         nudged, ran = self.stand_in(21600, time.time() + 600)
+        self.assertEqual((nudged, ran), (None, []))
+
+    def test_the_room_it_needs_includes_the_run_from_clean(self):
+        # one run fits in 90s at a 60s cap; the run from clean a failure gets
+        # does not, and a failure is when it is needed
+        import time
+        nudged, ran = self.stand_in(60, time.time() + 90)
         self.assertEqual((nudged, ran), (None, []))
 
     def test_the_others_are_given_back_the_time_it_took(self):
