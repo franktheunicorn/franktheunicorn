@@ -210,7 +210,12 @@ def queue_recheck_poll(*, priority: int = PRIORITY_BULK, exclude_pk: int | None 
 #: The git-only backlog sweeps. Targetless like ``poll_security_rechecks``:
 #: each one loops every project, so neither per-target unique constraint applies
 #: and the in-flight check has to be a SELECT.
-_SWEEP_COMMANDS = ("match_security_branches", "scan_security_fixed", "check_fixes_landed")
+_SWEEP_COMMANDS = (
+    "match_security_branches",
+    "scan_security_fixed",
+    "check_fixes_landed",
+    "check_cve_fixes_landed",
+)
 
 
 def queue_branch_sweep(command: str, *, priority: int = PRIORITY_BULK) -> bool:

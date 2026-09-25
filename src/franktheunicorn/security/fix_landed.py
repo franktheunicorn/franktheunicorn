@@ -189,6 +189,45 @@ def check_project_fixes(project: Project, operator_config: OperatorConfig) -> Fi
     return run
 
 
+@dataclass
+class CveFixLandedRun:
+    """One project's pass of the CVE fix-check button: tie branches, then test them."""
+
+    project: str = ""
+    match_summary: str = ""
+    landed_summary: str = ""
+    #: Set when nothing ran at all — the match half's error, which the landed
+    #: half would only repeat (same checkout, same gates).
+    error: str = ""
+
+    def summary(self) -> str:
+        if self.error:
+            return f"CVE fix-landed check did not run for {self.project}: {self.error}"
+        return f"{self.project}: {self.match_summary} / {self.landed_summary}"
+
+
+def check_cve_fixes(project: Project, operator_config: OperatorConfig) -> CveFixLandedRun:
+    """Tie fix branches, then test whether they landed — the CVE button's sweep.
+
+    The match half runs first because its strongest signal is the report's CVE
+    id in a branch NAME: a CVE-carrying report with no recorded branch gets one
+    there, and the landed half then has a ref to test. The match is a deliberate
+    superset of the CVE set — it also ties by finding id and cited paths — but
+    the fetch dominates either way, and a tied branch is worth testing whatever
+    tied it.
+    """
+    from franktheunicorn.security.branch_scan import match_fix_branches
+
+    run = CveFixLandedRun(project=project.full_name)
+    match_run = match_fix_branches(project, operator_config)
+    if match_run.error:
+        run.error = match_run.error
+        return run
+    run.match_summary = match_run.summary()
+    run.landed_summary = check_project_fixes(project, operator_config).summary()
+    return run
+
+
 def check_fix_landed(report: SecurityReport, operator_config: OperatorConfig) -> str:
     """One report's answer, for the per-report worker command. Never raises."""
     if report.project is None:

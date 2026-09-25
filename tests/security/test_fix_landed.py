@@ -18,6 +18,7 @@ from franktheunicorn.config.models import AgentCLIReviewerConfig, OperatorConfig
 from franktheunicorn.review.tool_executor import ExecResult
 from franktheunicorn.security.fix_landed import (
     _find_pr,
+    check_cve_fixes,
     check_fix_landed,
     check_project_fixes,
 )
@@ -384,3 +385,59 @@ class TestSweep:
         assert note.startswith("merged")
         report.refresh_from_db()
         assert report.fix_landed_status == "merged"
+
+
+@pytest.mark.django_db
+class TestCveFixesComposite:
+    """The CVE button's sweep: the match half must run first, because the tie
+    is what gives the landed half a ref to test."""
+
+    def test_match_runs_before_the_landed_check(self) -> None:
+        from franktheunicorn.security.branch_scan import BranchMatchRun
+        from franktheunicorn.security.fix_landed import FixLandedRun
+
+        project = ProjectFactory()
+        order: list[str] = []
+
+        def _match(p: Any, _c: Any) -> BranchMatchRun:
+            order.append("match")
+            return BranchMatchRun(project=p.full_name, applied=1)
+
+        def _check(p: Any, _c: Any) -> FixLandedRun:
+            order.append("check")
+            return FixLandedRun(project=p.full_name, merged=1)
+
+        with (
+            patch(
+                "franktheunicorn.security.branch_scan.match_fix_branches",
+                side_effect=_match,
+            ),
+            patch(
+                "franktheunicorn.security.fix_landed.check_project_fixes",
+                side_effect=_check,
+            ),
+        ):
+            run = check_cve_fixes(project, _operator())
+
+        assert order == ["match", "check"]
+        assert run.error == ""
+        assert "1 branch(es) recorded" in run.summary()
+        assert "1 merged" in run.summary()
+
+    def test_a_match_failure_short_circuits_the_landed_check(self) -> None:
+        """No checkout fails both halves the same way; saying it once is enough."""
+        from franktheunicorn.security.branch_scan import BranchMatchRun
+
+        project = ProjectFactory()
+        with (
+            patch(
+                "franktheunicorn.security.branch_scan.match_fix_branches",
+                return_value=BranchMatchRun(project=project.full_name, error="no checkout"),
+            ),
+            patch("franktheunicorn.security.fix_landed.check_project_fixes") as landed,
+        ):
+            run = check_cve_fixes(project, _operator())
+
+        assert run.error == "no checkout"
+        assert "did not run" in run.summary()
+        assert not landed.called

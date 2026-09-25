@@ -52,6 +52,22 @@ _DEFAULT_TIMEOUT = 30
 _CVE_ID_RE = re.compile(r"CVE-\d{4}-\d{4,7}")
 #: Full-string validation before an id goes into a URL path.
 _CVE_ID_FULL_RE = re.compile(r"^CVE-\d{4}-\d{4,7}$")
+#: The bare-number form the lookup box also accepts ("2026-12345").
+_CVE_ID_BARE_RE = re.compile(r"^\d{4}-\d{4,7}$")
+
+
+def normalize_cve_id(text: str) -> str:
+    """The canonical ``CVE-YYYY-NNNNN`` form of what was typed, or "" for junk.
+
+    Case-insensitive, and the bare number gets the prefix back — the lookup
+    box's whole job is to be typed into quickly. Junk returns "" rather than
+    raising, because the caller's answer to junk is a message, not a 400.
+    """
+    candidate = text.strip().upper()
+    if _CVE_ID_BARE_RE.match(candidate):
+        candidate = f"CVE-{candidate}"
+    return candidate if _CVE_ID_FULL_RE.match(candidate) else ""
+
 
 #: The phrase allocatecve.js flashes when the PMC is not CNA-trusted and the
 #: request went to security@apache.org by email instead.

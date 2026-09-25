@@ -113,6 +113,11 @@ urlpatterns = [
         name="security_check_fixes_landed",
     ),
     path(
+        "security/cve-fixes-landed/",
+        views.security_check_cve_fixes_landed,
+        name="security_check_cve_fixes_landed",
+    ),
+    path(
         "security/fix-landed-recheck/",
         views.security_fix_landed_recheck,
         name="security_fix_landed_recheck",

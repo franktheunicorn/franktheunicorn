@@ -1008,3 +1008,34 @@ class TestFixLandedHandlers:
 
         assert not checker.called
         assert "no project has an open security report" in cmd.log
+
+    @pytest.mark.django_db
+    def test_the_cve_sweep_covers_every_project(self) -> None:
+        from franktheunicorn.security.fix_landed import CveFixLandedRun
+
+        first, second = ProjectFactory(), ProjectFactory()
+        SecurityReportFactory(project=first, matched_cve_id="CVE-2026-11111")
+        SecurityReportFactory(project=second, matched_cve_id="CVE-2026-22222")
+        cmd = WorkerCommand.objects.create(command="check_cve_fixes_landed", status="running")
+
+        with patch(
+            "franktheunicorn.security.fix_landed.check_cve_fixes",
+            side_effect=lambda p, _c: CveFixLandedRun(
+                project=p.full_name, match_summary="matched", landed_summary="checked"
+            ),
+        ) as checker:
+            _dispatch(cmd, make_operator_config())
+
+        assert checker.call_count == 2
+        assert first.full_name in cmd.log
+        assert second.full_name in cmd.log
+
+    @pytest.mark.django_db
+    def test_the_cve_sweep_on_an_empty_backlog_says_so(self) -> None:
+        cmd = WorkerCommand.objects.create(command="check_cve_fixes_landed", status="running")
+
+        with patch("franktheunicorn.security.fix_landed.check_cve_fixes") as checker:
+            _dispatch(cmd, make_operator_config())
+
+        assert not checker.called
+        assert "no project has an open security report" in cmd.log

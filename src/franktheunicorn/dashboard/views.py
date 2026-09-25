@@ -1042,7 +1042,45 @@ def security_report_list(request: HttpRequest) -> HttpResponse:
         sort = _DEFAULT_SECURITY_SORT
     reports = SecurityReport.objects.select_related("project").order_by(*_SECURITY_SORTS[sort])
 
-    reports = reports.filter(_security_tab_q(status_filter))
+    # The CVE lookup box. One exact assigned-CVE hit goes straight to the
+    # report — "brings up the local entry" is the point of the box — while
+    # several (duplicates) or only NVD-match hits get the filtered list, which
+    # is where the difference between those two things is visible.
+    cve_filter = ""
+    cve_param = request.GET.get("cve", "")
+    if cve_param.strip():
+        from franktheunicorn.security.cve_api import normalize_cve_id
+
+        cve_filter = normalize_cve_id(cve_param)
+        if not cve_filter:
+            messages.warning(
+                request,
+                f"{cve_param.strip()!r} isn't a CVE id — expected something like "
+                "CVE-2026-12345. Showing the unfiltered list.",
+            )
+    if cve_filter:
+        exact = reports.filter(matched_cve_id=cve_filter)
+        if exact.count() == 1:
+            return redirect("dashboard:security_detail", report_id=exact.get().pk)
+        # cve_matches is a JSON list and this SQLite build has no JSON1 contains
+        # lookup — and SQLite is first-class here — so the NVD-match half is
+        # filtered in Python. Only rows that ran the CVE check carry any, so the
+        # scan is over them alone.
+        nvd_hit_pks = [
+            row.pk
+            for row in SecurityReport.objects.exclude(cve_matches=[]).only("pk", "cve_matches")
+            if any(isinstance(m, dict) and m.get("cve_id") == cve_filter for m in row.cve_matches)
+        ]
+        reports = reports.filter(Q(matched_cve_id=cve_filter) | Q(pk__in=nvd_hit_pks))
+        if not reports.exists():
+            messages.info(
+                request,
+                f"No local report names {cve_filter} — neither as its assigned CVE nor "
+                "in its NVD matches. The per-report “Check CVE Database” button is what "
+                "populates the latter.",
+            )
+    else:
+        reports = reports.filter(_security_tab_q(status_filter))
 
     all_reports = SecurityReport.objects.all()
     tabs_with_counts: list[dict[str, str | int]] = []
@@ -1057,7 +1095,8 @@ def security_report_list(request: HttpRequest) -> HttpResponse:
     # back to a count for a ?status= that matches no tab, which renders empty.
     counts_by_key = {str(tab["key"]): int(tab["count"]) for tab in tabs_with_counts}
     filtered_count = counts_by_key.get(status_filter, -1)
-    if filtered_count < 0:
+    if cve_filter or filtered_count < 0:
+        # The tab counts know nothing about the CVE filter — count what it matched.
         filtered_count = reports.count()
 
     return render(
@@ -1074,6 +1113,7 @@ def security_report_list(request: HttpRequest) -> HttpResponse:
             "row_cap": SECURITY_LIST_ROW_CAP,
             "rows_capped": filtered_count > SECURITY_LIST_ROW_CAP,
             "active_status": status_filter,
+            "cve_filter": cve_filter,
             "active_sort": sort,
             "sort_options": _SECURITY_SORT_LABELS,
             "archives": _imported_archives(),
@@ -2895,6 +2935,59 @@ def security_check_fixes_landed(request: HttpRequest) -> HttpResponse:
         )
     else:
         messages.info(request, "A fix-landed check is already queued or running.")
+    return _back_to_security_list(request)
+
+
+@require_POST
+def security_check_cve_fixes_landed(request: HttpRequest) -> HttpResponse:
+    """Queue the combined CVE sweep: tie CVE-named branches, then test ancestry.
+
+    One press for "have fixes landed for everything with a CVE". The match half
+    runs first because its strongest signal is the report's CVE id in a branch
+    name — a CVE-carrying report with no recorded branch gets one there, and
+    the landed half then has a ref to test. Both halves are git-only worker
+    work at bulk priority.
+    """
+    from franktheunicorn.config.loader import get_operator_config
+    from franktheunicorn.security.branch_scan import projects_with_open_reports
+    from franktheunicorn.security.queue import queue_branch_sweep
+
+    reason = _branch_sweep_gate_reason(get_operator_config())
+    if reason:
+        messages.error(request, reason)
+        return _back_to_security_list(request)
+    if not projects_with_open_reports():
+        messages.info(
+            request,
+            "No open report is attached to a project, so there is no repo to look at. "
+            "A report needs a project before any git sweep can run.",
+        )
+        return _back_to_security_list(request)
+    with_cve = (
+        SecurityReport.objects.exclude(status__in=SecurityReport.NO_FIX_OWED_STATUSES)
+        .filter(matched_cve_id__gt="")
+        .count()
+    )
+    if not with_cve:
+        messages.info(
+            request,
+            "No open report has a CVE id assigned, and tying CVE-named branches is "
+            "this sweep's starting point. The plain “Check Fixes Landed (git)” button "
+            "covers reports that already have a branch.",
+        )
+        return _back_to_security_list(request)
+
+    if queue_branch_sweep("check_cve_fixes_landed"):
+        messages.success(
+            request,
+            f"Queued the CVE fix check ({with_cve} open report(s) carry a CVE). It "
+            "fetches origin, ties CVE-named branches to reports that lack one, then "
+            "tests every recorded branch against master, the release lines and the "
+            "release tags. Slow — a branch walk plus ancestry checks per project — "
+            "and it runs at bulk priority.",
+        )
+    else:
+        messages.info(request, "A CVE fix check is already queued or running.")
     return _back_to_security_list(request)
 
 

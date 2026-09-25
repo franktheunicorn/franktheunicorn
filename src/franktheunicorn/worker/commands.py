@@ -26,6 +26,9 @@ Commands supported:
   branch, is that branch's commit an ancestor of master or a release line, or
   in a release tag? Git only; the per-report form is the detail page's button,
   the targetless form sweeps every project.
+- ``check_cve_fixes_landed``: the CVE button's sweep — tie CVE-named branches
+  to reports that lack one, then run the landed check. The match half is what
+  gives the check half a ref to test for CVE-carrying reports.
 - ``run_agents``: force-run the review pipeline on a PR (no trusted-author
   gate, no dedup against existing drafts).
 """
@@ -311,6 +314,7 @@ def _dispatch(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
         "scan_security_fixed": _scan_security_fixed,
         "check_fix_landed": _check_fix_landed,
         "check_fixes_landed": _check_fixes_landed,
+        "check_cve_fixes_landed": _check_cve_fixes_landed,
         "run_agents": _run_agents,
     }
     handler = handlers.get(cmd.command)
@@ -648,6 +652,23 @@ def _check_fixes_landed(cmd: WorkerCommand, operator_config: OperatorConfig) -> 
         cmd.log = "fix-landed check: no project has an open security report"
         return
     cmd.log = _sweep_log(cmd, projects, check_project_fixes, operator_config)
+
+
+def _check_cve_fixes_landed(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
+    """The CVE button: tie CVE-named branches, then test whether fixes landed.
+
+    One press, both halves, in the only order that works — the match is what
+    gives the landed check a ref to test for a CVE-carrying report that had
+    no branch recorded.
+    """
+    from franktheunicorn.security.branch_scan import projects_with_open_reports
+    from franktheunicorn.security.fix_landed import check_cve_fixes
+
+    projects = projects_with_open_reports()
+    if not projects:
+        cmd.log = "cve fix-landed check: no project has an open security report"
+        return
+    cmd.log = _sweep_log(cmd, projects, check_cve_fixes, operator_config)
 
 
 def _run_agents(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:

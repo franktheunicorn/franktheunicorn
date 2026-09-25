@@ -3444,6 +3444,108 @@ class TestFixLandedButtons:
 
         assert b"fix landed" in response.content
 
+    def test_the_cve_button_queues_one_command(self, client: Client, db: Any) -> None:
+        SecurityReportFactory(status="new", matched_cve_id="CVE-2026-11111")
+
+        response = self._post(client, "/security/cve-fixes-landed/")
+
+        assert b"1 open report(s) carry a CVE" in response.content
+        assert self._queued("check_cve_fixes_landed").filter(status="pending").count() == 1
+
+    def test_the_cve_button_without_cves_points_at_the_plain_sweep(
+        self, client: Client, db: Any
+    ) -> None:
+        SecurityReportFactory(status="new", fix_branch_sha="abc123")
+
+        response = self._post(client, "/security/cve-fixes-landed/")
+
+        assert b"Check Fixes Landed" in response.content
+        assert not self._queued("check_cve_fixes_landed").exists()
+
+    def test_the_cve_button_reports_the_gate(self, client: Client, db: Any) -> None:
+        from franktheunicorn.config.models import OperatorConfig
+
+        SecurityReportFactory(status="new", matched_cve_id="CVE-2026-11111")
+        bare = OperatorConfig()
+        bare.agent_cli_reviewers = []
+
+        response = self._post(client, "/security/cve-fixes-landed/", bare)
+
+        assert b"agent_cli_reviewers" in response.content
+        assert not self._queued("check_cve_fixes_landed").exists()
+
+    def test_the_cve_button_is_on_the_page(self, client: Client, db: Any) -> None:
+        response = client.get("/security/")
+        assert b"/security/cve-fixes-landed/" in response.content
+
+
+@pytest.mark.django_db
+class TestCveLookup:
+    """The lookup box: punch in a CVE, get the local entry."""
+
+    def test_one_exact_hit_goes_straight_to_the_report(self, client: Client, db: Any) -> None:
+        report = SecurityReportFactory(matched_cve_id="CVE-2026-11111")
+
+        response = client.get("/security/", {"cve": "CVE-2026-11111"})
+
+        assert response.status_code == 302
+        assert response.url == f"/security/{report.pk}/"
+
+    def test_the_id_is_normalised(self, client: Client, db: Any) -> None:
+        """Lowercase and the bare number both find the same entry."""
+        report = SecurityReportFactory(matched_cve_id="CVE-2026-11111")
+
+        for typed in ("cve-2026-11111", "2026-11111", "  CVE-2026-11111  "):
+            response = client.get("/security/", {"cve": typed})
+            assert response.status_code == 302, typed
+            assert response.url == f"/security/{report.pk}/"
+
+    def test_two_exact_hits_get_the_list_because_duplicates_are_the_point(
+        self, client: Client, db: Any
+    ) -> None:
+        one = SecurityReportFactory(matched_cve_id="CVE-2026-11111", title="first hole")
+        two = SecurityReportFactory(matched_cve_id="CVE-2026-11111", title="second hole")
+
+        response = client.get("/security/", {"cve": "CVE-2026-11111"})
+
+        assert response.status_code == 200
+        assert b"first hole" in response.content
+        assert b"second hole" in response.content
+        assert b"CVE-2026-11111" in response.content
+        assert one.pk and two.pk  # both rendered, no redirect
+
+    def test_an_nvd_match_without_an_assignment_is_listed_not_redirected(
+        self, client: Client, db: Any
+    ) -> None:
+        SecurityReportFactory(
+            title="nvd-matched hole",
+            cve_matches=[{"cve_id": "CVE-2026-33333", "description": "x", "status": "Analyzed"}],
+        )
+
+        response = client.get("/security/", {"cve": "CVE-2026-33333"})
+
+        assert response.status_code == 200
+        assert b"nvd-matched hole" in response.content
+
+    def test_an_unknown_cve_says_so(self, client: Client, db: Any) -> None:
+        SecurityReportFactory(matched_cve_id="CVE-2026-11111")
+
+        response = client.get("/security/", {"cve": "CVE-2026-99999"}, follow=True)
+
+        assert b"No local report names CVE-2026-99999" in response.content
+
+    def test_junk_is_a_message_not_an_empty_list(self, client: Client, db: Any) -> None:
+        SecurityReportFactory(title="still shown")
+
+        response = client.get("/security/", {"cve": "not-a-cve"}, follow=True)
+
+        assert b"isn" in response.content and b"CVE id" in response.content
+        assert b"still shown" in response.content  # the list is unfiltered
+
+    def test_the_box_is_on_the_page(self, client: Client, db: Any) -> None:
+        response = client.get("/security/")
+        assert b'name="cve"' in response.content
+
 
 @pytest.mark.django_db
 class TestCVETokenSave:

@@ -112,6 +112,18 @@
             ↻ Ask Agent About Indeterminate
         </button>
     </form>
+    {# The CVE-centric one press: tie CVE-named branches to reports that lack #}
+    {# one (the matcher's strongest signal), then test every recorded branch #}
+    {# for landed-ness. Both halves git-only, both at bulk priority. #}
+    <form method="post" action="{% url 'dashboard:security_check_cve_fixes_landed' %}" style="display: inline;">
+        {% csrf_token %}
+        <button type="submit" class="action-btn"
+                style="font-size: 0.85rem; padding: 0.4rem 0.8rem;"
+                hx-post="{% url 'dashboard:security_check_cve_fixes_landed' %}"
+                hx-confirm="Check whether fixes have landed for everything with a CVE? First ties CVE-named branches to reports that lack one, then tests every recorded branch against master, the release lines and the release tags. Git only, no agent — but it walks every recently-touched branch of every project, so it takes a while.">
+            ⑃ Check CVE Fixes Landed
+        </button>
+    </form>
 </div>
 
 {% include "dashboard/_security_cve_token_card.html" %}
@@ -304,10 +316,27 @@
     </p>
 </section>
 
+{# The CVE lookup: punch in an id, get the local entry. One exact assigned-CVE #}
+{# hit goes straight to the report; several (duplicates) or only NVD-match #}
+{# hits get the filtered list. A plain GET form — no JS needed. #}
+<form method="get" action="{% url 'dashboard:security_list' %}" class="security-sort"
+      style="display: flex; gap: 0.4rem; align-items: center; margin-bottom: 0.5rem;">
+    <label for="cve-lookup">Find CVE:</label>
+    <input id="cve-lookup" type="text" name="cve" value="{{ cve_filter }}"
+           placeholder="CVE-2026-12345" autocapitalize="characters" spellcheck="false"
+           style="font-size: 0.85rem; padding: 0.25rem 0.5rem; border: 1px solid var(--border); border-radius: 4px; width: 13rem;">
+    <button type="submit" class="action-btn" style="font-size: 0.85rem; padding: 0.3rem 0.7rem;">Go</button>
+    {% if cve_filter %}
+    <span class="muted">— showing reports whose assigned CVE or NVD matches name
+        <code>{{ cve_filter }}</code>.</span>
+    <a href="{% url 'dashboard:security_list' %}?sort={{ active_sort }}">clear</a>
+    {% endif %}
+</form>
+
 <div class="tab-bar">
     {% for tab in status_tabs %}
     <a href="{% url 'dashboard:security_list' %}?sort={{ active_sort }}{% if tab.key != 'all' %}&amp;status={{ tab.key|urlencode }}{% endif %}"
-       {% if active_status == tab.key %}class="active"{% endif %}>
+       {% if active_status == tab.key and not cve_filter %}class="active"{% endif %}>
         {{ tab.label }}
         <span class="tab-count">{{ tab.count }}</span>
     </a>
@@ -438,7 +467,10 @@
         {# "No security reports yet" on a filtered view reads as the backlog #}
         {# having vanished. The CVE queue is empty in the good case, so it needs #}
         {# to say which case this is. #}
-        {% if active_status != 'all' %}
+        {% if cve_filter %}
+        <p>No local report names {{ cve_filter }}.</p>
+        <p style="font-size: 0.85rem;"><a href="{% url 'dashboard:security_list' %}?sort={{ active_sort }}">Show all reports</a></p>
+        {% elif active_status != 'all' %}
         <p>No reports on this tab.</p>
         <p style="font-size: 0.85rem;"><a href="{% url 'dashboard:security_list' %}?sort={{ active_sort }}">Show all reports</a></p>
         {% else %}

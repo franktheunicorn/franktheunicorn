@@ -269,6 +269,11 @@ class TestBranchSweepQueue:
         assert queue_branch_sweep("check_fixes_landed") is False
         assert WorkerCommand.objects.filter(command="check_fixes_landed").count() == 1
 
+    def test_the_cve_fix_landed_sweep_is_independent_of_the_plain_one(self) -> None:
+        assert queue_branch_sweep("check_cve_fixes_landed") is True
+        assert queue_branch_sweep("check_fixes_landed") is True
+        assert queue_branch_sweep("check_cve_fixes_landed") is False
+
 
 @pytest.mark.django_db
 class TestFixLandedQueue:
