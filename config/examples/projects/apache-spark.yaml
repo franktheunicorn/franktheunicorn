@@ -74,6 +74,16 @@ test_expectations: "tests required for all new features and bug fixes"
 # machine-readable trust-boundary file to auto-load. SECURITY.md is
 # deliberately NOT used as the model: by convention it's a reporting policy.)
 # security_model_file: ".frank/security-model.md"
+
+# The PMC this project maps to at the ASF CVE process service
+# (cveprocess.apache.org) — the `pmc` form field when the dashboard allocates
+# a CVE id for a report, and the scope the pasted Bearer tokens are issued
+# for. Tokens are pasted per-session on the security page (they live for
+# hours; they are never read from env vars or this file). Empty falls back to
+# the repo name for apache/* projects (apache/spark → "spark"), logged when
+# used — set it when the PMC and the repo name differ.
+cve_process_pmc: "spark"
+
 security_model: |
   Spark treats anyone who can submit code, SQL, UDFs, jobs, or ML
   models/pipelines to a cluster as fully trusted: those inputs run arbitrary

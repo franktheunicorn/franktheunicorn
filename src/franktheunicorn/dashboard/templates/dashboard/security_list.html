@@ -91,7 +91,30 @@
             ⑃ Check Fixed (git)
         </button>
     </form>
+    {# The follow-up for reports that HAVE a branch: did it land? Git answers #}
+    {# by ancestry and release tag; what it can't prove comes back #}
+    {# indeterminate, and the second button pays a cloud agent to read the log. #}
+    <form method="post" action="{% url 'dashboard:security_check_fixes_landed' %}" style="display: inline;">
+        {% csrf_token %}
+        <button type="submit" class="action-btn"
+                style="font-size: 0.85rem; padding: 0.4rem 0.8rem;"
+                hx-post="{% url 'dashboard:security_check_fixes_landed' %}"
+                hx-confirm="Check whether every recorded fix branch landed upstream? Git only, no agent — each branch's tip is tested against master, the release lines and the release tags, which is proof rather than a guess. Reports git can't settle come back indeterminate.">
+            ⑃ Check Fixes Landed (git)
+        </button>
+    </form>
+    <form method="post" action="{% url 'dashboard:security_fix_landed_recheck' %}" style="display: inline;">
+        {% csrf_token %}
+        <button type="submit" class="action-btn"
+                style="font-size: 0.85rem; padding: 0.4rem 0.8rem;"
+                hx-post="{% url 'dashboard:security_fix_landed_recheck' %}"
+                hx-confirm="Ask a cloud agent about the reports git couldn't settle? One Cursor agent per project reads the log for each indeterminate report — real money, minutes per run. Its answer is a pointer; the git check's is proof.">
+            ↻ Ask Agent About Indeterminate
+        </button>
+    </form>
 </div>
+
+{% include "dashboard/_security_cve_token_card.html" %}
 
 {# Bulk import. Reports land as untriaged drafts exactly like a pasted one, and #}
 {# nothing is ever posted to a forge. Never triages unless asked — a backlog is #}
@@ -368,6 +391,18 @@
             {% endif %}
             {% if report.fix_branch %} &middot;
                 <span class="muted" title="Fix branch on the fork">🛠 {{ report.fix_branch }}</span>
+            {% endif %}
+            {# The fix-landed verdict, beside the branch it judged. The method #}
+            {# is in the tooltip for the same reason as the recheck's: git's #}
+            {# ancestry is proof and the agent's log-reading is not. #}
+            {% if report.fix_landed_status == "released" %} &middot;
+                <span class="muted" title="{{ report.fix_landed_detail.note }}">✓ fix released{% if report.fix_landed_method == "agent" %} (agent){% endif %}</span>
+            {% elif report.fix_landed_status == "merged" %} &middot;
+                <span class="muted" title="{{ report.fix_landed_detail.note }}">✓ fix landed{% if report.fix_landed_method == "agent" %} (agent){% endif %}</span>
+            {% elif report.fix_landed_status == "not-merged" %} &middot;
+                <span class="muted" title="{{ report.fix_landed_detail.note }}">fix not merged{% if report.fix_landed_method == "agent" %} (agent){% endif %}</span>
+            {% elif report.fix_landed_status == "indeterminate" %} &middot;
+                <span class="muted" title="{{ report.fix_landed_detail.note }}">fix landed: unclear</span>
             {% endif %}
             {# The operator's answer, distinct from the agent's branch above. Shown #}
             {# because the tab beside it counts rows where this is missing, and a #}

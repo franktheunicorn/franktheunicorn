@@ -821,6 +821,26 @@ class SecurityReport(models.Model):
     cve_matches = models.JSONField(default=list, blank=True)
     matched_cve_id = models.CharField(max_length=50, blank=True, default="")
 
+    # State of the CVE record at the ASF CVE process service
+    # (cveprocess.apache.org), when matched_cve_id is one of theirs and
+    # somebody has pressed the button to look. Written by
+    # security.cve_api.fetch_record via the dashboard — never inferred from
+    # NVD, whose "status" means something else entirely.
+    #: RESERVED / PUBLISHED / REJECT track the record's lifecycle; "unknown"
+    #: means the service answered but said nothing recognisable (the API is
+    #: young — see the unknown-response logging in security.cve_api).
+    CVE_RECORD_STATE_CHOICES = [
+        ("", "Never checked"),
+        ("RESERVED", "Reserved"),
+        ("PUBLISHED", "Published"),
+        ("REJECT", "Rejected"),
+        ("unknown", "Unrecognised response"),
+    ]
+    cve_record_state = models.CharField(
+        max_length=20, blank=True, default="", choices=CVE_RECORD_STATE_CHOICES
+    )
+    cve_record_checked_at = models.DateTimeField(null=True, blank=True)
+
     # Dedup against your own backlog, which is a different question and the one that
     # bites at volume. A scanner archive emits one finding per site, so a missing
     # check in a shared helper arrives as six findings against six callers; two scans
@@ -983,6 +1003,45 @@ class SecurityReport(models.Model):
     ]
     fix_merged_upstream = models.CharField(
         max_length=40, blank=True, default="", choices=FIX_MERGED_CHOICES
+    )
+
+    # "Has the fix landed upstream?" — the machine's answer, computed by
+    # security.fix_landed (git ancestry + tag checks, with a cloud-agent
+    # fallback for what git can't prove). Deliberately separate from
+    # fix_merged_upstream above: that column round-trips through the review
+    # sheet and is the PMC's/operator's ruling, these are the evidence —
+    # the same split as fixed_in_branch vs branch_match_*. A machine verdict
+    # here never overwrites the sheet's column.
+    #: "merged" means an ancestor of the default branch; "released" means a
+    #: release tag contains it. "indeterminate" covers everything git could
+    #: not prove — including the degenerate case where fixed_in_branch *is* a
+    #: mainline branch and there is no topic ref to test.
+    FIX_LANDED_STATUS_CHOICES = [
+        ("", "Never checked"),
+        ("merged", "Merged upstream"),
+        ("released", "In a release tag"),
+        ("not-merged", "Not merged upstream"),
+        ("no-fix-branch", "No fix branch to check"),
+        ("indeterminate", "Git could not prove it either way"),
+    ]
+    fix_landed_status = models.CharField(
+        max_length=20, blank=True, default="", choices=FIX_LANDED_STATUS_CHOICES
+    )
+    #: What the check actually saw: {"checked_ref", "branches", "tags",
+    #: "pr_url", "pr_merged_at"}. The reason an unaccountable badge is a badge
+    #: nobody trusts — same argument as branch_match_reason.
+    fix_landed_detail = models.JSONField(default=dict, blank=True)
+    fix_landed_checked_at = models.DateTimeField(null=True, blank=True)
+    #: "git" (ancestry/tags — proof) or "agent" (a cloud agent read the log —
+    #: a judgement call). Not collapsed into the detail JSON, for the
+    #: recheck_method reason: the two answers are worth different amounts.
+    FIX_LANDED_METHOD_CHOICES = [
+        ("", "Never checked"),
+        ("git", "Git ancestry and tag checks"),
+        ("agent", "Cloud agent read the commit log"),
+    ]
+    fix_landed_method = models.CharField(
+        max_length=20, blank=True, default="", choices=FIX_LANDED_METHOD_CHOICES
     )
 
     # The batch "did the last month of commits fix this?" recheck. Two things
@@ -1167,6 +1226,22 @@ class SecurityRecheckRun(models.Model):
         ("error", "Error"),
     ]
 
+    #: What the run was launched to answer. "recheck" is the original batch
+    #: question (did the last month of commits fix these? writes
+    #: ``SecurityReport.recheck_*``); "fix-landed" is the fallback for reports
+    #: git could not prove landed or not (writes ``SecurityReport.fix_landed_*``
+    #: with ``fix_landed_method="agent"``). One model for both because the
+    #: lifecycle — one POST, poll, write per-report verdicts — is identical;
+    #: the kind is in the uniqueness constraint so the two never block each
+    #: other.
+    KIND_RECHECK = "recheck"
+    KIND_FIX_LANDED = "fix-landed"
+    KIND_CHOICES = [
+        (KIND_RECHECK, "Did recent commits fix these?"),
+        (KIND_FIX_LANDED, "Did the known fix land upstream?"),
+    ]
+    kind = models.CharField(max_length=20, choices=KIND_CHOICES, default=KIND_RECHECK)
+
     project = models.ForeignKey(
         Project,
         on_delete=models.CASCADE,
@@ -1196,9 +1271,12 @@ class SecurityRecheckRun(models.Model):
             # Same argument WorkerCommand's partial unique constraints make:
             # the constraint is the check, because a check-then-create is a race.
             # Keyed on the chunk too, because one press of a 120-report backlog
-            # is legitimately three launched runs for the one project.
+            # is legitimately three launched runs for the one project. Keyed on
+            # kind as well: a live "did recent commits fix these" run must not
+            # block a "did the known fix land" run for the same project — they
+            # answer different questions about the same rows.
             models.UniqueConstraint(
-                fields=["project", "chunk_index"],
+                fields=["project", "kind", "chunk_index"],
                 condition=models.Q(status="launched"),
                 name="unique_launched_recheck_per_project_chunk",
             ),
@@ -1206,6 +1284,46 @@ class SecurityRecheckRun(models.Model):
 
     def __str__(self) -> str:
         return f"SecurityRecheckRun: {self.project} ({self.status})"
+
+
+class CVEAPIToken(models.Model):
+    """A pasted Bearer token for the ASF CVE process service, scoped to a PMC.
+
+    The service (cveprocess.apache.org, PR apache/security-vulnogram#252)
+    issues short-lived tokens — hours — from ``/users/token`` after a browser
+    login: one ``allocate`` and one ``write`` token per PMC the operator
+    belongs to. Hours-lived secrets are why this is a table and not a config
+    key: a token you paste every few hours cannot live in a YAML file that
+    needs an editor and a restart, and ``.env`` is no better.
+
+    Hygiene rules the rest of the codebase keeps: the value is write-only
+    (never rendered after submit, never logged), it is excluded from CSV
+    export and sheet sync, and a 401 from the service deletes the row — the
+    service gives no expiry metadata, so an auth failure is the only
+    trustworthy "this token is dead" signal there is.
+    """
+
+    OP_CHOICES = [
+        ("allocate", "Allocate CVE ids"),
+        ("write", "Read and update CVE records"),
+    ]
+
+    #: Lower-case PMC name the token is scoped to ("spark"). Matches
+    #: ``ProjectConfig.cve_process_pmc``.
+    pmc = models.CharField(max_length=100)
+    op = models.CharField(max_length=20, choices=OP_CHOICES)
+    token = models.CharField(max_length=200)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["pmc", "op"], name="unique_cve_api_token_per_pmc_op"),
+        ]
+        ordering = ["pmc", "op"]
+
+    def __str__(self) -> str:
+        # Deliberately not the token: __str__ lands in admin lists and logs.
+        return f"CVEAPIToken: {self.pmc} ({self.op})"
 
 
 class SecurityVerification(models.Model):
@@ -1487,6 +1605,8 @@ class WorkerCommand(models.Model):
         ("poll_security_rechecks", "Wait on batch security rechecks"),
         ("run_security_triage", "Run LLM triage on security report"),
         ("run_agents", "Force-run review agents"),
+        ("check_fix_landed", "Check whether one report's fix landed upstream"),
+        ("check_fixes_landed", "Sweep: check whether known fixes landed upstream"),
     ]
 
     STATUS_CHOICES = [

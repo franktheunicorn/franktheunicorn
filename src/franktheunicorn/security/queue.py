@@ -95,6 +95,17 @@ def queue_introduction_scan(report: SecurityReport, *, priority: int = PRIORITY_
     return queue_command("find_report_introduction", report=report, priority=priority)
 
 
+def queue_fix_landed(report: SecurityReport, *, priority: int = PRIORITY_INTERACTIVE) -> bool:
+    """Queue the git ancestry check for one report's fix branch.
+
+    Interactive by default: the caller is the detail page's "Check if landed"
+    button and somebody is watching. Git only — a fetch plus a handful of
+    merge-base calls — so it is cheap either way, and the dedup keeps a
+    double-click one run.
+    """
+    return queue_command("check_fix_landed", report=report, priority=priority)
+
+
 def verifier_gate_reason(operator_config: OperatorConfig) -> str:
     """Why the deep verifier (and the version map, which shares its checkout)
     can't run, or "" when they can.
@@ -196,16 +207,16 @@ def queue_recheck_poll(*, priority: int = PRIORITY_BULK, exclude_pk: int | None 
     return queue_targetless("poll_security_rechecks", priority=priority, exclude_pk=exclude_pk)
 
 
-#: The two git-only backlog sweeps. Targetless like ``poll_security_rechecks``:
+#: The git-only backlog sweeps. Targetless like ``poll_security_rechecks``:
 #: each one loops every project, so neither per-target unique constraint applies
 #: and the in-flight check has to be a SELECT.
-_SWEEP_COMMANDS = ("match_security_branches", "scan_security_fixed")
+_SWEEP_COMMANDS = ("match_security_branches", "scan_security_fixed", "check_fixes_landed")
 
 
 def queue_branch_sweep(command: str, *, priority: int = PRIORITY_BULK) -> bool:
     """Queue one of the git-only sweeps unless the same one is already in flight.
 
-    Both are minutes-to-tens-of-minutes of git per project — a fetch, two
+    They are minutes-to-tens-of-minutes of git per project — a fetch, two
     ``git log`` calls per branch, a checkout per branch group — so they go in at
     :data:`PRIORITY_BULK` even though a person pressed the button. The
     interactive lane exists so a click doesn't queue behind bulk work, and

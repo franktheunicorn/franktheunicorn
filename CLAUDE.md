@@ -154,6 +154,45 @@ src/franktheunicorn/
                      #   priority (match_security_branches, scan_security_fixed) —
                      #   a 300-branch walk in the interactive lane would park the
                      #   lane that exists so a click doesn't wait behind bulk work.
+                     #   fix_landed.py answers the follow-up for a report that HAS
+                     #   a branch: is its commit an ancestor of master or a release
+                     #   line (git merge-base --is-ancestor), or in a release tag
+                     #   (git tag --contains) — proof, not a guess. Ref resolution
+                     #   in order: the fix agent's recorded sha, the branch on
+                     #   origin, the fork branch's upstream PR (one GitHub lookup —
+                     #   a squash merge's merge commit survives where the branch
+                     #   tip does not), then the operator's fixed_in_branch free
+                     #   text ref by ref. A mainline branch name there is the
+                     #   degenerate case — ancestry of a branch against itself is
+                     #   a tautology — and comes back indeterminate, which is what
+                     #   recheck.launch_fix_landed_recheck (kind="fix-landed", same
+                     #   poll) is for. Verdicts land in fix_landed_* — the machine's
+                     #   evidence, kept separate from the sheet's
+                     #   fix_merged_upstream, the branch_match_* split again. Two
+                     #   never-overwrite rules: indeterminate only fills an empty
+                     #   slot (a non-answer must not replace a paid verdict), and
+                     #   released is terminal (tags do not un-happen). The worker
+                     #   commands are check_fix_landed (per report, interactive)
+                     #   and check_fixes_landed (targetless sweep, bulk).
+                     #   cve_api.py is the ASF CVE process service client
+                     #   (cveprocess.apache.org, from security-vulnogram PR #252):
+                     #   allocate an id, read the CVE 5 record, push the advisory.
+                     #   Bearer tokens are pasted per-session into the CVEAPIToken
+                     #   table (hours-lived, never env vars, never rendered back),
+                     #   scoped per PMC per operation; the PMC comes from the
+                     #   project config's cve_process_pmc. Three response shapes
+                     #   are real: trusted allocation is a plain-text id,
+                     #   untrusted is an HTML flash page (async via security@),
+                     #   and an expired token is a 302 to /users/login, not a 401
+                     #   — so no query strings (originalUrl exact-match) and
+                     #   follow_redirects=False throughout. cve_advisory.py builds
+                     #   the CVE 5 JSON from a report: a fresh skeleton mirrors
+                     #   the allocate route (cveMetadata PUBLISHED but CNA_private
+                     #   RESERVED — prefer CNA_private when reading state), a merge
+                     #   preserves everything else and replaces only title,
+                     #   descriptions, affected and references. No fabricated
+                     #   CVSS; the operator's affected_versions sentence goes in
+                     #   as-is.
   curator/           # Textual TUI for curating voice datasets from
                      #   historical comments (used to seed fine-tuning;
                      #   not part of the live review path)

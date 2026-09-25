@@ -1586,6 +1586,42 @@ class SecurityBranchScanConfig(BaseModel):
         return v
 
 
+class SecurityCVEAPIConfig(BaseModel):
+    """Config for the ASF CVE process API (cveprocess.apache.org) client.
+
+    See :mod:`franktheunicorn.security.cve_api`. There is no ``enabled`` here,
+    for the branch_scan reason: every call is a button press, which is the
+    consent, and the button cannot do anything until the operator pastes a
+    Bearer token — which is the other consent. Tokens are hours-lived and
+    issued per PMC from ``/users/token`` after a browser login, so they live
+    in the database (``CVEAPIToken``), not here: a secret you have to paste
+    every few hours has no business in a file you edit by hand and commit by
+    accident.
+
+    The project → PMC mapping is *not* here either: it is
+    ``ProjectConfig.cve_process_pmc``, one mapping in one place.
+    """
+
+    #: Root of the cveprocess service. A knob rather than a constant so a
+    #: staging or testmode deployment can be pointed at instead of the live
+    #: one without a code change.
+    base_url: str = "https://cveprocess.apache.org"
+    #: How old a pasted token may be before the UI labels it stale. A hint
+    #: only — the service keeps tokens in its session store and gives no
+    #: expiry metadata, so the real expiry signal is a 401, which deletes the
+    #: row and asks for a fresh one.
+    token_max_age_hours: int = 12
+
+    @field_validator("token_max_age_hours")
+    @classmethod
+    def token_age_must_be_positive(cls, v: int) -> int:
+        """A zero here would label every token stale the moment it is pasted."""
+        if v <= 0:
+            msg = "security_triage.cve_api.token_max_age_hours must be positive"
+            raise ValueError(msg)
+        return v
+
+
 class SecurityTriageConfig(BaseModel):
     """Config for security report triage feature.
 
@@ -1632,6 +1668,7 @@ class SecurityTriageConfig(BaseModel):
     duplicates: SecurityDuplicateConfig = Field(default_factory=SecurityDuplicateConfig)
     fix_agent: SecurityFixAgentConfig = Field(default_factory=SecurityFixAgentConfig)
     branch_scan: SecurityBranchScanConfig = Field(default_factory=SecurityBranchScanConfig)
+    cve_api: SecurityCVEAPIConfig = Field(default_factory=SecurityCVEAPIConfig)
 
 
 class ForgeRegistryEntry(BaseModel):
@@ -2038,6 +2075,12 @@ class ProjectConfig(BaseModel):
     ai_agents: list[str] = Field(default_factory=list)
     committers: list[str] = Field(default_factory=list)
     cve_files: list[str] = Field(default_factory=list)
+    #: The PMC this project maps to at the ASF CVE process service
+    #: (cveprocess.apache.org) — the ``pmc`` form field when allocating a CVE
+    #: and the scope the pasted Bearer tokens are issued for. Empty falls back
+    #: to the repo name for ``apache/*`` projects (apache/spark → "spark"),
+    #: logged when used; set it when the PMC and the repo name differ.
+    cve_process_pmc: str = ""
     new_contributor_addendum: str = ""
     enabled: bool = True
     # Default review-gating policy (token saver). Controls which PRs the

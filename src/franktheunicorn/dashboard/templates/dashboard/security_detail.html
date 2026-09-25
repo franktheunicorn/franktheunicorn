@@ -152,6 +152,18 @@
 </section>
 {% endif %}
 
+{# Has the fix landed upstream? Offered once there is anything to test — a #}
+{# branch frank's agent pushed, or the operator's own recorded location. Git #}
+{# answers by ancestry; what it can't prove is the cloud fallback's job. #}
+{% if report.fix_branch or report.fix_branch_sha or report.fixed_in_branch or report.fix_landed_status %}
+<section class="verify-panel" style="margin-bottom: 1rem;">
+    <h3 style="font-size: 0.9rem; margin-bottom: 0.5rem;">Did the fix land?</h3>
+    <div id="fix-landed-area">
+        {% include "dashboard/_security_fix_landed.html" %}
+    </div>
+</section>
+{% endif %}
+
 <!-- Parsed Fields -->
 {% if report.parsed_component or report.parsed_poc or report.parsed_impact %}
 <div style="background: var(--card); border: 1px solid var(--border); border-radius: 4px; padding: 0.75rem; margin-bottom: 1rem;">
@@ -186,6 +198,11 @@
         Check CVE Database
     </button>
     {% endif %}
+</div>
+
+<!-- ASF CVE process: allocate an id, read the record, push the advisory -->
+<div id="cve-api-area" style="margin-bottom: 1rem;">
+    {% include "dashboard/_security_cve_api.html" %}
 </div>
 
 <!-- Sandbox Execution -->

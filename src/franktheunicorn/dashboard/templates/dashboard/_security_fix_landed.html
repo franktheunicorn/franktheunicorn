@@ -1,0 +1,67 @@
+{# The fix-landed panel: has the recorded fix landed upstream? Git answers by #}
+{# ancestry and release tag, which is proof; the cloud-agent fallback's answer #}
+{# is a pointer, and the method badge says which one you're looking at. The #}
+{# button queues the check (a fetch plus merge-base calls), so the answer #}
+{# lands on a reload, not in this response. #}
+<div class="fix-landed">
+    {% if blocked %}
+    <div class="verify-result error-note">{{ blocked }}</div>
+    {% endif %}
+    {% if created %}
+    <div class="verify-result queued-note">
+        Queued — the worker fetches origin and tests the branch against master, the
+        release lines and the release tags. Reload in a minute.
+    </div>
+    {% elif created == False %}
+    <div class="verify-result queued-note">A fix-landed check is already queued or running for this report.</div>
+    {% endif %}
+
+    {% if report.fix_landed_status == "released" %}
+    <p>
+        <span class="badge">released</span>
+        The fix commit is in
+        {{ report.fix_landed_detail.tag_count|default:report.fix_landed_detail.tags|length }}
+        release tag(s){% if report.fix_landed_detail.tags %}:
+        {{ report.fix_landed_detail.tags|join:", " }}{% endif %}.
+        <span class="pr-meta">{{ report.fix_landed_detail.note }}</span>
+    </p>
+    {% elif report.fix_landed_status == "merged" %}
+    <p>
+        <span class="badge">merged</span>
+        {% if report.fix_landed_detail.branches %}
+        An ancestor of: {{ report.fix_landed_detail.branches|join:", " }}.
+        {% endif %}
+        <span class="pr-meta">{{ report.fix_landed_detail.note }}</span>
+        {% if report.fix_landed_detail.pr_url %}
+        · <a href="{{ report.fix_landed_detail.pr_url }}">the PR</a>{% endif %}
+    </p>
+    {% elif report.fix_landed_status == "not-merged" %}
+    <p>
+        <span class="badge badge-warning">not merged</span>
+        <span class="pr-meta">{{ report.fix_landed_detail.note }}</span>
+        {% if report.fix_landed_detail.pr_url %}
+        · <a href="{{ report.fix_landed_detail.pr_url }}">the PR</a>{% endif %}
+    </p>
+    {% elif report.fix_landed_status == "indeterminate" %}
+    <p>
+        <span class="badge badge-warning">indeterminate</span>
+        <span class="pr-meta">{{ report.fix_landed_detail.note }}</span>
+    </p>
+    {% elif report.fix_landed_status == "no-fix-branch" %}
+    <p><span class="pr-meta">No fix branch is recorded for this report.</span></p>
+    {% endif %}
+    {% if report.fix_landed_status %}
+    <p class="pr-meta" style="margin-top: 0.2rem;">
+        Checked {{ report.fix_landed_checked_at|date:"Y-m-d H:i" }} by
+        {% if report.fix_landed_method == "git" %}git ancestry (proof){% else %}a cloud agent reading the log (a pointer){% endif %}.
+    </p>
+    {% endif %}
+
+    <button class="action-btn"
+            hx-post="{% url 'dashboard:security_check_fix_landed' report.pk %}"
+            hx-target="#fix-landed-area"
+            hx-swap="innerHTML"
+            hx-confirm="Fetch origin and test whether this report's fix landed? Git only, no agent — ancestry against master and the release lines, plus the release tags.">
+        ⑃ {% if report.fix_landed_status %}Re-check{% else %}Check{% endif %} if landed (git)
+    </button>
+</div>

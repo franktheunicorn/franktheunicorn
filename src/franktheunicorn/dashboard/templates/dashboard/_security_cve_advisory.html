@@ -1,0 +1,43 @@
+{# The CVE 5 advisory draft, and the push button. The JSON is editable on #}
+{# purpose: every value in it came from an attacker-supplied report, and the #}
+{# operator reading it before it goes to the service is the review step. #}
+<div class="cve-advisory" style="background: var(--card); border: 1px solid var(--border); border-radius: 4px; padding: 0.75rem;">
+    {% if blocked %}
+    <div class="verify-result error-note">{{ blocked }}</div>
+    {% endif %}
+    {% if note %}
+    <div class="verify-result queued-note">{{ note }}</div>
+    {% endif %}
+
+    {% if record_json %}
+    <p style="font-size: 0.85rem; margin: 0 0 0.4rem;">
+        Draft CVE 5 record for <code>{{ report.matched_cve_id }}</code>
+        {% if merged %}— merged into the record the service already holds
+        (cveMetadata and CNA_private preserved){% endif %}.
+        Read it before you push it: the text came from the report.
+    </p>
+    <form hx-post="{% url 'dashboard:security_cve_advisory_push' report.pk %}"
+          hx-target="#cve-advisory-area"
+          hx-swap="innerHTML">
+        {% csrf_token %}
+        <textarea name="record_json" rows="18"
+                  style="width: 100%; font-family: monospace; font-size: 0.8rem; padding: 0.4rem; border: 1px solid var(--border); border-radius: 4px;">{{ record_json }}</textarea>
+        <button class="action-btn post" type="submit" style="margin-top: 0.4rem;"
+                {% if not cve_tokens.write.present %}disabled title="Paste a write token on the security list page first"{% endif %}
+                hx-confirm="Push this record to cveprocess.apache.org for {{ report.matched_cve_id }}? It replaces what the service holds (an upsert).">
+            ⬆ Push advisory
+        </button>
+    </form>
+    {% elif pushed %}
+    <p style="font-size: 0.85rem; margin: 0;">
+        Record state is now
+        <strong>{{ report.get_cve_record_state_display|default:"unknown" }}</strong>.
+        <button class="action-btn"
+                hx-post="{% url 'dashboard:security_cve_advisory_preview' report.pk %}"
+                hx-target="#cve-advisory-area"
+                hx-swap="innerHTML">
+            📄 Draft again
+        </button>
+    </p>
+    {% endif %}
+</div>

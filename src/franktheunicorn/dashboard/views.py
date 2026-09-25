@@ -6,7 +6,9 @@ Function-based views. No SPA, no React. htmx for all dynamic updates.
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 from datetime import timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
@@ -1075,6 +1077,7 @@ def security_report_list(request: HttpRequest) -> HttpResponse:
             "active_sort": sort,
             "sort_options": _SECURITY_SORT_LABELS,
             "archives": _imported_archives(),
+            "cve_api_pmcs": _cve_token_card_context(),
             # Configured projects, plus any project that actually has a report.
             # The reports themselves are deliberately *not* allow-list filtered —
             # hiding a security report because its YAML was removed loses sight of
@@ -2116,6 +2119,7 @@ def security_report_detail(request: HttpRequest, report_id: int) -> HttpResponse
                 row["name"] for row in version_rows if row["status"] == "affected"
             ],
             **_triage_area_context(report, triage_command),
+            **_cve_api_panel_context(report),
         },
     )
 
@@ -2806,6 +2810,188 @@ def security_scan_fixed(request: HttpRequest) -> HttpResponse:
 
 
 @require_POST
+def security_check_fix_landed(request: HttpRequest, report_id: int) -> HttpResponse:
+    """Queue the git ancestry check for one report's fix branch (htmx).
+
+    The detail page's "Check if landed" button. Queued rather than run
+    in-request because the fetch alone is seconds and the merge-base walk is
+    per branch; the verdict lands on the row and the operator reloads. The
+    gate is reported rather than hidden, same as the verifier's button.
+    """
+    report = get_object_or_404(SecurityReport.objects.select_related("project"), pk=report_id)
+
+    from franktheunicorn.config.loader import get_operator_config
+    from franktheunicorn.security.queue import queue_fix_landed
+
+    reason = _branch_sweep_gate_reason(get_operator_config())
+    if reason:
+        return render(
+            request, "dashboard/_security_fix_landed.html", {"report": report, "blocked": reason}
+        )
+    if report.project is None:
+        return render(
+            request,
+            "dashboard/_security_fix_landed.html",
+            {
+                "report": report,
+                "blocked": (
+                    "This report isn't attached to a project, so there's no repository "
+                    "to check it against. Set one and try again."
+                ),
+            },
+        )
+    created = queue_fix_landed(report)
+    return render(
+        request, "dashboard/_security_fix_landed.html", {"report": report, "created": created}
+    )
+
+
+@require_POST
+def security_check_fixes_landed(request: HttpRequest) -> HttpResponse:
+    """Queue the sweep: did the branches the backlog knows about land upstream?
+
+    Git only — a fetch plus ancestry and tag checks per report — so cents, not
+    dollars, but slow enough to be a worker command at bulk priority like the
+    other sweeps. Reports git can't prove either way come back indeterminate,
+    which is what the cloud-agent fallback button below is for.
+    """
+    from franktheunicorn.config.loader import get_operator_config
+    from franktheunicorn.security.branch_scan import projects_with_open_reports
+    from franktheunicorn.security.queue import queue_branch_sweep
+
+    reason = _branch_sweep_gate_reason(get_operator_config())
+    if reason:
+        messages.error(request, reason)
+        return _back_to_security_list(request)
+    if not projects_with_open_reports():
+        messages.info(
+            request,
+            "No open report is attached to a project, so there is no repo to look at. "
+            "A report needs a project before any git sweep can run.",
+        )
+        return _back_to_security_list(request)
+    checkable = (
+        SecurityReport.objects.filter(project__isnull=False)
+        .exclude(status__in=SecurityReport.NO_FIX_OWED_STATUSES)
+        .filter(Q(fix_branch__gt="") | Q(fix_branch_sha__gt="") | Q(fixed_in_branch__gt=""))
+        .exclude(fix_landed_status="released")
+        .count()
+    )
+    if not checkable:
+        messages.info(
+            request,
+            "No open report carries a fix branch to check — the “Find Fix Branches” "
+            "sweep is the one that records them.",
+        )
+        return _back_to_security_list(request)
+
+    if queue_branch_sweep("check_fixes_landed"):
+        messages.success(
+            request,
+            f"Queued the fix-landed check over {checkable} report(s) with a fix branch. "
+            "It fetches origin and tests each branch's tip against master, the release "
+            "lines and the release tags — proof, not a guess. Verdicts land on the "
+            "reports; the ones git can't prove come back indeterminate.",
+        )
+    else:
+        messages.info(request, "A fix-landed check is already queued or running.")
+    return _back_to_security_list(request)
+
+
+@require_POST
+def security_fix_landed_recheck(request: HttpRequest) -> HttpResponse:
+    """Launch the cloud-agent fallback for the reports git couldn't settle (bulk).
+
+    One agent per project over the indeterminate set — the ones whose fix
+    branch isn't on origin, or whose recorded location is a mainline branch
+    name there is no topic ref to test. Real money, so it is a separate button
+    from the git sweep rather than an automatic follow-on.
+    """
+    from franktheunicorn.config.loader import get_operator_config
+    from franktheunicorn.security.fix_agent import FixAgentError, cursor_api_key
+    from franktheunicorn.security.queue import PRIORITY_INTERACTIVE, queue_recheck_poll
+    from franktheunicorn.security.recheck import fix_landed_candidates, launch_fix_landed_recheck
+
+    operator_config = get_operator_config()
+    config = operator_config.security_triage.fix_agent
+    if not config.enabled:
+        messages.error(
+            request,
+            "The fix agent is switched off (security_triage.fix_agent.enabled: false "
+            "in operator.yaml), and the fix-landed fallback rides on it.",
+        )
+        return _back_to_security_list(request)
+    if not cursor_api_key(config):
+        messages.error(
+            request,
+            f"This needs a Cursor API key — set {config.api_key_env} in the environment.",
+        )
+        return _back_to_security_list(request)
+
+    grouped = fix_landed_candidates()
+    if not grouped:
+        messages.info(
+            request,
+            "No report is waiting on this — the fallback covers reports whose git "
+            "fix-landed check came back indeterminate, and there are none.",
+        )
+        return _back_to_security_list(request)
+
+    # Same stale-run rule as the recheck button, scoped to this kind.
+    stale_before = timezone.now() - timedelta(seconds=config.recheck_timeout_seconds)
+    launched_runs = SecurityRecheckRun.objects.filter(
+        status="launched", kind=SecurityRecheckRun.KIND_FIX_LANDED
+    )
+    stale = launched_runs.filter(created_at__lt=stale_before)
+    if stale.exists():
+        stale.update(
+            status="error",
+            detail="the poll never finished it — marked stale by a later press",
+            updated_at=timezone.now(),
+        )
+    in_flight = set(
+        launched_runs.filter(created_at__gte=stale_before).values_list("project_id", flat=True)
+    )
+    launched = 0
+    covered = 0
+    needs_poll = False
+    failures: list[str] = []
+    for project, reports in grouped.items():
+        if project.pk in in_flight:
+            failures.append(f"{project.full_name}: a fix-landed check is already running")
+            continue
+        try:
+            launch_fix_landed_recheck(project, reports, operator_config)
+        except FixAgentError as exc:
+            partial = SecurityRecheckRun.objects.filter(
+                project=project, kind=SecurityRecheckRun.KIND_FIX_LANDED, status="launched"
+            )
+            if partial.exists():
+                needs_poll = True
+                failures.append(
+                    f"{project.full_name}: {exc} — {partial.count()} chunk(s) did "
+                    "launch and will be polled"
+                )
+            else:
+                failures.append(f"{project.full_name}: {exc}")
+        else:
+            launched += 1
+            covered += len(reports)
+    if launched or needs_poll or launched_runs.exists():
+        queue_recheck_poll(priority=PRIORITY_INTERACTIVE)
+    if launched:
+        messages.success(
+            request,
+            f"Fix-landed agent launched for {launched} project(s) covering {covered} "
+            "report(s) — verdicts land on the reports as the runs finish. The agent's "
+            "answer is a pointer; git's ancestry check is the proof.",
+        )
+    for failure in failures:
+        messages.error(request, f"Fix-landed check not launched for {failure}.")
+    return _back_to_security_list(request)
+
+
+@require_POST
 def security_recheck_fixed(request: HttpRequest) -> HttpResponse:
     """Launch the batch "did recent commits fix these?" recheck (bulk).
 
@@ -2852,8 +3038,12 @@ def security_recheck_fixed(request: HttpRequest) -> HttpResponse:
             detail="the poll never finished it — marked stale by a later recheck press",
             updated_at=timezone.now(),
         )
+    # Scoped to this button's kind: a fix-landed run in flight says nothing
+    # about whether a month-of-commits recheck should launch, or vice versa.
     in_flight = set(
-        launched_runs.filter(created_at__gte=stale_before).values_list("project_id", flat=True)
+        launched_runs.filter(
+            created_at__gte=stale_before, kind=SecurityRecheckRun.KIND_RECHECK
+        ).values_list("project_id", flat=True)
     )
     launched = 0
     covered = 0
@@ -3024,6 +3214,409 @@ def security_report_cve_check(request: HttpRequest, report_id: int) -> HttpRespo
         return HttpResponse('<div class="cve-result error-note">CVE lookup failed.</div>')
 
     return render(request, "dashboard/_security_cve_matches.html", {"report": report})
+
+
+# --- ASF CVE process API (security.cve_api) -----------------------------------
+#
+# All five endpoints work in-request: each is one HTTP call to
+# cveprocess.apache.org and the operator is standing there — the same call the
+# NVD check above makes. Tokens come from the paste card on the list page and
+# live in the CVEAPIToken table; a 401/redirect from the service deletes the
+# row, because an auth failure is the only "this token is dead" signal there
+# is. The token value is never put in a template context, a flash, or a log.
+
+
+def _cve_api_panel_context(report: SecurityReport) -> dict[str, object]:
+    """Everything the CVE API panel needs, recomputed on every render.
+
+    Recomputed rather than passed around because the endpoints mutate the
+    state it shows (a token dropped on a 401, a fresh record state) and a
+    stale context would render the token the operator just watched die.
+    """
+    from django.utils import timezone
+
+    from franktheunicorn.config.loader import get_operator_config, get_project_config
+    from franktheunicorn.core.models import CVEAPIToken
+    from franktheunicorn.security.cve_api import resolve_pmc
+
+    try:
+        operator_config = get_operator_config()
+        project_config = get_project_config(report.project.full_name) if report.project else None
+    except Exception as exc:
+        # A broken config must not take the report page down with it — the
+        # panel renders with no PMC and the buttons explain themselves dead.
+        logger.warning("CVE panel for report #%s: could not read the config: %s", report.pk, exc)
+        return {"cve_pmc": "", "cve_tokens": {}, "cve_config_error": str(exc)}
+    cve_config = operator_config.security_triage.cve_api
+    pmc = resolve_pmc(report.project, project_config)
+
+    max_age = timedelta(hours=cve_config.token_max_age_hours)
+    now = timezone.now()
+    tokens: dict[str, dict[str, object]] = {}
+    for op in ("allocate", "write"):
+        row = CVEAPIToken.objects.filter(pmc=pmc, op=op).first() if pmc else None
+        tokens[op] = {
+            "present": row is not None,
+            "created_at": row.created_at if row else None,
+            "stale": row is not None and now - row.created_at > max_age,
+        }
+    return {
+        "cve_pmc": pmc,
+        "cve_tokens": tokens,
+        "cve_token_max_age_hours": cve_config.token_max_age_hours,
+    }
+
+
+def _cve_token_card_context() -> list[dict[str, object]]:
+    """One row per configured PMC for the paste card on the security list page.
+
+    A broken operator.yaml must not take the list page down with it — the page
+    renders with the config error flashed, and the card simply has no rows to
+    offer until the file parses again.
+    """
+    from django.utils import timezone
+
+    from franktheunicorn.config.loader import get_operator_config
+    from franktheunicorn.core.models import CVEAPIToken
+    from franktheunicorn.security.cve_api import configured_pmcs
+
+    try:
+        cve_config = get_operator_config().security_triage.cve_api
+        pmcs = configured_pmcs()
+    except Exception as exc:
+        logger.warning("CVE token card: could not read the config: %s", exc)
+        return []
+    max_age = timedelta(hours=cve_config.token_max_age_hours)
+    now = timezone.now()
+    rows: list[dict[str, object]] = []
+    for pmc in pmcs:
+        ops: dict[str, dict[str, object]] = {}
+        for op in ("allocate", "write"):
+            token_row = CVEAPIToken.objects.filter(pmc=pmc, op=op).first()
+            ops[op] = {
+                "present": token_row is not None,
+                "created_at": token_row.created_at if token_row else None,
+                "stale": token_row is not None and now - token_row.created_at > max_age,
+            }
+        rows.append({"pmc": pmc, "ops": ops, "max_age_hours": cve_config.token_max_age_hours})
+    return rows
+
+
+@require_POST
+def security_cve_token_save(request: HttpRequest) -> HttpResponse:
+    """Paste (or clear) a PMC-scoped Bearer token for the CVE process service."""
+    pmc = request.POST.get("pmc", "").strip().lower()
+    op = request.POST.get("op", "")
+    token = request.POST.get("token", "").strip()
+
+    from franktheunicorn.security.cve_api import drop_token, save_token
+
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", pmc) or op not in ("allocate", "write"):
+        messages.error(
+            request, "Token not saved: a PMC and an operation (allocate/write) are required."
+        )
+        return _back_to_security_list(request)
+    if token:
+        save_token(pmc, op, token)
+        messages.success(
+            request,
+            f"Saved the {op} token for {pmc}. It lives for a few hours — the service "
+            "issues them short-lived — and is never shown again.",
+        )
+    else:
+        drop_token(pmc, op)
+        messages.info(request, f"Dropped the {op} token for {pmc}.")
+    return _back_to_security_list(request)
+
+
+@require_POST
+def security_cve_allocate(request: HttpRequest, report_id: int) -> HttpResponse:
+    """Allocate a CVE id for this report's PMC (htmx).
+
+    A reserved id is written straight into ``matched_cve_id``: the button
+    press is the operator assigning it, which is exactly what that field
+    means. The title that goes into the request (and the email to the PMC's
+    security address) comes from the editable field in the panel, not blind
+    from the report — report titles are attacker-supplied.
+    """
+    report = get_object_or_404(SecurityReport.objects.select_related("project"), pk=report_id)
+
+    from franktheunicorn.security.cve_api import (
+        CVEAPIError,
+        CVETokenExpiredError,
+        allocate_cve,
+        drop_token,
+        get_token,
+    )
+
+    blocked = ""
+    note = ""
+    ctx = _cve_api_panel_context(report)
+    pmc = str(ctx["cve_pmc"])
+    if not pmc:
+        blocked = (
+            "No PMC mapping for this project. Set cve_process_pmc in the project YAML "
+            "(apache/* repos fall back to the repo name)."
+        )
+    else:
+        token = get_token(pmc, "allocate")
+        if not token:
+            blocked = (
+                f"No allocate token for {pmc}. Paste one on the security list page — "
+                "cveprocess.apache.org/users/token issues them after a browser login."
+            )
+        else:
+            title = request.POST.get("title", "").strip() or report.title
+            try:
+                from franktheunicorn.config.loader import get_operator_config
+
+                base_url = get_operator_config().security_triage.cve_api.base_url
+                result = allocate_cve(
+                    pmc,
+                    title,
+                    token=token,
+                    messageid=report.email_message_id,
+                    base_url=base_url,
+                )
+            except CVETokenExpiredError:
+                drop_token(pmc, "allocate")
+                blocked = (
+                    "The service rejected the allocate token — they live for hours, so "
+                    "it has probably expired. It was deleted; paste a fresh one."
+                )
+            except CVEAPIError as exc:
+                blocked = str(exc)
+            else:
+                note = result.detail
+                if result.status == "reserved":
+                    previous = report.matched_cve_id
+                    report.matched_cve_id = result.cve_id
+                    report.cve_record_state = "RESERVED"
+                    from django.utils import timezone
+
+                    report.cve_record_checked_at = timezone.now()
+                    report.save(
+                        update_fields=[
+                            "matched_cve_id",
+                            "cve_record_state",
+                            "cve_record_checked_at",
+                            "updated_at",
+                        ]
+                    )
+                    if previous and previous != result.cve_id:
+                        note += f" (Replaces {previous}, which stays RESERVED — release it via the PMC.)"
+
+    return render(
+        request,
+        "dashboard/_security_cve_api.html",
+        {"report": report, "blocked": blocked, "note": note, **ctx},
+    )
+
+
+@require_POST
+def security_cve_state(request: HttpRequest, report_id: int) -> HttpResponse:
+    """Refresh the record state (RESERVED/PUBLISHED/...) from the service (htmx)."""
+    report = get_object_or_404(SecurityReport.objects.select_related("project"), pk=report_id)
+
+    from franktheunicorn.security.cve_api import (
+        CVEAPIError,
+        CVETokenExpiredError,
+        drop_token,
+        fetch_record,
+        get_token,
+    )
+
+    blocked = ""
+    note = ""
+    ctx = _cve_api_panel_context(report)
+    pmc = str(ctx["cve_pmc"])
+    if not report.matched_cve_id:
+        blocked = "No CVE id on this report yet."
+    elif not pmc:
+        blocked = "No PMC mapping for this project (cve_process_pmc in the project YAML)."
+    else:
+        token = get_token(pmc, "write")
+        if not token:
+            blocked = f"No write token for {pmc}. Paste one on the security list page."
+        else:
+            try:
+                from franktheunicorn.config.loader import get_operator_config
+
+                base_url = get_operator_config().security_triage.cve_api.base_url
+                record = fetch_record(report.matched_cve_id, token=token, base_url=base_url)
+            except CVETokenExpiredError:
+                drop_token(pmc, "write")
+                blocked = "The service rejected the write token (they live for hours). Deleted; paste a fresh one."
+            except CVEAPIError as exc:
+                blocked = str(exc)
+            else:
+                if record.found:
+                    from django.utils import timezone
+
+                    report.cve_record_state = record.state
+                    report.cve_record_checked_at = timezone.now()
+                    report.save(
+                        update_fields=["cve_record_state", "cve_record_checked_at", "updated_at"]
+                    )
+                    note = f"Record state: {record.state}."
+                else:
+                    note = (
+                        f"No document for {report.matched_cve_id} on the service yet — if the "
+                        "id came by email, the record appears when somebody creates it there."
+                    )
+
+    return render(
+        request,
+        "dashboard/_security_cve_api.html",
+        {"report": report, "blocked": blocked, "note": note, **ctx},
+    )
+
+
+@require_POST
+def security_cve_advisory_preview(request: HttpRequest, report_id: int) -> HttpResponse:
+    """Build the CVE 5 JSON for this report and show it, editable (htmx).
+
+    When a write token is available the record on the service is fetched
+    first and the draft merges into it (cveMetadata and CNA_private survive);
+    without one the draft is a fresh record and the preview says so.
+    """
+    report = get_object_or_404(SecurityReport.objects.select_related("project"), pk=report_id)
+
+    from franktheunicorn.security.cve_advisory import build_cve5_json
+    from franktheunicorn.security.cve_api import (
+        CVEAPIError,
+        CVETokenExpiredError,
+        drop_token,
+        fetch_record,
+        get_token,
+    )
+
+    blocked = ""
+    note = ""
+    record_json = ""
+    ctx = _cve_api_panel_context(report)
+    pmc = str(ctx["cve_pmc"])
+    if not report.matched_cve_id:
+        blocked = (
+            "No CVE id on this report yet — allocate one above or type one into the verdict form."
+        )
+    elif not pmc:
+        blocked = "No PMC mapping for this project (cve_process_pmc in the project YAML)."
+    else:
+        existing = None
+        token = get_token(pmc, "write")
+        if token:
+            try:
+                from franktheunicorn.config.loader import get_operator_config
+
+                base_url = get_operator_config().security_triage.cve_api.base_url
+                fetched = fetch_record(report.matched_cve_id, token=token, base_url=base_url)
+            except CVETokenExpiredError:
+                drop_token(pmc, "write")
+                blocked = "The service rejected the write token (they live for hours). Deleted; paste a fresh one."
+            except CVEAPIError as exc:
+                blocked = str(exc)
+            else:
+                if fetched.found:
+                    existing = fetched.raw
+                else:
+                    note = "No record on the service yet — this draft creates one."
+        else:
+            note = "No write token pasted, so this is a fresh record, not a merge with what's on the service."
+        if not blocked:
+            try:
+                record = build_cve5_json(report, pmc=pmc, existing=existing)
+            except ValueError as exc:
+                blocked = str(exc)
+            else:
+                record_json = json.dumps(record, indent=2)
+
+    return render(
+        request,
+        "dashboard/_security_cve_advisory.html",
+        {
+            "report": report,
+            "blocked": blocked,
+            "note": note,
+            "record_json": record_json,
+            "merged": bool(record_json and not note),
+            **ctx,
+        },
+    )
+
+
+@require_POST
+def security_cve_advisory_push(request: HttpRequest, report_id: int) -> HttpResponse:
+    """Push the (operator-edited) CVE 5 JSON to the service (htmx).
+
+    The record is read back afterwards so the panel shows the state the
+    service actually stored, not the state we hope it stored.
+    """
+    report = get_object_or_404(SecurityReport.objects.select_related("project"), pk=report_id)
+
+    from franktheunicorn.security.cve_api import (
+        CVEAPIError,
+        CVETokenExpiredError,
+        drop_token,
+        fetch_record,
+        get_token,
+        update_record,
+    )
+
+    blocked = ""
+    note = ""
+    pushed = False
+    ctx = _cve_api_panel_context(report)
+    pmc = str(ctx["cve_pmc"])
+    token = get_token(pmc, "write") if pmc else ""
+    if not report.matched_cve_id:
+        blocked = "No CVE id on this report."
+    elif not token:
+        blocked = (
+            f"No write token for {pmc or 'this project'}. Paste one on the security list page."
+        )
+    else:
+        try:
+            record = json.loads(request.POST.get("record_json", ""))
+        except json.JSONDecodeError as exc:
+            blocked = f"The edited record is not valid JSON: {exc}"
+            record = None
+        if record is not None:
+            if not isinstance(record, dict):
+                blocked = "The record must be a JSON object."
+            else:
+                try:
+                    from franktheunicorn.config.loader import get_operator_config
+
+                    base_url = get_operator_config().security_triage.cve_api.base_url
+                    update_record(report.matched_cve_id, record, token=token, base_url=base_url)
+                    refreshed = fetch_record(report.matched_cve_id, token=token, base_url=base_url)
+                except CVETokenExpiredError:
+                    drop_token(pmc, "write")
+                    blocked = "The service rejected the write token (they live for hours). Deleted; paste a fresh one."
+                except CVEAPIError as exc:
+                    blocked = str(exc)
+                else:
+                    pushed = True
+                    note = f"Pushed. The service now holds the record for {report.matched_cve_id}."
+                    if refreshed.found:
+                        from django.utils import timezone
+
+                        report.cve_record_state = refreshed.state
+                        report.cve_record_checked_at = timezone.now()
+                        report.save(
+                            update_fields=[
+                                "cve_record_state",
+                                "cve_record_checked_at",
+                                "updated_at",
+                            ]
+                        )
+
+    return render(
+        request,
+        "dashboard/_security_cve_advisory.html",
+        {"report": report, "blocked": blocked, "note": note, "pushed": pushed, **ctx},
+    )
 
 
 def security_guidance_list(request: HttpRequest) -> HttpResponse:

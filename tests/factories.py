@@ -19,6 +19,7 @@ from franktheunicorn.core.models import (
     Alert,
     AntiPattern,
     CostRecord,
+    CVEAPIToken,
     DependencyChange,
     EmailScanRecord,
     LLMBackendFallback,
@@ -229,6 +230,17 @@ class SecurityReportFactory(factory.django.DjangoModelFactory):  # type: ignore[
     cve_matches = factory.LazyFunction(list)
     matched_cve_id = ""
     operator_notes = ""
+
+
+class CVEAPITokenFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
+    """Factory for CVEAPIToken (pasted ASF CVE process Bearer tokens)."""
+
+    class Meta:
+        model = CVEAPIToken
+
+    pmc = "spark"
+    op = "allocate"
+    token = factory.Sequence(lambda n: f"test-token-{n}")
 
 
 class SecurityRecheckRunFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]

@@ -953,3 +953,58 @@ class TestGitSweepHandlers:
 
         assert not matcher.called
         assert "no project has an open security report" in cmd.log
+
+
+class TestFixLandedHandlers:
+    @pytest.mark.django_db
+    def test_the_per_report_handler_logs_the_verdict(self) -> None:
+        report = SecurityReportFactory(fix_branch_sha="abc123")
+        cmd = WorkerCommand.objects.create(
+            command="check_fix_landed", security_report=report, status="running"
+        )
+
+        with patch(
+            "franktheunicorn.security.fix_landed.check_fix_landed",
+            return_value="merged: tested the fix agent's branch tip abc123",
+        ) as checker:
+            _dispatch(cmd, make_operator_config())
+
+        checker.assert_called_once()
+        assert f"report #{report.pk}" in cmd.log
+        assert "merged" in cmd.log
+
+    @pytest.mark.django_db
+    def test_the_per_report_handler_requires_a_target(self) -> None:
+        cmd = WorkerCommand.objects.create(command="check_fix_landed", status="running")
+
+        with pytest.raises(ValueError, match="requires a security_report target"):
+            _dispatch(cmd, make_operator_config())
+
+    @pytest.mark.django_db
+    def test_the_sweep_covers_every_project(self) -> None:
+        from franktheunicorn.security.fix_landed import FixLandedRun
+
+        first, second = ProjectFactory(), ProjectFactory()
+        SecurityReportFactory(project=first)
+        SecurityReportFactory(project=second)
+        cmd = WorkerCommand.objects.create(command="check_fixes_landed", status="running")
+
+        with patch(
+            "franktheunicorn.security.fix_landed.check_project_fixes",
+            side_effect=lambda p, _c: FixLandedRun(project=p.full_name, merged=1),
+        ) as checker:
+            _dispatch(cmd, make_operator_config())
+
+        assert checker.call_count == 2
+        assert first.full_name in cmd.log
+        assert second.full_name in cmd.log
+
+    @pytest.mark.django_db
+    def test_an_empty_backlog_says_so_rather_than_looking_like_a_clean_sweep(self) -> None:
+        cmd = WorkerCommand.objects.create(command="check_fixes_landed", status="running")
+
+        with patch("franktheunicorn.security.fix_landed.check_project_fixes") as checker:
+            _dispatch(cmd, make_operator_config())
+
+        assert not checker.called
+        assert "no project has an open security report" in cmd.log

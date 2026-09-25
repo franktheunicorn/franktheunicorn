@@ -99,6 +99,31 @@ urlpatterns = [
         views.security_scan_fixed,
         name="security_scan_fixed",
     ),
+    # Did the recorded fix land upstream? The per-report button queues a git
+    # ancestry check; the two list-page buttons are the git sweep over every
+    # project and the cloud-agent fallback for what git couldn't settle.
+    path(
+        "security/<int:report_id>/fix-landed/",
+        views.security_check_fix_landed,
+        name="security_check_fix_landed",
+    ),
+    path(
+        "security/fixes-landed/",
+        views.security_check_fixes_landed,
+        name="security_check_fixes_landed",
+    ),
+    path(
+        "security/fix-landed-recheck/",
+        views.security_fix_landed_recheck,
+        name="security_fix_landed_recheck",
+    ),
+    # The ASF CVE process service (cveprocess.apache.org): the token paste card
+    # lives on the list page because tokens are per-PMC, not per-report.
+    path(
+        "security/cve-token/",
+        views.security_cve_token_save,
+        name="security_cve_token_save",
+    ),
     # Bulk import: a zip of report files, same importer as import_security_zip.
     path("security/upload/", views.security_report_upload, name="security_upload"),
     # The undo for one: delete every report that came from a named archive.
@@ -187,5 +212,28 @@ urlpatterns = [
         "security/<int:report_id>/cve-check/",
         views.security_report_cve_check,
         name="security_cve_check",
+    ),
+    # Allocate a CVE id, read the record back, and push the advisory JSON —
+    # the three things the cveprocess API does. All in-request: one HTTP call
+    # each, with the operator standing there.
+    path(
+        "security/<int:report_id>/cve-allocate/",
+        views.security_cve_allocate,
+        name="security_cve_allocate",
+    ),
+    path(
+        "security/<int:report_id>/cve-state/",
+        views.security_cve_state,
+        name="security_cve_state",
+    ),
+    path(
+        "security/<int:report_id>/cve-advisory/",
+        views.security_cve_advisory_preview,
+        name="security_cve_advisory_preview",
+    ),
+    path(
+        "security/<int:report_id>/cve-advisory/push/",
+        views.security_cve_advisory_push,
+        name="security_cve_advisory_push",
     ),
 ]

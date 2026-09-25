@@ -3258,3 +3258,411 @@ class TestGitSweepButtons:
         response = client.get("/security/")
         assert b"/security/match-branches/" in response.content
         assert b"/security/scan-fixed/" in response.content
+
+
+@pytest.mark.django_db
+class TestFixLandedButtons:
+    """The "did the fix land" buttons: the per-report git check, the git sweep
+    over every project, and the cloud-agent fallback for what git couldn't
+    settle. All three queue or launch work, so the tests pin what gets queued
+    and what the operator is told when it can't run."""
+
+    def _operator(self) -> Any:
+        from franktheunicorn.config.models import AgentCLIReviewerConfig, OperatorConfig
+
+        config = OperatorConfig()
+        config.agent_cli_reviewers = [AgentCLIReviewerConfig(name="claude", cli_path="claude")]
+        return config
+
+    def _queued(self, command: str) -> Any:
+        from franktheunicorn.core.models import WorkerCommand
+
+        return WorkerCommand.objects.filter(command=command)
+
+    def _post(self, client: Client, path: str, operator: Any = None) -> Any:
+        with patch(
+            "franktheunicorn.config.loader.get_operator_config",
+            return_value=operator or self._operator(),
+        ):
+            return client.post(path, follow=True)
+
+    def test_the_per_report_button_queues_one_command(self, client: Client, db: Any) -> None:
+        report = SecurityReportFactory(fix_branch_sha="abc123")
+
+        response = self._post(client, f"/security/{report.pk}/fix-landed/")
+
+        assert response.status_code == 200
+        assert b"Queued" in response.content
+        cmd = self._queued("check_fix_landed").get()
+        assert cmd.security_report == report
+
+    def test_a_second_click_is_one_run(self, client: Client, db: Any) -> None:
+        report = SecurityReportFactory(fix_branch_sha="abc123")
+
+        self._post(client, f"/security/{report.pk}/fix-landed/")
+        response = self._post(client, f"/security/{report.pk}/fix-landed/")
+
+        assert b"already queued or running" in response.content
+        assert self._queued("check_fix_landed").count() == 1
+
+    def test_the_per_report_button_reports_the_gate(self, client: Client, db: Any) -> None:
+        from franktheunicorn.config.models import OperatorConfig
+
+        report = SecurityReportFactory(fix_branch_sha="abc123")
+        bare = OperatorConfig()
+        bare.agent_cli_reviewers = []
+
+        response = self._post(client, f"/security/{report.pk}/fix-landed/", bare)
+
+        assert b"agent_cli_reviewers" in response.content
+        assert not self._queued("check_fix_landed").exists()
+
+    def test_a_project_less_report_says_so(self, client: Client, db: Any) -> None:
+        report = SecurityReportFactory(project=None, fix_branch_sha="abc123")
+
+        response = self._post(client, f"/security/{report.pk}/fix-landed/")
+
+        assert b"attached to a project" in response.content
+        assert not self._queued("check_fix_landed").exists()
+
+    def test_the_sweep_queues_one_command(self, client: Client, db: Any) -> None:
+        SecurityReportFactory(status="new", fix_branch_sha="abc123")
+
+        response = self._post(client, "/security/fixes-landed/")
+
+        assert b"1 report(s) with a fix branch" in response.content
+        assert self._queued("check_fixes_landed").filter(status="pending").count() == 1
+
+    def test_no_branch_in_the_backlog_points_at_the_button_that_can(
+        self, client: Client, db: Any
+    ) -> None:
+        SecurityReportFactory(status="new")
+
+        response = self._post(client, "/security/fixes-landed/")
+
+        assert b"Find Fix Branches" in response.content
+        assert not self._queued("check_fixes_landed").exists()
+
+    def test_a_released_verdict_is_not_re_checked(self, client: Client, db: Any) -> None:
+        """Released is terminal — tags do not un-happen — so a backlog whose
+        only branch-carrying report is released has nothing for the sweep."""
+        SecurityReportFactory(status="new", fix_branch_sha="abc123", fix_landed_status="released")
+
+        response = self._post(client, "/security/fixes-landed/")
+
+        assert b"Find Fix Branches" in response.content
+        assert not self._queued("check_fixes_landed").exists()
+
+    def test_the_fallback_launches_one_agent_per_indeterminate_project(
+        self, client: Client, db: Any
+    ) -> None:
+        from franktheunicorn.core.models import SecurityRecheckRun, WorkerCommand
+
+        one = SecurityReportFactory(fix_landed_status="indeterminate")
+        other_project = ProjectFactory()
+        SecurityReportFactory(fix_landed_status="indeterminate", project=other_project)
+        SecurityReportFactory(fix_landed_status="merged")  # git answered — not covered
+        with (
+            patch.dict("os.environ", {"CURSOR_API_KEY": "key"}),
+            patch(
+                "franktheunicorn.config.loader.get_operator_config",
+                return_value=make_operator_config(),
+            ),
+            patch(
+                "franktheunicorn.security.recheck.create_cursor_agent",
+                return_value=("bc-x", "run-x"),
+            ),
+        ):
+            response = client.post("/security/fix-landed-recheck/", follow=True)
+
+        assert response.status_code == 200
+        runs = SecurityRecheckRun.objects.filter(kind=SecurityRecheckRun.KIND_FIX_LANDED)
+        assert runs.count() == 2
+        assert {r.project_id for r in runs} == {one.project_id, other_project.pk}
+        assert WorkerCommand.objects.filter(command="poll_security_rechecks").exists()
+        assert b"2 project(s)" in response.content
+
+    def test_the_fallback_with_nothing_indeterminate_says_so(self, client: Client, db: Any) -> None:
+        SecurityReportFactory(fix_landed_status="merged")
+        with (
+            patch.dict("os.environ", {"CURSOR_API_KEY": "key"}),
+            patch(
+                "franktheunicorn.config.loader.get_operator_config",
+                return_value=make_operator_config(),
+            ),
+        ):
+            response = client.post("/security/fix-landed-recheck/", follow=True)
+
+        assert b"git" in response.content and b"indeterminate" in response.content
+
+    def test_the_fallback_names_the_missing_api_key(self, client: Client, db: Any) -> None:
+        SecurityReportFactory(fix_landed_status="indeterminate")
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch(
+                "franktheunicorn.config.loader.get_operator_config",
+                return_value=make_operator_config(),
+            ),
+        ):
+            response = client.post("/security/fix-landed-recheck/", follow=True)
+
+        assert b"CURSOR_API_KEY" in response.content
+
+    def test_all_three_buttons_are_on_the_page(self, client: Client, db: Any) -> None:
+        response = client.get("/security/")
+        assert b"/security/fixes-landed/" in response.content
+        assert b"/security/fix-landed-recheck/" in response.content
+
+    def test_the_detail_page_shows_the_panel_when_there_is_a_branch(
+        self, client: Client, db: Any
+    ) -> None:
+        report = SecurityReportFactory(fix_branch="bug_7-x")
+
+        response = client.get(f"/security/{report.pk}/")
+
+        assert b"fix-landed-area" in response.content
+        assert b"Check" in response.content and b"if landed" in response.content
+
+    def test_the_detail_page_hides_the_panel_when_there_is_nothing_to_test(
+        self, client: Client, db: Any
+    ) -> None:
+        report = SecurityReportFactory()
+
+        response = client.get(f"/security/{report.pk}/")
+
+        assert b"fix-landed-area" not in response.content
+
+    def test_the_row_badge_renders_the_verdict(self, client: Client, db: Any) -> None:
+        SecurityReportFactory(
+            status="new",
+            fix_landed_status="merged",
+            fix_landed_method="git",
+            fix_landed_detail={"note": "tested origin/bug_7-x"},
+        )
+
+        response = client.get("/security/")
+
+        assert b"fix landed" in response.content
+
+
+@pytest.mark.django_db
+class TestCVETokenSave:
+    def test_save_and_clear(self, client: Client, db: Any) -> None:
+        from franktheunicorn.core.models import CVEAPIToken
+
+        response = client.post(
+            "/security/cve-token/", {"pmc": "Spark", "op": "allocate", "token": "tok-1"}
+        )
+        assert response.status_code in (200, 204, 302)
+        row = CVEAPIToken.objects.get()
+        assert row.pmc == "spark"  # lower-cased
+        assert row.op == "allocate"
+
+        # An empty token is the clear path.
+        client.post("/security/cve-token/", {"pmc": "spark", "op": "allocate", "token": ""})
+        assert not CVEAPIToken.objects.exists()
+
+    def test_rejects_a_bad_op(self, client: Client, db: Any) -> None:
+        from franktheunicorn.core.models import CVEAPIToken
+
+        client.post("/security/cve-token/", {"pmc": "spark", "op": "root", "token": "x"})
+        assert not CVEAPIToken.objects.exists()
+
+    def test_token_value_is_never_rendered(self, client: Client, db: Any) -> None:
+        from tests.factories import CVEAPITokenFactory
+
+        CVEAPITokenFactory(pmc="spark", op="allocate", token="supersecret-value")
+        CVEAPITokenFactory(pmc="spark", op="write", token="supersecret-value-2")
+        for url in ("/security/",):
+            response = client.get(url)
+            assert response.status_code == 200
+            assert b"supersecret" not in response.content
+
+
+@pytest.mark.django_db
+class TestSecurityCVEAllocate:
+    def _report(self) -> Any:
+        return SecurityReportFactory(
+            title="Widget overflow",
+            project=ProjectFactory(owner="apache", repo="spark"),
+        )
+
+    @patch("franktheunicorn.security.cve_api.allocate_cve")
+    def test_reserved_writes_matched_cve_id(
+        self, mock_alloc: MagicMock, client: Client, db: Any
+    ) -> None:
+        from franktheunicorn.security.cve_api import CVEAllocation
+        from tests.factories import CVEAPITokenFactory
+
+        CVEAPITokenFactory(pmc="spark", op="allocate")
+        mock_alloc.return_value = CVEAllocation(
+            status="reserved", cve_id="CVE-2026-12345", detail="Reserved CVE-2026-12345."
+        )
+        report = self._report()
+        response = client.post(f"/security/{report.pk}/cve-allocate/", {"title": "Reviewed title"})
+        assert response.status_code == 200
+        report.refresh_from_db()
+        assert report.matched_cve_id == "CVE-2026-12345"
+        assert report.cve_record_state == "RESERVED"
+        # The operator-edited title, not the report's, goes to the service.
+        assert mock_alloc.call_args[0][1] == "Reviewed title"
+
+    @patch("franktheunicorn.security.cve_api.allocate_cve")
+    def test_requested_via_email_writes_nothing(
+        self, mock_alloc: MagicMock, client: Client, db: Any
+    ) -> None:
+        from franktheunicorn.security.cve_api import CVEAllocation
+        from tests.factories import CVEAPITokenFactory
+
+        CVEAPITokenFactory(pmc="spark", op="allocate")
+        mock_alloc.return_value = CVEAllocation(status="requested", detail="emailed")
+        report = self._report()
+        response = client.post(f"/security/{report.pk}/cve-allocate/", {"title": "t"})
+        assert b"emailed" in response.content
+        report.refresh_from_db()
+        assert report.matched_cve_id == ""
+
+    def test_no_token_blocks_with_instructions(self, client: Client, db: Any) -> None:
+        report = self._report()
+        response = client.post(f"/security/{report.pk}/cve-allocate/", {"title": "t"})
+        assert b"No allocate token" in response.content
+
+    @patch("franktheunicorn.security.cve_api.allocate_cve")
+    def test_expired_token_deletes_the_row(
+        self, mock_alloc: MagicMock, client: Client, db: Any
+    ) -> None:
+        from franktheunicorn.core.models import CVEAPIToken
+        from franktheunicorn.security.cve_api import CVETokenExpiredError
+        from tests.factories import CVEAPITokenFactory
+
+        CVEAPITokenFactory(pmc="spark", op="allocate")
+        mock_alloc.side_effect = CVETokenExpiredError("dead")
+        report = self._report()
+        response = client.post(f"/security/{report.pk}/cve-allocate/", {"title": "t"})
+        assert b"paste a fresh one" in response.content
+        assert not CVEAPIToken.objects.exists()
+
+    def test_no_pmc_mapping_blocks(self, client: Client, db: Any) -> None:
+        report = SecurityReportFactory(project=ProjectFactory(owner="holdenk", repo="app-x"))
+        response = client.post(f"/security/{report.pk}/cve-allocate/", {"title": "t"})
+        assert b"No PMC mapping" in response.content
+
+
+@pytest.mark.django_db
+class TestSecurityCVEState:
+    @patch("franktheunicorn.security.cve_api.fetch_record")
+    def test_updates_record_state(self, mock_fetch: MagicMock, client: Client, db: Any) -> None:
+        from franktheunicorn.security.cve_api import CVERecord
+        from tests.factories import CVEAPITokenFactory
+
+        CVEAPITokenFactory(pmc="spark", op="write")
+        mock_fetch.return_value = CVERecord(cve_id="CVE-2026-12345", found=True, state="PUBLISHED")
+        report = SecurityReportFactory(
+            matched_cve_id="CVE-2026-12345",
+            project=ProjectFactory(owner="apache", repo="spark"),
+        )
+        response = client.post(f"/security/{report.pk}/cve-state/")
+        assert response.status_code == 200
+        report.refresh_from_db()
+        assert report.cve_record_state == "PUBLISHED"
+        assert report.cve_record_checked_at is not None
+
+    @patch("franktheunicorn.security.cve_api.fetch_record")
+    def test_not_found_keeps_state(self, mock_fetch: MagicMock, client: Client, db: Any) -> None:
+        from franktheunicorn.security.cve_api import CVERecord
+        from tests.factories import CVEAPITokenFactory
+
+        CVEAPITokenFactory(pmc="spark", op="write")
+        mock_fetch.return_value = CVERecord(cve_id="CVE-2026-12345", found=False)
+        report = SecurityReportFactory(
+            matched_cve_id="CVE-2026-12345",
+            cve_record_state="RESERVED",
+            project=ProjectFactory(owner="apache", repo="spark"),
+        )
+        response = client.post(f"/security/{report.pk}/cve-state/")
+        assert b"No document" in response.content
+        report.refresh_from_db()
+        assert report.cve_record_state == "RESERVED"
+
+    def test_no_cve_id_blocks(self, client: Client, db: Any) -> None:
+        report = SecurityReportFactory(matched_cve_id="")
+        response = client.post(f"/security/{report.pk}/cve-state/")
+        assert b"No CVE id" in response.content
+
+
+@pytest.mark.django_db
+class TestSecurityCVEAdvisory:
+    def _report(self) -> Any:
+        return SecurityReportFactory(
+            title="Widget overflow",
+            matched_cve_id="CVE-2026-12345",
+            parsed_impact="RCE via the widget parser.",
+            project=ProjectFactory(owner="apache", repo="spark"),
+        )
+
+    @patch("franktheunicorn.security.cve_api.fetch_record")
+    def test_preview_merges_existing_record(
+        self, mock_fetch: MagicMock, client: Client, db: Any
+    ) -> None:
+        from franktheunicorn.security.cve_api import CVERecord
+        from tests.factories import CVEAPITokenFactory
+
+        CVEAPITokenFactory(pmc="spark", op="write")
+        mock_fetch.return_value = CVERecord(
+            cve_id="CVE-2026-12345",
+            found=True,
+            state="RESERVED",
+            raw={
+                "cveMetadata": {"cveId": "CVE-2026-12345", "serial": 3, "state": "PUBLISHED"},
+                "CNA_private": {"owner": "spark", "state": "RESERVED"},
+                "containers": {"cna": {"title": "Old"}},
+            },
+        )
+        report = self._report()
+        response = client.post(f"/security/{report.pk}/cve-advisory/")
+        assert response.status_code == 200
+        # The draft carries the report's title and preserves the serial.
+        assert b"Widget overflow" in response.content
+        assert b"&quot;serial&quot;: 3" in response.content
+
+    def test_preview_without_token_builds_fresh(self, client: Client, db: Any) -> None:
+        report = self._report()
+        response = client.post(f"/security/{report.pk}/cve-advisory/")
+        assert response.status_code == 200
+        assert b"fresh record" in response.content
+        assert b"Widget overflow" in response.content
+
+    @patch("franktheunicorn.security.cve_api.fetch_record")
+    @patch("franktheunicorn.security.cve_api.update_record")
+    def test_push_round_trips_state(
+        self, mock_update: MagicMock, mock_fetch: MagicMock, client: Client, db: Any
+    ) -> None:
+        from franktheunicorn.security.cve_api import CVERecord
+        from tests.factories import CVEAPITokenFactory
+
+        CVEAPITokenFactory(pmc="spark", op="write")
+        mock_fetch.return_value = CVERecord(cve_id="CVE-2026-12345", found=True, state="PUBLISHED")
+        report = self._report()
+        record = {
+            "dataType": "CVE_RECORD",
+            "cveMetadata": {"cveId": "CVE-2026-12345", "state": "PUBLISHED"},
+            "containers": {"cna": {"title": "Widget overflow"}},
+        }
+        response = client.post(
+            f"/security/{report.pk}/cve-advisory/push/", {"record_json": json.dumps(record)}
+        )
+        assert response.status_code == 200
+        assert b"Pushed" in response.content
+        mock_update.assert_called_once()
+        report.refresh_from_db()
+        assert report.cve_record_state == "PUBLISHED"
+
+    def test_push_rejects_invalid_json(self, client: Client, db: Any) -> None:
+        from tests.factories import CVEAPITokenFactory
+
+        CVEAPITokenFactory(pmc="spark", op="write")
+        report = self._report()
+        response = client.post(
+            f"/security/{report.pk}/cve-advisory/push/", {"record_json": "{nope"}
+        )
+        assert b"not valid JSON" in response.content

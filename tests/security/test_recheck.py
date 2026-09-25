@@ -18,8 +18,12 @@ from franktheunicorn.core.models import SecurityRecheckRun
 from franktheunicorn.security.fix_agent import FixAgentError, RunGoneError
 from franktheunicorn.security.recheck import (
     _verdicts_from,
+    apply_fix_landed_results,
     apply_recheck_results,
+    build_fix_landed_prompt,
     build_recheck_prompt,
+    fix_landed_candidates,
+    launch_fix_landed_recheck,
     launch_recheck,
     poll_rechecks,
     untriaged_by_project,
@@ -404,3 +408,187 @@ class TestOneLiveRunPerProjectChunk:
         ):
             launch_recheck(report.project, [report], make_operator_config())
         assert not SecurityRecheckRun.objects.filter(status="launched").exists()
+
+
+class TestFixLandedCandidates:
+    @pytest.mark.django_db
+    def test_only_indeterminate_reports_with_a_project_are_covered(self) -> None:
+        included = SecurityReportFactory(fix_landed_status="indeterminate")
+        SecurityReportFactory(fix_landed_status="merged")  # git already answered
+        SecurityReportFactory(fix_landed_status="indeterminate", project=None)
+        SecurityReportFactory(fix_landed_status="indeterminate", status="invalid")
+        SecurityReportFactory()  # never checked
+
+        grouped = fix_landed_candidates()
+
+        assert list(grouped) == [included.project]
+        assert grouped[included.project] == [included]
+
+
+class TestBuildFixLandedPrompt:
+    @pytest.mark.django_db
+    def test_the_prompt_names_where_the_fix_was_expected(self) -> None:
+        report = SecurityReportFactory(
+            title="mergeDir escapes",
+            finding_id="f002",
+            triage_summary="Path traversal.",
+            fixed_in_branch="master, branch-3.5",
+        )
+        prompt = build_fix_landed_prompt(report.project, [report])
+        assert f"report #{report.pk}" in prompt
+        assert "master, branch-3.5" in prompt
+        assert "landed" in prompt and "not-landed" in prompt and "unclear" in prompt
+        assert "UNTRUSTED DATA" in prompt
+
+
+class TestLaunchFixLandedRecheck:
+    @pytest.mark.django_db
+    def test_the_run_row_is_the_fix_landed_kind(self) -> None:
+        report = SecurityReportFactory(fix_landed_status="indeterminate")
+        with (
+            patch.dict(os.environ, {"CURSOR_API_KEY": "key"}),
+            patch(
+                "franktheunicorn.security.recheck.create_cursor_agent",
+                return_value=("bc-f", "run-f"),
+            ) as mock_create,
+        ):
+            runs = launch_fix_landed_recheck(report.project, [report], make_operator_config())
+        assert len(runs) == 1
+        assert runs[0].kind == SecurityRecheckRun.KIND_FIX_LANDED
+        assert "fix-landed" in mock_create.call_args.args[0]["name"]
+
+    @pytest.mark.django_db
+    def test_a_recheck_in_flight_does_not_block_a_fix_landed_launch(self) -> None:
+        """The kinds have separate slots — a month-of-commits recheck says
+        nothing about whether the known fix branch landed."""
+        report = SecurityReportFactory(fix_landed_status="indeterminate")
+        SecurityRecheckRun.objects.create(
+            project=report.project,
+            kind=SecurityRecheckRun.KIND_RECHECK,
+            status="launched",
+            report_count=1,
+            chunk_index=0,
+        )
+        with (
+            patch.dict(os.environ, {"CURSOR_API_KEY": "key"}),
+            patch(
+                "franktheunicorn.security.recheck.create_cursor_agent",
+                return_value=("bc-f", "run-f"),
+            ),
+        ):
+            runs = launch_fix_landed_recheck(report.project, [report], make_operator_config())
+        assert len(runs) == 1
+
+    @pytest.mark.django_db
+    def test_a_fix_landed_run_in_flight_blocks_a_second(self) -> None:
+        report = SecurityReportFactory(fix_landed_status="indeterminate")
+        SecurityRecheckRun.objects.create(
+            project=report.project,
+            kind=SecurityRecheckRun.KIND_FIX_LANDED,
+            status="launched",
+            report_count=1,
+            chunk_index=0,
+        )
+        with (
+            patch.dict(os.environ, {"CURSOR_API_KEY": "key"}),
+            patch("franktheunicorn.security.recheck.create_cursor_agent") as mock_create,
+            pytest.raises(FixAgentError, match="already running"),
+        ):
+            launch_fix_landed_recheck(report.project, [report], make_operator_config())
+        assert not mock_create.called
+
+
+class TestApplyFixLandedResults:
+    @pytest.mark.django_db
+    def test_verdicts_land_with_the_agent_method_stamped(self) -> None:
+        report = SecurityReportFactory(fix_landed_status="indeterminate")
+        other = SecurityReportFactory(project=report.project, fix_landed_status="indeterminate")
+        run = SecurityRecheckRunFactory(
+            project=report.project, kind=SecurityRecheckRun.KIND_FIX_LANDED, report_count=2
+        )
+        result = (
+            f'[{{"report": {report.pk}, "verdict": "landed", "reason": "commit abc123"}},'
+            f'{{"report": {other.pk}, "verdict": "not-landed", "reason": "still there"}}]'
+        )
+
+        assert apply_fix_landed_results(run, result) == 2
+
+        report.refresh_from_db()
+        other.refresh_from_db()
+        assert report.fix_landed_status == "merged"
+        assert report.fix_landed_method == "agent"
+        assert report.fix_landed_detail["note"] == "commit abc123"
+        assert other.fix_landed_status == "not-merged"
+
+    @pytest.mark.django_db
+    def test_unclear_is_not_written(self) -> None:
+        report = SecurityReportFactory(fix_landed_status="indeterminate")
+        run = SecurityRecheckRunFactory(
+            project=report.project, kind=SecurityRecheckRun.KIND_FIX_LANDED
+        )
+
+        written = apply_fix_landed_results(
+            run, f'[{{"report": {report.pk}, "verdict": "unclear", "reason": "cannot tell"}}]'
+        )
+
+        report.refresh_from_db()
+        assert written == 0
+        assert report.fix_landed_status == "indeterminate"
+
+    @pytest.mark.django_db
+    def test_a_git_verdict_that_arrived_since_the_launch_is_kept(self) -> None:
+        """Proof beats a pointer: the sweep stamped merged while the agent ran."""
+        report = SecurityReportFactory(fix_landed_status="merged", fix_landed_method="git")
+        run = SecurityRecheckRunFactory(
+            project=report.project, kind=SecurityRecheckRun.KIND_FIX_LANDED
+        )
+
+        written = apply_fix_landed_results(
+            run, f'[{{"report": {report.pk}, "verdict": "not-landed", "reason": "guess"}}]'
+        )
+
+        report.refresh_from_db()
+        assert written == 0
+        assert report.fix_landed_status == "merged"
+        assert report.fix_landed_method == "git"
+
+    @pytest.mark.django_db
+    def test_another_projects_report_is_not_touched(self) -> None:
+        report = SecurityReportFactory(fix_landed_status="indeterminate")
+        run = SecurityRecheckRunFactory(kind=SecurityRecheckRun.KIND_FIX_LANDED)
+
+        written = apply_fix_landed_results(
+            run, f'[{{"report": {report.pk}, "verdict": "landed", "reason": "x"}}]'
+        )
+
+        report.refresh_from_db()
+        assert written == 0
+        assert report.fix_landed_status == "indeterminate"
+
+
+class TestPollDispatchesOnKind:
+    @pytest.mark.django_db
+    def test_a_finished_fix_landed_run_writes_fix_landed_verdicts(self) -> None:
+        report = SecurityReportFactory(fix_landed_status="indeterminate")
+        run = SecurityRecheckRunFactory(
+            project=report.project, kind=SecurityRecheckRun.KIND_FIX_LANDED
+        )
+        payload = {
+            "status": "FINISHED",
+            "result": f'[{{"report": {report.pk}, "verdict": "landed", "reason": "c abc"}}]',
+        }
+        with (
+            patch.dict(os.environ, {"CURSOR_API_KEY": "key"}),
+            patch(
+                "franktheunicorn.security.recheck.fetch_run",
+                return_value=payload,
+            ),
+        ):
+            finished, failed, still = poll_rechecks(make_operator_config())
+
+        run.refresh_from_db()
+        report.refresh_from_db()
+        assert (finished, failed, still) == (1, 0, 0)
+        assert run.status == "finished"
+        assert report.fix_landed_status == "merged"
+        assert report.recheck_status == ""  # the recheck column is not this run's to write

@@ -1,0 +1,100 @@
+{# The ASF CVE process panel, and the answer to its buttons. Self-contained #}
+{# like _security_fix_status.html: rendered on the detail page and swapped by #}
+{# the allocate/state endpoints, so it always shows the row's current state — #}
+{# PMC mapping, token presence (never the token), record state, and whatever #}
+{# the last click had to say. #}
+<div class="cve-api" style="background: var(--card); border: 1px solid var(--border); border-radius: 4px; padding: 0.75rem;">
+    {% if blocked %}
+    <div class="verify-result error-note">{{ blocked }}</div>
+    {% endif %}
+    {% if note %}
+    <div class="verify-result queued-note">{{ note }}</div>
+    {% endif %}
+
+    <h3 style="font-size: 0.9rem; margin-bottom: 0.5rem;">ASF CVE Process
+        <span class="muted" style="font-weight: 400; font-size: 0.8rem;">cveprocess.apache.org</span>
+    </h3>
+
+    {% if cve_config_error %}
+    <p class="muted" style="font-size: 0.85rem; margin: 0;">
+        Could not read the operator or project config ({{ cve_config_error }}), so the
+        PMC mapping and token state are unknown — the rest of the page is unaffected.
+    </p>
+    {% elif not cve_pmc %}
+    <p class="muted" style="font-size: 0.85rem; margin: 0;">
+        No PMC mapping for this project. Set <code>cve_process_pmc</code> in the
+        project YAML (apache/* repos fall back to the repo name).
+    </p>
+    {% else %}
+    <p style="font-size: 0.85rem; margin: 0 0 0.5rem;">
+        PMC: <code>{{ cve_pmc }}</code> &middot;
+        tokens:
+        {% for op, t in cve_tokens.items %}
+            {{ op }}
+            {% if t.present %}
+                ✓ pasted {{ t.created_at|timesince }} ago{% if t.stale %}
+                <span class="badge badge-warning" title="Tokens live for hours; this one is older than {{ cve_token_max_age_hours }}h and the next call will probably reject it">likely stale</span>{% endif %}
+            {% else %}
+                <span class="muted">none</span>
+            {% endif %}{% if not forloop.last %} &middot; {% endif %}
+        {% endfor %}
+        &middot; <a href="{% url 'dashboard:security_list' %}">paste tokens</a>
+    </p>
+
+    {% if report.matched_cve_id %}
+    <p style="font-size: 0.85rem; margin: 0 0 0.5rem;">
+        <code>{{ report.matched_cve_id }}</code> —
+        record state:
+        {% if report.cve_record_state %}
+            <strong>{{ report.get_cve_record_state_display }}</strong>
+            <span class="muted">(checked {{ report.cve_record_checked_at|timesince }} ago)</span>
+        {% else %}
+            <span class="muted">never checked</span>
+        {% endif %}
+    </p>
+    {% if cve_tokens.write.present %}
+    <button class="action-btn"
+            hx-post="{% url 'dashboard:security_cve_state' report.pk %}"
+            hx-target="#cve-api-area"
+            hx-swap="innerHTML">
+        ↻ Refresh record state
+    </button>
+    {% endif %}
+    <button class="action-btn"
+            hx-post="{% url 'dashboard:security_cve_advisory_preview' report.pk %}"
+            hx-target="#cve-advisory-area"
+            hx-swap="innerHTML">
+        📄 Draft advisory JSON
+    </button>
+    {% endif %}
+
+    {% if cve_tokens.allocate.present %}
+    {# The title goes into the CVE record and an email to the PMC's security #}
+    {# address, and report.title is attacker-supplied — so it is an editable #}
+    {# field, not a hidden value. #}
+    <form hx-post="{% url 'dashboard:security_cve_allocate' report.pk %}"
+          hx-target="#cve-api-area"
+          hx-swap="innerHTML"
+          style="margin-top: 0.5rem; display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap;">
+        {% csrf_token %}
+        <input type="text" name="title" value="{{ report.title }}" required
+               style="flex: 1; min-width: 16rem; font-size: 0.85rem; padding: 0.3rem 0.5rem; border: 1px solid var(--border); border-radius: 4px;"
+               title="Goes into the CVE record and the email to the PMC's security address">
+        <button class="action-btn post" type="submit"
+                {% if report.matched_cve_id %}
+                hx-confirm="{{ report.matched_cve_id }} is already assigned to this report. Allocate a fresh id and replace it? The old id stays RESERVED at the service."
+                {% else %}
+                hx-confirm="Request a CVE id for {{ cve_pmc }} from the ASF CVE process service? The title above goes into the request."
+                {% endif %}>
+            🎟 Allocate CVE id
+        </button>
+    </form>
+    {% elif not report.matched_cve_id %}
+    <p class="muted" style="font-size: 0.85rem; margin: 0;">
+        Paste an allocate token (security list page) to request a CVE id without leaving the report.
+    </p>
+    {% endif %}
+    {% endif %}
+</div>
+{# Where the advisory preview/push partial lands. #}
+<div id="cve-advisory-area" style="margin-top: 0.5rem;"></div>

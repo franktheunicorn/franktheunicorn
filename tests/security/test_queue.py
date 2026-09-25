@@ -11,8 +11,10 @@ from franktheunicorn.config.models import OperatorConfig, SecurityTriageConfig
 from franktheunicorn.core.models import WorkerCommand
 from franktheunicorn.security.queue import (
     PRIORITY_BULK,
+    PRIORITY_INTERACTIVE,
     cancel_pending_for_reports,
     queue_branch_sweep,
+    queue_fix_landed,
     queue_triage,
     queue_triage_if_enabled,
     queue_triage_on_request,
@@ -261,3 +263,21 @@ class TestBranchSweepQueue:
         creates a row nothing dispatches and the button silently does nothing."""
         with pytest.raises(ValueError, match="only queues"):
             queue_branch_sweep("run_agents")
+
+    def test_the_fix_landed_sweep_is_a_sweep_command(self) -> None:
+        assert queue_branch_sweep("check_fixes_landed") is True
+        assert queue_branch_sweep("check_fixes_landed") is False
+        assert WorkerCommand.objects.filter(command="check_fixes_landed").count() == 1
+
+
+@pytest.mark.django_db
+class TestFixLandedQueue:
+    """The per-report "Check if landed" button's door."""
+
+    def test_one_click_is_one_command_at_interactive_priority(self) -> None:
+        report = SecurityReportFactory()
+        assert queue_fix_landed(report) is True
+        assert queue_fix_landed(report) is False
+        cmd = WorkerCommand.objects.get(command="check_fix_landed")
+        assert cmd.security_report == report
+        assert cmd.priority == PRIORITY_INTERACTIVE

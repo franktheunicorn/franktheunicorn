@@ -1,0 +1,55 @@
+{# The CVE process token card. Tokens are hours-lived and per-PMC, so they #}
+{# are pasted here rather than configured anywhere; the value is write-only #}
+{# (never rendered back) and an empty submit clears the row. Collapsed by #}
+{# default — it is plumbing, not the page's job. #}
+{% if cve_api_pmcs %}
+<details style="margin-bottom: 1rem; background: var(--card); border: 1px solid var(--border); border-radius: 4px; padding: 0.5rem 0.75rem;">
+    <summary style="font-size: 0.85rem; cursor: pointer;">
+        ASF CVE process tokens
+        <span class="muted" style="font-size: 0.8rem;">
+            — from cveprocess.apache.org/users/token (browser login); they live for hours
+        </span>
+    </summary>
+    <table style="font-size: 0.85rem; margin-top: 0.5rem; border-collapse: collapse;">
+        <tr>
+            <th style="text-align: left; padding-right: 1rem;">PMC</th>
+            <th style="text-align: left; padding-right: 1rem;">Operation</th>
+            <th style="text-align: left; padding-right: 1rem;">Token</th>
+            <th></th>
+        </tr>
+        {% for row in cve_api_pmcs %}
+            {% for op, t in row.ops.items %}
+            <tr>
+                <td style="padding-right: 1rem;"><code>{{ row.pmc }}</code></td>
+                <td style="padding-right: 1rem;">{{ op }}</td>
+                <td style="padding-right: 1rem;">
+                    {% if t.present %}
+                        pasted {{ t.created_at|timesince }} ago
+                        {% if t.stale %}
+                        <span class="badge badge-warning" title="Older than {{ row.max_age_hours }}h — the next call will probably reject it">likely stale</span>
+                        {% endif %}
+                    {% else %}
+                        <span class="muted">none</span>
+                    {% endif %}
+                </td>
+                <td>
+                    <form method="post" action="{% url 'dashboard:security_cve_token_save' %}" style="display: flex; gap: 0.3rem;">
+                        {% csrf_token %}
+                        <input type="hidden" name="pmc" value="{{ row.pmc }}">
+                        <input type="hidden" name="op" value="{{ op }}">
+                        <input type="password" name="token" autocomplete="off"
+                               placeholder="paste token"
+                               style="font-size: 0.8rem; padding: 0.2rem 0.4rem; border: 1px solid var(--border); border-radius: 4px;">
+                        <button type="submit" class="action-btn" style="font-size: 0.8rem; padding: 0.2rem 0.5rem;">Save</button>
+                        {% if t.present %}
+                        <button type="submit" class="action-btn" style="font-size: 0.8rem; padding: 0.2rem 0.5rem;"
+                                title="Drop the stored token">Clear</button>
+                        {% endif %}
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        {% endfor %}
+    </table>
+</details>
+{% endif %}

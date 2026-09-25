@@ -22,6 +22,10 @@ Commands supported:
   per branch per project.
 - ``scan_security_fixed``: reverse-apply each report's proposed patch to find the
   ones already fixed. Git only, and proof rather than the cloud recheck's guess.
+- ``check_fix_landed`` / ``check_fixes_landed``: for a report that *has* a fix
+  branch, is that branch's commit an ancestor of master or a release line, or
+  in a release tag? Git only; the per-report form is the detail page's button,
+  the targetless form sweeps every project.
 - ``run_agents``: force-run the review pipeline on a PR (no trusted-author
   gate, no dedup against existing drafts).
 """
@@ -305,6 +309,8 @@ def _dispatch(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
         "poll_security_rechecks": _poll_security_rechecks,
         "match_security_branches": _match_security_branches,
         "scan_security_fixed": _scan_security_fixed,
+        "check_fix_landed": _check_fix_landed,
+        "check_fixes_landed": _check_fixes_landed,
         "run_agents": _run_agents,
     }
     handler = handlers.get(cmd.command)
@@ -614,6 +620,34 @@ def _scan_security_fixed(cmd: WorkerCommand, operator_config: OperatorConfig) ->
         cmd.log = "fixed-scan: no project has an open security report"
         return
     cmd.log = _sweep_log(cmd, projects, scan_already_fixed, operator_config)
+
+
+def _check_fix_landed(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
+    """The detail page's "Check if landed" button: one report, git ancestry."""
+    if cmd.security_report is None:
+        msg = "check_fix_landed requires a security_report target"
+        raise ValueError(msg)
+
+    from franktheunicorn.security.fix_landed import check_fix_landed
+
+    note = check_fix_landed(cmd.security_report, operator_config)
+    cmd.log = f"fix-landed check for report #{cmd.security_report.pk}: {note}"
+
+
+def _check_fixes_landed(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
+    """Sweep every project: did the branches the backlog knows about land upstream?
+
+    Targetless for the same reason the other sweeps are — the fetch is per
+    project, and per report it would be the same fetch several hundred times.
+    """
+    from franktheunicorn.security.branch_scan import projects_with_open_reports
+    from franktheunicorn.security.fix_landed import check_project_fixes
+
+    projects = projects_with_open_reports()
+    if not projects:
+        cmd.log = "fix-landed check: no project has an open security report"
+        return
+    cmd.log = _sweep_log(cmd, projects, check_project_fixes, operator_config)
 
 
 def _run_agents(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
