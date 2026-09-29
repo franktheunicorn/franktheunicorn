@@ -70,6 +70,19 @@
             ↻ Check Untriaged vs Recent Changes
         </button>
     </form>
+    {# The triaged-real fan-out: one cheap cloud agent per valid report reads #}
+    {# the repo and answers "is this issue fixed yet?". Per-report, not #}
+    {# batched — each run is small, and a report already being checked is #}
+    {# left to the run in flight. #}
+    <form method="post" action="{% url 'dashboard:security_check_valid_fixed' %}" style="display: inline;">
+        {% csrf_token %}
+        <button type="submit" class="action-btn"
+                style="font-size: 0.85rem; padding: 0.4rem 0.8rem;"
+                hx-post="{% url 'dashboard:security_check_valid_fixed' %}"
+                hx-confirm="Fan out one Cursor cloud agent per valid report to check whether each confirmed issue is fixed upstream? One paid run per report — real money, minutes each. Verdicts land on the reports as the runs finish.">
+            ↻ Check Valid Reports Fixed
+        </button>
+    </form>
     {# The two git-only sweeps. No agent and no model, so cents rather than #}
     {# dollars — but slow: a fetch plus two git logs per branch per project. #}
     {# Worker commands at bulk priority; the flash says where to watch. #}

@@ -1230,15 +1230,20 @@ class SecurityRecheckRun(models.Model):
     #: question (did the last month of commits fix these? writes
     #: ``SecurityReport.recheck_*``); "fix-landed" is the fallback for reports
     #: git could not prove landed or not (writes ``SecurityReport.fix_landed_*``
-    #: with ``fix_landed_method="agent"``). One model for both because the
-    #: lifecycle — one POST, poll, write per-report verdicts — is identical;
-    #: the kind is in the uniqueness constraint so the two never block each
-    #: other.
+    #: with ``fix_landed_method="agent"``); "valid-check" is the per-report
+    #: fan-out over the triaged-real backlog (one run per report, asking "is
+    #: this issue fixed yet?", writing ``SecurityReport.recheck_*``). One model
+    #: for all three because the lifecycle — one POST, poll, write per-report
+    #: verdicts — is identical; the kind is in the uniqueness constraint so the
+    #: three never block each other. For "valid-check" the chunk_index carries
+    #: the report pk: the constraint then dedups a double-press per report.
     KIND_RECHECK = "recheck"
     KIND_FIX_LANDED = "fix-landed"
+    KIND_VALID_CHECK = "valid-check"
     KIND_CHOICES = [
         (KIND_RECHECK, "Did recent commits fix these?"),
         (KIND_FIX_LANDED, "Did the known fix land upstream?"),
+        (KIND_VALID_CHECK, "Is this valid report fixed yet?"),
     ]
     kind = models.CharField(max_length=20, choices=KIND_CHOICES, default=KIND_RECHECK)
 

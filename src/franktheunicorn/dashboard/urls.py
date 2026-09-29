@@ -86,6 +86,13 @@ urlpatterns = [
         views.security_recheck_fixed,
         name="security_recheck_fixed",
     ),
+    # The triaged-real fan-out: one cheap cloud agent per valid report answers
+    # "is this issue fixed yet?".
+    path(
+        "security/check-valid-fixed/",
+        views.security_check_valid_fixed,
+        name="security_check_valid_fixed",
+    ),
     # The two git-only backlog sweeps: which branch carries each fix, and which
     # reports a fix already landed for. Both fetch origin first; both are worker
     # commands because both are minutes of git per project.

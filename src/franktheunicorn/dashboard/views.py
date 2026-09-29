@@ -3184,6 +3184,93 @@ def security_recheck_fixed(request: HttpRequest) -> HttpResponse:
     return _back_to_security_list(request)
 
 
+@require_POST
+def security_check_valid_fixed(request: HttpRequest) -> HttpResponse:
+    """Fan out one cloud agent per triaged-real report: is it fixed yet?
+
+    The per-report sibling of :func:`security_recheck_fixed`: that one batches
+    the untriaged backlog into one agent per project, this one spends one cheap
+    agent run on each report the operator has already ruled valid. The launches
+    are one POST each and happen here; the waiting is the same
+    ``poll_security_rechecks`` worker command the other rechecks ride on.
+    """
+    from franktheunicorn.config.loader import get_operator_config
+    from franktheunicorn.security.fix_agent import FixAgentError, cursor_api_key
+    from franktheunicorn.security.queue import PRIORITY_INTERACTIVE, queue_recheck_poll
+    from franktheunicorn.security.recheck import launch_valid_check, valid_reports
+
+    operator_config = get_operator_config()
+    config = operator_config.security_triage.fix_agent
+    if not config.enabled:
+        messages.error(
+            request,
+            "The fix agent is switched off (security_triage.fix_agent.enabled: false "
+            "in operator.yaml), and the valid-report check rides on it.",
+        )
+        return _back_to_security_list(request)
+    if not cursor_api_key(config):
+        messages.error(
+            request,
+            f"The valid-report check needs a Cursor API key — set {config.api_key_env} "
+            "in the environment.",
+        )
+        return _back_to_security_list(request)
+
+    reports = valid_reports()
+    if not reports:
+        messages.info(request, "No valid reports with a project to check.")
+        return _back_to_security_list(request)
+
+    # Same stale-run rule as the other recheck buttons: a launched run older
+    # than the poll's own timeout is not coming back, and leaving it
+    # "launched" would block that report's slot forever.
+    stale_before = timezone.now() - timedelta(seconds=config.recheck_timeout_seconds)
+    launched_runs = SecurityRecheckRun.objects.filter(status="launched")
+    stale = launched_runs.filter(created_at__lt=stale_before)
+    if stale.exists():
+        stale.update(
+            status="error",
+            detail="the poll never finished it — marked stale by a later recheck press",
+            updated_at=timezone.now(),
+        )
+    # In-flight is per report here: chunk_index carries the report pk.
+    in_flight = set(
+        launched_runs.filter(
+            created_at__gte=stale_before, kind=SecurityRecheckRun.KIND_VALID_CHECK
+        ).values_list("chunk_index", flat=True)
+    )
+    launched = 0
+    skipped = 0
+    failures: list[str] = []
+    for report in reports:
+        if report.pk in in_flight:
+            # The running agent is already answering this report; a second run
+            # would answer the same question twice at full price.
+            skipped += 1
+            continue
+        try:
+            launch_valid_check(report, operator_config)
+        except FixAgentError as exc:
+            failures.append(f"#{report.pk}: {exc}")
+        else:
+            launched += 1
+    # Any live run needs the poll, not just the ones this press started — an
+    # orphaned run's verdicts were paid for and should not be thrown away.
+    if launched or SecurityRecheckRun.objects.filter(status="launched").exists():
+        queue_recheck_poll(priority=PRIORITY_INTERACTIVE)
+    if launched:
+        messages.success(
+            request,
+            f"Launched {launched} agent(s), one per valid report — verdicts land on "
+            "the reports as the runs finish.",
+        )
+    if skipped:
+        messages.info(request, f"{skipped} report(s) already have a check running.")
+    for failure in failures:
+        messages.error(request, f"Valid-check not launched for report {failure}.")
+    return _back_to_security_list(request)
+
+
 def _git_scan_blocker(report: SecurityReport, what: str, needs: str) -> str:
     """Why a git-only scan of *report* can't run, or "" if it can.
 

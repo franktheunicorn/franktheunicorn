@@ -20,13 +20,17 @@ from franktheunicorn.security.recheck import (
     _verdicts_from,
     apply_fix_landed_results,
     apply_recheck_results,
+    apply_valid_check_results,
     build_fix_landed_prompt,
     build_recheck_prompt,
+    build_valid_check_prompt,
     fix_landed_candidates,
     launch_fix_landed_recheck,
     launch_recheck,
+    launch_valid_check,
     poll_rechecks,
     untriaged_by_project,
+    valid_reports,
 )
 from tests.factories import (
     SecurityRecheckRunFactory,
@@ -592,3 +596,238 @@ class TestPollDispatchesOnKind:
         assert run.status == "finished"
         assert report.fix_landed_status == "merged"
         assert report.recheck_status == ""  # the recheck column is not this run's to write
+
+    @pytest.mark.django_db
+    def test_a_finished_valid_check_run_writes_a_recheck_verdict(self) -> None:
+        report = SecurityReportFactory(status="valid")
+        run = SecurityRecheckRunFactory(
+            project=report.project,
+            kind=SecurityRecheckRun.KIND_VALID_CHECK,
+            chunk_index=report.pk,
+        )
+        payload = {
+            "status": "FINISHED",
+            "result": f'[{{"report": {report.pk}, "verdict": "likely-fixed", "reason": "c abc"}}]',
+        }
+        with (
+            patch.dict(os.environ, {"CURSOR_API_KEY": "key"}),
+            patch(
+                "franktheunicorn.security.recheck.fetch_run",
+                return_value=payload,
+            ),
+        ):
+            finished, failed, still = poll_rechecks(make_operator_config())
+
+        run.refresh_from_db()
+        report.refresh_from_db()
+        assert (finished, failed, still) == (1, 0, 0)
+        assert run.status == "finished"
+        assert report.recheck_status == "likely-fixed"
+        assert report.fix_landed_status == ""  # the fix-landed column is not this run's
+
+
+class TestValidReports:
+    @pytest.mark.django_db
+    def test_only_valid_reports_with_a_project_are_covered(self) -> None:
+        included = SecurityReportFactory(status="valid")
+        SecurityReportFactory(status="new")  # not triaged yet
+        SecurityReportFactory(status="invalid")  # ruled out
+        SecurityReportFactory(status="valid", project=None)  # no repo to check
+
+        found = valid_reports()
+
+        assert found == [included]
+
+    @pytest.mark.django_db
+    def test_a_valid_report_with_a_confirmed_branch_is_still_covered(self) -> None:
+        # The git fix-landed check answers those for free, but only once run —
+        # the button's remit is the whole triaged-real backlog.
+        report = SecurityReportFactory(status="valid", fixed_in_branch="branch-3.5")
+
+        assert valid_reports() == [report]
+
+
+class TestBuildValidCheckPrompt:
+    @pytest.mark.django_db
+    def test_the_prompt_names_the_report_and_demands_json(self) -> None:
+        report = SecurityReportFactory(
+            status="valid",
+            title="mergeDir escapes",
+            finding_id="f002",
+            triage_summary="Path traversal.",
+            source_archive="scan-spark-branch-3.5-20260811.zip",
+        )
+        prompt = build_valid_check_prompt(report)
+        assert f"report #{report.pk}" in prompt.lower() or f"REPORT #{report.pk}" in prompt
+        assert "mergeDir escapes" in prompt
+        assert "branch-3.5" in prompt  # the archive's scanned branch, not a guess
+        assert "likely-fixed" in prompt and "still-valid" in prompt
+        assert "UNTRUSTED DATA" in prompt
+
+    @pytest.mark.django_db
+    def test_the_patch_is_inlined_as_the_shape_of_fixed(self) -> None:
+        report = SecurityReportFactory(
+            status="valid", proposed_patch="--- a/Foo.java\n+++ b/Foo.java\n-bad\n+good\n"
+        )
+        prompt = build_valid_check_prompt(report)
+        assert "proposed patch" in prompt
+        assert "-bad" in prompt and "+good" in prompt
+
+    @pytest.mark.django_db
+    def test_a_report_without_a_patch_gets_no_patch_section(self) -> None:
+        report = SecurityReportFactory(status="valid", proposed_patch="")
+        prompt = build_valid_check_prompt(report)
+        assert "proposed patch" not in prompt
+
+
+class TestLaunchValidCheck:
+    @pytest.mark.django_db
+    def test_the_run_row_is_per_report(self) -> None:
+        report = SecurityReportFactory(status="valid")
+        with (
+            patch.dict(os.environ, {"CURSOR_API_KEY": "key"}),
+            patch(
+                "franktheunicorn.security.recheck.create_cursor_agent",
+                return_value=("bc-v", "run-v"),
+            ) as mock_create,
+        ):
+            run = launch_valid_check(report, make_operator_config())
+        assert run.kind == SecurityRecheckRun.KIND_VALID_CHECK
+        assert run.chunk_index == report.pk  # the per-report dedup key
+        assert run.report_count == 1
+        assert run.agent_id == "bc-v"
+        payload = mock_create.call_args.args[0]
+        assert f"#{report.pk}" in payload["name"]
+        assert payload["autoCreatePR"] is False
+
+    @pytest.mark.django_db
+    def test_a_second_launch_while_one_is_running_does_not_pay_twice(self) -> None:
+        report = SecurityReportFactory(status="valid")
+        SecurityRecheckRun.objects.create(
+            project=report.project,
+            kind=SecurityRecheckRun.KIND_VALID_CHECK,
+            status="launched",
+            report_count=1,
+            chunk_index=report.pk,
+        )
+        with (
+            patch.dict(os.environ, {"CURSOR_API_KEY": "key"}),
+            patch("franktheunicorn.security.recheck.create_cursor_agent") as mock_create,
+            pytest.raises(FixAgentError, match="already running"),
+        ):
+            launch_valid_check(report, make_operator_config())
+        assert not mock_create.called
+
+    @pytest.mark.django_db
+    def test_a_finished_run_does_not_block_a_fresh_check(self) -> None:
+        report = SecurityReportFactory(status="valid")
+        SecurityRecheckRun.objects.create(
+            project=report.project,
+            kind=SecurityRecheckRun.KIND_VALID_CHECK,
+            status="finished",
+            report_count=1,
+            chunk_index=report.pk,
+        )
+        with (
+            patch.dict(os.environ, {"CURSOR_API_KEY": "key"}),
+            patch(
+                "franktheunicorn.security.recheck.create_cursor_agent",
+                return_value=("bc-v", "run-v"),
+            ),
+        ):
+            run = launch_valid_check(report, make_operator_config())
+        assert run.pk is not None
+
+    @pytest.mark.django_db
+    def test_a_failed_post_releases_the_reports_slot(self) -> None:
+        report = SecurityReportFactory(status="valid")
+        with (
+            patch.dict(os.environ, {"CURSOR_API_KEY": "key"}),
+            patch(
+                "franktheunicorn.security.recheck.create_cursor_agent",
+                side_effect=FixAgentError("could not reach the Cursor API"),
+            ),
+            pytest.raises(FixAgentError),
+        ):
+            launch_valid_check(report, make_operator_config())
+        assert not SecurityRecheckRun.objects.filter(status="launched").exists()
+
+    @pytest.mark.django_db
+    def test_no_api_key_raises_before_any_row(self) -> None:
+        report = SecurityReportFactory(status="valid")
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            pytest.raises(FixAgentError, match="CURSOR_API_KEY"),
+        ):
+            launch_valid_check(report, make_operator_config())
+        assert not SecurityRecheckRun.objects.exists()
+
+    @pytest.mark.django_db
+    def test_a_projectless_report_is_refused(self) -> None:
+        report = SecurityReportFactory(status="valid", project=None)
+        with (
+            patch.dict(os.environ, {"CURSOR_API_KEY": "key"}),
+            pytest.raises(FixAgentError, match="no project"),
+        ):
+            launch_valid_check(report, make_operator_config())
+
+
+class TestApplyValidCheckResults:
+    @pytest.mark.django_db
+    def test_the_verdict_lands_on_the_valid_report(self) -> None:
+        report = SecurityReportFactory(status="valid")
+        run = SecurityRecheckRunFactory(
+            project=report.project,
+            kind=SecurityRecheckRun.KIND_VALID_CHECK,
+            chunk_index=report.pk,
+        )
+        result = (
+            f'[{{"report": {report.pk}, "verdict": "likely-fixed", "reason": "abc123 rewrote it"}}]'
+        )
+        assert apply_valid_check_results(run, result) == 1
+        report.refresh_from_db()
+        assert report.recheck_status == "likely-fixed"
+        assert report.recheck_reason == "abc123 rewrote it"
+        assert report.recheck_method == "agent"
+        assert report.rechecked_at is not None
+
+    @pytest.mark.django_db
+    def test_a_re_ruled_report_is_not_touched(self) -> None:
+        # The operator marked it invalid between launch and finish; that is
+        # newer information than the agent's answer.
+        report = SecurityReportFactory(status="invalid")
+        run = SecurityRecheckRunFactory(
+            project=report.project,
+            kind=SecurityRecheckRun.KIND_VALID_CHECK,
+            chunk_index=report.pk,
+        )
+        written = apply_valid_check_results(
+            run, f'[{{"report": {report.pk}, "verdict": "likely-fixed", "reason": "x"}}]'
+        )
+        assert written == 0
+        report.refresh_from_db()
+        assert report.recheck_status == ""
+
+    @pytest.mark.django_db
+    def test_another_projects_report_is_not_touched(self) -> None:
+        report = SecurityReportFactory(status="valid")
+        run = SecurityRecheckRunFactory(kind=SecurityRecheckRun.KIND_VALID_CHECK)
+        written = apply_valid_check_results(
+            run, f'[{{"report": {report.pk}, "verdict": "still-valid", "reason": "x"}}]'
+        )
+        assert written == 0
+        report.refresh_from_db()
+        assert report.recheck_status == ""
+
+    @pytest.mark.django_db
+    def test_an_unknown_verdict_is_skipped(self) -> None:
+        report = SecurityReportFactory(status="valid")
+        run = SecurityRecheckRunFactory(
+            project=report.project,
+            kind=SecurityRecheckRun.KIND_VALID_CHECK,
+            chunk_index=report.pk,
+        )
+        written = apply_valid_check_results(
+            run, f'[{{"report": {report.pk}, "verdict": "maybe", "reason": "x"}}]'
+        )
+        assert written == 0

@@ -3021,6 +3021,164 @@ class TestSecurityRecheckFixed:
         assert b"did launch and will be polled" in response.content
 
 
+@pytest.mark.django_db
+class TestSecurityCheckValidFixed:
+    """The per-report 'check valid reports fixed' button."""
+
+    def test_launches_one_agent_per_valid_report_and_queues_the_poll(
+        self, client: Client, db: Any
+    ) -> None:
+        from franktheunicorn.core.models import SecurityRecheckRun, WorkerCommand
+
+        one = SecurityReportFactory(status="valid")
+        two = SecurityReportFactory(status="valid", project=one.project)
+        SecurityReportFactory(status="new")  # not triaged — not covered
+        SecurityReportFactory(status="invalid")  # ruled out — not covered
+        SecurityReportFactory(status="valid", project=None)  # no repo to check
+        with (
+            patch.dict("os.environ", {"CURSOR_API_KEY": "key"}),
+            patch(
+                "franktheunicorn.config.loader.get_operator_config",
+                return_value=make_operator_config(),
+            ),
+            patch(
+                "franktheunicorn.security.recheck.create_cursor_agent",
+                return_value=("bc-x", "run-x"),
+            ) as mock_create,
+        ):
+            response = client.post("/security/check-valid-fixed/", follow=True)
+
+        assert response.status_code == 200
+        assert mock_create.call_count == 2
+        assert WorkerCommand.objects.filter(command="poll_security_rechecks").exists()
+        assert b"Launched 2 agent(s)" in response.content
+        runs = SecurityRecheckRun.objects.all()
+        assert {r.kind for r in runs} == {SecurityRecheckRun.KIND_VALID_CHECK}
+        # chunk_index carries the report pk — the per-report dedup key.
+        assert {r.chunk_index for r in runs} == {one.pk, two.pk}
+        assert {r.report_count for r in runs} == {1}
+
+    def test_no_valid_reports_says_so(self, client: Client, db: Any) -> None:
+        SecurityReportFactory(status="new")
+        with (
+            patch.dict("os.environ", {"CURSOR_API_KEY": "key"}),
+            patch(
+                "franktheunicorn.config.loader.get_operator_config",
+                return_value=make_operator_config(),
+            ),
+        ):
+            response = client.post("/security/check-valid-fixed/", follow=True)
+
+        assert b"No valid reports with a project" in response.content
+
+    def test_no_api_key_names_the_env_var(self, client: Client, db: Any) -> None:
+        SecurityReportFactory(status="valid")
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch(
+                "franktheunicorn.config.loader.get_operator_config",
+                return_value=make_operator_config(),
+            ),
+        ):
+            response = client.post("/security/check-valid-fixed/", follow=True)
+
+        assert b"CURSOR_API_KEY" in response.content
+
+    def test_disabled_config_names_the_setting(self, client: Client, db: Any) -> None:
+        SecurityReportFactory(status="valid")
+        with patch(
+            "franktheunicorn.config.loader.get_operator_config",
+            return_value=make_operator_config(enabled=False),
+        ):
+            response = client.post("/security/check-valid-fixed/", follow=True)
+
+        assert b"fix_agent.enabled" in response.content
+
+    def test_a_second_press_skips_the_in_flight_report(self, client: Client, db: Any) -> None:
+        from franktheunicorn.core.models import SecurityRecheckRun, WorkerCommand
+
+        SecurityReportFactory(status="valid")
+        with (
+            patch.dict("os.environ", {"CURSOR_API_KEY": "key"}),
+            patch(
+                "franktheunicorn.config.loader.get_operator_config",
+                return_value=make_operator_config(),
+            ),
+            patch(
+                "franktheunicorn.security.recheck.create_cursor_agent",
+                return_value=("bc-x", "run-x"),
+            ) as mock_create,
+        ):
+            client.post("/security/check-valid-fixed/", follow=True)
+            response = client.post("/security/check-valid-fixed/", follow=True)
+
+        # The first run is still answering this report; a second would pay
+        # twice for the same answer.
+        assert mock_create.call_count == 1
+        assert SecurityRecheckRun.objects.count() == 1
+        assert b"already have a check running" in response.content
+        assert (
+            WorkerCommand.objects.filter(command="poll_security_rechecks", status="pending").count()
+            == 1
+        )
+
+    def test_a_stale_run_does_not_block_a_fresh_check(self, client: Client, db: Any) -> None:
+        from franktheunicorn.core.models import SecurityRecheckRun
+
+        report = SecurityReportFactory(status="valid")
+        stale = SecurityRecheckRunFactory(
+            project=report.project,
+            kind=SecurityRecheckRun.KIND_VALID_CHECK,
+            chunk_index=report.pk,
+            created_at=timezone.now() - timedelta(hours=2),
+        )
+        with (
+            patch.dict("os.environ", {"CURSOR_API_KEY": "key"}),
+            patch(
+                "franktheunicorn.config.loader.get_operator_config",
+                return_value=make_operator_config(),
+            ),
+            patch(
+                "franktheunicorn.security.recheck.create_cursor_agent",
+                return_value=("bc-new", "run-new"),
+            ),
+        ):
+            response = client.post("/security/check-valid-fixed/", follow=True)
+
+        assert b"Launched 1 agent(s)" in response.content
+        stale.refresh_from_db()
+        assert stale.status == "error"
+        assert "stale" in stale.detail
+        assert SecurityRecheckRun.objects.filter(status="launched").count() == 1
+
+    def test_a_failed_launch_is_reported_and_the_rest_still_go(
+        self, client: Client, db: Any
+    ) -> None:
+        from franktheunicorn.core.models import SecurityRecheckRun, WorkerCommand
+        from franktheunicorn.security.fix_agent import FixAgentError
+
+        project = ProjectFactory()
+        SecurityReportFactory(status="valid", project=project)
+        SecurityReportFactory(status="valid", project=project)
+        with (
+            patch.dict("os.environ", {"CURSOR_API_KEY": "key"}),
+            patch(
+                "franktheunicorn.config.loader.get_operator_config",
+                return_value=make_operator_config(),
+            ),
+            patch(
+                "franktheunicorn.security.recheck.create_cursor_agent",
+                side_effect=[("bc-1", "run-1"), FixAgentError("Cursor API said 500")],
+            ),
+        ):
+            response = client.post("/security/check-valid-fixed/", follow=True)
+
+        assert SecurityRecheckRun.objects.filter(status="launched").count() == 1
+        assert WorkerCommand.objects.filter(command="poll_security_rechecks").exists()
+        assert b"Launched 1 agent(s)" in response.content
+        assert b"Valid-check not launched" in response.content
+
+
 class TestAnOrphanedRecheckRunIsPolledAgain:
     """A live run needs a poll even when this press launched nothing.
 
