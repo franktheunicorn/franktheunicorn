@@ -29,6 +29,46 @@ def test_render_markdown(input_md: str | None, expected_fragment: str) -> None:
     assert expected_fragment in result
 
 
+@pytest.mark.parametrize(
+    "input_md",
+    [
+        # PR-template instructions, the common case.
+        "<!-- Describe your changes here -->",
+        # The managed marker appended to posted comments.
+        "Done.\n\n---\n<sub>Generated with assistance of franktheunicorn</sub>\n"
+        "<!-- franktheunicorn-managed -->",
+        # Inline comment mixed with text.
+        "Text <!-- foo --> more",
+        # Multiline comment.
+        "before\n<!-- comment\nspanning\nlines -->\nafter",
+    ],
+)
+def test_render_markdown_hides_html_comments(input_md: str) -> None:
+    """GitHub does not render HTML comments; the dashboard must not either.
+
+    With ``html: False`` markdown-it escaped the ``<`` and the whole marker
+    showed up as visible ``&lt;!-- ... --&gt;`` text, so every templated PR
+    body rendered as a wall of instruction noise.
+    """
+    result = render_markdown(input_md)
+    assert "<!--" not in result
+    assert "-->" not in result
+    assert "&lt;!--" not in result
+
+
+def test_render_markdown_preserves_html_comments_inside_code() -> None:
+    """A comment inside a code block is code, not a comment — keep it."""
+    result = render_markdown("```\n<!-- real code -->\n```")
+    assert "&lt;!-- real code --&gt;" in result
+
+
+def test_render_markdown_escapes_raw_html_other_than_comments() -> None:
+    """Raw HTML that is not a comment stays escaped — bodies are attacker-controlled."""
+    assert render_markdown("<b>bold</b>") == "<p>&lt;b&gt;bold&lt;/b&gt;</p>\n"
+    assert "<img" not in render_markdown("<img src=x onerror=alert(1)>")
+    assert "&lt;img" in render_markdown("<img src=x onerror=alert(1)>")
+
+
 def test_render_markdown_returns_safe_string() -> None:
     result = render_markdown("hello")
     assert isinstance(result, SafeString)
