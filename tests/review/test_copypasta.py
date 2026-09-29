@@ -398,6 +398,102 @@ class TestCheckSymilar:
         matches = _check_symilar(chunks, repo_files, min_lines=4)
         assert isinstance(matches, list)
 
+    def test_find_common_pairs_supports_new_pylint_hash_signature(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """pylint 4.1+ changed ``_find_common`` to require precomputed
+        ``hashes1``/``hashes2`` args. The helper must call the new shape with
+        cached hashes (one hash per lineset, not per pair) and still yield
+        Commonalities. We force the new-signature branch on regardless of the
+        installed pylint so this passes on both old and new."""
+        import types as _types
+
+        from franktheunicorn.review import copypasta as cp
+
+        monkeypatch.setattr(cp, "_SYMILAR_FIND_COMMON_TAKES_HASHES", True)
+
+        received: dict[str, object] = {}
+
+        class _FakeCommon:
+            def __init__(self, pr_ls: object) -> None:
+                self.fst_lset = pr_ls
+                self.snd_lset = None
+                self.fst_file_start = 0
+                self.fst_file_end = 1
+                self.snd_file_start = 5
+                self.snd_file_end = 6
+                self.cmn_lines_nb = 1
+
+        class _FakeSym:
+            def __init__(self) -> None:
+                self.namespace = _types.SimpleNamespace(min_similarity_lines=4)
+
+            def _find_common(self, ls1, ls2, hashes1, hashes2):
+                received["hashes1"] = hashes1
+                received["hashes2"] = hashes2
+                yield _FakeCommon(ls1)
+
+        calls: list[object] = []
+
+        def counting_hash_lineset(lineset, min_lines):
+            calls.append(lineset)
+            return f"hashes-for-{id(lineset)}"
+
+        import pylint.checkers.symilar as symilar_mod
+
+        monkeypatch.setattr(symilar_mod, "hash_lineset", counting_hash_lineset)
+
+        pr_ls = object()
+        repo_ls = object()
+        sym = _FakeSym()
+        results = list(cp._find_common_pairs(sym, pr_ls, repo_ls))
+
+        assert len(results) == 1
+        assert results[0].fst_lset is pr_ls
+        assert calls.count(pr_ls) == 1
+        assert calls.count(repo_ls) == 1
+        assert received["hashes1"] == f"hashes-for-{id(pr_ls)}"
+        assert received["hashes2"] == f"hashes-for-{id(repo_ls)}"
+
+    def test_find_common_pairs_falls_back_to_two_arg_call_on_old_pylint(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """On pylint <4.1 the helper calls ``_find_common(ls1, ls2)`` with no
+        hashes."""
+        import types as _types
+
+        from franktheunicorn.review import copypasta as cp
+
+        monkeypatch.setattr(cp, "_SYMILAR_FIND_COMMON_TAKES_HASHES", False)
+
+        received: list[object] = []
+
+        class _FakeCommon:
+            def __init__(self, pr_ls: object) -> None:
+                self.fst_lset = pr_ls
+                self.snd_lset = None
+                self.fst_file_start = 0
+                self.fst_file_end = 1
+                self.snd_file_start = 0
+                self.snd_file_end = 1
+                self.cmn_lines_nb = 1
+
+        class _FakeSym:
+            def __init__(self) -> None:
+                self.namespace = _types.SimpleNamespace(min_similarity_lines=4)
+
+            def _find_common(self, ls1, ls2):
+                received.append((ls1, ls2))
+                yield _FakeCommon(ls1)
+
+        pr_ls = object()
+        repo_ls = object()
+        sym = _FakeSym()
+        results = list(cp._find_common_pairs(sym, pr_ls, repo_ls))
+
+        assert len(results) == 1
+        assert received == [(pr_ls, repo_ls)]
+
 
 # -- Test tier 1b: winnowing -------------------------------------------------
 

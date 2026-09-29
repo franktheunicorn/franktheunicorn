@@ -17,10 +17,11 @@ import logging
 import re
 import subprocess
 from collections import Counter, defaultdict
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from io import StringIO
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from copydetect.detector import CodeFingerprint, compare_files  # type: ignore[import-untyped]
 from pylint.checkers.symilar import Symilar
@@ -394,6 +395,54 @@ def extract_added_chunks(diff: PRDiff, min_lines: int = 4) -> list[CodeChunk]:
     return chunks
 
 
+#: Detected once at import. pylint 4.1+ changed ``Symilar._find_common`` to
+#: take precomputed ``hashes1``/``hashes2`` args (a ``LineSetHashResult`` from
+#: ``hash_lineset``), which is exactly the re-hash-on-every-call cost the loop
+#: below complained about. ``<5.0`` is the pin, so support both shapes: on the
+#: new API we precompute and cache per-lineset hashes (faster); on the old API
+#: we fall back to the 2-arg call.
+_SYMILAR_FIND_COMMON_TAKES_HASHES: bool | None = None
+
+
+def _symilar_takes_hashes() -> bool:
+    """True if ``Symilar._find_common`` wants precomputed hash args."""
+    global _SYMILAR_FIND_COMMON_TAKES_HASHES
+    if _SYMILAR_FIND_COMMON_TAKES_HASHES is None:
+        import inspect
+
+        params = inspect.signature(Symilar._find_common).parameters
+        _SYMILAR_FIND_COMMON_TAKES_HASHES = "hashes1" in params
+    return _SYMILAR_FIND_COMMON_TAKES_HASHES
+
+
+def _find_common_pairs(sym: Symilar, pr_ls: Any, repo_ls: Any) -> Iterator[Any]:
+    """Yield ``Commonality`` for one PR-chunk vs one repo-file lineset pair,
+    calling ``_find_common`` with whichever signature the installed pylint
+    uses. On pylint 4.1+ the per-lineset hashes are cached so each lineset is
+    hashed once instead of once per pair.
+
+    ``_find_common`` is a private API whose signature changed across pylint
+    versions, so it is called through ``Any`` to keep mypy honest on both
+    shapes without version-specific ``type: ignore`` comments (which would
+    be "unused" on the version that doesn't need them)."""
+    find_common: Any = sym._find_common
+    if not _symilar_takes_hashes():
+        yield from find_common(pr_ls, repo_ls)
+        return
+    from pylint.checkers.symilar import hash_lineset
+
+    cache: dict[int, Any] = getattr(sym, "_frank_hash_cache", {})
+    if not hasattr(sym, "_frank_hash_cache"):
+        sym._frank_hash_cache = cache  # type: ignore[attr-defined]
+    key_pr = id(pr_ls)
+    if key_pr not in cache:
+        cache[key_pr] = hash_lineset(pr_ls, sym.namespace.min_similarity_lines)
+    key_repo = id(repo_ls)
+    if key_repo not in cache:
+        cache[key_repo] = hash_lineset(repo_ls, sym.namespace.min_similarity_lines)
+    yield from find_common(pr_ls, repo_ls, cache[key_pr], cache[key_repo])
+
+
 def _check_symilar(
     chunks: list[CodeChunk],
     repo_files: dict[str, str],
@@ -442,10 +491,11 @@ def _check_symilar(
     # python/ tree: run() took 68s and printed 262KB of report, against 0.42s
     # for one chunk / 3.7s for twenty in the loop below.
     #
-    # That loop is linear in chunks x repo files rather than constant, because
-    # _find_common re-hashes both linesets on every call and there's no public
-    # way to hand it a precomputed hash. Worth revisiting if PRs with many
-    # separate added blocks start dominating cycle time.
+    # That loop is linear in chunks x repo files. On pylint 4.1+ we hand
+    # _find_common precomputed per-lineset hashes (cached), so each lineset is
+    # hashed once instead of once per pair — the optimization the private API
+    # grew specifically to enable. On older pylint we fall back to the 2-arg
+    # call and accept the re-hash cost.
 
     # Find commonalities between PR chunks and repo files.
     # NOTE: _find_common is a private API on Symilar. There is no public
@@ -466,7 +516,7 @@ def _check_symilar(
         for repo_ls in repo_linesets:
             # _find_common(a, b) always yields fst_lset=a (checked against
             # pylint 4.0.6), so fst_* is the PR side and snd_* the repo side.
-            for common in sym._find_common(pr_ls, repo_ls):
+            for common in _find_common_pairs(sym, pr_ls, repo_ls):
                 matches.append(
                     CopyPastaMatch(
                         source_file=common.snd_lset.name,

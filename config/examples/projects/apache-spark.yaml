@@ -26,36 +26,85 @@ test_expectations: "tests required for all new features and bug fixes"
 # about that a generic "how to review" block can't carry. Keep it prose, not
 # rules; the agent is told to treat it as authoritative.
 review_guidance: |
-  Apache Spark cuts release branches (branch-3.5, 4.0, 4.1, 4.2, master) and
-  a PR's target branch decides which APIs and conventions apply. Call out a
-  change that won't compile or behave the same on the branch it targets —
-  e.g. a config using `.withBindingPolicy(...)` / `ConfigBindingPolicy` only
-  exists on 4.2+ (master / branch-4.x / 4.3 / 4.2) and must be dropped when
-  backported to branch-4.1/4.0/3.5; a new config's `.version(...)` must name
-  the target branch's next release, not master's. Name the specific upcoming
-  release and where it is in its RC cycle when it matters — "target 4.4, the
-  4.3 RC is about to cut so only bug fixes land there now" is the kind of call
-  the operator makes, not a generic "check the branch".
+  Apache Spark cuts release branches (branch-3.5, 4.0, 4.1, 4.2, 4.3, master)
+  and a PR's target branch decides which APIs and conventions apply — this is
+  the thing I leave comments on more than anything else. Call out a change
+  that won't compile or behave the same on the branch it targets:
+  `.withBindingPolicy(...)` / `ConfigBindingPolicy` only exists on 4.2+
+  (master / branch-4.x / 4.3 / 4.2) and has to be dropped when backported to
+  branch-4.1/4.0/3.5; a new config's `.version(...)` names the target branch's
+  next release (4.3.0, not 4.2.0), not master's; new SQLConf entries need
+  `.withBindingPolicy(...)` on 4.2+ or `SparkConfigBindingPolicySuite` fails.
+  Name the specific upcoming release and where it is in its RC cycle when it
+  matters — "lets target 4.4, the 4.3 RC is about to cut so only bug fixes
+  land there now" is the call, not a generic "check the branch". Raise it as a
+  question ("is this meant for master only, or does it need a backport?") —
+  the author usually knows the plan.
 
-  Prefer raising the target-branch / backport question as a question ("is this
-  intended for master only, or does it need a backport?") over asserting it
-  is wrong — the author usually knows the plan.
+  Don't pre-document backports that haven't been decided. "Introduced in 4.3.0;
+  also available in 3.5.10, 4.0.5, ..." in a config doc commits to backports
+  nobody's approved yet; no other config in internal/config does it. Keep
+  backport status in the PR description / commit, not the doc string. When a
+  new config is likely to backport, prefer `createOptional` or a default that
+  won't break old branches (default-off, or a sane default like 512mb that's
+  safe even on a maintenance branch). A behavior-breaking default is a
+  maintenance-branch hazard — security hardening that flips a default belongs
+  on master, or warn-only on the branch with an opt-out, not a silent flip in
+  a patch. A default flip or any user-visible behavior change in a minor
+  release needs a `docs/core-migration-guide.md` entry so upgraders find it.
 
-  New public config keys belong in SQLConf.scala with a `.withBindingPolicy`
-  on 4.2+ and a `.doc(...)`. When the value is a string-typed config, the
-  guard has to validate the string, not just store a bool — flag a Python-side
-  read that bypasses the Scala `checkValue` (validation silently never fires
-  for Python callers), and note when the guard itself could be tightened
-  rather than only flagging the bypass. When a new parameter is threaded
-  through a constructor, flag any sibling subclass or registered variety
-  whose signature wasn't updated — `**kwargs` on the base class, or shoving
-  the new param after `**kwargs`, are the usual fixes; when the convention
-  isn't obvious, say so and ping the maintainer who owns that surface.
+  Keep the diff to what was asked. Don't change unrelated code or behavior; if
+  a fix is broader than the bug (e.g. `!m.foldable` rejecting `RuntimeReplaceable`
+  like `nvl`/`ifnull` that `eval()` handled fine, or an unreachable `else`
+  that changes DELETE's behavior), narrow it. Split unrelated commits into
+  their own PR — a `[MINOR][INFRA]` drive-by doesn't belong in a SPARK-xxxxx PR.
+
+  The deep bugs are semantic: name resolution (a column name with a dot goes
+  through `FieldReference`/the parser and lands at the connector as a nested
+  field), exprId collisions (a projection emitting the same name twice with
+  different exprIds surviving only because `findColOrdinal` takes the first
+  match), metadata columns sneaking in as data attributes via
+  `LogicalPlan.resolve`'s `metadataOutput` fallback, resource ownership (who
+  releases the transferred Arrow vectors — `ArrowUtils.rootAllocator` allocated
+  them, the output `ColumnarBatch` holds them, nothing downstream closes them),
+  parser-vs-wrap behavior. When a change shifts an invariant other code
+  assumes — a leaf `DataSourceV2Relation.output` becoming a strict subset of
+  the table's columns, so `PushDownUtils.pruneColumns`'s map-every-field-back-
+  by-name is now wrong — find the other places that still assume the old
+  invariant and flag them. Adding a field means checking `copy()`,
+  serialization and snapshot paths actually carry it; a `copy()` that drops
+  the new field silently reports empty.
+
+  Probe the empty / invalid / boundary input. `ObjectInputFilter.Config.createFilter("")`
+  returns null and silently disables the filter; a slightly-too-narrow filter
+  pattern (`org.apache.spark.*` matches the package, not subpackages)
+  irreversibly deletes the whole recovery state on failover; a truncated varint
+  at end-of-page hangs instead of throwing; matching on a JDK exception message
+  is fragile. Say what the change covers and what it doesn't — a deserialization
+  gadget filter blocks gadgets, it doesn't make ZooKeeper contents trustworthy,
+  so "validate data" / "treated as corrupt" overstates it; a reverse-proxy fix
+  that only touches the non-proxy rendering path should say so.
+
+  When you do raise testing, raise it because a behavior change is unverified,
+  and check the test actually exercises the new path — a test that short-
+  circuits before the new branch (`href != null` before the URI parse), or
+  asserts with an input that would pass anyway (`"badlink"` has no scheme so
+  `isSafeHref` accepts it regardless), or passes vacuously (`lastScanSchema == null`
+  substitutes an empty schema so the negative assertion is trivially true),
+  doesn't cover the change. New public config keys belong in SQLConf.scala
+  with `.withBindingPolicy` on 4.2+ and `.doc(...)`. String-typed configs need
+  string validation, not a stored bool, and the Scala `checkValue` guard doesn't
+  fire for Python-side `session.conf.get` reads — so validate in Python too, or
+  the wrong case silently defaults; the guard can be tightened rather than only
+  flagging the bypass. When a new parameter is threaded through a constructor,
+  `**kwargs` on the base class, or shoving the new param after `**kwargs`, are
+  the usual fixes; ping the maintainer who owns that surface when the
+  convention isn't obvious.
 
   Defer out-of-scope concerns to a follow-up SPARK JIRA rather than blocking
-  the PR on them — but defer with a commitment to actually do it soon, not a
-  bare punt. Don't ask for tests by default — only when a behavior change is
-  wholly unverified. Don't paste code blocks; describe the direction in prose.
+  the PR — but defer with a commitment to do it ~soon, not a bare punt, and
+  file the JIRA yourself when you can. Don't paste code blocks; describe the
+  direction in prose. Don't ask for tests by default.
 
 # Threat model / trust boundaries, fed into security-report triage. This is
 # what lets triage tell "we run arbitrary code by design" reports apart from
