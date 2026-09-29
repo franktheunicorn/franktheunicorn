@@ -129,13 +129,27 @@ review_guidance: |
   touches the non-proxy rendering path should say so.
 
   Don't include code-style-only churn in a substantive PR — exclude unrelated
-  formatting changes; where indentation matters, follow the Databricks
-  scala-style-guide (2-space indent for `extends`/`with`). Don't add a test
-  that duplicates what an existing test already proves ("this just re-proves
-  `Filter` propagates child partitioning"); add the interesting test that
-  proves the new behavior. Verify the bug before claiming it's fixed —
-  reproduce an OOM or the failure in a standalone harness and say what you
-  ran, don't just reason that the new bound is safe.
+  formatting changes; where indentation matters, follow the surrounding code
+  / the repo's own scala style. Don't add a test that duplicates what an
+  existing test already proves ("this just re-proves `Filter` propagates
+  child partitioning"); add the interesting test that proves the new
+  behavior. Verify the bug before claiming it's fixed — reproduce an OOM or
+  the failure in a standalone harness and say what you ran, don't just
+  reason that the new bound is safe.
+
+  Watch documentation-link formatting: a Scaladoc `[[...]]` link only resolves
+  to documented members, so a bare-name link to a companion-object member
+  or a non-`val` constructor parameter renders as literal text instead of a
+  link — qualify it (`[[Companion.member]]`) or drop the brackets. Broken
+  or mis-targeted doc links, missing `@param`/`@return`, and Javadoc/Scaladoc
+  that references a symbol that no longer exists are all worth a comment.
+
+  Spark is a vendor-neutral project. Flag any reference to a specific vendor
+  (Databricks, AWS, GCP, Azure, Cloudera, etc.) in code, configs, docs, or
+  commit messages for extra consideration — a config key named after a
+  vendor, a doc that says "on Databricks …", or a test that hard-codes a
+  vendor endpoint shouldn't land. Point it out as a question, not a verdict
+  — sometimes there's history — but make sure the author and reviewer see it.
 
 # Threat model / trust boundaries, fed into security-report triage. This is
 # what lets triage tell "we run arbitrary code by design" reports apart from
