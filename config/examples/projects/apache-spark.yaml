@@ -29,17 +29,19 @@ review_guidance: |
   Apache Spark cuts release branches (branch-3.5, 4.0, 4.1, 4.2, 4.3, master)
   and a PR's target branch decides which APIs and conventions apply — this is
   the thing I leave comments on more than anything else. Call out a change
-  that won't compile or behave the same on the branch it targets:
+  that won't compile or behave the same on the branch it targets.
   `.withBindingPolicy(...)` / `ConfigBindingPolicy` only exists on 4.2+
-  (master / branch-4.x / 4.3 / 4.2) and has to be dropped when backported to
-  branch-4.1/4.0/3.5; a new config's `.version(...)` names the target branch's
-  next release (4.3.0, not 4.2.0), not master's; new SQLConf entries need
-  `.withBindingPolicy(...)` on 4.2+ or `SparkConfigBindingPolicySuite` fails.
-  Name the specific upcoming release and where it is in its RC cycle when it
-  matters — "lets target 4.4, the 4.3 RC is about to cut so only bug fixes
-  land there now" is the call, not a generic "check the branch". Raise it as a
-  question ("is this meant for master only, or does it need a backport?") —
-  the author usually knows the plan.
+  (master / branch-4.x / 4.3 / 4.2): a new SQLConf entry on one of those
+  branches needs it, or `SparkConfigBindingPolicySuite` fails. It does NOT
+  compile on branch-3.5/4.0/4.1, so a backport there must DROP the call and
+  the `ConfigBindingPolicy` import — never suggest adding it on a pre-4.2
+  branch. A new config's `.version(...)` names the target branch's next
+  release (4.3.0, not 4.2.0), not master's. Name the specific upcoming release
+  and where it is in its RC cycle when it matters — "lets target 4.4, the 4.3
+  RC is about to cut so only bug fixes land there now" is the call, not a
+  generic "check the branch". Raise it as a question ("is this meant for
+  master only, or does it need a backport?") — the author usually knows the
+  plan.
 
   Don't pre-document backports that haven't been decided. "Introduced in 4.3.0;
   also available in 3.5.10, 4.0.5, ..." in a config doc commits to backports
@@ -75,16 +77,6 @@ review_guidance: |
   serialization and snapshot paths actually carry it; a `copy()` that drops
   the new field silently reports empty.
 
-  Probe the empty / invalid / boundary input. `ObjectInputFilter.Config.createFilter("")`
-  returns null and silently disables the filter; a slightly-too-narrow filter
-  pattern (`org.apache.spark.*` matches the package, not subpackages)
-  irreversibly deletes the whole recovery state on failover; a truncated varint
-  at end-of-page hangs instead of throwing; matching on a JDK exception message
-  is fragile. Say what the change covers and what it doesn't — a deserialization
-  gadget filter blocks gadgets, it doesn't make ZooKeeper contents trustworthy,
-  so "validate data" / "treated as corrupt" overstates it; a reverse-proxy fix
-  that only touches the non-proxy rendering path should say so.
-
   When you do raise testing, raise it because a behavior change is unverified,
   and check the test actually exercises the new path — a test that short-
   circuits before the new branch (`href != null` before the URI parse), or
@@ -103,8 +95,47 @@ review_guidance: |
 
   Defer out-of-scope concerns to a follow-up SPARK JIRA rather than blocking
   the PR — but defer with a commitment to do it ~soon, not a bare punt, and
-  file the JIRA yourself when you can. Don't paste code blocks; describe the
-  direction in prose. Don't ask for tests by default.
+  file the JIRA yourself when you can. When a PR sprawls across surfaces,
+  suggest splitting it into separate PRs under an umbrella SPARK JIRA, and ping
+  the maintainers who own each surface for a quick look. Don't paste code
+  blocks; describe the direction in prose. Don't ask for tests by default.
+
+  Spark has a structured error framework: a new error path should register an
+  error condition in `error-conditions.json` and throw via `SparkThrowable`,
+  not a raw exception with an inline message, and the test should assert it
+  with `checkError` (including the STANDARD JSON form when relevant) — not
+  by matching the message text. When a problem is detectable up front, fail
+  at analysis time (`CheckAnalysis`) rather than at execution time. Don't
+  expose a Scala `case class` as public API — it carries a wide surface
+  including the companion object; define public API in Java, following
+  `SparkThrowable`. Adding a field to an existing `case class` breaks every
+  pattern match on it (4-5 places in Spark, more in third-party plugins) and
+  a new constructor param can't be hidden in `unapply` — weigh whether the
+  field is worth it, and prefer `Option`/a builder over a positional param.
+  Flag dead code the refactor introduced or left behind.
+
+  Be precise about null and numeric edge behavior: `InternalRow.getInt`
+  returns 0 on null (say so in a comment rather than letting it surprise the
+  next reader), prefer an explicit null check or `pmod` over silent 0 / a
+  negative partition id, and probe the empty / invalid / boundary input
+  (`ObjectInputFilter.Config.createFilter("")` returns null and silently
+  disables the filter; a too-narrow filter pattern like `org.apache.spark.*`
+  matches the package, not subpackages, and can irreversibly delete the whole
+  recovery state on failover; a truncated varint at end-of-page hangs instead
+  of throwing; matching on a JDK exception message is fragile). Say what the
+  change covers and what it doesn't — a deserialization gadget filter blocks
+  gadgets, it doesn't make ZooKeeper contents trustworthy, so "validate
+  data" / "treated as corrupt" overstates it; a reverse-proxy fix that only
+  touches the non-proxy rendering path should say so.
+
+  Don't include code-style-only churn in a substantive PR — exclude unrelated
+  formatting changes; where indentation matters, follow the Databricks
+  scala-style-guide (2-space indent for `extends`/`with`). Don't add a test
+  that duplicates what an existing test already proves ("this just re-proves
+  `Filter` propagates child partitioning"); add the interesting test that
+  proves the new behavior. Verify the bug before claiming it's fixed —
+  reproduce an OOM or the failure in a standalone harness and say what you
+  ran, don't just reason that the new bound is safe.
 
 # Threat model / trust boundaries, fed into security-report triage. This is
 # what lets triage tell "we run arbitrary code by design" reports apart from
