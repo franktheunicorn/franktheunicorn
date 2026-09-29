@@ -81,7 +81,7 @@ How to review (match the operator's actual review style):
   release branches (see project-specific guidance below if present).
 - Skip a finding you would reject. If you would not leave the comment, do not
   emit it.
-{review_guidance_section}For EACH issue, emit a block in EXACTLY this format, separated by lines of
+{review_guidance_section}{review_areas_section}For EACH issue, emit a block in EXACTLY this format, separated by lines of
 five or more equals signs:
 
 <file_path>:<line_number> - [<Severity>] <Short title>
@@ -124,7 +124,7 @@ before reporting: whether input is actually attacker-reachable is usually
 decided outside the diff.
 
 {security_model_section}
-{review_guidance_section}For EACH security issue, emit a block in EXACTLY this format, separated by
+{review_guidance_section}{review_areas_section}For EACH security issue, emit a block in EXACTLY this format, separated by
 lines of five or more equals signs:
 
 <file_path>:<line_number> - [<Severity>] security: <Short title>
@@ -181,6 +181,7 @@ def build_review_prompt(
     diff: str,
     security_model: str = "",
     review_guidance: str = "",
+    review_areas_of_interest: list[str] | None = None,
 ) -> str:
     """Pick and fill the prompt template for the reviewer's ``review_focus``.
 
@@ -190,11 +191,22 @@ def build_review_prompt(
     project. ``review_guidance`` is the per-project prose (release-process
     concerns, convention nudges) and reaches both templates — it is the
     project-specific voice that the default "How to review" block can't carry.
+    ``review_areas_of_interest`` is the per-project watch list — short
+    descriptors of areas to flag for extra consideration when touched — and
+    also reaches both templates.
     """
     guidance = (review_guidance or "").strip()
     guidance_section = (
         f"\nProject-specific review guidance (treat as authoritative):\n{guidance}\n"
         if guidance
+        else ""
+    )
+    areas = [a.strip() for a in (review_areas_of_interest or []) if a.strip()]
+    areas_section = (
+        "\nAreas of interest — flag for extra consideration when the PR touches these:\n"
+        + "\n".join(f"- {a}" for a in areas)
+        + "\n"
+        if areas
         else ""
     )
     if config.review_focus == "security":
@@ -206,9 +218,14 @@ def build_review_prompt(
         return _SECURITY_PROMPT_TEMPLATE.format(
             security_model_section=section,
             review_guidance_section=guidance_section,
+            review_areas_section=areas_section,
             diff=diff,
         )
-    return _PROMPT_TEMPLATE.format(review_guidance_section=guidance_section, diff=diff)
+    return _PROMPT_TEMPLATE.format(
+        review_guidance_section=guidance_section,
+        review_areas_section=areas_section,
+        diff=diff,
+    )
 
 
 def run_agent_cli_review(
@@ -219,6 +236,7 @@ def run_agent_cli_review(
     *,
     security_model: str = "",
     review_guidance: str = "",
+    review_areas_of_interest: list[str] | None = None,
 ) -> list[AgentCLIFinding]:
     """
     Run the agent CLI against the diff between ``base_commit`` and HEAD.
@@ -238,6 +256,8 @@ def run_agent_cli_review(
     worker) resolves it from the project config. ``review_guidance`` is the
     per-project review-voice prose (release-process concerns, convention
     nudges) and reaches both the general and security templates.
+    ``review_areas_of_interest`` is the per-project watch list — short
+    descriptors of areas to flag for extra consideration when touched.
     """
     if executor is None:
         executor = LocalExecutor()
@@ -280,7 +300,9 @@ def run_agent_cli_review(
             cutoff = config.max_diff_chars
         diff = diff[:cutoff] + "\n[...diff truncated...]\n"
 
-    prompt = build_review_prompt(config, diff, security_model, review_guidance)
+    prompt = build_review_prompt(
+        config, diff, security_model, review_guidance, review_areas_of_interest
+    )
 
     cmd = list(config.cli_argv) + config.build_invocation(prompt)
 

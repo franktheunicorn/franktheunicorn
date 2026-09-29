@@ -36,6 +36,9 @@ class PRContext:
     governance: str
     # Free-form per-project prose (see ProjectConfig.review_guidance).
     review_guidance: str = ""
+    # Per-project watch list (see ProjectConfig.review_areas_of_interest) —
+    # short descriptors of areas to flag for extra consideration when touched.
+    review_areas_of_interest: list[str] = field(default_factory=list)
     anti_patterns: list[str] = field(default_factory=list)
     personality_identity: str = ""
     personality_internal_voice: str = ""

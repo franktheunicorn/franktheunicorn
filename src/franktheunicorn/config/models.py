@@ -2077,6 +2077,14 @@ class ProjectConfig(BaseModel):
     # follow-up JIRA"). Empty by default — the default prompt is enough for
     # a project with no special process.
     review_guidance: str = ""
+    # Areas the reviewer should flag for extra consideration when a PR touches
+    # them — each entry is a short descriptor (``"iceberg/** — Iceberg
+    # integration in Spark, flag for extra consideration"``, ``"vector type —
+    # changes to vector type, flag"``). Injected into the review prompt as a
+    # bulleted "flag for extra consideration" list, separate from the free-form
+    # ``review_guidance`` prose: guidance is the voice, areas are the watch
+    # list. Empty by default.
+    review_areas_of_interest: list[str] = Field(default_factory=list)
     scoring_weights: dict[str, float] = Field(default_factory=dict)
     custom_scoring_expressions: list[str] = Field(default_factory=list)
     custom_scoring_max_boost: int = 30

@@ -114,6 +114,12 @@ def build_system_prompt(ctx: PRContext) -> str:
         parts.append("")
         parts.append("Project-specific review guidance (treat as authoritative):")
         parts.append(ctx.review_guidance.strip())
+    if ctx.review_areas_of_interest:
+        parts.append("")
+        parts.append("Areas of interest — flag for extra consideration when the PR touches these:")
+        for area in ctx.review_areas_of_interest:
+            if area.strip():
+                parts.append(f"  - {area.strip()}")
     parts.append("")
     parts.append(_finding_schema())
 

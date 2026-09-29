@@ -151,6 +151,23 @@ review_guidance: |
   vendor endpoint shouldn't land. Point it out as a question, not a verdict
   — sometimes there's history — but make sure the author and reviewer see it.
 
+# Areas to flag for extra consideration when a PR touches them. Each entry is
+# a short descriptor; the reviewer gets them as a bulleted "flag for extra
+# consideration" list, separate from the review_guidance prose. Spark has a
+# couple of surfaces where a change has outsized blast radius or where the
+# project has a stated direction worth checking a PR against.
+review_areas_of_interest:
+  # Iceberg integration in Spark — connector/v2 + the Iceberg support in
+  # sql/core. Iceberg has its own release cadence and compatibility
+  # surface; a change here can break cross-project integration that isn't
+  # exercised by Spark's own tests. Flag for extra consideration, especially
+  # around catalog/v2 table APIs, partition handling, and write paths.
+  - "iceberg/** and connector/v2 Iceberg integration — flag for extra consideration (Iceberg has its own release cadence; a Spark change here can break cross-project integration Spark's own tests don't exercise)"
+  # Vector type — the VECTOR type and its interactions with parquet/orc,
+  # arrow, and the vectorized reader. Flag for extra consideration, especially
+  # around type promotion, UDF support, and read/write round-tripping.
+  - "vector type — VECTOR type changes (parquet/orc/arrow round-trip, type promotion, UDF support) flag for extra consideration"
+
 # Threat model / trust boundaries, fed into security-report triage. This is
 # what lets triage tell "we run arbitrary code by design" reports apart from
 # real findings, instead of flagging (or dismissing) everything the same way.

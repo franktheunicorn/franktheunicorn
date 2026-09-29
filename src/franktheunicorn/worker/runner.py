@@ -2504,6 +2504,9 @@ def _run_agent_cli_for_pr(
             run_agent_cli_review,
             security_model=security_model,
             review_guidance=(project_config.review_guidance if project_config else ""),
+            review_areas_of_interest=(
+                project_config.review_areas_of_interest if project_config else []
+            ),
         )
 
     create_drafts = partial(

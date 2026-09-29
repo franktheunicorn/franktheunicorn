@@ -329,6 +329,32 @@ class TestSecurityFocus:
         prompt = build_review_prompt(AgentCLIReviewerConfig(name="pi"), "DIFF", review_guidance="")
         assert "Project-specific review guidance" not in prompt
 
+    def test_review_areas_of_interest_injected_for_general_reviewer(self) -> None:
+        prompt = build_review_prompt(
+            AgentCLIReviewerConfig(name="pi"),
+            "DIFF",
+            review_areas_of_interest=["iceberg/** — Iceberg, flag", "vector type — flag"],
+        )
+        assert "Areas of interest" in prompt
+        assert "Iceberg" in prompt
+        assert "vector type" in prompt
+
+    def test_review_areas_of_interest_injected_for_security_reviewer(self) -> None:
+        prompt = build_review_prompt(
+            self._security_config(),
+            "DIFF",
+            security_model="Submitted jobs run arbitrary code by design.",
+            review_areas_of_interest=["iceberg/** — Iceberg, flag"],
+        )
+        assert "Areas of interest" in prompt
+        assert "Iceberg" in prompt
+
+    def test_no_areas_of_interest_leaves_no_stray_section(self) -> None:
+        prompt = build_review_prompt(
+            AgentCLIReviewerConfig(name="pi"), "DIFF", review_areas_of_interest=[]
+        )
+        assert "Areas of interest" not in prompt
+
     def test_security_findings_parse_with_the_shared_parser(self) -> None:
         """The security prompt keeps the block-format output contract, and the
         "security:" title prefix the prompt asks for lands in the finding body —

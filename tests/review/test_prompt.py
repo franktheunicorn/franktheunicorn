@@ -64,6 +64,23 @@ class TestBuildSystemPrompt:
         prompt = build_system_prompt(ctx)
         assert "add a test" in prompt.lower()
 
+    def test_includes_areas_of_interest_when_set(self) -> None:
+        ctx = make_pr_context(
+            review_areas_of_interest=[
+                "iceberg/** — Iceberg integration, flag for extra consideration",
+                "vector type — VECTOR changes, flag",
+            ]
+        )
+        prompt = build_system_prompt(ctx)
+        assert "Areas of interest" in prompt
+        assert "Iceberg integration" in prompt
+        assert "VECTOR changes" in prompt
+
+    def test_omits_areas_of_interest_section_when_empty(self) -> None:
+        ctx = make_pr_context(review_areas_of_interest=[])
+        prompt = build_system_prompt(ctx)
+        assert "Areas of interest" not in prompt
+
 
 class TestBuildUserMessage:
     def test_includes_pr_metadata(self) -> None:
