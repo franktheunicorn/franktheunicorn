@@ -658,7 +658,7 @@ class TestBuildValidCheckPrompt:
             source_archive="scan-spark-branch-3.5-20260811.zip",
         )
         prompt = build_valid_check_prompt(report)
-        assert f"report #{report.pk}" in prompt.lower() or f"REPORT #{report.pk}" in prompt
+        assert f"REPORT #{report.pk}" in prompt
         assert "mergeDir escapes" in prompt
         assert "branch-3.5" in prompt  # the archive's scanned branch, not a guess
         assert "likely-fixed" in prompt and "still-valid" in prompt
