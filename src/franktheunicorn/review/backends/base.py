@@ -34,6 +34,8 @@ class PRContext:
     tone: str
     test_expectations: str
     governance: str
+    # Free-form per-project prose (see ProjectConfig.review_guidance).
+    review_guidance: str = ""
     anti_patterns: list[str] = field(default_factory=list)
     personality_identity: str = ""
     personality_internal_voice: str = ""

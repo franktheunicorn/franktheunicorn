@@ -306,6 +306,29 @@ class TestSecurityFocus:
         )
         assert "LEAK ME NOT" not in prompt
 
+    def test_review_guidance_is_injected_for_general_reviewer(self) -> None:
+        prompt = build_review_prompt(
+            AgentCLIReviewerConfig(name="pi"),
+            "DIFF",
+            review_guidance="Question the target branch on Spark.",
+        )
+        assert "Project-specific review guidance" in prompt
+        assert "Question the target branch" in prompt
+
+    def test_review_guidance_is_injected_for_security_reviewer(self) -> None:
+        prompt = build_review_prompt(
+            self._security_config(),
+            "DIFF",
+            security_model="Submitted jobs run arbitrary code by design.",
+            review_guidance="Reading data is not a trust boundary.",
+        )
+        assert "Project-specific review guidance" in prompt
+        assert "Reading data is not a trust boundary" in prompt
+
+    def test_no_review_guidance_leaves_no_stray_section(self) -> None:
+        prompt = build_review_prompt(AgentCLIReviewerConfig(name="pi"), "DIFF", review_guidance="")
+        assert "Project-specific review guidance" not in prompt
+
     def test_security_findings_parse_with_the_shared_parser(self) -> None:
         """The security prompt keeps the block-format output contract, and the
         "security:" title prefix the prompt asks for lands in the finding body —

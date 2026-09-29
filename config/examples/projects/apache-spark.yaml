@@ -20,6 +20,43 @@ ignore_paths:
 tone: "constructive and thorough"
 test_expectations: "tests required for all new features and bug fixes"
 
+# Per-project review voice, prepended to every agent_cli review prompt as
+# authoritative guidance. This is where the project's release-process and
+# convention concerns live — the things the operator actually leaves comments
+# about that a generic "how to review" block can't carry. Keep it prose, not
+# rules; the agent is told to treat it as authoritative.
+review_guidance: |
+  Apache Spark cuts release branches (branch-3.5, 4.0, 4.1, 4.2, master) and
+  a PR's target branch decides which APIs and conventions apply. Call out a
+  change that won't compile or behave the same on the branch it targets —
+  e.g. a config using `.withBindingPolicy(...)` / `ConfigBindingPolicy` only
+  exists on 4.2+ (master / branch-4.x / 4.3 / 4.2) and must be dropped when
+  backported to branch-4.1/4.0/3.5; a new config's `.version(...)` must name
+  the target branch's next release, not master's. Name the specific upcoming
+  release and where it is in its RC cycle when it matters — "target 4.4, the
+  4.3 RC is about to cut so only bug fixes land there now" is the kind of call
+  the operator makes, not a generic "check the branch".
+
+  Prefer raising the target-branch / backport question as a question ("is this
+  intended for master only, or does it need a backport?") over asserting it
+  is wrong — the author usually knows the plan.
+
+  New public config keys belong in SQLConf.scala with a `.withBindingPolicy`
+  on 4.2+ and a `.doc(...)`. When the value is a string-typed config, the
+  guard has to validate the string, not just store a bool — flag a Python-side
+  read that bypasses the Scala `checkValue` (validation silently never fires
+  for Python callers), and note when the guard itself could be tightened
+  rather than only flagging the bypass. When a new parameter is threaded
+  through a constructor, flag any sibling subclass or registered variety
+  whose signature wasn't updated — `**kwargs` on the base class, or shoving
+  the new param after `**kwargs`, are the usual fixes; when the convention
+  isn't obvious, say so and ping the maintainer who owns that surface.
+
+  Defer out-of-scope concerns to a follow-up SPARK JIRA rather than blocking
+  the PR on them — but defer with a commitment to actually do it soon, not a
+  bare punt. Don't ask for tests by default — only when a behavior change is
+  wholly unverified. Don't paste code blocks; describe the direction in prose.
+
 # Threat model / trust boundaries, fed into security-report triage. This is
 # what lets triage tell "we run arbitrary code by design" reports apart from
 # real findings, instead of flagging (or dismissing) everything the same way.

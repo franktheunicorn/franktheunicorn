@@ -62,7 +62,26 @@ issues — bugs, race conditions, security holes, API misuse, missing error
 handling, or breakage of established invariants. Skip stylistic nits unless
 they materially affect readability.
 
-For EACH issue, emit a block in EXACTLY this format, separated by lines of
+How to review (match the operator's actual review style):
+- Focus on design, semantics, and correctness — NULL/NaN handling, config
+  vs. param, trust boundaries, ordering, API misuse. These are the comments
+  the operator actually leaves. Style, formatting, and naming are handled by
+  linters; do not surface them.
+- Do NOT default to "add a test." Only raise testing when a behavior change is
+  wholly unverified AND substantive. Never critique test mechanics.
+- Do NOT paste code blocks or ready-made patches. Describe the concern and a
+  concrete direction in prose; the operator writes the fix.
+- Frame as a contributor talking to a contributor: "Maybe…", "Have you
+  considered…?", "I'd lean toward… but open to push back." Propose
+  alternatives, name the trade-off, invite a response. Do not dictate.
+- Keep each finding to 1-3 sentences.
+- When a concern is valid but out of scope, suggest deferring it to a follow-up
+  ticket rather than blocking the PR on it.
+- Question the target branch and backport suitability when the project cuts
+  release branches (see project-specific guidance below if present).
+- Skip a finding you would reject. If you would not leave the comment, do not
+  emit it.
+{review_guidance_section}For EACH issue, emit a block in EXACTLY this format, separated by lines of
 five or more equals signs:
 
 <file_path>:<line_number> - [<Severity>] <Short title>
@@ -105,8 +124,7 @@ before reporting: whether input is actually attacker-reachable is usually
 decided outside the diff.
 
 {security_model_section}
-
-For EACH security issue, emit a block in EXACTLY this format, separated by
+{review_guidance_section}For EACH security issue, emit a block in EXACTLY this format, separated by
 lines of five or more equals signs:
 
 <file_path>:<line_number> - [<Severity>] security: <Short title>
@@ -162,22 +180,35 @@ def build_review_prompt(
     config: AgentCLIReviewerConfig,
     diff: str,
     security_model: str = "",
+    review_guidance: str = "",
 ) -> str:
     """Pick and fill the prompt template for the reviewer's ``review_focus``.
 
     ``security_model`` only reaches the security template; a general reviewer
     has no use for it and a security reviewer without one gets an explicit
     "not documented" section, so the agent doesn't invent a stance for the
-    project.
+    project. ``review_guidance`` is the per-project prose (release-process
+    concerns, convention nudges) and reaches both templates — it is the
+    project-specific voice that the default "How to review" block can't carry.
     """
+    guidance = (review_guidance or "").strip()
+    guidance_section = (
+        f"\nProject-specific review guidance (treat as authoritative):\n{guidance}\n"
+        if guidance
+        else ""
+    )
     if config.review_focus == "security":
         section = (
             _SECURITY_MODEL_KNOWN_SECTION.format(security_model=security_model.strip())
             if security_model.strip()
             else _SECURITY_MODEL_UNKNOWN_SECTION
         )
-        return _SECURITY_PROMPT_TEMPLATE.format(security_model_section=section, diff=diff)
-    return _PROMPT_TEMPLATE.format(diff=diff)
+        return _SECURITY_PROMPT_TEMPLATE.format(
+            security_model_section=section,
+            review_guidance_section=guidance_section,
+            diff=diff,
+        )
+    return _PROMPT_TEMPLATE.format(review_guidance_section=guidance_section, diff=diff)
 
 
 def run_agent_cli_review(
@@ -187,6 +218,7 @@ def run_agent_cli_review(
     executor: ToolExecutor | None = None,
     *,
     security_model: str = "",
+    review_guidance: str = "",
 ) -> list[AgentCLIFinding]:
     """
     Run the agent CLI against the diff between ``base_commit`` and HEAD.
@@ -203,7 +235,9 @@ def run_agent_cli_review(
 
     ``security_model`` is the project's documented trust boundaries, used
     only when ``config.review_focus`` is ``"security"`` — the caller (the
-    worker) resolves it from the project config.
+    worker) resolves it from the project config. ``review_guidance`` is the
+    per-project review-voice prose (release-process concerns, convention
+    nudges) and reaches both the general and security templates.
     """
     if executor is None:
         executor = LocalExecutor()
@@ -246,7 +280,7 @@ def run_agent_cli_review(
             cutoff = config.max_diff_chars
         diff = diff[:cutoff] + "\n[...diff truncated...]\n"
 
-    prompt = build_review_prompt(config, diff, security_model)
+    prompt = build_review_prompt(config, diff, security_model, review_guidance)
 
     cmd = list(config.cli_argv) + config.build_invocation(prompt)
 

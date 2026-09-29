@@ -2500,7 +2500,11 @@ def _run_agent_cli_for_pr(
                 project_config.owner if project_config else "?",
                 project_config.repo if project_config else "?",
             )
-        run_review = partial(run_agent_cli_review, security_model=security_model)
+        run_review = partial(
+            run_agent_cli_review,
+            security_model=security_model,
+            review_guidance=(project_config.review_guidance if project_config else ""),
+        )
 
     create_drafts = partial(
         create_drafts_from_agent_cli,

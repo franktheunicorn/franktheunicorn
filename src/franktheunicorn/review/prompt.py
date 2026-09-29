@@ -39,6 +39,36 @@ def _finding_schema() -> str:
     )
 
 
+#: Default reviewing guidance, shaped by diffing the operator's real review
+#: comments against frank's old findings. The operator reviews like a
+#: maintainer talking to a contributor, not a linter talking to a file:
+#: design and semantics first, conversational, short, and happy to defer.
+#: See docs/review-prompt-tuning.md for the corpus this was learned from.
+_REVIEWING_GUIDANCE = """\
+How to review (match the operator's actual review style):
+- Focus on design, semantics, and correctness — NULL/NaN handling, config
+  vs. param, trust boundaries, ordering, API misuse. These are the comments
+  the operator actually leaves. Style, formatting, and naming are handled by
+  linters; do not surface them.
+- Do NOT default to "add a test." Test coverage is a separate check; only
+  raise testing when a behavior change is wholly unverified AND substantive.
+  Never critique test mechanics (assertion style, message text coupling).
+- Do NOT paste code blocks or ready-made patches. Describe the concern and a
+  concrete direction in prose; the operator writes the fix.
+- Frame as a contributor talking to a contributor: "Maybe…", "Have you
+  considered…?", "I'd lean toward… but open to push back." Propose
+  alternatives, name the trade-off, invite a response. Do not dictate.
+- Keep each finding to 1-3 sentences. The operator's comments are short.
+- When a concern is valid but out of scope for this PR, suggest deferring it to
+  a follow-up JIRA rather than blocking the PR on it.
+- Question the target branch and backport suitability when the project cuts
+  release branches (see project-specific guidance if present).
+- If a decision needs another committer's input, say so ("worth checking with
+  @maintainer") rather than deciding it yourself.
+- Skip a finding you would reject. If you would not leave the comment, do not
+  emit it."""
+
+
 def build_system_prompt(ctx: PRContext) -> str:
     """Build the system prompt from project and operator context."""
     if ctx.personality_identity:
@@ -78,6 +108,12 @@ def build_system_prompt(ctx: PRContext) -> str:
         parts.append("")
         parts.append(ctx.personality_review_philosophy)
 
+    parts.append("")
+    parts.append(_REVIEWING_GUIDANCE)
+    if ctx.review_guidance and ctx.review_guidance.strip():
+        parts.append("")
+        parts.append("Project-specific review guidance (treat as authoritative):")
+        parts.append(ctx.review_guidance.strip())
     parts.append("")
     parts.append(_finding_schema())
 

@@ -2067,6 +2067,16 @@ class ProjectConfig(BaseModel):
     test_expectations: str = "tests expected for new features"
     frequent_contributors: list[str] = Field(default_factory=list)
     governance: str = "standard"
+    # Free-form prose injected into the reviewer's system prompt: what this
+    # project's reviewer actually cares about that isn't captured by the
+    # short ``review_context`` label or the ``security_model`` threat
+    # boundaries. The place for release-process concerns ("Spark cuts
+    # release branches; question the target branch; backport with a sane
+    # default"), convention nudges ("new params go after **kwargs"), and
+    # review-voice guidance ("prefer deferring out-of-scope concerns to a
+    # follow-up JIRA"). Empty by default — the default prompt is enough for
+    # a project with no special process.
+    review_guidance: str = ""
     scoring_weights: dict[str, float] = Field(default_factory=dict)
     custom_scoring_expressions: list[str] = Field(default_factory=list)
     custom_scoring_max_boost: int = 30

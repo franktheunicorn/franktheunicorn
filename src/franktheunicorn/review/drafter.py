@@ -181,6 +181,7 @@ def build_pr_context(
         tone=project_config.tone,
         test_expectations=project_config.test_expectations,
         governance=project_config.governance,
+        review_guidance=project_config.review_guidance,
         anti_patterns=anti_patterns,
         personality_identity=personality.identity if personality else "",
         personality_internal_voice=personality.internal_voice if personality else "",

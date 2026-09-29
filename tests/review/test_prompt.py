@@ -46,6 +46,24 @@ class TestBuildSystemPrompt:
         prompt = build_system_prompt(ctx)
         assert "Project context" not in prompt
 
+    def test_includes_review_guidance_when_set(self) -> None:
+        ctx = make_pr_context(
+            review_guidance="Prefer deferring out-of-scope concerns to a follow-up SPARK JIRA."
+        )
+        prompt = build_system_prompt(ctx)
+        assert "Project-specific review guidance" in prompt
+        assert "follow-up SPARK JIRA" in prompt
+
+    def test_omits_review_guidance_section_when_empty(self) -> None:
+        ctx = make_pr_context(review_guidance="")
+        prompt = build_system_prompt(ctx)
+        assert "Project-specific review guidance" not in prompt
+
+    def test_default_guidance_discourages_defaulting_to_add_a_test(self) -> None:
+        ctx = make_pr_context()
+        prompt = build_system_prompt(ctx)
+        assert "add a test" in prompt.lower()
+
 
 class TestBuildUserMessage:
     def test_includes_pr_metadata(self) -> None:
