@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from django.test import Client
 
@@ -1786,6 +1788,163 @@ class TestAgentRunSummary:
         assert claude_entry["rejected"] == 1
         assert len(claude_entry["findings"]) == 2
 
+    @staticmethod
+    def _cli_op_config() -> Any:
+        """An operator config with one active ssh-mode CLI reviewer.
+
+        All four seed names are supplied so the registry merge appends
+        nothing; the three not under test are disabled explicitly, which keeps
+        the result independent of whether the test host happens to have the
+        binaries on PATH (the seeds are enabled="auto" and probe for them).
+        """
+        from franktheunicorn.config.models import (
+            AgentCLIReviewerConfig,
+            OperatorConfig,
+            RemoteExecutionConfig,
+        )
+
+        return OperatorConfig(
+            agent_cli_reviewers=[
+                AgentCLIReviewerConfig(
+                    name="codex",
+                    enabled=True,
+                    prompt_mode="subcommand",
+                    prompt_arg="exec",
+                    remote=RemoteExecutionConfig(
+                        mode="ssh",
+                        ssh_command=["sf", "workspace", "ssh"],
+                        remote_workspace_dir="~/.frank-remote",
+                    ),
+                ),
+                AgentCLIReviewerConfig(name="claude", enabled=False),
+                AgentCLIReviewerConfig(name="pi", enabled=False),
+                AgentCLIReviewerConfig(name="cursor-agent", enabled=False),
+            ]
+        )
+
+    def test_a_cli_reviewer_with_no_drafts_still_gets_a_row(self, db_pr: PullRequest) -> None:
+        """A CLI reviewer's run leaves no drafts when it found nothing or never
+        got a checkout — so until the summary listed configured CLI reviewers,
+        its recorded status had no row to render in and a skip on ssh read
+        exactly like "never configured"."""
+        from franktheunicorn.dashboard.views import build_agent_run_summary
+
+        db_pr.agent_runs = {
+            "codex": {"at": "2026-09-29T00:00:00+00:00", "status": "no-checkout", "findings": 0}
+        }
+        db_pr.save(update_fields=["agent_runs"])
+
+        result = build_agent_run_summary(db_pr, self._cli_op_config(), None)
+
+        codex = next(e for e in result if e["source"] == "codex")
+        assert codex["did_run"] is True
+        assert codex["run_status"] == "no-checkout"
+        assert codex["total"] == 0
+
+    def test_a_disabled_cli_reviewer_gets_no_row(self, db_pr: PullRequest) -> None:
+        from franktheunicorn.dashboard.views import build_agent_run_summary
+
+        result = build_agent_run_summary(db_pr, self._cli_op_config(), None)
+
+        assert not any(e["source"] == "pi" for e in result)
+
+    def test_a_clean_cli_run_renders_ran_with_zero_findings(
+        self, client: Client, db_pr: PullRequest
+    ) -> None:
+        from unittest.mock import patch
+
+        db_pr.agent_runs = {
+            "codex": {"at": "2026-09-29T00:00:00+00:00", "status": "ok", "findings": 0}
+        }
+        db_pr.save(update_fields=["agent_runs"])
+
+        with (
+            patch(
+                "franktheunicorn.config.loader.get_operator_config",
+                return_value=self._cli_op_config(),
+            ),
+            patch(
+                "franktheunicorn.config.loader.get_project_config",
+                return_value=None,
+            ),
+        ):
+            response = client.get(f"/pr/{db_pr.pk}/")
+
+        assert response.status_code == 200
+        assert b"codex" in response.content
+        # "ran" with "0 total", not the italic "not run" a draft-less reviewer
+        # used to get.
+        assert b"0 total" in response.content
+
+    def test_a_no_checkout_cli_run_renders_the_chip(
+        self, client: Client, db_pr: PullRequest
+    ) -> None:
+        from unittest.mock import patch
+
+        db_pr.agent_runs = {
+            "codex": {"at": "2026-09-29T00:00:00+00:00", "status": "no-checkout", "findings": 0}
+        }
+        db_pr.save(update_fields=["agent_runs"])
+
+        with (
+            patch(
+                "franktheunicorn.config.loader.get_operator_config",
+                return_value=self._cli_op_config(),
+            ),
+            patch(
+                "franktheunicorn.config.loader.get_project_config",
+                return_value=None,
+            ),
+        ):
+            response = client.get(f"/pr/{db_pr.pk}/")
+
+        assert response.status_code == 200
+        assert b"no checkout" in response.content
+
+
+@pytest.mark.django_db
+class TestLastAgentCommandOnPrPage:
+    """The Force Run button's feedback used to end at "queued". The last
+    run_agents WorkerCommand — status, error, log tail — is what tells the
+    operator whether the run produced nothing because the PR is clean or
+    because every reviewer was skipped."""
+
+    def test_a_completed_command_shows_its_log(self, client: Client, db_pr: PullRequest) -> None:
+        WorkerCommand.objects.create(
+            command="run_agents",
+            pull_request=db_pr,
+            status="completed",
+            log="Generated 0 finding(s)\ncodex: did not run: no usable checkout (remote.mode=ssh)",
+        )
+        response = client.get(f"/pr/{db_pr.pk}/")
+
+        assert response.status_code == 200
+        assert b"Last agent run" in response.content
+        assert b"completed" in response.content
+        assert b"no usable checkout" in response.content
+
+    def test_a_failed_command_shows_its_error(self, client: Client, db_pr: PullRequest) -> None:
+        WorkerCommand.objects.create(
+            command="run_agents",
+            pull_request=db_pr,
+            status="failed",
+            error="ValueError: No project config for apache/spark",
+        )
+        response = client.get(f"/pr/{db_pr.pk}/")
+
+        assert response.status_code == 200
+        assert b"Last agent run" in response.content
+        assert b"No project config for apache/spark" in response.content
+
+    def test_no_command_no_block(self, client: Client, db_pr: PullRequest) -> None:
+        response = client.get(f"/pr/{db_pr.pk}/")
+
+        assert response.status_code == 200
+        assert b"Last agent run" not in response.content
+
+
+@pytest.mark.django_db
+class TestAgentRunSummaryHelpers:
     def test_draft_source_key_helper(self) -> None:
         """_draft_source_key returns correct primary key."""
         from unittest.mock import MagicMock

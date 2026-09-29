@@ -277,8 +277,9 @@ def build_agent_run_summary(
     """Build a structured summary of which agents ran (or were configured) for a PR.
 
     Returns a list of dicts, one per agent, ordered by: LLM backends first,
-    then CodeRabbit, then LLM checks, then shepherding, then any extra sources
-    found in the database that were not part of the configured set.
+    then CodeRabbit, then agent CLI reviewers, then LLM checks, then
+    shepherding, then any extra sources found in the database that were not
+    part of the configured set.
 
     Each dict has the following keys:
 
@@ -324,6 +325,25 @@ def build_agent_run_summary(
     # 2. CodeRabbit (when enabled).
     if operator_config.coderabbit.enabled:
         configured.append(("coderabbit", "CodeRabbit"))
+
+    # 2b. Agent CLI reviewers (claude/codex/cursor-agent/...). Resolved, not the
+    # raw config list: an enabled: false entry is not expected to run and gets
+    # no row. These are the reviewers whose zero-finding runs leave no drafts
+    # at all, so until they were listed here their recorded status in
+    # pr.agent_runs — "failed", "no-checkout" — had no row to render in, and a
+    # CLI reviewer skipped on an ssh failure read exactly like one that was
+    # never configured.
+    from franktheunicorn.worker.runner import resolve_agent_cli_reviewers
+
+    claimed = {key for key, _ in configured}
+    for rc in resolve_agent_cli_reviewers(operator_config):
+        if rc.name in claimed:
+            # An LLM backend can share a provider name with a CLI reviewer
+            # ("claude"); one row per source key, first claim wins.
+            continue
+        display = rc.name + (f" ({rc.model})" if rc.model else "")
+        configured.append((rc.name, display))
+        claimed.add(rc.name)
 
     # 3. LLM sub-checks from project config.
     if project_config:
@@ -474,6 +494,16 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
     # Agent run summary: which agents ran, their stats, and which didn't.
     agent_run_summary = build_agent_run_summary(pr, operator_config, project_config)
 
+    # The last Force Run Agents command, so the button's feedback doesn't end
+    # at "queued": its status, error and log tail are the only place the
+    # per-reviewer outcome (skipped on ssh, found nothing, failed) is visible
+    # without opening the worker log.
+    last_agent_command = (
+        WorkerCommand.objects.filter(pull_request=pr, command="run_agents")
+        .order_by("-created_at")
+        .first()
+    )
+
     prev_pr, next_pr = _adjacent_prs(pr)
 
     return render(
@@ -491,6 +521,7 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
             "jira_context": jira_context,
             "jira_server": jira_server,
             "agent_run_summary": agent_run_summary,
+            "last_agent_command": last_agent_command,
             "prev_pr": prev_pr,
             "next_pr": next_pr,
         },

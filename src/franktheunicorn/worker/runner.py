@@ -1184,7 +1184,7 @@ def process_pr(
 
         if cr_config is not None:
             _log("Running CodeRabbit...")
-            _run_coderabbit_for_pr(
+            outcome = _run_coderabbit_for_pr(
                 pr,
                 cr_config,
                 repo_path,
@@ -1193,9 +1193,14 @@ def process_pr(
                 operator_config=effective_config,
                 diff_http=diff_http,
             )
+            # The outcome goes into log_lines too: the force-run WorkerCommand
+            # log is built from those, and "Running codex..." followed by
+            # silence read exactly like a clean run when the reviewer had in
+            # fact been skipped for want of a checkout.
+            _log(f"CodeRabbit: {outcome}")
         for reviewer in agent_cli_reviewers:
             _log(f"Running {reviewer.name} agent CLI review...")
-            _run_agent_cli_for_pr(
+            outcome = _run_agent_cli_for_pr(
                 pr,
                 reviewer,
                 repo_path,
@@ -1204,9 +1209,10 @@ def process_pr(
                 operator_config=effective_config,
                 diff_http=diff_http,
             )
+            _log(f"{reviewer.name}: {outcome}")
         if snowflake_config is not None:
             _log("Running Snowflake review...")
-            _run_snowflake_for_pr(
+            outcome = _run_snowflake_for_pr(
                 pr,
                 snowflake_config,
                 repo_path,
@@ -1215,6 +1221,7 @@ def process_pr(
                 operator_config=effective_config,
                 diff_http=diff_http,
             )
+            _log(f"Snowflake review: {outcome}")
 
         if pc.llm_checks:
             try:
@@ -2254,12 +2261,17 @@ def _run_review_tool_for_pr(
     run_review: Callable[..., list[Any]],
     create_drafts: Callable[..., list[Any]],
     tool_config: object,
-) -> None:
+) -> str:
     """Shared scaffold for all CLI review tool runners. Never raises.
 
     Resolves a working directory, handles merge conflicts and remote execution,
     calls ``run_review``, converts findings to drafts, and cleans up the temp
     branch on exit.
+
+    Returns a one-line outcome for the caller's own log. The force-run
+    WorkerCommand log is assembled from the caller's lines, and without a
+    returned outcome the per-reviewer result lived only in the worker log —
+    so there a skipped reviewer read exactly like a clean one.
     """
     from franktheunicorn.review.tool_executor import make_executor
 
@@ -2279,7 +2291,7 @@ def _run_review_tool_for_pr(
             pr.number,
             mode,
         )
-        return
+        return f"did not run: no usable checkout (remote.mode={mode})"
     cwd, base_ref, temp_branch = resolved
 
     if temp_branch is None:
@@ -2289,8 +2301,12 @@ def _run_review_tool_for_pr(
             pr.number,
             base_ref,
         )
+        # Recorded like every other outcome: the template has rendered a
+        # "merge conflict" chip since the agent_runs table existed, and until
+        # now no path ever wrote the status it keys on.
+        record_agent_run(pr, source, status="merge-conflict")
         _handle_merge_conflict(pr, project_config, operator_config, diff_http)
-        return
+        return f"skipped: does not merge cleanly onto {base_ref}"
 
     executor = make_executor(remote_config)  # type: ignore[arg-type]
     real_branch: str | None = None if temp_branch == _REMOTE else temp_branch
@@ -2315,9 +2331,11 @@ def _run_review_tool_for_pr(
         # had a turn and found nothing" and "it never got a turn" are exactly the
         # two states the rescan has to tell apart.
         record_agent_run(pr, source, status="ok", findings=len(findings))
+        return f"{len(findings)} finding(s) → {len(drafts)} draft(s)"
     except Exception:
         logger.exception("%s failed for PR #%d; continuing.", tool_name, pr.number)
         record_agent_run(pr, source, status="failed")
+        return "failed — traceback in the worker log"
     finally:
         if real_branch is not None:
             _cleanup_review_branch(executor, cwd, real_branch)
@@ -2331,14 +2349,14 @@ def _run_coderabbit_for_pr(
     project_config: ProjectConfig | None = None,
     operator_config: OperatorConfig | None = None,
     diff_http: httpx.Client | None = None,
-) -> None:
+) -> str:
     """Run CodeRabbit CLI review for a single PR. Never raises."""
     from franktheunicorn.review.coderabbit import (
         create_drafts_from_coderabbit,
         run_coderabbit_review,
     )
 
-    _run_review_tool_for_pr(
+    return _run_review_tool_for_pr(
         pr,
         "CodeRabbit",
         cr_config.remote,
@@ -2361,7 +2379,7 @@ def _run_agent_cli_for_pr(
     project_config: ProjectConfig | None = None,
     operator_config: OperatorConfig | None = None,
     diff_http: httpx.Client | None = None,
-) -> None:
+) -> str:
     """Run one agent-CLI reviewer (claude/codex/pi/...) for a PR. Never raises.
 
     Drafts are attributed to the reviewer's ``name`` and deduped across
@@ -2405,7 +2423,7 @@ def _run_agent_cli_for_pr(
         deduplicate=reviewer.deduplicate,
     )
 
-    _run_review_tool_for_pr(
+    return _run_review_tool_for_pr(
         pr,
         f"{reviewer.name} agent CLI",
         reviewer.remote,
@@ -2428,14 +2446,14 @@ def _run_snowflake_for_pr(
     project_config: ProjectConfig | None = None,
     operator_config: OperatorConfig | None = None,
     diff_http: httpx.Client | None = None,
-) -> None:
+) -> str:
     """Run the Snowflake code review CLI for a single PR. Never raises."""
     from franktheunicorn.review.snowflake_review import (
         create_drafts_from_snowflake,
         run_snowflake_review,
     )
 
-    _run_review_tool_for_pr(
+    return _run_review_tool_for_pr(
         pr,
         "Snowflake review",
         snowflake_config.remote,

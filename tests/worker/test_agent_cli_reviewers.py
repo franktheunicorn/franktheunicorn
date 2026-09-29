@@ -642,3 +642,98 @@ class TestCursorReviewer:
         cursor = next(rc for rc in oc.agent_cli_reviewers if rc.name == "cursor-agent")
         assert cursor.extra_args == []
         assert cursor.cli_argv == ["cursor-agent"], "the seeded cli_path survives"
+
+
+@pytest.mark.django_db
+class TestReviewerOutcomeLines:
+    """The one-line outcome ``_run_review_tool_for_pr`` returns is what
+    ``process_pr`` puts into the force-run WorkerCommand's log. Without it the
+    per-reviewer result lived only in the worker log, and there a reviewer
+    skipped on an ssh failure read exactly like one that found nothing."""
+
+    def test_no_checkout_returns_the_reason(self, db_pr: PullRequest) -> None:
+        with patch.object(RemoteSSHExecutor, "prepare_repo", return_value=None):
+            outcome = _run_agent_cli_for_pr(
+                db_pr,
+                _ssh_reviewer(),
+                repo_path=None,
+                clone_url="https://example.com/a/b.git",
+                project_config=ProjectConfig(owner="apache", repo="spark"),
+            )
+
+        assert outcome == "did not run: no usable checkout (remote.mode=ssh)"
+        db_pr.refresh_from_db()
+        assert db_pr.agent_runs["claude"]["status"] == "no-checkout"
+
+    def test_a_clean_run_reports_zero_findings(self, db_pr: PullRequest) -> None:
+        from franktheunicorn.worker.runner import _REMOTE
+
+        with (
+            patch(
+                "franktheunicorn.worker.runner._resolve_cwd_for_tool",
+                return_value=("/remote/spark", "origin/master", _REMOTE),
+            ),
+            patch(
+                "franktheunicorn.review.agent_cli.run_agent_cli_review",
+                return_value=[],
+            ),
+        ):
+            outcome = _run_agent_cli_for_pr(
+                db_pr,
+                _ssh_reviewer(),
+                repo_path=None,
+                clone_url="https://example.com/a/b.git",
+                project_config=ProjectConfig(owner="apache", repo="spark"),
+            )
+
+        assert outcome == "0 finding(s) → 0 draft(s)"
+        db_pr.refresh_from_db()
+        assert db_pr.agent_runs["claude"]["status"] == "ok"
+
+    def test_a_raising_review_returns_failed(self, db_pr: PullRequest) -> None:
+        from franktheunicorn.worker.runner import _REMOTE
+
+        with (
+            patch(
+                "franktheunicorn.worker.runner._resolve_cwd_for_tool",
+                return_value=("/remote/spark", "origin/master", _REMOTE),
+            ),
+            patch(
+                "franktheunicorn.review.agent_cli.run_agent_cli_review",
+                side_effect=RuntimeError("boom"),
+            ),
+        ):
+            outcome = _run_agent_cli_for_pr(
+                db_pr,
+                _ssh_reviewer(),
+                repo_path=None,
+                clone_url="https://example.com/a/b.git",
+                project_config=ProjectConfig(owner="apache", repo="spark"),
+            )
+
+        assert outcome.startswith("failed")
+        db_pr.refresh_from_db()
+        assert db_pr.agent_runs["claude"]["status"] == "failed"
+
+    def test_a_merge_conflict_is_recorded(self, db_pr: PullRequest) -> None:
+        """The template has rendered a "merge conflict" chip since agent_runs
+        existed; until now no path ever wrote the status it keys on."""
+        with (
+            patch(
+                "franktheunicorn.worker.runner._resolve_cwd_for_tool",
+                return_value=("/checkout", "origin/master", None),
+            ),
+            patch("franktheunicorn.worker.runner._handle_merge_conflict") as mock_conflict,
+        ):
+            outcome = _run_agent_cli_for_pr(
+                db_pr,
+                _ssh_reviewer(),
+                repo_path=None,
+                clone_url="https://example.com/a/b.git",
+                project_config=ProjectConfig(owner="apache", repo="spark"),
+            )
+
+        assert outcome == "skipped: does not merge cleanly onto origin/master"
+        assert mock_conflict.called
+        db_pr.refresh_from_db()
+        assert db_pr.agent_runs["claude"]["status"] == "merge-conflict"

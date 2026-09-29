@@ -96,6 +96,29 @@
         </button>
         <span id="run-agents-spinner" class="htmx-indicator run-agents-spinner" aria-label="Running..."></span>
         <div id="run-agents-result"></div>
+        {% if last_agent_command %}
+        {# The button's feedback used to end at "queued". This is the outcome: #}
+        {# status, failure, and the log tail that names what each reviewer did #}
+        {# (or why it was skipped — an ssh blip shows up here as "no usable #}
+        {# checkout" rather than as silence). #}
+        <div class="fainter" style="font-size: 0.8rem; margin-top: 0.3rem;">
+            Last agent run: <strong>{{ last_agent_command.status }}</strong>
+            {% if last_agent_command.started_at %}· started {{ last_agent_command.started_at|timesince }} ago{% endif %}
+            {% if last_agent_command.finished_at %}· finished {{ last_agent_command.finished_at|timesince }} ago{% endif %}
+            {% if last_agent_command.status == "pending" or last_agent_command.status == "running" %}
+            — the worker has it; reload in a minute or two.
+            {% endif %}
+            {% if last_agent_command.error %}
+            <div class="error-note" style="font-size: 0.8rem;">{{ last_agent_command.error }}</div>
+            {% endif %}
+            {% if last_agent_command.log %}
+            <details>
+                <summary style="cursor: pointer; color: var(--accent);">run log</summary>
+                <pre style="font-size: 0.75rem; white-space: pre-wrap;">{{ last_agent_command.log }}</pre>
+            </details>
+            {% endif %}
+        </div>
+        {% endif %}
     </div>
     <div>
         <button class="action-btn reject"
