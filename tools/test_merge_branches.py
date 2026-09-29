@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests for the pure rules in merge_branches.py.
 
-    python3 -m unittest test_merge_branches -v      (or: pytest test_merge_branches.py)
+python3 -m unittest test_merge_branches -v      (or: pytest test_merge_branches.py)
 """
 
 import csv
@@ -49,19 +49,35 @@ class SuffixTarget(unittest.TestCase):
                 self.assertEqual(suffix_target(branch), expected)
 
     def test_a_version_that_is_not_the_ending_does_not_pin(self):
-        for branch in ("3.5-cve-fixes", "master-of-none", "fix-4.1-followup", "SPARK-59119-cyclic-cause_idx",
-                       "branch-4.10", "no-version-here"):
+        for branch in (
+            "3.5-cve-fixes",
+            "master-of-none",
+            "fix-4.1-followup",
+            "SPARK-59119-cyclic-cause_idx",
+            "branch-4.10",
+            "no-version-here",
+        ):
             with self.subTest(branch=branch):
                 self.assertIsNone(suffix_target(branch))
 
     def test_every_spelling_of_the_same_pin_agrees(self):
         """-4x, -4.x, with or without "-branch", with or without a revision."""
         stem = "f091-kafka-datasource-option-restrict"
-        spellings = [f"{stem}{tail}" for tail in (
-            "-4x", "-4.x", "-branch-4x", "-branch-4.x",
-            "-4x-aok", "-branch-4x-squashed", "-branch-4.x-aok",
-            "-4.x-r2", "-branch-4x-r2", "-branch-4.x-r2-aok",
-        )]
+        spellings = [
+            f"{stem}{tail}"
+            for tail in (
+                "-4x",
+                "-4.x",
+                "-branch-4x",
+                "-branch-4.x",
+                "-4x-aok",
+                "-branch-4x-squashed",
+                "-branch-4.x-aok",
+                "-4.x-r2",
+                "-branch-4x-r2",
+                "-branch-4.x-r2-aok",
+            )
+        ]
         for branch in spellings:
             with self.subTest(branch=branch):
                 self.assertEqual(suffix_target(branch), "branch-4.x")
@@ -71,8 +87,7 @@ class SuffixTarget(unittest.TestCase):
         # SPARK-59118-doAs-warn-4.x-r2 is the second cut for 4.x, not an
         # unpinned branch that would go to every release.
         self.assertEqual(suffix_target("SPARK-59118-doAs-warn-4.x-r2"), "branch-4.x")
-        self.assertEqual(family_stem("SPARK-59118-doAs-warn-4.x-r2"),
-                         "SPARK-59118-doAs-warn")
+        self.assertEqual(family_stem("SPARK-59118-doAs-warn-4.x-r2"), "SPARK-59118-doAs-warn")
 
     def test_a_revision_marker_on_an_unpinned_name_is_part_of_the_name(self):
         # f003-r2 is the name of the work; there is no f003 to fold it into.
@@ -84,10 +99,13 @@ class SuffixTarget(unittest.TestCase):
 
 class LogicalName(unittest.TestCase):
     def test_strips_the_squash_marker(self):
-        self.assertEqual(logical_name("security-agg-injection-branch-4.2-aok"),
-                         "security-agg-injection-branch-4.2")
-        self.assertEqual(logical_name("ldap-thriftserver-improvement-squashed"),
-                         "ldap-thriftserver-improvement")
+        self.assertEqual(
+            logical_name("security-agg-injection-branch-4.2-aok"),
+            "security-agg-injection-branch-4.2",
+        )
+        self.assertEqual(
+            logical_name("ldap-thriftserver-improvement-squashed"), "ldap-thriftserver-improvement"
+        )
         self.assertEqual(logical_name("some-fix-4.1-squashed"), "some-fix-4.1")
 
     def test_strips_stacked_markers(self):
@@ -95,8 +113,10 @@ class LogicalName(unittest.TestCase):
         self.assertEqual(logical_name("thing-aok-squashed"), "thing")
 
     def test_leaves_an_unmarked_name_alone(self):
-        self.assertEqual(logical_name("f107-improve-show-create-table-escaping"),
-                         "f107-improve-show-create-table-escaping")
+        self.assertEqual(
+            logical_name("f107-improve-show-create-table-escaping"),
+            "f107-improve-show-create-table-escaping",
+        )
 
     def test_strips_repeats_but_never_the_whole_name(self):
         self.assertEqual(logical_name("thing-aok-aok"), "thing")
@@ -115,8 +135,7 @@ class SquashedBranchRouting(unittest.TestCase):
 
     def test_version_is_found_behind_the_marker(self):
         self.assertEqual(suffix_target("security-agg-injection-branch-4.2-aok"), "branch-4.2")
-        self.assertEqual(suffix_target("security-agg-injection-branch-4.2-squashed"),
-                         "branch-4.2")
+        self.assertEqual(suffix_target("security-agg-injection-branch-4.2-squashed"), "branch-4.2")
         self.assertEqual(suffix_target("udt-config-opt-squashed"), None)
         self.assertEqual(suffix_target("some-fix-master-aok"), "master")
         self.assertEqual(suffix_target("xss-fix-branch-4.x-aok"), "branch-4.x")
@@ -128,9 +147,9 @@ class SquashedBranchRouting(unittest.TestCase):
     def test_routing_uses_the_stripped_name(self):
         self.assertEqual(
             targets_for("security-agg-injection-branch-4.2-aok", "master", ALL_TARGETS),
-            ["branch-4.2"])
-        self.assertEqual(
-            targets_for("f007-mergedir-aok", "master", ALL_TARGETS), ALL_TARGETS)
+            ["branch-4.2"],
+        )
+        self.assertEqual(targets_for("f007-mergedir-aok", "master", ALL_TARGETS), ALL_TARGETS)
 
 
 class TargetsFor(unittest.TestCase):
@@ -179,8 +198,9 @@ class CiStatus(unittest.TestCase):
     def test_running_wins_over_a_failure_but_says_so(self):
         # A branch still building is "come back later", not "rejected" -- but an
         # already-failed job should not be invisible while the rest queues.
-        self.assertEqual(ci_status([("completed", "failure"), ("queued", "")]),
-                         "running-with-failures")
+        self.assertEqual(
+            ci_status([("completed", "failure"), ("queued", "")]), "running-with-failures"
+        )
 
     def test_a_clean_pending_run_is_plain_running(self):
         self.assertEqual(ci_status([("completed", "success"), ("queued", "")]), "running")
@@ -198,8 +218,9 @@ class ParseBranchFile(unittest.TestCase):
         self.assertEqual(parse_branch_file("alpha"), [("alpha", None)])
 
     def test_a_branch_listed_twice_is_taken_once(self):
-        self.assertEqual(parse_branch_file("alpha\nbeta\nalpha\n"),
-                         [("alpha", None), ("beta", None)])
+        self.assertEqual(
+            parse_branch_file("alpha\nbeta\nalpha\n"), [("alpha", None), ("beta", None)]
+        )
 
     def test_extra_columns_are_ignored(self):
         self.assertEqual(parse_branch_file("alpha master junk\n"), [("alpha", "master")])
@@ -232,8 +253,11 @@ class SpecificSubject(unittest.TestCase):
     """Subject matching only means something for a subject that says something."""
 
     def test_a_real_commit_subject_is_specific(self):
-        self.assertTrue(is_specific_subject(
-            "[SPARK-59200][DOCS] Clarify the spark.eventLog.compress description"))
+        self.assertTrue(
+            is_specific_subject(
+                "[SPARK-59200][DOCS] Clarify the spark.eventLog.compress description"
+            )
+        )
 
     def test_a_generic_subject_is_not(self):
         for subject in ("[MINOR] Fix typo", "fix", "  Update docs  ", ""):
@@ -246,42 +270,61 @@ class Families(unittest.TestCase):
     per-release cut of the same work."""
 
     def test_stem_strips_markers_and_version(self):
-        for name in ("f107-fix", "f107-fix-aok", "f107-fix-3.5", "f107-fix-3.5-aok",
-                     "f107-fix-4.1-squashed", "f107-fix-master",
-                     # the other spelling: -branch-3.5 rather than -3.5
-                     "f107-fix-branch-3.5", "f107-fix-branch-4.x-aok",
-                     "f107-fix-branch-master"):
+        for name in (
+            "f107-fix",
+            "f107-fix-aok",
+            "f107-fix-3.5",
+            "f107-fix-3.5-aok",
+            "f107-fix-4.1-squashed",
+            "f107-fix-master",
+            # the other spelling: -branch-3.5 rather than -3.5
+            "f107-fix-branch-3.5",
+            "f107-fix-branch-4.x-aok",
+            "f107-fix-branch-master",
+        ):
             with self.subTest(name=name):
                 self.assertEqual(family_stem(name), "f107-fix")
 
     def test_mixed_spellings_pair_with_the_plain_branch(self):
-        listed = ["f091-kafka-datasource-option-restrict",
-                  "f091-kafka-datasource-option-restrict-4x",
-                  "f091-kafka-datasource-option-restrict-branch-3.5-aok"]
+        listed = [
+            "f091-kafka-datasource-option-restrict",
+            "f091-kafka-datasource-option-restrict-4x",
+            "f091-kafka-datasource-option-restrict-branch-3.5-aok",
+        ]
         self.assertEqual(
             sibling_coverage("f091-kafka-datasource-option-restrict", ALL_TARGETS, listed),
-            {"branch-4.x": "f091-kafka-datasource-option-restrict-4x",
-             "branch-3.5": "f091-kafka-datasource-option-restrict-branch-3.5-aok"})
+            {
+                "branch-4.x": "f091-kafka-datasource-option-restrict-4x",
+                "branch-3.5": "f091-kafka-datasource-option-restrict-branch-3.5-aok",
+            },
+        )
 
     def test_a_name_that_really_ends_in_branch_keeps_it(self):
         # only the "-branch" that came in front of a version is dropped
-        self.assertEqual(family_stem("security-agg-injection-branch"),
-                         "security-agg-injection-branch")
+        self.assertEqual(
+            family_stem("security-agg-injection-branch"), "security-agg-injection-branch"
+        )
 
     def test_the_branch_spelling_pairs_with_the_plain_one(self):
-        listed = ["f040-compressed-file-handling",
-                  "f040-compressed-file-handling-branch-3.5",
-                  "f040-compressed-file-handling-branch-4.1"]
+        listed = [
+            "f040-compressed-file-handling",
+            "f040-compressed-file-handling-branch-3.5",
+            "f040-compressed-file-handling-branch-4.1",
+        ]
         self.assertEqual(
             sibling_coverage("f040-compressed-file-handling", ALL_TARGETS, listed),
-            {"branch-3.5": "f040-compressed-file-handling-branch-3.5",
-             "branch-4.1": "f040-compressed-file-handling-branch-4.1"})
+            {
+                "branch-3.5": "f040-compressed-file-handling-branch-3.5",
+                "branch-4.1": "f040-compressed-file-handling-branch-4.1",
+            },
+        )
 
     def test_the_plain_branch_leaves_35_to_its_sibling(self):
         listed = ["f107-fix-aok", "f107-fix-3.5-aok"]
         self.assertEqual(
             sibling_coverage("f107-fix-aok", ALL_TARGETS, listed),
-            {"branch-3.5": "f107-fix-3.5-aok"})
+            {"branch-3.5": "f107-fix-3.5-aok"},
+        )
 
     def test_a_pinned_branch_claims_nothing(self):
         listed = ["f107-fix-aok", "f107-fix-3.5-aok"]
@@ -295,7 +338,8 @@ class Families(unittest.TestCase):
         listed = ["thing-aok", "thing-3.5-aok", "thing-4.1-aok"]
         self.assertEqual(
             sibling_coverage("thing-aok", ALL_TARGETS, listed),
-            {"branch-3.5": "thing-3.5-aok", "branch-4.1": "thing-4.1-aok"})
+            {"branch-3.5": "thing-3.5-aok", "branch-4.1": "thing-4.1-aok"},
+        )
 
     def test_a_sibling_for_a_target_not_in_play_is_ignored(self):
         listed = ["thing-aok", "thing-4.3-aok"]
@@ -316,19 +360,24 @@ class Ledger(unittest.TestCase):
         self.assertEqual(load_ledger(Path("/nonexistent/ledger.csv")), set())
 
     def test_reads_branch_and_target_pairs(self):
-        path = self.ledger([
-            ["2026-08-31T10:00:00-07:00", "f003-r2-aok", "master", "abc", "def", "apache"],
-            ["2026-08-31T10:05:00-07:00", "f003-r2-aok", "branch-4.1", "ghi", "def", "apache"],
-        ])
-        self.assertEqual(load_ledger(path),
-                         {("f003-r2-aok", "master"), ("f003-r2-aok", "branch-4.1")})
+        path = self.ledger(
+            [
+                ["2026-08-31T10:00:00-07:00", "f003-r2-aok", "master", "abc", "def", "apache"],
+                ["2026-08-31T10:05:00-07:00", "f003-r2-aok", "branch-4.1", "ghi", "def", "apache"],
+            ]
+        )
+        self.assertEqual(
+            load_ledger(path), {("f003-r2-aok", "master"), ("f003-r2-aok", "branch-4.1")}
+        )
 
     def test_blank_and_ragged_rows_are_ignored(self):
-        path = self.ledger([
-            ["2026-08-31T10:00:00-07:00", "good-aok", "master", "abc", "def", "apache"],
-            ["2026-08-31T10:00:00-07:00", "", "master", "", "", ""],
-            ["2026-08-31T10:00:00-07:00", "no-target", "", "", "", ""],
-        ])
+        path = self.ledger(
+            [
+                ["2026-08-31T10:00:00-07:00", "good-aok", "master", "abc", "def", "apache"],
+                ["2026-08-31T10:00:00-07:00", "", "master", "", "", ""],
+                ["2026-08-31T10:00:00-07:00", "no-target", "", "", "", ""],
+            ]
+        )
         self.assertEqual(load_ledger(path), {("good-aok", "master")})
 
     def test_a_subject_with_a_comma_survives_the_round_trip(self):
@@ -348,10 +397,7 @@ class HoldList(unittest.TestCase):
         self.assertEqual(load_hold_list(Path("/nonexistent/hold.txt")), {})
 
     def test_reads_names_and_reasons_and_skips_comments(self):
-        path = self.hold_file(
-            "# branches on hold\n"
-            "foo-aok\tflaky test, chasing it\n"
-            "bar-aok\n")
+        path = self.hold_file("# branches on hold\nfoo-aok\tflaky test, chasing it\nbar-aok\n")
         held = load_hold_list(path)
         self.assertEqual(set(held), {"foo-aok", "bar-aok"})
         self.assertEqual(held["foo-aok"], "flaky test, chasing it")
@@ -380,12 +426,13 @@ class Approvals(unittest.TestCase):
         self.assertEqual(load_approvals(Path("/nonexistent/approved.txt")), set())
 
     def test_reads_branch_and_patch_id(self):
-        path = self.approvals([
-            ["2026-09-01T01:00:00-07:00", "foo-aok", "abc", "patch111", "master"],
-            ["2026-09-01T01:00:01-07:00", "bar-aok", "def", "patch222", "master branch-4.1"],
-        ])
-        self.assertEqual(load_approvals(path),
-                         {("foo-aok", "patch111"), ("bar-aok", "patch222")})
+        path = self.approvals(
+            [
+                ["2026-09-01T01:00:00-07:00", "foo-aok", "abc", "patch111", "master"],
+                ["2026-09-01T01:00:01-07:00", "bar-aok", "def", "patch222", "master branch-4.1"],
+            ]
+        )
+        self.assertEqual(load_approvals(path), {("foo-aok", "patch111"), ("bar-aok", "patch222")})
 
     def test_a_row_without_a_patch_id_is_ignored(self):
         path = self.approvals([["t", "foo-aok", "abc", "", "master"]])
@@ -401,9 +448,14 @@ class FailingCiGetsOneRetry(unittest.TestCase):
         from types import SimpleNamespace
 
         bp = object.__new__(merge_branches.Backporter)
-        bp.cfg = SimpleNamespace(dry_run=False, fork_remote="fork",
-                                 fork_repo="holdenk/spark", ci_poll_minutes=0,
-                                 ci_wait_hours=0, refresh_before_retry=False)
+        bp.cfg = SimpleNamespace(
+            dry_run=False,
+            fork_remote="fork",
+            fork_repo="holdenk/spark",
+            ci_poll_minutes=0,
+            ci_wait_hours=0,
+            refresh_before_retry=False,
+        )
         bp.git = SimpleNamespace(run=lambda *a, **k: None)
         self.written = []
         self.recorded = []
@@ -411,8 +463,9 @@ class FailingCiGetsOneRetry(unittest.TestCase):
         bp.reports = SimpleNamespace(write=lambda name, *cols: self.written.append((name, cols)))
         bp.record = lambda name, target, why: self.recorded.append((name, why))
         bp.warn_if_untested = lambda src: None
-        bp.merge_all = lambda work: self.merged.extend(name for (src, _) in work
-                                                       for name in [src.name])
+        bp.merge_all = lambda work: self.merged.extend(
+            name for (src, _) in work for name in [src.name]
+        )
         bp.ci_status_of = lambda sha: states[sha]
         heads = heads or {}
         bp.resolve_on_fork = lambda name: heads.get(name, (name, name + "-head"))
@@ -458,10 +511,9 @@ class FailingCiGetsOneRetry(unittest.TestCase):
         bp = self.make({"a-head": "passing"})
         bp.cfg.refresh_before_retry = True
         seen = []
-        bp.refresh_rewrites = lambda work: (seen.append([src.name for src, _ in work])
-                                            or work)
+        bp.refresh_rewrites = lambda work: seen.append([src.name for src, _ in work]) or work
         bp.retry_failed([(self.source("a"), ["master"])])
-        self.assertEqual(seen, [["a"]])          # and before anything was merged
+        self.assertEqual(seen, [["a"]])  # and before anything was merged
         self.assertEqual(self.merged, ["a"])
 
     def test_a_branch_that_survives_nothing_after_re_cutting_stops_there(self):
@@ -475,7 +527,7 @@ class FailingCiGetsOneRetry(unittest.TestCase):
         bp = self.make({"a-head": "failing"})
         late = bp.revisit([(self.source("a"), ["master"])])
         self.assertEqual([src.name for src, _ in late], ["a"])
-        self.assertEqual(self.written, [])   # retry_failed decides, not revisit
+        self.assertEqual(self.written, [])  # retry_failed decides, not revisit
 
 
 class SquashOutput(unittest.TestCase):
@@ -485,8 +537,7 @@ class SquashOutput(unittest.TestCase):
 
     def test_a_branch_that_came_back_under_a_different_marker_still_matches(self):
         # listed as f1-aok, but a second commit turned up and it is -squashed now
-        self.assertEqual(squash_output("f1-squashed\n").get(logical_name("f1-aok")),
-                         "f1-squashed")
+        self.assertEqual(squash_output("f1-squashed\n").get(logical_name("f1-aok")), "f1-squashed")
 
 
 class RefreshBeforeRetry(unittest.TestCase):
@@ -501,12 +552,22 @@ class RefreshBeforeRetry(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         bp.stamp = "stamp"
         bp.cfg = SimpleNamespace(
-            refresh_before_retry=True, pick_from_fork=False, dry_run=False,
-            strip_suffixes=merge_branches.STRIP_SUFFIXES, upstream="up", fork_remote="fork",
-            log_dir=Path(self.tmp.name), update_bases=Path("update-bases.sh"),
-            squash_magic=Path("squash-magic.sh"), refresh_timeout=60)
-        bp.git = SimpleNamespace(rev_parse=lambda ref: heads.get(
-            ref.removeprefix("refs/heads/").removesuffix("^{commit}")))
+            refresh_before_retry=True,
+            pick_from_fork=False,
+            dry_run=False,
+            strip_suffixes=merge_branches.STRIP_SUFFIXES,
+            upstream="up",
+            fork_remote="fork",
+            log_dir=Path(self.tmp.name),
+            update_bases=Path("update-bases.sh"),
+            squash_magic=Path("squash-magic.sh"),
+            refresh_timeout=60,
+        )
+        bp.git = SimpleNamespace(
+            rev_parse=lambda ref: heads.get(
+                ref.removeprefix("refs/heads/").removesuffix("^{commit}")
+            )
+        )
         self.ran = []
         self.planned = []
 
@@ -517,7 +578,7 @@ class RefreshBeforeRetry(unittest.TestCase):
             return helpers
 
         bp.run_helper = run_helper
-        bp.plan = lambda src: (self.planned.append(src.name) or ["master"])
+        bp.plan = lambda src: self.planned.append(src.name) or ["master"]
         return bp
 
     def source(self, name, pick, head):
@@ -532,9 +593,8 @@ class RefreshBeforeRetry(unittest.TestCase):
         bp = self.make({"f1-aok": "old"}, cut="f1-aok\n")
         src = self.source("f1-aok", "f1-aok", "old")
         out = bp.refresh_rewrites(self.work(src))
-        self.assertEqual([name for name, _ in self.ran],
-                         ["update-bases.sh", "squash-magic.sh"])
-        self.assertEqual(out[0][1], ["master", "branch-3.5"])   # not planned again
+        self.assertEqual([name for name, _ in self.ran], ["update-bases.sh", "squash-magic.sh"])
+        self.assertEqual(out[0][1], ["master", "branch-3.5"])  # not planned again
         self.assertEqual((src.pick_name, src.head, self.planned), ("f1-aok", "old", []))
 
     def test_squash_magic_is_asked_only_about_the_branches_being_retried(self):
@@ -554,14 +614,12 @@ class RefreshBeforeRetry(unittest.TestCase):
         src = self.source("f1-aok", "f1-aok", "old")
         bp.refresh_rewrites(self.work(src))
         # the listed name is what the reports and the ledger keep calling it
-        self.assertEqual((src.name, src.pick_name, src.head),
-                         ("f1-aok", "f1-squashed", "new"))
+        self.assertEqual((src.name, src.pick_name, src.head), ("f1-aok", "f1-squashed", "new"))
 
     def test_nothing_left_to_merge_drops_the_branch(self):
         bp = self.make({"f1-aok": "new"}, cut="f1-aok\n")
         bp.plan = lambda src: None
-        self.assertEqual(bp.refresh_rewrites(self.work(self.source("f1-aok", "f1-aok", "old"))),
-                         [])
+        self.assertEqual(bp.refresh_rewrites(self.work(self.source("f1-aok", "f1-aok", "old"))), [])
 
     def test_a_helper_that_fails_leaves_the_rewrites_alone(self):
         bp = self.make({"f1-aok": "new"}, cut="f1-aok\n", helpers=False)
@@ -577,7 +635,7 @@ class RefreshBeforeRetry(unittest.TestCase):
         self.assertEqual((src.head, self.planned, len(out)), ("old", [], 1))
 
     def test_a_branch_squash_magic_gave_up_on_keeps_the_rewrite_it_had(self):
-        bp = self.make({"f1-aok": "old"}, cut="")     # went to its unknown pile
+        bp = self.make({"f1-aok": "old"}, cut="")  # went to its unknown pile
         src = self.source("f1-aok", "f1-aok", "old")
         out = bp.refresh_rewrites(self.work(src))
         self.assertEqual((src.pick_name, src.head, self.planned), ("f1-aok", "old", []))
@@ -651,10 +709,10 @@ class CiCoversTheChange(unittest.TestCase):
         src = self.source("rewritten", "onfork")
         bp.warn_if_untested(src)
         self.assertEqual(self.written, [])
-        self.assertFalse(src.ci_covers_change)   # nothing to merge, nothing covered
+        self.assertFalse(src.ci_covers_change)  # nothing to merge, nothing covered
 
     def test_a_signature_we_could_not_work_out_is_still_flagged(self):
-        bp = self.make({"onfork": "patch-1"})     # picked is None, but not empty
+        bp = self.make({"onfork": "patch-1"})  # picked is None, but not empty
         src = self.source("rewritten", "onfork")
         bp.warn_if_untested(src)
         self.assertEqual([name for name, _ in self.written], ["NEEDS_REVIEW.txt"])
@@ -668,9 +726,15 @@ class BuildInsteadOfWaiting(unittest.TestCase):
         from types import SimpleNamespace
 
         bp = object.__new__(merge_branches.Backporter)
-        bp.cfg = SimpleNamespace(dry_run=False, fork_remote="fork", fork_repo="holdenk/spark",
-                                 ci_poll_minutes=0, ci_wait_hours=0,
-                                 local_stand_in=stand_in, do_compile=compile_)
+        bp.cfg = SimpleNamespace(
+            dry_run=False,
+            fork_remote="fork",
+            fork_repo="holdenk/spark",
+            ci_poll_minutes=0,
+            ci_wait_hours=0,
+            local_stand_in=stand_in,
+            do_compile=compile_,
+        )
         self.events = []
         bp.git = SimpleNamespace(run=lambda *a, **k: None)
         bp.reports = SimpleNamespace(write=lambda name, *cols: None)
@@ -715,9 +779,9 @@ class BuildInsteadOfWaiting(unittest.TestCase):
         bp = self.make({"a-head": "running", "b-head": "passing"}, stand_in=False)
         # b goes green on the first look, a would poll forever -- so stop it there
         bp.ci_status_of = lambda sha: {"a-head": "running", "b-head": "passing"}[sha]
-        bp.cfg.ci_wait_hours = 1e-9        # deadline expires immediately
+        bp.cfg.ci_wait_hours = 1e-9  # deadline expires immediately
         bp.revisit(self.work("a", "b"))
-        self.assertEqual(self.events, ["merge:b"])       # nothing built locally
+        self.assertEqual(self.events, ["merge:b"])  # nothing built locally
 
     def test_with_no_local_build_there_is_nothing_to_stand_in_with(self):
         bp = self.make({"a-head": "running"}, compile_=False)
@@ -745,8 +809,7 @@ class AlreadyLandedGroup(unittest.TestCase):
         src.head, src.fork_head = "abc", "def"
         self.assertIsNone(bp.plan(src))
         self.assertEqual([name for name, _ in written], ["already_landed.txt"])
-        self.assertEqual(written[0][1][:4],
-                         ("f003-r2-aok", "-", "abc", "[CORE] the work"))
+        self.assertEqual(written[0][1][:4], ("f003-r2-aok", "-", "abc", "[CORE] the work"))
         self.assertIn("master", written[0][1][4])
         self.assertEqual(recorded, ["skipped, already in master"])
 
@@ -760,11 +823,12 @@ class EmptyCherryPick(unittest.TestCase):
         from types import SimpleNamespace
 
         bp = object.__new__(merge_branches.Backporter)
-        bp.cfg = SimpleNamespace(dry_run=False, fork_remote="fork", do_push=False,
-                                 ci_shortcut=True, do_compile=False)
+        bp.cfg = SimpleNamespace(
+            dry_run=False, fork_remote="fork", do_push=False, ci_shortcut=True, do_compile=False
+        )
         self.written = []
         self.recorded = []
-        self.state = "clean"          # what the last failed pick left behind
+        self.state = "clean"  # what the last failed pick left behind
         self.aborted = []
 
         def ok(*args):
@@ -789,7 +853,10 @@ class EmptyCherryPick(unittest.TestCase):
             return SimpleNamespace(returncode=0)
 
         bp.git = SimpleNamespace(
-            ok=ok, out=out, run=run, subject=lambda sha: f"subject of {sha}",
+            ok=ok,
+            out=out,
+            run=run,
+            subject=lambda sha: f"subject of {sha}",
             has_ref=lambda ref: ref == "CHERRY_PICK_HEAD",
             lines=lambda *args: [] if args[0] == "cherry" else ["landed"],
         )
@@ -816,7 +883,7 @@ class EmptyCherryPick(unittest.TestCase):
         self.assertEqual(bp.backport(self.source(["c1"]), "branch-3.5"), [])
         self.assertEqual(self.files(), ["already_landed.txt", "skipped.txt"])
         self.assertNotIn("rejects.txt", self.files())
-        self.assertEqual(self.aborted, [True])          # the stopped pick is undone
+        self.assertEqual(self.aborted, [True])  # the stopped pick is undone
 
     def test_the_row_says_which_commit_on_which_target(self):
         bp = self.make({"c1": "empty"})
@@ -828,7 +895,7 @@ class EmptyCherryPick(unittest.TestCase):
     def test_the_rest_of_the_series_carries_on(self):
         bp = self.make({"c1": "empty", "c2": "ok"})
         landed = bp.backport(self.source(["c1", "c2"]), "master")
-        self.assertEqual(self.files(), ["already_landed.txt"])   # no skipped.txt: c2 went in
+        self.assertEqual(self.files(), ["already_landed.txt"])  # no skipped.txt: c2 went in
         self.assertEqual(landed, ["landed"])
 
     def test_a_real_conflict_is_still_a_conflict(self):
@@ -856,20 +923,28 @@ class BackporterAttributes(unittest.TestCase):
         import merge_branches
 
         source = ast.parse(Path(merge_branches.__file__).read_text())
-        cls = next(node for node in ast.walk(source)
-                   if isinstance(node, ast.ClassDef) and node.name == "Backporter")
-        defined = {item.name for item in cls.body
-                   if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        cls = next(
+            node
+            for node in ast.walk(source)
+            if isinstance(node, ast.ClassDef) and node.name == "Backporter"
+        )
+        defined = {
+            item.name
+            for item in cls.body
+            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
         read = set()
         for node in ast.walk(cls):
-            if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
-                    and node.value.id == "self"):
+            if (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "self"
+            ):
                 if isinstance(node.ctx, ast.Store):
                     defined.add(node.attr)
                 elif not node.attr.startswith("__"):
                     read.add(node.attr)
-        self.assertEqual(read - defined, set(),
-                         "read but never assigned in Backporter")
+        self.assertEqual(read - defined, set(), "read but never assigned in Backporter")
 
 
 class RefSlug(unittest.TestCase):
@@ -877,8 +952,9 @@ class RefSlug(unittest.TestCase):
         self.assertEqual(ref_slug("feature/my branch--master"), "feature_my_branch--master")
 
     def test_safe_characters_survive(self):
-        self.assertEqual(ref_slug("xss-fix-branch-3.5--branch-3.5"),
-                         "xss-fix-branch-3.5--branch-3.5")
+        self.assertEqual(
+            ref_slug("xss-fix-branch-3.5--branch-3.5"), "xss-fix-branch-3.5--branch-3.5"
+        )
 
 
 if __name__ == "__main__":
