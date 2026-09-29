@@ -132,6 +132,11 @@ class PullRequest(models.Model):
     # Head branch ref (e.g. "feature/foo"), used by the merge-queue restack
     # which needs the real branch name — PR number is not the branch name.
     head_branch = models.CharField(max_length=255, blank=True, default="")
+    # Base branch ref (e.g. "master", "branch-4.0"). The CLI review tools diff
+    # against the PR's base; without this they fell back to origin/main and
+    # reviewed every commit on a non-main base branch that wasn't on main —
+    # i.e. code that isn't in the PR.
+    base_branch = models.CharField(max_length=255, blank=True, default="")
 
     # Cached context (v1.5)
     jira_ticket_id = models.CharField(max_length=50, blank=True, default="")

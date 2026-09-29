@@ -323,6 +323,8 @@ def _refresh_pull_request(
         pr_obj.head_sha = head_sha
     if head_branch and pr_obj.head_branch != head_branch:
         pr_obj.head_branch = head_branch
+    if base_branch and pr_obj.base_branch != base_branch:
+        pr_obj.base_branch = base_branch
 
     # Fetch blame data if repo clone is available (v1.25).
     blame_data: list[dict[str, object]] | None = None
@@ -464,6 +466,7 @@ def _refresh_pull_request(
             "base_sha",
             "head_sha",
             "head_branch",
+            "base_branch",
             "last_polled_at",
         ]
     )

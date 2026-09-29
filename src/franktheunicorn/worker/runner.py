@@ -16,6 +16,7 @@ import argparse
 import fcntl
 import logging
 import os
+import re
 import shutil
 import signal
 import sys
@@ -1995,6 +1996,76 @@ def _clone_url_for_project(
     return f"{base}/{owner}/{repo}.git"
 
 
+# A 40-char hex SHA, as opposed to a ref name like ``origin/main``. The base
+# ref returned by ``_resolve_base_ref`` can be either, and only a SHA needs
+# fetching into the checkout — a branch ref already exists in a fresh clone.
+_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _looks_like_sha(ref: str) -> bool:
+    return bool(_SHA_RE.match(ref))
+
+
+def _sha_present(executor: object, cwd: str, sha: str) -> bool:
+    result = executor.run(  # type: ignore[attr-defined]
+        ["git", "cat-file", "-e", sha], cwd=cwd, timeout=15
+    )
+    return result is not None and result.ok
+
+
+def _ensure_base_ref_available(
+    executor: object,
+    cwd: str,
+    base_ref: str,
+    pr: PullRequest,
+) -> str | None:
+    """Ensure the resolved base ref is present in the checkout.
+
+    Returns a usable base ref (possibly a fallback) or ``None`` when no base
+    can be had. A branch ref is already in a fresh clone, so only a SHA base
+    (the preferred path) needs fetching — via the PR's base branch when known
+    (the SHA sits on it) or directly otherwise. A fetch that still doesn't
+    bring the SHA falls back to ``origin/<base_branch>`` so a stale clone
+    degrades to the base-branch tip rather than the wrong branch (main), which
+    is the bug this exists to prevent.
+    """
+    if not _looks_like_sha(base_ref):
+        return base_ref
+    if _sha_present(executor, cwd, base_ref):
+        return base_ref
+
+    base_branch = (getattr(pr, "base_branch", "") or "").strip()
+    fetch_ref = base_branch or base_ref
+    fetch = executor.run(  # type: ignore[attr-defined]
+        ["git", "fetch", "--quiet", "origin", fetch_ref], cwd=cwd, timeout=300
+    )
+    if fetch is not None and fetch.ok and _sha_present(executor, cwd, base_ref):
+        return base_ref
+
+    if base_branch:
+        branch_ref = f"origin/{base_branch}"
+        verify = executor.run(  # type: ignore[attr-defined]
+            ["git", "rev-parse", "--verify", branch_ref], cwd=cwd, timeout=15
+        )
+        if verify is not None and verify.ok:
+            logger.warning(
+                "Could not fetch PR #%d base SHA %s; falling back to %s.",
+                pr.number,
+                base_ref[:12],
+                branch_ref,
+            )
+            return branch_ref
+
+    logger.warning(
+        "Could not make base ref %s available for PR #%d in %s; skipping the "
+        "local review tool rather than diffing against the wrong base.",
+        base_ref[:12],
+        pr.number,
+        cwd,
+    )
+    return None
+
+
 def _checkout_pr_head_with_merge(
     executor: object,
     cwd: str,
@@ -2146,6 +2217,14 @@ def _resolve_cwd_for_tool(
                 tool_name,
             )
             return None
+        # The resolved base may be the PR's exact base SHA, which is not
+        # guaranteed to be in the clone yet — without fetching it both the
+        # merge and `git diff base_ref HEAD` fail. Fetch (and fall back to the
+        # base-branch tip) before checkout so the diff is against the PR's
+        # real base, not origin/main.
+        base_ref = _ensure_base_ref_available(executor, str(local_repo_path), base_ref, pr)
+        if base_ref is None:
+            return None
         ok, temp_branch = _checkout_pr_head_with_merge(executor, str(local_repo_path), pr, base_ref)
         if not ok:
             logger.warning(
@@ -2196,6 +2275,12 @@ def _resolve_cwd_for_tool(
             remote_cwd,
             tool_name,
         )
+        return None
+    # The resolved base may be the PR's exact base SHA, which the remote
+    # checkout may not have yet — fetch it (falling back to the base-branch
+    # tip) so `git diff base_ref HEAD` runs against the PR's real base.
+    base_ref = _ensure_base_ref_available(executor, remote_cwd, base_ref, pr)
+    if base_ref is None:
         return None
     # Remote: checkout head but don't attempt merge (no conflict tracking).
     head_sha = (pr.head_sha or "").strip()
@@ -2473,11 +2558,32 @@ def _resolve_remote_base_ref(
     remote_cwd: str,
     pr: PullRequest,
 ) -> str | None:
-    """Mirror of ``_resolve_base_ref`` for a remote checkout (over SSH)."""
+    """Mirror of ``_resolve_base_ref`` for a remote checkout (over SSH).
+
+    Prefers ``pr.base_sha`` (the PR's exact base, fetched by the caller) and
+    then ``origin/<pr.base_branch>`` before falling back to main/master —
+    see ``_resolve_base_ref`` for why the fallback to main is wrong for any
+    PR whose base isn't main.
+    """
     from franktheunicorn.review.tool_executor import RemoteSSHExecutor
 
     if not isinstance(executor, RemoteSSHExecutor):
         return None
+
+    base_sha = (pr.base_sha or "").strip()
+    if base_sha:
+        return base_sha
+
+    base_branch = (getattr(pr, "base_branch", "") or "").strip()
+    if base_branch:
+        candidate = f"origin/{base_branch}"
+        result = executor.run(
+            ["git", "rev-parse", "--verify", candidate],
+            cwd=remote_cwd,
+            timeout=15,
+        )
+        if result is not None and result.ok:
+            return candidate
 
     for candidate in ("origin/main", "origin/master"):
         result = executor.run(
@@ -2497,12 +2603,43 @@ def _resolve_remote_base_ref(
 
 
 def _resolve_base_ref(repo_path: Path, pr: PullRequest) -> str | None:
-    """
-    Try to determine the base ref for CodeRabbit diffing.
+    """Determine the diff/merge base ref for a PR's local review checkout.
 
-    Returns ``None`` (and logs) when we can't determine a sensible base.
+    Priority:
+
+    1. ``pr.base_sha`` — the exact base GitHub reports for the PR. Diffing
+       against it gives the PR's actual diff (what GitHub shows). Without
+       this we diffed against ``origin/main``, which for a PR targeting a
+       non-main branch (a release branch like ``branch-4.0``, or a feature
+       branch) includes every commit on that branch that isn't on main —
+       i.e. code that is not in the PR. The SHA is fetched into the checkout
+       by the caller, so it need not be present yet.
+    2. ``origin/<pr.base_branch>`` — the PR's actual base-branch tip, when
+       base_sha is unknown but the branch is. Approximates the PR diff
+       against the current tip rather than the exact base.
+    3. ``origin/main`` / ``origin/master`` — last resort, for PRs with no
+       base info recorded (pre-migration rows). Preserves the historical
+       behaviour, including its wrongness for non-main PRs.
+
+    Returns ``None`` (and logs) when no base can be determined.
     """
     import subprocess
+
+    base_sha = (pr.base_sha or "").strip()
+    if base_sha:
+        return base_sha
+
+    base_branch = (getattr(pr, "base_branch", "") or "").strip()
+    if base_branch:
+        candidate = f"origin/{base_branch}"
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", candidate],
+            capture_output=True,
+            text=True,
+            cwd=str(repo_path),
+        )
+        if result.returncode == 0:
+            return candidate
 
     for candidate in ("origin/main", "origin/master"):
         result = subprocess.run(
@@ -2515,7 +2652,7 @@ def _resolve_base_ref(repo_path: Path, pr: PullRequest) -> str | None:
             return candidate
 
     logger.debug(
-        "Could not determine base ref for PR #%d in %s; skipping CodeRabbit.",
+        "Could not determine base ref for PR #%d in %s; skipping.",
         pr.number,
         repo_path,
     )

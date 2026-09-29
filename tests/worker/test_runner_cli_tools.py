@@ -22,7 +22,11 @@ from franktheunicorn.worker.runner import (
     _REMOTE,
     _checkout_pr_head_with_merge,
     _clone_url_for_project,
+    _ensure_base_ref_available,
+    _looks_like_sha,
+    _resolve_base_ref,
     _resolve_cwd_for_tool,
+    _resolve_remote_base_ref,
     _run_coderabbit_for_pr,
 )
 
@@ -218,6 +222,199 @@ class TestCheckoutPrHeadWithMerge:
         cmds = [call.args[0] for call in executor.run.call_args_list]
         assert any("--abort" in cmd for cmd in cmds)
         assert any("-D" in cmd for cmd in cmds)
+
+
+# ---------------------------------------------------------------------------
+# _resolve_base_ref — diff against the PR's real base, not origin/main
+# ---------------------------------------------------------------------------
+
+
+class TestResolveBaseRef:
+    """The CLI review tools diff against the resolved base ref. Resolving to
+    ``origin/main`` for a PR whose base is ``branch-4.0`` made the diff include
+    every commit on branch-4.0 that isn't on main — code that isn't in the PR.
+    """
+
+    def _pr(self, base_sha: str = "", base_branch: str = "") -> PullRequest:
+        pr = MagicMock(spec=PullRequest)
+        pr.number = 42
+        pr.base_sha = base_sha
+        pr.base_branch = base_branch
+        return pr
+
+    def test_prefers_base_sha_when_set(self, tmp_path: Path) -> None:
+        """base_sha is the PR's exact base — return it without needing it
+        present locally; the caller fetches it."""
+        pr = self._pr(base_sha="a" * 40, base_branch="branch-4.0")
+        assert _resolve_base_ref(tmp_path, pr) == "a" * 40
+
+    def test_falls_back_to_base_branch_when_no_sha(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "checkout", "-qb", "branch-4.0"], cwd=repo, check=True)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "c",
+            ],
+            cwd=repo,
+            check=True,
+        )
+        # origin/branch-4.0 must exist for rev-parse to verify.
+        subprocess.run(
+            ["git", "branch", "-f", "origin/branch-4.0", "branch-4.0"], cwd=repo, check=True
+        )
+        pr = self._pr(base_sha="", base_branch="branch-4.0")
+        assert _resolve_base_ref(repo, pr) == "origin/branch-4.0"
+
+    def test_falls_back_to_main_when_no_base_info(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "master"], cwd=repo, check=True)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "c",
+            ],
+            cwd=repo,
+            check=True,
+        )
+        subprocess.run(["git", "branch", "-f", "origin/main", "master"], cwd=repo, check=True)
+        pr = self._pr(base_sha="", base_branch="")
+        assert _resolve_base_ref(repo, pr) == "origin/main"
+
+    def test_returns_none_when_nothing_resolves(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        pr = self._pr(base_sha="", base_branch="")
+        assert _resolve_base_ref(repo, pr) is None
+
+
+class TestResolveRemoteBaseRef:
+    def _pr(self, base_sha: str = "", base_branch: str = "") -> PullRequest:
+        pr = MagicMock(spec=PullRequest)
+        pr.number = 42
+        pr.base_sha = base_sha
+        pr.base_branch = base_branch
+        return pr
+
+    def _ssh_executor(self) -> Any:
+        from franktheunicorn.review.tool_executor import RemoteSSHExecutor
+
+        executor = MagicMock(spec=RemoteSSHExecutor)
+        return executor
+
+    def test_prefers_base_sha(self) -> None:
+        pr = self._pr(base_sha="b" * 40, base_branch="branch-4.0")
+        assert _resolve_remote_base_ref(self._ssh_executor(), "/srv/repo", pr) == "b" * 40
+
+    def test_falls_back_to_base_branch(self) -> None:
+        executor = self._ssh_executor()
+        executor.run.return_value = ExecResult(returncode=0, stdout="", stderr="")
+        pr = self._pr(base_sha="", base_branch="branch-4.0")
+        assert _resolve_remote_base_ref(executor, "/srv/repo", pr) == "origin/branch-4.0"
+
+    def test_falls_back_to_main(self) -> None:
+        executor = self._ssh_executor()
+        # First rev-parse (origin/branch-4.0) fails, second (origin/main) ok.
+        executor.run.side_effect = [
+            ExecResult(returncode=128, stdout="", stderr=""),
+            ExecResult(returncode=0, stdout="", stderr=""),
+        ]
+        pr = self._pr(base_sha="", base_branch="branch-4.0")
+        assert _resolve_remote_base_ref(executor, "/srv/repo", pr) == "origin/main"
+
+
+class TestEnsureBaseRefAvailable:
+    def _pr(self, base_branch: str = "branch-4.0") -> PullRequest:
+        pr = MagicMock(spec=PullRequest)
+        pr.number = 42
+        pr.base_branch = base_branch
+        return pr
+
+    def test_branch_ref_passes_through_unchanged(self) -> None:
+        executor = MagicMock()
+        assert (
+            _ensure_base_ref_available(executor, "/srv", "origin/main", self._pr()) == "origin/main"
+        )
+        executor.run.assert_not_called()
+
+    def test_sha_already_present_passes_through(self) -> None:
+        executor = MagicMock()
+        executor.run.return_value = ExecResult(returncode=0, stdout="", stderr="")
+        sha = "c" * 40
+        assert _ensure_base_ref_available(executor, "/srv", sha, self._pr()) == sha
+        # Only the cat-file presence check runs; no fetch.
+        assert executor.run.call_count == 1
+        assert executor.run.call_args.args[0] == ["git", "cat-file", "-e", sha]
+
+    def test_sha_fetched_via_base_branch_when_absent(self) -> None:
+        executor = MagicMock()
+        # cat-file (absent) -> fetch -> cat-file (present)
+        executor.run.side_effect = [
+            ExecResult(returncode=128, stdout="", stderr=""),
+            ExecResult(returncode=0, stdout="", stderr=""),
+            ExecResult(returncode=0, stdout="", stderr=""),
+        ]
+        sha = "d" * 40
+        assert (
+            _ensure_base_ref_available(executor, "/srv", sha, self._pr(base_branch="branch-4.0"))
+            == sha
+        )
+        fetch_cmd = executor.run.call_args_list[1].args[0]
+        assert fetch_cmd[:3] == ["git", "fetch", "--quiet"]
+        assert "branch-4.0" in fetch_cmd  # fetched via the branch the SHA sits on
+
+    def test_falls_back_to_base_branch_tip_when_sha_unfetchable(self) -> None:
+        executor = MagicMock()
+        # cat-file (absent) -> fetch (ok but sha still absent) -> rev-parse origin/branch-4.0 (ok)
+        executor.run.side_effect = [
+            ExecResult(returncode=128, stdout="", stderr=""),
+            ExecResult(returncode=0, stdout="", stderr=""),
+            ExecResult(returncode=128, stdout="", stderr=""),  # sha still not present
+            ExecResult(returncode=0, stdout="", stderr=""),  # origin/branch-4.0 verifies
+        ]
+        sha = "e" * 40
+        result = _ensure_base_ref_available(
+            executor, "/srv", sha, self._pr(base_branch="branch-4.0")
+        )
+        assert result == "origin/branch-4.0"
+
+    def test_returns_none_when_sha_unfetchable_and_no_branch(self) -> None:
+        executor = MagicMock()
+        executor.run.side_effect = [
+            ExecResult(returncode=128, stdout="", stderr=""),  # cat-file absent
+            ExecResult(returncode=1, stdout="", stderr=""),  # fetch fails
+        ]
+        sha = "f" * 40
+        assert _ensure_base_ref_available(executor, "/srv", sha, self._pr(base_branch="")) is None
+
+
+class TestLooksLikeSha:
+    def test_full_sha(self) -> None:
+        assert _looks_like_sha("a" * 40) is True
+
+    def test_branch_ref(self) -> None:
+        assert _looks_like_sha("origin/main") is False
+
+    def test_short_sha(self) -> None:
+        assert _looks_like_sha("abc123") is False
 
 
 # ---------------------------------------------------------------------------
