@@ -3315,7 +3315,7 @@ def security_check_valid_fixed(request: HttpRequest) -> HttpResponse:
         # checked" and "the first 25 of it are".
         messages.info(
             request,
-            f"Stopped at {MAX_VALID_CHECK_LAUNCHES} launches — {remaining} valid "
+            f"Stopped at {MAX_VALID_CHECK_LAUNCHES} launch attempts — {remaining} valid "
             "report(s) not checked this press. Press again to carry on; the "
             "never-checked ones go first.",
         )

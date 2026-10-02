@@ -113,10 +113,35 @@ class TestGitHubClient:
     def test_list_pull_review_comments_pages(
         self, httpx_mock: HTTPXMock, client: GitHubClient
     ) -> None:
-        httpx_mock.add_response(json=[{"id": i} for i in range(100)])
+        # GitHub sends a Link: rel="next" on every non-final page.
+        httpx_mock.add_response(
+            json=[{"id": i} for i in range(100)],
+            headers={"link": '<https://api.github.test/x?page=2>; rel="next"'},
+        )
         httpx_mock.add_response(json=[{"id": 100}])
         result = client.list_pull_review_comments("org", "repo", 42)
         assert len(result) == 101
+
+    def test_a_short_last_page_after_a_linked_page_is_not_truncation(
+        self,
+        httpx_mock: HTTPXMock,
+        client: GitHubClient,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The common multi-page case: 150 comments, fully read, no warning.
+
+        The break on a short page must not inherit the previous page's
+        rel="next" — every PR between 101 and 499 comments looks like that.
+        """
+        httpx_mock.add_response(
+            json=[{"id": i} for i in range(100)],
+            headers={"link": '<https://api.github.test/x?page=2>; rel="next"'},
+        )
+        httpx_mock.add_response(json=[{"id": i} for i in range(50)])
+        with caplog.at_level(logging.WARNING):
+            result = client.list_pull_review_comments("org", "repo", 42)
+        assert len(result) == 150
+        assert "may restate one past that" not in caplog.text
 
     def test_a_thread_past_the_page_cap_says_so(
         self,

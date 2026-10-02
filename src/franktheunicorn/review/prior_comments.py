@@ -227,8 +227,9 @@ def seen_keys_from_drafts(bodies: Iterable[str]) -> set[str]:
     the same line. Seeding from what is already filed covers every call site at
     once, including across a worker restart.
 
-    Recovers the key for a comment that has a URL, which is every comment a
-    forge hands back.
+    Recovers the key for a comment that has a URL, which is every comment
+    GitHub hands back. GitLab notes carry no web URL, so there the seed
+    misses and only same-file draft dedup catches a repeat.
     """
     found: set[str] = set()
     for body in bodies:

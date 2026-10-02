@@ -271,12 +271,16 @@ class GitHubClient(ForgeClient):
             response.raise_for_status()
             data: list[dict[str, Any]] = response.json()
             found.extend(data)
-            if len(data) < 100:
-                break
             # The Link header, not a full last page: a PR with exactly 500
             # inline comments fills page five and has nothing after it, and
-            # warning there would be the same confusion inverted.
+            # warning there would be the same confusion inverted. Read on every
+            # page, before the break: a short page is the end of the list and
+            # carries no next link, so this comes out False there — assigning
+            # only on full pages would leak the previous page's rel="next"
+            # through and warn on a fully-read thread.
             truncated = 'rel="next"' in response.headers.get("link", "")
+            if len(data) < 100:
+                break
         if truncated:
             # A thread this long means a finding could restate something we
             # never read. Say so rather than let the cap look like the end
