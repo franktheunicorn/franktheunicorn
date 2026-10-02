@@ -161,3 +161,40 @@ def test_an_unclosed_fence_keeps_what_follows_verbatim() -> None:
     result = render_markdown("```\n<!-- inside -->\n")
 
     assert "&lt;!-- inside --&gt;" in result
+
+
+def test_an_inline_code_span_does_not_open_a_fence() -> None:
+    """A line holding a code span is a paragraph, not a code block.
+
+    Matching the marker alone opened a fence that never closed, so every
+    comment after such a line survived — the exact noise this filter exists
+    to remove. CommonMark forbids a backtick in a backtick fence's info
+    string, which is what tells the two apart.
+    """
+    body = "```--enable-foo``` was renamed\n\n<!-- should be hidden -->\nvisible\n"
+
+    result = render_markdown(body)
+
+    assert "&lt;!--" not in result
+    assert "<code>--enable-foo</code>" in result
+    assert "visible" in result
+
+
+def test_a_marker_followed_by_prose_does_not_close_a_fence() -> None:
+    """``` plus words is a line of code, so the block is still open."""
+    body = "```\nline1\n``` not a close\n<!-- inside -->\nline2\n```\n"
+
+    result = render_markdown(body)
+
+    # The comment is inside the code block, so it stays visible as code.
+    assert "&lt;!-- inside --&gt;" in result
+    assert result.count("<pre>") == 1
+
+
+def test_an_info_string_still_opens_a_fence() -> None:
+    body = "```python\n<!-- keep -->\n```\n<!-- drop -->\n"
+
+    result = render_markdown(body)
+
+    assert "&lt;!-- keep --&gt;" in result
+    assert "drop" not in result

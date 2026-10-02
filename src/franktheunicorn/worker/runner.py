@@ -885,19 +885,33 @@ def record_agent_run(pr: PullRequest, source: str, *, status: str, findings: int
     review. Written with a targeted ``update`` on the JSON column so it can't
     clobber whatever else the poll cycle has changed on the row.
     """
+    from django.db import transaction
     from django.utils import timezone
 
     from franktheunicorn.core.models import PullRequest as PullRequestModel
 
     try:
-        runs = dict(pr.agent_runs or {})
-        runs[source] = {
-            "at": timezone.now().isoformat(),
-            "status": status,
-            "findings": findings,
-            "head_sha": pr.head_sha or "",
-        }
-        PullRequestModel.objects.filter(pk=pr.pk).update(agent_runs=runs)
+        # Re-read immediately before the merge rather than trusting the dict
+        # loaded with ``pr`` at the top of process_pr: the diff fetch, the LLM
+        # calls and the agent-CLI runs all happen in between, and the poll
+        # cycle marks runs stale in that window. Merging onto the stale copy
+        # wrote those flags back off, so a push stopped re-reviewing the other
+        # sources — the inverse of the clobber this update style prevents, and
+        # the expensive direction.
+        with transaction.atomic():
+            stored = (
+                PullRequestModel.objects.filter(pk=pr.pk)
+                .values_list("agent_runs", flat=True)
+                .first()
+            )
+            runs = dict(stored or {})
+            runs[source] = {
+                "at": timezone.now().isoformat(),
+                "status": status,
+                "findings": findings,
+                "head_sha": pr.head_sha or "",
+            }
+            PullRequestModel.objects.filter(pk=pr.pk).update(agent_runs=runs)
         pr.agent_runs = runs
     except Exception:
         logger.debug("Could not record the %s run for PR #%d", source, pr.number, exc_info=True)

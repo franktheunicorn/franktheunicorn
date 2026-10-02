@@ -24,6 +24,7 @@ from franktheunicorn.review.dedup import (
     deduplicate_findings_with_groups,
     merge_source_tags_from_groups,
 )
+from franktheunicorn.review.prior_comments import seen_keys_from_drafts
 from franktheunicorn.review.tone_guard import apply_tone_guard_batch
 from franktheunicorn.scoring.rejection_predictor import (
     SUPPRESS_THRESHOLD,
@@ -342,7 +343,9 @@ def create_drafts_from_findings(
     # memory rather than a query per finding, which is what the agent-CLI path
     # does too.
     existing_drafts = list(ReviewDraft.objects.filter(pull_request=pr))
-    seen_comments: set[str] = set()
+    # Seeded from what is already filed: this set would otherwise be local to
+    # this call, and the worker makes one per reviewer and one per sub-check.
+    seen_comments: set[str] = seen_keys_from_drafts(d.comment_body for d in existing_drafts)
 
     with transaction.atomic():
         for idx, finding in enumerate(findings):

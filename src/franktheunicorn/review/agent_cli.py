@@ -32,6 +32,7 @@ from franktheunicorn.review.antipattern import (
 )
 from franktheunicorn.review.coderabbit import parse_prompt_only_output
 from franktheunicorn.review.dedup import is_duplicate_finding
+from franktheunicorn.review.prior_comments import seen_keys_from_drafts
 from franktheunicorn.review.prompt import COMMENT_VOICE, REVIEWING_GUIDANCE
 from franktheunicorn.review.tool_executor import (
     DEFAULT_TIMEOUT_SECONDS,
@@ -440,7 +441,10 @@ def create_drafts_from_agent_cli(
     # Snapshot existing drafts once so cross-agent dedup compares against
     # both prior tools and agents that already ran this PR.
     existing: list[ReviewDraft] = list(pr.review_drafts.all()) if deduplicate else []
-    seen_comments: set[str] = set()
+    # Seeded from what is already filed, so the reviewers that run after this
+    # one do not each file their own copy of the same +1.
+    filed = existing if deduplicate else list(pr.review_drafts.all())
+    seen_comments: set[str] = seen_keys_from_drafts(d.comment_body for d in filed)
 
     for finding in findings:
         # Decided here, applied after the two gates below: the rewrite replaces

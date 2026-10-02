@@ -628,7 +628,15 @@ def _mark_reviews_stale(pr_obj: PullRequest) -> None:
     and writing it back would drop a run recorded in that window, and the next
     cycle would re-run the whole pipeline at full cost to rediscover it.
     """
-    runs = dict(pr_obj.agent_runs or {})
+    # Re-read for the same reason record_agent_run does: the dict loaded by
+    # _upsert_pull_request is a PR-detail and a changed-files fetch old by now,
+    # and a run recorded in that window belongs in the merge.
+    stored = None
+    if pr_obj.pk:
+        stored = (
+            PullRequest.objects.filter(pk=pr_obj.pk).values_list("agent_runs", flat=True).first()
+        )
+    runs = dict(stored or pr_obj.agent_runs or {})
     updated: dict[str, object] = {}
     changed = False
     for source, info in runs.items():

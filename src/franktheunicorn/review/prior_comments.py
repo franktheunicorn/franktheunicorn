@@ -8,6 +8,8 @@ point is not a second finding. If someone else said it, the draft is a
 from __future__ import annotations
 
 import logging
+import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -148,14 +150,19 @@ def _agrees(file_path: str, line: int | None, body: str, comment: PriorComment) 
         if (file_path or "") != comment.file_path:
             return False
         # No line on either side is "no position to compare", not line 0.
-        # Treating it as 0 made a file-level finding land within _NEAR_LINES of
-        # any comment that also had no line, and the two then matched on words
-        # alone at the low inline threshold.
+        # Treating it as 0 put a file-level finding within _NEAR_LINES of any
+        # comment that also had no line, and the pair then matched on words
+        # alone at the low inline threshold. Rejecting outright instead went
+        # too far the other way: a file-level review comment (GitHub's
+        # subject_type "file" carries a path and no line) could then never
+        # agree with anything. Same file and no position is as much evidence
+        # as a conversation comment has, so it is held to that threshold.
         if line is None or comment.line is None:
+            threshold = _CONVERSATION_JACCARD
+        elif abs(line - comment.line) > _NEAR_LINES:
             return False
-        if abs(line - comment.line) > _NEAR_LINES:
-            return False
-        threshold = _INLINE_JACCARD
+        else:
+            threshold = _INLINE_JACCARD
     else:
         threshold = _CONVERSATION_JACCARD
     if _jaccard_similarity(body, comment.body) >= threshold:
@@ -204,6 +211,31 @@ def adjust_for_prior_comments(
         seen.add(key)
         return "plus_one", plus_one_text(comment)
     return "keep", body
+
+
+#: The URL a ``+1`` body carries, so an already-filed one can be recognised.
+_PLUS_ONE_URL_RE = re.compile(r"^\+1\s.*?\((https?://\S+?)\)\.?\s*$")
+
+
+def seen_keys_from_drafts(bodies: Iterable[str]) -> set[str]:
+    """Comment keys a draft on this PR has already ``+1``'d.
+
+    ``seen`` is otherwise local to one ``create_drafts_*`` call, and the worker
+    makes a separate call for the LLM pipeline, for each agent-CLI reviewer and
+    for each enabled sub-check. Ten sources agreeing with one comment filed ten
+    identical "+1 @bob" drafts — they only collapse when the findings land on
+    the same line. Seeding from what is already filed covers every call site at
+    once, including across a worker restart.
+
+    Recovers the key for a comment that has a URL, which is every comment a
+    forge hands back.
+    """
+    found: set[str] = set()
+    for body in bodies:
+        match = _PLUS_ONE_URL_RE.match((body or "").strip())
+        if match:
+            found.add(match.group(1))
+    return found
 
 
 def format_prior_comments(comments: list[PriorComment]) -> str:

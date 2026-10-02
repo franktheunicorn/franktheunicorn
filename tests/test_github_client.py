@@ -125,12 +125,35 @@ class TestGitHubClient:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Silence here reads as "that was all the comments"."""
+        next_link = '<https://api.github.test/x?page=6>; rel="next"'
         for _ in range(5):
-            httpx_mock.add_response(json=[{"id": i} for i in range(100)])
+            httpx_mock.add_response(
+                json=[{"id": i} for i in range(100)], headers={"link": next_link}
+            )
         with caplog.at_level(logging.WARNING):
             result = client.list_pull_review_comments("org", "repo", 42)
         assert len(result) == 500
         assert "may restate one past that" in caplog.text
+
+    def test_exactly_five_full_pages_is_not_truncation(
+        self,
+        httpx_mock: HTTPXMock,
+        client: GitHubClient,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """500 comments and nothing after them. Warning would be the same
+        confusion inverted, on every poll of that PR."""
+        for page in range(1, 6):
+            headers = (
+                {"link": f'<https://api.github.test/x?page={page + 1}>; rel="next"'}
+                if page < 5
+                else {}
+            )
+            httpx_mock.add_response(json=[{"id": i} for i in range(100)], headers=headers)
+        with caplog.at_level(logging.WARNING):
+            result = client.list_pull_review_comments("org", "repo", 42)
+        assert len(result) == 500
+        assert "may restate one past that" not in caplog.text
 
     def test_delete_review_comment(self, httpx_mock: HTTPXMock, client: GitHubClient) -> None:
         httpx_mock.add_response(status_code=204)

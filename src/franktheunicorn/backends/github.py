@@ -265,6 +265,7 @@ class GitHubClient(ForgeClient):
         url = f"/repos/{owner}/{repo}/pulls/{pr_number}/comments"
         found: list[dict[str, Any]] = []
         pages = 5
+        truncated = False
         for page in range(1, pages + 1):
             response = self._get(url, params={"per_page": 100, "page": page})
             response.raise_for_status()
@@ -272,7 +273,11 @@ class GitHubClient(ForgeClient):
             found.extend(data)
             if len(data) < 100:
                 break
-        else:
+            # The Link header, not a full last page: a PR with exactly 500
+            # inline comments fills page five and has nothing after it, and
+            # warning there would be the same confusion inverted.
+            truncated = 'rel="next"' in response.headers.get("link", "")
+        if truncated:
             # A thread this long means a finding could restate something we
             # never read. Say so rather than let the cap look like the end
             # of the list.

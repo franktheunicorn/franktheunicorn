@@ -3958,23 +3958,47 @@ class TestTheValidCheckFanOutIsCapped:
         )
 
     @pytest.mark.django_db
-    def test_a_never_checked_report_goes_before_an_answered_one(self) -> None:
+    def test_a_never_launched_report_goes_before_a_launched_one(self) -> None:
         """What makes the cap workable: a second press advances the backlog."""
+        from franktheunicorn.core.models import SecurityRecheckRun
         from franktheunicorn.security.recheck import valid_reports
 
         project = ProjectFactory()
-        answered = SecurityReportFactory(
-            status="valid",
+        tried = SecurityReportFactory(status="valid", project=project, priority=99)
+        SecurityRecheckRunFactory(
             project=project,
-            priority=99,
-            recheck_status="still-valid",
-            rechecked_at=timezone.now(),
+            kind=SecurityRecheckRun.KIND_VALID_CHECK,
+            chunk_index=tried.pk,
         )
         fresh = SecurityReportFactory(status="valid", project=project, priority=1)
 
-        # Priority alone would have put the answered one first and spent every
+        # Priority alone would have put the tried one first and spent every
         # press re-asking about it.
-        assert valid_reports() == [fresh, answered]
+        assert valid_reports() == [fresh, tried]
+
+    @pytest.mark.django_db
+    def test_a_report_whose_run_died_does_not_hold_the_front(self) -> None:
+        """No verdict ever lands for it, so ``rechecked_at`` stays NULL.
+
+        Ordering on the verdict put it back at the head on every press, and a
+        handful of reports that reliably kill the agent would then absorb the
+        whole cap forever.
+        """
+        from franktheunicorn.core.models import SecurityRecheckRun
+        from franktheunicorn.security.recheck import valid_reports
+
+        project = ProjectFactory()
+        died = SecurityReportFactory(status="valid", project=project, priority=99)
+        SecurityRecheckRunFactory(
+            project=project,
+            kind=SecurityRecheckRun.KIND_VALID_CHECK,
+            chunk_index=died.pk,
+            status="error",
+            detail="the poll never finished it",
+        )
+        untried = SecurityReportFactory(status="valid", project=project, priority=1)
+
+        assert valid_reports() == [untried, died]
 
 
 class TestTheCapCountsAttemptsNotSuccesses:

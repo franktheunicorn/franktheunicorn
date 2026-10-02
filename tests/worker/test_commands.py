@@ -1039,3 +1039,42 @@ class TestFixLandedHandlers:
 
         assert not checker.called
         assert "no project has an open security report" in cmd.log
+
+
+@pytest.mark.django_db
+class TestRecordAgentRunMergesFreshState:
+    """``record_agent_run`` merges onto the stored dict, not the loaded one.
+
+    The agent runs between loading the PR and recording the result — the diff
+    fetch, the LLM calls, the CLI runs. The poll cycle marks runs stale in that
+    window, and merging onto the stale in-memory copy wrote those flags back
+    off, so a push stopped re-reviewing every other source.
+    """
+
+    def test_a_stale_mark_set_during_the_run_survives(self, db_pr: PullRequest) -> None:
+        from franktheunicorn.worker.runner import record_agent_run
+
+        db_pr.agent_runs = {
+            "claude": {"status": "ok", "findings": 1, "head_sha": "a" * 40},
+            "llm": {"status": "ok", "findings": 2, "head_sha": "a" * 40},
+        }
+        db_pr.head_sha = "b" * 40
+        db_pr.save(update_fields=["agent_runs", "head_sha"])
+        loaded = PullRequest.objects.get(pk=db_pr.pk)
+
+        # The poller sees the push while the claude run is still going.
+        PullRequest.objects.filter(pk=db_pr.pk).update(
+            agent_runs={
+                "claude": {"status": "ok", "findings": 1, "head_sha": "a" * 40, "stale": True},
+                "llm": {"status": "ok", "findings": 2, "head_sha": "a" * 40, "stale": True},
+            }
+        )
+
+        record_agent_run(loaded, "claude", status="ok", findings=3)
+
+        runs = PullRequest.objects.get(pk=db_pr.pk).agent_runs
+        # This reviewer just ran against the new head, so it is current...
+        assert runs["claude"]["head_sha"] == "b" * 40
+        assert "stale" not in runs["claude"]
+        # ...and the others keep the mark that says they are not.
+        assert runs["llm"]["stale"] is True

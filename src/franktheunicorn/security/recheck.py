@@ -27,7 +27,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 from django.db import IntegrityError, transaction
-from django.db.models import F
+from django.db.models import F, OuterRef, Subquery
 from django.utils import timezone
 
 from franktheunicorn.core.models import SecurityRecheckRun, SecurityReport
@@ -454,15 +454,30 @@ def valid_reports() -> list[SecurityReport]:
     the operator has run it — and the prompt tells the agent what branch was
     recorded so it can check that branch too.
 
-    Never-checked first, then the stalest answer, then priority. Priority alone
+    Never-launched first, then the oldest launch, then priority. Priority alone
     was the order while the fan-out was unbounded; with ``MAX_VALID_CHECK_LAUNCHES``
     in front of it, that would have spent every press on the same top rows and
     never reached the tail.
+
+    Ordered on the *launch*, not ``rechecked_at``, because a verdict is not
+    guaranteed to arrive: a run that dies (``RunGoneError``, the stale sweep,
+    unparseable JSON) leaves ``rechecked_at`` NULL, and ordering on that put
+    the same reports back at the head on every press — 25 reports that reliably
+    blow the agent's budget would have absorbed the whole cap forever while the
+    flash said "press again to carry on".
     """
+    last_launch = (
+        SecurityRecheckRun.objects.filter(
+            kind=SecurityRecheckRun.KIND_VALID_CHECK, chunk_index=OuterRef("pk")
+        )
+        .order_by("-created_at")
+        .values("created_at")[:1]
+    )
     return list(
         SecurityReport.objects.filter(status="valid", project__isnull=False)
         .select_related("project")
-        .order_by(F("rechecked_at").asc(nulls_first=True), "-priority", "pk")
+        .annotate(last_valid_check=Subquery(last_launch))
+        .order_by(F("last_valid_check").asc(nulls_first=True), "-priority", "pk")
     )
 
 

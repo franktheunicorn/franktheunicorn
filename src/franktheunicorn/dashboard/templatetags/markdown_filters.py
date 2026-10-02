@@ -25,9 +25,42 @@ register = template.Library()
 # around it still renders.
 _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 
-#: Opening or closing line of a fenced code block, per CommonMark: up to three
-#: leading spaces, then three or more backticks or tildes.
-_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+#: Candidate fence line: up to three leading spaces, three or more backticks
+#: or tildes, then the info string. Whether it actually opens or closes a block
+#: is decided by ``_opens_fence`` / ``_closes_fence`` — matching the marker
+#: alone gets both directions wrong. A line holding an inline code span opened
+#: a fence that never closed, so every comment after it survived; and a code
+#: line that merely starts with three backticks closed it early, deleting
+#: comments out of the middle of a code block.
+_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+
+
+def _opens_fence(line: str) -> str | None:
+    """The marker this line opens a code fence with, or ``None``.
+
+    CommonMark forbids a backtick anywhere in a backtick fence's info string,
+    which is what separates an opening fence from an inline code span.
+    """
+    match = _FENCE_RE.match(line)
+    if not match:
+        return None
+    marker, info = match.group(1), match.group(2)
+    if marker[0] == "`" and "`" in info:
+        return None
+    return marker
+
+
+def _closes_fence(line: str, marker: str) -> bool:
+    """Whether this line closes a fence opened with *marker*.
+
+    A closing fence is the same character, at least as long, and nothing but
+    whitespace after it; a marker followed by prose is code, not a close.
+    """
+    match = _FENCE_RE.match(line)
+    if not match:
+        return False
+    found, rest = match.group(1), match.group(2)
+    return found[0] == marker[0] and len(found) >= len(marker) and not rest.strip()
 
 
 def strip_html_comments(text: str) -> str:
@@ -45,18 +78,17 @@ def strip_html_comments(text: str) -> str:
     fence: str | None = None
     for line in text.splitlines(keepends=True):
         if fence is None:
-            opening = _FENCE_RE.match(line)
-            if opening:
+            marker = _opens_fence(line)
+            if marker is not None:
                 out.append(_HTML_COMMENT_RE.sub("", "".join(plain)))
                 plain = []
-                fence = opening.group(1)
+                fence = marker
                 out.append(line)
             else:
                 plain.append(line)
         else:
             out.append(line)
-            closing = _FENCE_RE.match(line)
-            if closing and closing.group(1)[0] == fence[0] and len(closing.group(1)) >= len(fence):
+            if _closes_fence(line, fence):
                 fence = None
     out.append(_HTML_COMMENT_RE.sub("", "".join(plain)))
     return "".join(out)

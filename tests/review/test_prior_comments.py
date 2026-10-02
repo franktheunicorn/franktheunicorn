@@ -281,43 +281,147 @@ class TestAgentCLIGatesSeeTheOriginalBody:
         assert db_pr.review_drafts.count() == 1
 
 
-class TestPositionIsRequiredForAnInlineComment:
-    """``line or 0`` made "no line" compare as line 0."""
+class TestPositionlessComparison:
+    """``line or 0`` made "no line" compare as line 0.
 
-    def test_a_file_level_finding_does_not_match_a_positionless_comment(self) -> None:
-        comment = _comment(line=None, url="")
+    So a file-level finding sat within ``_NEAR_LINES`` of any comment that
+    also had no line, and the pair was then judged on words alone at the low
+    *inline* threshold. Without a position they get the conversation
+    threshold — same evidence, same bar — rather than being rejected, which
+    would mean a file-level review comment could never agree with anything.
+    """
+
+    #: Jaccard 0.375 against the fixture comment: over the inline threshold
+    #: (0.3), under the conversation one (0.45). Exactly the band that moved.
+    _LOOSE = "This check returns 0 from getInt, and the sort is rebuilt for every row."
+
+    def test_a_loose_match_without_a_position_is_kept(self) -> None:
+        action, _ = adjust_for_prior_comments(
+            "sql/foo.scala",
+            None,
+            self._LOOSE,
+            [_comment(line=None, url="")],
+            operator="holdenk",
+            seen=set(),
+        )
+
+        assert action == "keep"
+
+    def test_a_loose_match_against_a_positionless_comment_is_kept(self) -> None:
+        action, _ = adjust_for_prior_comments(
+            "sql/foo.scala",
+            4,
+            self._LOOSE,
+            [_comment(line=None, url="")],
+            operator="holdenk",
+            seen=set(),
+        )
+
+        assert action == "keep"
+
+    def test_the_same_point_on_a_file_level_comment_still_agrees(self) -> None:
+        """GitHub's subject_type "file": a path and no line."""
         action, _ = adjust_for_prior_comments(
             "sql/foo.scala",
             None,
             "getInt returns 0 on null, so this check hides the null.",
-            [comment],
+            [_comment(line=None)],
             operator="holdenk",
             seen=set(),
         )
 
-        assert action == "keep"
+        assert action == "plus_one"
 
-    def test_a_finding_with_a_line_does_not_match_a_positionless_comment(self) -> None:
-        comment = _comment(line=None, url="")
-        action, _ = adjust_for_prior_comments(
-            "sql/foo.scala",
-            4,
-            "getInt returns 0 on null, so this check hides the null.",
-            [comment],
-            operator="holdenk",
-            seen=set(),
-        )
-
-        assert action == "keep"
-
-    def test_a_nearby_line_still_matches(self) -> None:
+    def test_a_loose_match_on_a_nearby_line_still_agrees(self) -> None:
+        """With a position, the inline threshold applies as before."""
         action, _ = adjust_for_prior_comments(
             "sql/foo.scala",
             42,
-            "getInt returns 0 on null, so this check hides the null.",
+            self._LOOSE,
             [_comment()],
             operator="holdenk",
             seen=set(),
         )
 
         assert action == "plus_one"
+
+    def test_a_distant_line_does_not_agree(self) -> None:
+        action, _ = adjust_for_prior_comments(
+            "sql/foo.scala",
+            400,
+            "getInt returns 0 on null, so this check hides the null.",
+            [_comment()],
+            operator="holdenk",
+            seen=set(),
+        )
+
+        assert action == "keep"
+
+
+@pytest.mark.django_db
+class TestOnePlusOnePerComment:
+    """``seen`` is local to one call; the worker makes about ten of them.
+
+    One for the LLM pipeline, one per agent-CLI reviewer, one per enabled
+    sub-check. Each independently decided "+1 @cloud-fan" for the same
+    comment, and they only collapsed when the findings shared a line.
+    """
+
+    #: A conversation comment: no file, so it agrees on the words alone and
+    #: two sources can match it from different files. An *inline* comment
+    #: cannot produce this — a finding has to be within _NEAR_LINES of it to
+    #: agree, which is inside the draft dedup's own proximity window.
+    _BODY = "getInt returns 0 on null, so this check hides the null."
+
+    def test_a_later_source_does_not_file_a_second_plus_one(self, db_pr: Any) -> None:
+        from franktheunicorn.review.agent_cli import AgentCLIFinding, create_drafts_from_agent_cli
+
+        comment = _comment(file_path="", line=None)
+        create_drafts_from_findings(
+            db_pr,
+            [
+                ReviewFinding(
+                    file_path="sql/foo.scala",
+                    line_number=40,
+                    title="null getInt",
+                    body=self._BODY,
+                )
+            ],
+            source="llm",
+            project=db_pr.project,
+            prior_comments=[comment],
+            operator="holdenk",
+        )
+
+        # A different reviewer, same point, a different file entirely — so the
+        # draft dedup has nothing to match on.
+        create_drafts_from_agent_cli(
+            db_pr,
+            [
+                AgentCLIFinding(
+                    file_path="core/bar.scala",
+                    line_number=900,
+                    severity="medium",
+                    title="null getInt",
+                    body=self._BODY,
+                )
+            ],
+            project=db_pr.project,
+            source="claude",
+            prior_comments=[comment],
+            operator="holdenk",
+        )
+
+        plus_ones = [
+            d.comment_body for d in db_pr.review_drafts.all() if d.comment_body.startswith("+1")
+        ]
+        assert len(plus_ones) == 1
+
+    def test_the_key_comes_back_off_a_filed_draft(self) -> None:
+        from franktheunicorn.review.prior_comments import seen_keys_from_drafts
+
+        comment = _comment()
+        body = plus_one_text(comment)
+
+        assert seen_keys_from_drafts([body]) == {comment.url}
+        assert seen_keys_from_drafts(["a normal finding body, not a +1"]) == set()
