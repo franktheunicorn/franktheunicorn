@@ -443,6 +443,11 @@ def create_drafts_from_agent_cli(
     seen_comments: set[str] = set()
 
     for finding in findings:
+        # Decided here, applied after the two gates below: the rewrite replaces
+        # the body both of them key on. An anti-pattern written to kill this
+        # finding does not match "+1 @bob", and the dedup compares the short +1
+        # against the old long body and falls under the similarity threshold.
+        plus_one_body = ""
         if prior_comments:
             from franktheunicorn.review.prior_comments import adjust_for_prior_comments
 
@@ -462,13 +467,7 @@ def create_drafts_from_agent_cli(
                 )
                 continue
             if action == "plus_one":
-                finding = AgentCLIFinding(
-                    file_path=finding.file_path,
-                    line_number=finding.line_number,
-                    severity=finding.severity,
-                    title=finding.title,
-                    body=rewritten,
-                )
+                plus_one_body = rewritten
 
         matches = check_against_anti_patterns(finding.body, project)
         if matches:
@@ -483,6 +482,19 @@ def create_drafts_from_agent_cli(
 
         if deduplicate:
             dup = _find_duplicate_draft(existing, finding)
+            if dup is None and plus_one_body:
+                # A draft filed on an earlier pass carries the +1 text, which
+                # no longer resembles the finding it came from.
+                dup = _find_duplicate_draft(
+                    existing,
+                    AgentCLIFinding(
+                        file_path=finding.file_path,
+                        line_number=finding.line_number,
+                        severity=finding.severity,
+                        title=finding.title,
+                        body=plus_one_body,
+                    ),
+                )
             if dup is not None:
                 if source not in dup.sources:
                     dup.sources = [*dup.sources, source]
@@ -495,6 +507,16 @@ def create_drafts_from_agent_cli(
                     dup.sources,
                 )
                 continue
+
+        # Gates are past; the body can become the +1 now.
+        if plus_one_body:
+            finding = AgentCLIFinding(
+                file_path=finding.file_path,
+                line_number=finding.line_number,
+                severity=finding.severity,
+                title=finding.title,
+                body=plus_one_body,
+            )
 
         confidence = _SEVERITY_CONFIDENCE.get(finding.severity, 0.5)
 

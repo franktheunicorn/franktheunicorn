@@ -346,6 +346,11 @@ def create_drafts_from_findings(
 
     with transaction.atomic():
         for idx, finding in enumerate(findings):
+            # Decided here, applied after the two gates below. The rewrite
+            # replaces the body those gates key on: an anti-pattern the operator
+            # wrote to kill this finding no longer matches "+1 @bob", and the
+            # exact-body dedup stops recognising its own earlier draft.
+            plus_one_body = ""
             if prior_comments:
                 from franktheunicorn.review.prior_comments import adjust_for_prior_comments
 
@@ -365,7 +370,7 @@ def create_drafts_from_findings(
                     )
                     continue
                 if action == "plus_one":
-                    finding = finding.model_copy(update={"body": rewritten, "suggestion": ""})
+                    plus_one_body = rewritten
             # Resolve attribution for this specific finding. When dedup merged
             # findings from multiple backends, sources_per_finding[idx] holds
             # all contributors as a comma-joined string.
@@ -385,6 +390,12 @@ def create_drafts_from_findings(
             # same PR — Force Run Agents, or a cycle chasing one missing reviewer —
             # filed a fresh copy of every finding it had already filed.
             duplicate = _find_existing_draft(existing_drafts, finding)
+            if duplicate is None and plus_one_body:
+                # A draft filed on an earlier pass carries the +1 text, not the
+                # original. Both spellings are the same finding.
+                duplicate = _find_existing_draft(
+                    existing_drafts, finding.model_copy(update={"body": plus_one_body})
+                )
             if duplicate is not None:
                 logger.debug(
                     "Skipping %s finding '%s' — already filed as draft #%d",
@@ -405,6 +416,10 @@ def create_drafts_from_findings(
                     ", ".join(ap.pattern_text[:40] for ap in matches),
                 )
                 continue
+
+            # Gates are past; the body can become the +1 now.
+            if plus_one_body:
+                finding = finding.model_copy(update={"body": plus_one_body, "suggestion": ""})
 
             # Category comes from the original title when the caller derived
             # it before the tone guard replaced titles with reasoning traces.

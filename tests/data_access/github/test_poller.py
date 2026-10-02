@@ -1380,3 +1380,74 @@ class TestBailOutStillReportsTheTail:
         assert got == []
         # 5 attempted and failed, so 15 remain — handed back, not dropped.
         assert len(skipped) == 15, [pr.number for pr in skipped]
+
+
+class TestActivityIsRecent:
+    """The push-staleness gate. A naive timestamp used to raise, not answer."""
+
+    def test_a_naive_timestamp_is_compared_not_crashed_on(self) -> None:
+        from franktheunicorn.backends.poller import activity_is_recent
+
+        # USE_TZ makes stored values aware, so this is the path that never ran
+        # locally: an in-memory PullRequest built from a naive parse.
+        assert activity_is_recent(datetime.now() - timedelta(days=1), 30) is True
+        assert activity_is_recent(datetime.now() - timedelta(days=90), 30) is False
+
+    def test_no_timestamp_and_no_limit_both_count_as_recent(self) -> None:
+        from franktheunicorn.backends.poller import activity_is_recent
+
+        assert activity_is_recent(None, 30) is True
+        assert activity_is_recent(timezone.now() - timedelta(days=900), 0) is True
+
+
+@pytest.mark.django_db
+class TestConcurrentAgentRunRecording:
+    """The poll cycle and the interactive drain both write ``agent_runs``."""
+
+    def _config(self, **kwargs: Any) -> ProjectConfig:
+        return ProjectConfig(owner="apache", repo="spark", poll_refresh_hours=0, **kwargs)
+
+    def test_a_run_recorded_mid_refresh_is_not_clobbered(self, tmp_path: Path) -> None:
+        """``run_agents`` lands while the refresh is still fetching.
+
+        The refresh loads the PR at the top and used to write ``agent_runs``
+        back at the bottom, across the detail/comments/blame fetches. A run
+        recorded in that window was lost, and the next cycle re-ran the whole
+        pipeline at full cost to rediscover it.
+        """
+        client = _CountingMockClient(tmp_path, [_listed_pr()])
+        config = self._config()
+        poll_project(client, config, operator_username="holdenk")
+
+        recorded = {"claude": {"status": "ok", "findings": 2, "head_sha": "a" * 40}}
+
+        def concurrent_write(
+            pr: PullRequest, *args: Any, **kwargs: Any
+        ) -> tuple[int, dict[str, Any]]:
+            # Stands in for the drain thread, hooked on the scoring call so it
+            # lands inside the refresh and ahead of its save: a direct UPDATE
+            # the in-memory pr_obj this refresh is holding knows nothing about.
+            PullRequest.objects.filter(pk=pr.pk).update(agent_runs=recorded)
+            return 50, {}
+
+        with patch(
+            "franktheunicorn.backends.poller.score_pull_request_from_model",
+            side_effect=concurrent_write,
+        ):
+            poll_project(client, config, operator_username="holdenk")
+
+        assert PullRequest.objects.get(number=99).agent_runs == recorded
+
+    def test_the_stale_mark_is_written_when_it_happens(self, tmp_path: Path) -> None:
+        """Not carried to the save at the bottom — persisted on the spot."""
+        from franktheunicorn.backends.poller import _mark_reviews_stale
+
+        client = _CountingMockClient(tmp_path, [_listed_pr()])
+        poll_project(client, self._config(), operator_username="holdenk")
+        pr = PullRequest.objects.get(number=99)
+        pr.agent_runs = {"llm": {"status": "ok", "findings": 1, "head_sha": "a" * 40}}
+        pr.save(update_fields=["agent_runs"])
+
+        _mark_reviews_stale(pr)
+
+        assert PullRequest.objects.get(pk=pr.pk).agent_runs["llm"]["stale"] is True

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import httpx
@@ -102,6 +103,34 @@ class TestGitHubClient:
         httpx_mock.add_response(json=[])
         result = client.get_issue_comments("org", "repo", 42, since="2026-01-01T00:00:00Z")
         assert result == []
+
+    def test_list_pull_review_comments(self, httpx_mock: HTTPXMock, client: GitHubClient) -> None:
+        httpx_mock.add_response(json=[{"id": 1, "body": "nit", "path": "a.py"}])
+        result = client.list_pull_review_comments("org", "repo", 42)
+        assert len(result) == 1
+        assert result[0]["path"] == "a.py"
+
+    def test_list_pull_review_comments_pages(
+        self, httpx_mock: HTTPXMock, client: GitHubClient
+    ) -> None:
+        httpx_mock.add_response(json=[{"id": i} for i in range(100)])
+        httpx_mock.add_response(json=[{"id": 100}])
+        result = client.list_pull_review_comments("org", "repo", 42)
+        assert len(result) == 101
+
+    def test_a_thread_past_the_page_cap_says_so(
+        self,
+        httpx_mock: HTTPXMock,
+        client: GitHubClient,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Silence here reads as "that was all the comments"."""
+        for _ in range(5):
+            httpx_mock.add_response(json=[{"id": i} for i in range(100)])
+        with caplog.at_level(logging.WARNING):
+            result = client.list_pull_review_comments("org", "repo", 42)
+        assert len(result) == 500
+        assert "may restate one past that" in caplog.text
 
     def test_delete_review_comment(self, httpx_mock: HTTPXMock, client: GitHubClient) -> None:
         httpx_mock.add_response(status_code=204)

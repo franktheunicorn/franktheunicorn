@@ -3926,3 +3926,81 @@ class TestSecurityCVEAdvisory:
             f"/security/{report.pk}/cve-advisory/push/", {"record_json": "{nope"}
         )
         assert b"not valid JSON" in response.content
+
+
+class TestTheValidCheckFanOutIsCapped:
+    """One press is paid cloud runs, so it stops and says what it left."""
+
+    @pytest.mark.django_db
+    def test_the_press_stops_at_the_cap_and_names_the_remainder(self, client: Client) -> None:
+        from franktheunicorn.security.recheck import MAX_VALID_CHECK_LAUNCHES
+
+        project = ProjectFactory()
+        over = MAX_VALID_CHECK_LAUNCHES + 3
+        for _ in range(over):
+            SecurityReportFactory(status="valid", project=project)
+        with (
+            patch.dict("os.environ", {"CURSOR_API_KEY": "key"}),
+            patch(
+                "franktheunicorn.config.loader.get_operator_config",
+                return_value=make_operator_config(),
+            ),
+            patch(
+                "franktheunicorn.security.recheck.create_cursor_agent",
+                return_value=("bc-x", "run-x"),
+            ) as mock_create,
+        ):
+            response = client.post("/security/check-valid-fixed/", follow=True)
+
+        assert mock_create.call_count == MAX_VALID_CHECK_LAUNCHES
+        assert f"{over - MAX_VALID_CHECK_LAUNCHES} valid report(s) not checked".encode() in (
+            response.content
+        )
+
+    @pytest.mark.django_db
+    def test_a_never_checked_report_goes_before_an_answered_one(self) -> None:
+        """What makes the cap workable: a second press advances the backlog."""
+        from franktheunicorn.security.recheck import valid_reports
+
+        project = ProjectFactory()
+        answered = SecurityReportFactory(
+            status="valid",
+            project=project,
+            priority=99,
+            recheck_status="still-valid",
+            rechecked_at=timezone.now(),
+        )
+        fresh = SecurityReportFactory(status="valid", project=project, priority=1)
+
+        # Priority alone would have put the answered one first and spent every
+        # press re-asking about it.
+        assert valid_reports() == [fresh, answered]
+
+
+class TestTheCapCountsAttemptsNotSuccesses:
+    """A revoked key fails every launch, and a success-only cap never breaks."""
+
+    @pytest.mark.django_db
+    def test_an_api_outage_stops_at_the_cap(self, client: Client) -> None:
+        from franktheunicorn.security.fix_agent import FixAgentError
+        from franktheunicorn.security.recheck import MAX_VALID_CHECK_LAUNCHES
+
+        project = ProjectFactory()
+        for _ in range(MAX_VALID_CHECK_LAUNCHES + 5):
+            SecurityReportFactory(status="valid", project=project)
+        with (
+            patch.dict("os.environ", {"CURSOR_API_KEY": "key"}),
+            patch(
+                "franktheunicorn.config.loader.get_operator_config",
+                return_value=make_operator_config(),
+            ),
+            patch(
+                "franktheunicorn.security.recheck.create_cursor_agent",
+                side_effect=FixAgentError("Cursor API said 500"),
+            ) as mock_create,
+        ):
+            response = client.post("/security/check-valid-fixed/", follow=True)
+
+        assert mock_create.call_count == MAX_VALID_CHECK_LAUNCHES
+        # And the flashes are collapsed, not one per failed report.
+        assert response.content.count(b"Valid-check not launched") == 1

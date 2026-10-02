@@ -264,13 +264,26 @@ class GitHubClient(ForgeClient):
         """
         url = f"/repos/{owner}/{repo}/pulls/{pr_number}/comments"
         found: list[dict[str, Any]] = []
-        for page in range(1, 6):
+        pages = 5
+        for page in range(1, pages + 1):
             response = self._get(url, params={"per_page": 100, "page": page})
             response.raise_for_status()
             data: list[dict[str, Any]] = response.json()
             found.extend(data)
             if len(data) < 100:
                 break
+        else:
+            # A thread this long means a finding could restate something we
+            # never read. Say so rather than let the cap look like the end
+            # of the list.
+            logger.warning(
+                "Read only the first %d inline comments on %s/%s#%d; a finding "
+                "may restate one past that.",
+                len(found),
+                owner,
+                repo,
+                pr_number,
+            )
         return found
 
     def delete_review_comment(self, owner: str, repo: str, pr_number: int, comment_id: int) -> None:

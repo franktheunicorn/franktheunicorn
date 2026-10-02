@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -480,7 +480,6 @@ def _refresh_pull_request(
             "head_branch",
             "base_branch",
             "last_polled_at",
-            "agent_runs",
             "title",
             "body",
         ]
@@ -585,7 +584,7 @@ def activity_is_recent(when: datetime | None, days: int) -> bool:
     if days <= 0 or when is None:
         return True
     if timezone.is_naive(when):
-        when = timezone.make_aware(when, datetime.UTC)
+        when = timezone.make_aware(when, UTC)
     return timezone.now() - when <= timedelta(days=days)
 
 
@@ -619,7 +618,16 @@ def _listing_values(pr_data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _mark_reviews_stale(pr_obj: PullRequest) -> None:
-    """The commits these reviews read are no longer the PR head."""
+    """The commits these reviews read are no longer the PR head.
+
+    Written here with a targeted ``update()`` rather than left for the refresh's
+    ``save(update_fields=...)`` at the bottom of ``_refresh_pull_request``. The
+    interactive drain runs ``run_agents`` concurrently with the poll cycle, and
+    ``record_agent_run`` is a read-modify-write of this same field: carrying the
+    dict loaded at the top of the refresh past the detail/comments/blame fetches
+    and writing it back would drop a run recorded in that window, and the next
+    cycle would re-run the whole pipeline at full cost to rediscover it.
+    """
     runs = dict(pr_obj.agent_runs or {})
     updated: dict[str, object] = {}
     changed = False
@@ -629,8 +637,11 @@ def _mark_reviews_stale(pr_obj: PullRequest) -> None:
             changed = True
         else:
             updated[source] = info
-    if changed:
-        pr_obj.agent_runs = updated
+    if not changed:
+        return
+    pr_obj.agent_runs = updated
+    if pr_obj.pk:
+        PullRequest.objects.filter(pk=pr_obj.pk).update(agent_runs=updated)
 
 
 def _close_missing_pull_requests(

@@ -27,6 +27,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 from django.db import IntegrityError, transaction
+from django.db.models import F
 from django.utils import timezone
 
 from franktheunicorn.core.models import SecurityRecheckRun, SecurityReport
@@ -434,6 +435,15 @@ def apply_fix_landed_results(run: SecurityRecheckRun, result: str) -> int:
 # ---------------------------------------------------------------------------
 
 
+#: How many agents one press of the valid-report button may launch. Each is a
+#: paid cloud run, so an unbounded fan-out over a backlog this feature exists
+#: to handle at volume is a four-figure click. The order below is what makes a
+#: cap workable: never-checked reports first, then the stalest verdict, so a
+#: second press advances through the backlog instead of re-asking about the
+#: same top-priority rows. The view says how many it left.
+MAX_VALID_CHECK_LAUNCHES = 25
+
+
 def valid_reports() -> list[SecurityReport]:
     """The triaged-real backlog: reports the operator ruled ``valid``, with a repo.
 
@@ -442,13 +452,17 @@ def valid_reports() -> list[SecurityReport]:
     "the triaged real issues". Reports with a confirmed fix branch are *not*
     excluded: the git fix-landed check answers those for free, but only once
     the operator has run it — and the prompt tells the agent what branch was
-    recorded so it can check that branch too. Priority order, so the launches
-    spend first on what matters.
+    recorded so it can check that branch too.
+
+    Never-checked first, then the stalest answer, then priority. Priority alone
+    was the order while the fan-out was unbounded; with ``MAX_VALID_CHECK_LAUNCHES``
+    in front of it, that would have spent every press on the same top rows and
+    never reached the tail.
     """
     return list(
         SecurityReport.objects.filter(status="valid", project__isnull=False)
         .select_related("project")
-        .order_by("-priority", "pk")
+        .order_by(F("rechecked_at").asc(nulls_first=True), "-priority", "pk")
     )
 
 

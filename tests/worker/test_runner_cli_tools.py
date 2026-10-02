@@ -525,6 +525,57 @@ class TestRemoteCloneUsesProjectForgeUrl:
 
 
 @pytest.mark.django_db
+class TestRemoteGitQueriesShareOneTimeout:
+    """Every remote git call pays the ssh session-open cost, not just some.
+
+    ``_GIT_QUERY_TIMEOUT_SECONDS`` exists because 15s was enough for local git
+    and not for ``sf workspace ssh``, where the session spends most of the
+    budget opening. ``RemoteSSHExecutor.run`` spawns a fresh ssh per call with
+    no connection reuse, so a checkout left on the old 30s was dropped with
+    "Failed to checkout PR #N head in remote" on the same boxes.
+    """
+
+    def test_the_remote_head_checkout_gets_the_long_timeout(self, db_pr: PullRequest) -> None:
+        from franktheunicorn.worker.runner import _resolve_cwd_for_tool
+
+        db_pr.head_sha = "deadbeef" * 5
+        db_pr.base_sha = ""
+        db_pr.base_branch = "branch-4.0"
+        db_pr.save()
+
+        from franktheunicorn.review.tool_executor import RemoteSSHExecutor
+
+        # spec'd: the resolver isinstance-checks the executor before using it.
+        executor = MagicMock(spec=RemoteSSHExecutor)
+        executor.prepare_repo.return_value = "/srv/frank/widget"
+        executor.run.return_value = ExecResult(returncode=0, stdout="", stderr="")
+
+        remote = RemoteExecutionConfig(
+            mode="ssh",
+            host="review.example.com",
+            user="frank",
+            remote_workspace_dir="/srv/frank",
+        )
+        with patch("franktheunicorn.review.tool_executor.make_executor", return_value=executor):
+            _resolve_cwd_for_tool(
+                db_pr,
+                remote,
+                None,
+                "CodeRabbit",
+                clone_url="https://git.example.com/acme/widget.git",
+            )
+
+        checkouts = [
+            call
+            for call in executor.run.call_args_list
+            if call.args and call.args[0][:2] == ["git", "checkout"]
+        ]
+        assert checkouts, "expected a remote head checkout"
+        for call in checkouts:
+            assert call.kwargs["timeout"] == _GIT_QUERY_TIMEOUT_SECONDS
+
+
+@pytest.mark.django_db
 class TestLocalCheckoutHonoursTheLane:
     """The interactive thread's lane has to reach the *local* path too — local is
     the default mode, and this branch used the clone directly rather than going

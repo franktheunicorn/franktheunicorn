@@ -81,7 +81,7 @@ where = ["src"]
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "franktheunicorn.settings"
 pythonpath = ["src"]
-testpaths = ["tests"]
+testpaths = ["tests", "tools"]
 addopts = "--strict-markers -v --tb=short"
 markers = [
     "integration: marks tests as integration tests",

@@ -1292,6 +1292,7 @@ def process_pr(
                     operator_config=operator_config,
                     repo_path=repo_path,
                     forge_client=forge_client,
+                    prior_comments=prior_comments,
                 )
                 if check_drafts:
                     _log(f"LLM checks: {len(check_drafts)} finding(s)")
@@ -2367,7 +2368,9 @@ def _resolve_cwd_for_tool(
             )
             return None
         checkout = executor.run(
-            ["git", "checkout", "--quiet", "--detach", head_sha], cwd=remote_cwd, timeout=30
+            ["git", "checkout", "--quiet", "--detach", head_sha],
+            cwd=remote_cwd,
+            timeout=_GIT_QUERY_TIMEOUT_SECONDS,
         )
         if checkout is None or not checkout.ok:
             logger.warning(

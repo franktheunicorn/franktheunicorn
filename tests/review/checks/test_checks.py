@@ -14,6 +14,7 @@ from franktheunicorn.review.checks import (
     _get_registry,
     run_enabled_checks,
 )
+from franktheunicorn.review.prior_comments import PriorComment
 from tests.factories import AntiPatternFactory
 
 
@@ -275,6 +276,103 @@ class TestRunEnabledChecks:
                 "some diff",
                 project_config=config,
                 operator_config=operator_config,
+            )
+
+        assert drafts == []
+
+
+@pytest.mark.django_db
+class TestChecksSeePriorComments:
+    """The checks are a finding source too, so the +1 rule has to reach them.
+
+    A ``security:`` check restating a reviewer's own point is exactly the
+    second comment the feature exists to stop.
+    """
+
+    def _config(self) -> ProjectConfig:
+        return ProjectConfig(owner="apache", repo="spark", llm_checks=["security"])
+
+    def _comment(self) -> PriorComment:
+        return PriorComment(
+            author="cloud-fan",
+            body="This path joins user input without checking it escapes the dir.",
+            file_path="src/main.py",
+            line=10,
+            url="https://github.com/apache/spark/pull/1#discussion_r1",
+        )
+
+    def _finding(self) -> ReviewFinding:
+        return ReviewFinding(
+            file_path="src/main.py",
+            line_number=10,
+            title="security: path traversal",
+            body="This path joins user input without checking it escapes the dir.",
+            confidence=0.8,
+            severity="important",
+        )
+
+    def test_the_prompt_carries_them(self, db_pr: PullRequest) -> None:
+        op_config = OperatorConfig(llm_backends=[LLMBackendConfig(provider="stub")])
+        seen: dict[str, str] = {}
+
+        def capture(check: object, pr: object, diff: str, ctx: object, backend: object) -> list:
+            seen["prior"] = ctx.prior_comments  # type: ignore[attr-defined]
+            return []
+
+        with patch("franktheunicorn.review.checks._run_single_check", side_effect=capture):
+            run_enabled_checks(
+                db_pr,
+                "diff",
+                project_config=self._config(),
+                operator_config=op_config,
+                prior_comments=[self._comment()],
+            )
+
+        assert "@cloud-fan" in seen["prior"]
+
+    def test_a_restating_finding_becomes_a_plus_one(self, db_pr: PullRequest) -> None:
+        op_config = OperatorConfig(
+            llm_backends=[LLMBackendConfig(provider="stub")],
+            github_username="holdenk",
+        )
+
+        with patch(
+            "franktheunicorn.review.checks._run_single_check",
+            return_value=[self._finding()],
+        ):
+            drafts = run_enabled_checks(
+                db_pr,
+                "diff",
+                project_config=self._config(),
+                operator_config=op_config,
+                prior_comments=[self._comment()],
+            )
+
+        assert len(drafts) == 1
+        assert drafts[0].comment_body.startswith("+1 @cloud-fan")
+
+    def test_our_own_earlier_comment_drops_the_finding(self, db_pr: PullRequest) -> None:
+        op_config = OperatorConfig(
+            llm_backends=[LLMBackendConfig(provider="stub")],
+            github_username="holdenk",
+        )
+        ours = PriorComment(
+            author="holdenk",
+            body="This path joins user input without checking it escapes the dir.",
+            file_path="src/main.py",
+            line=10,
+        )
+
+        with patch(
+            "franktheunicorn.review.checks._run_single_check",
+            return_value=[self._finding()],
+        ):
+            drafts = run_enabled_checks(
+                db_pr,
+                "diff",
+                project_config=self._config(),
+                operator_config=op_config,
+                prior_comments=[ours],
             )
 
         assert drafts == []

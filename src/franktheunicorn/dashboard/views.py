@@ -3228,7 +3228,11 @@ def security_check_valid_fixed(request: HttpRequest) -> HttpResponse:
     from franktheunicorn.config.loader import get_operator_config
     from franktheunicorn.security.fix_agent import FixAgentError, cursor_api_key
     from franktheunicorn.security.queue import PRIORITY_INTERACTIVE, queue_recheck_poll
-    from franktheunicorn.security.recheck import launch_valid_check, valid_reports
+    from franktheunicorn.security.recheck import (
+        MAX_VALID_CHECK_LAUNCHES,
+        launch_valid_check,
+        valid_reports,
+    )
 
     operator_config = get_operator_config()
     config = operator_config.security_triage.fix_agent
@@ -3279,12 +3283,21 @@ def security_check_valid_fixed(request: HttpRequest) -> HttpResponse:
             # would answer the same question twice at full price.
             skipped += 1
             continue
+        if launched + len(failures) >= MAX_VALID_CHECK_LAUNCHES:
+            # One press is capped on *attempts*, not successes: these POSTs
+            # happen in this request, and a revoked key or a Cursor outage
+            # fails every one of them — counting only successes would walk the
+            # whole backlog issuing failed POSTs and one flash message each.
+            # valid_reports() puts never-checked reports first, so the next
+            # press picks up where this one stopped.
+            break
         try:
             launch_valid_check(report, operator_config)
         except FixAgentError as exc:
             failures.append(f"#{report.pk}: {exc}")
         else:
             launched += 1
+    remaining = len(reports) - skipped - launched - len(failures)
     # Any live run needs the poll, not just the ones this press started — an
     # orphaned run's verdicts were paid for and should not be thrown away.
     if launched or SecurityRecheckRun.objects.filter(status="launched").exists():
@@ -3297,8 +3310,22 @@ def security_check_valid_fixed(request: HttpRequest) -> HttpResponse:
         )
     if skipped:
         messages.info(request, f"{skipped} report(s) already have a check running.")
-    for failure in failures:
-        messages.error(request, f"Valid-check not launched for report {failure}.")
+    if remaining > 0:
+        # Never silently: the cap is the difference between "the backlog is
+        # checked" and "the first 25 of it are".
+        messages.info(
+            request,
+            f"Stopped at {MAX_VALID_CHECK_LAUNCHES} launches — {remaining} valid "
+            "report(s) not checked this press. Press again to carry on; the "
+            "never-checked ones go first.",
+        )
+    if failures:
+        # One message, however many failed: they share a cause (key, quota,
+        # Cursor itself) far more often than not, and N flashes in the session
+        # cookie is its own problem.
+        shown = "; ".join(failures[:5])
+        more = f" (+{len(failures) - 5} more)" if len(failures) > 5 else ""
+        messages.error(request, f"Valid-check not launched for {shown}{more}.")
     return _back_to_security_list(request)
 
 

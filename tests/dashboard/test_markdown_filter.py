@@ -118,3 +118,46 @@ def test_render_markdown_inline_never_emits_links() -> None:
 
     autolink = render_markdown_inline("Fix <https://evil.example> handling")
     assert "<a" not in autolink
+
+
+def test_markdown_around_an_html_wrapper_still_renders() -> None:
+    """A ``<div>`` wrapper must not swallow the markdown inside it.
+
+    ``html: True`` turned on markdown-it's HTML *block* rule, which consumes
+    every line to the next blank one. A table wrapped in ``<div align="center">``
+    — common in PR descriptions, and rendered by GitHub — came back as one
+    escaped literal with the pipes unprocessed.
+    """
+    body = '<div align="center">\n| a | b |\n|---|---|\n| 1 | 2 |\n</div>'
+
+    result = render_markdown(body)
+
+    assert "<table>" in result
+    assert "| a | b |" not in result
+    # The tag itself is still inert text, not emitted HTML.
+    assert "&lt;div" in result
+    assert "<div" not in result
+
+
+def test_a_comment_between_fenced_blocks_is_still_stripped() -> None:
+    """Fence tracking must close, or everything after the first block survives."""
+    body = "```\ncode\n```\n<!-- hide -->\n```\nmore\n```\n"
+
+    result = render_markdown(body)
+
+    assert "&lt;!--" not in result
+    assert "<!--" not in result
+    assert result.count("<pre>") == 2
+
+
+def test_a_tilde_fence_protects_its_comment() -> None:
+    result = render_markdown("~~~\n<!-- keep -->\n~~~\n")
+
+    assert "&lt;!-- keep --&gt;" in result
+
+
+def test_an_unclosed_fence_keeps_what_follows_verbatim() -> None:
+    """Degrades the way the parser does: everything after it is code."""
+    result = render_markdown("```\n<!-- inside -->\n")
+
+    assert "&lt;!-- inside --&gt;" in result

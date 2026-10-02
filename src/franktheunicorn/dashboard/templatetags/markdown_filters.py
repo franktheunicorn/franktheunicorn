@@ -1,14 +1,10 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
-from typing import Any
 
 from django import template
 from django.utils.safestring import SafeString, mark_safe
 from markdown_it import MarkdownIt
-from markdown_it.common.utils import escapeHtml
-from markdown_it.token import Token
 
 register = template.Library()
 
@@ -18,39 +14,55 @@ register = template.Library()
 # dashboard as visible ``&lt;!-- ... --&gt;`` text. PR templates are full of
 # these instructions, so every templated PR body rendered as noise.
 #
-# Enabling raw-HTML parsing lets markdown-it see the comments, and the
-# overridden ``html_block`` / ``html_inline`` render rules then drop them
-# (matching GitHub) while escaping every *other* raw tag. Comment bodies and
-# PR descriptions are attacker-controlled, so raw HTML must never pass through
-# unescaped — ``<script>`` and ``<img onerror=...>`` stay escaped, same as
-# the old ``html: False`` behaviour.
+# They come out of the source instead of being dropped at render time, which is
+# what ``html: True`` plus a comment-eating render rule did. That also turned on
+# markdown-it's HTML *block* rule, and an HTML block swallows every line up to a
+# blank one: a ``<div align="center">`` wrapper around a table — common in PR
+# descriptions, and rendered by GitHub — came back as one escaped literal with
+# the table markup unprocessed. Stripping the comments first leaves the parser
+# in the configuration it was in, so raw HTML is still escaped (``<script>``,
+# ``<img onerror=...>``: PR bodies are attacker-controlled) and the markdown
+# around it still renders.
 _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 
-_md = MarkdownIt("gfm-like", {"html": True})
+#: Opening or closing line of a fenced code block, per CommonMark: up to three
+#: leading spaces, then three or more backticks or tildes.
+_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 
 
-def _render_html_filtered(
-    self: Any,
-    tokens: Sequence[Token],
-    idx: int,
-    options: Any,
-    env: Any,
-) -> str:
-    """Render rule for raw HTML: hide comments, escape everything else.
+def strip_html_comments(text: str) -> str:
+    """Remove ``<!-- ... -->`` outside fenced code blocks.
 
-    Registered for both ``html_block`` and ``html_inline`` tokens. A token
-    whose content is a single HTML comment renders as nothing (GitHub hides
-    them); any other raw HTML is escaped via markdown-it's own escaper so it
-    shows as inert text rather than executing.
+    A comment inside a fence is content — a PR body explaining the template's
+    own markers, say — and GitHub shows it, so the fence is copied through
+    untouched. (A four-space-indented code block is not tracked; a comment
+    there is stripped. PR bodies use fences.)
     """
-    content = tokens[idx].content
-    if _HTML_COMMENT_RE.fullmatch(content.strip()):
-        return ""
-    return escapeHtml(content)
+    if "<!--" not in text:
+        return text
+    out: list[str] = []
+    plain: list[str] = []
+    fence: str | None = None
+    for line in text.splitlines(keepends=True):
+        if fence is None:
+            opening = _FENCE_RE.match(line)
+            if opening:
+                out.append(_HTML_COMMENT_RE.sub("", "".join(plain)))
+                plain = []
+                fence = opening.group(1)
+                out.append(line)
+            else:
+                plain.append(line)
+        else:
+            out.append(line)
+            closing = _FENCE_RE.match(line)
+            if closing and closing.group(1)[0] == fence[0] and len(closing.group(1)) >= len(fence):
+                fence = None
+    out.append(_HTML_COMMENT_RE.sub("", "".join(plain)))
+    return "".join(out)
 
 
-_md.add_render_rule("html_block", _render_html_filtered)
-_md.add_render_rule("html_inline", _render_html_filtered)
+_md = MarkdownIt("gfm-like", {"html": False})
 
 # Title renderer: formatting only (code spans, emphasis), NO links. PR titles
 # are attacker-controlled and get rendered inside the dashboard's own <a>
@@ -65,7 +77,7 @@ _md_title = MarkdownIt("zero", {"html": False, "linkify": False}).enable(
 def render_markdown(value: str | None) -> SafeString:
     if not value:
         return mark_safe("")
-    rendered: str = _md.render(str(value))
+    rendered: str = _md.render(strip_html_comments(str(value)))
     return mark_safe(rendered)
 
 
@@ -78,5 +90,5 @@ def render_markdown_inline(value: str | None) -> SafeString:
     """
     if not value:
         return mark_safe("")
-    rendered: str = _md_title.renderInline(str(value))
+    rendered: str = _md_title.renderInline(strip_html_comments(str(value)))
     return mark_safe(rendered)

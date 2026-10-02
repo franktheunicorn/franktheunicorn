@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from franktheunicorn.backends.base import ForgeClient
     from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig, ProjectConfig
     from franktheunicorn.core.models import PullRequest, ReviewDraft
+    from franktheunicorn.review.prior_comments import PriorComment
 
 logger = logging.getLogger(__name__)
 
@@ -78,12 +79,19 @@ def run_enabled_checks(
     *,
     repo_path: Path | str | None = None,
     forge_client: ForgeClient | None = None,
+    prior_comments: list[PriorComment] | None = None,
 ) -> list[ReviewDraft]:
     """Run all LLM checks enabled in project config and return resulting drafts.
 
     Each check builds a focused prompt, calls the first configured LLM backend,
     parses findings, and feeds them through ``create_drafts_from_findings`` for
     anti-pattern gating and persistence.
+
+    ``prior_comments`` reaches the checks the same way it reaches the main
+    pipeline: into the prompt, and into draft creation so a finding that
+    restates an existing comment becomes a ``+1`` or is dropped. The checks
+    are a finding source like any other — "security:" restating a reviewer's
+    own point is the comment this is meant to stop.
     """
     from franktheunicorn.config.models import LLMBackendConfig
     from franktheunicorn.config.models import OperatorConfig as DefaultOperatorConfig
@@ -96,7 +104,14 @@ def run_enabled_checks(
         return []
 
     registry = _get_registry()
-    pr_context = build_pr_context(pr, project_config, operator_config)
+    from franktheunicorn.review.prior_comments import format_prior_comments
+
+    pr_context = build_pr_context(
+        pr,
+        project_config,
+        operator_config,
+        prior_comments=format_prior_comments(prior_comments or []),
+    )
 
     if "issue-link" in enabled and not pr_context.linked_issues_context:
         from franktheunicorn.review.drafter import fetch_linked_issues_context
@@ -134,6 +149,8 @@ def run_enabled_checks(
             diff=diff,
             governance=project_config.governance,
             rlm_scoring=getattr(project_config, "rlm_scoring", None),
+            prior_comments=prior_comments,
+            operator=operator_config.github_username,
         )
         all_drafts.extend(drafts)
 
