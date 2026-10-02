@@ -108,6 +108,8 @@ How to review (match the operator's actual review comments):
 - If another maintainer owns the surface, say to check with them instead of
   deciding it.
 - Skip a finding you would not leave.
+- If a comment already on the PR says it, do not restate it. "+1 @author"
+  is the whole finding.
 
 """
     + COMMENT_VOICE
@@ -222,6 +224,9 @@ def build_user_message(diff: str, ctx: PRContext) -> str:
         header_parts.append(f"\n{ctx.full_file_context}")
     if ctx.imported_modules_context:
         header_parts.append(f"\n{ctx.imported_modules_context}")
+
+    if ctx.prior_comments:
+        header_parts.append(f"\n{ctx.prior_comments}")
 
     header_parts.append(f"\nDiff:\n```diff\n{diff}\n```")
 

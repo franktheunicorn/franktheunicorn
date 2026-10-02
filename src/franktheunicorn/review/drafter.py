@@ -41,6 +41,7 @@ if TYPE_CHECKING:
         RLMScoringConfig,
     )
     from franktheunicorn.core.models import Project, PullRequest
+    from franktheunicorn.review.prior_comments import PriorComment
     from franktheunicorn.scoring.rejection_predictor import RejectionPredictor
 
 logger = logging.getLogger(__name__)
@@ -153,6 +154,7 @@ def build_pr_context(
     jira_context: str = "",
     sentry_context: str = "",
     repo_path: Path | None = None,
+    prior_comments: str = "",
 ) -> PRContext:
     """Bundle PR + config data into a PRContext for the LLM."""
     anti_patterns: list[str] = []
@@ -206,6 +208,7 @@ def build_pr_context(
         sentry_context=sentry_context,
         full_file_context=full_file_ctx,
         imported_modules_context=imported_ctx,
+        prior_comments=prior_comments,
         project_id=pr.project_id,
         pr_id=pr.pk,
     )
@@ -297,6 +300,8 @@ def create_drafts_from_findings(
     categories_per_finding: list[str] | None = None,
     tone_applied_per_finding: list[bool] | None = None,
     rejection_predictor_enabled: bool = False,
+    prior_comments: list[PriorComment] | None = None,
+    operator: str = "",
 ) -> list[ReviewDraft]:
     """Convert ReviewFinding objects into ReviewDraft rows.
 
@@ -337,9 +342,30 @@ def create_drafts_from_findings(
     # memory rather than a query per finding, which is what the agent-CLI path
     # does too.
     existing_drafts = list(ReviewDraft.objects.filter(pull_request=pr))
+    seen_comments: set[str] = set()
 
     with transaction.atomic():
         for idx, finding in enumerate(findings):
+            if prior_comments:
+                from franktheunicorn.review.prior_comments import adjust_for_prior_comments
+
+                action, rewritten = adjust_for_prior_comments(
+                    finding.file_path,
+                    finding.line_number,
+                    finding.body,
+                    prior_comments,
+                    operator=operator,
+                    seen=seen_comments,
+                )
+                if action == "drop":
+                    logger.info(
+                        "Dropped %s finding '%s' — already on the PR",
+                        source,
+                        finding.title[:40],
+                    )
+                    continue
+                if action == "plus_one":
+                    finding = finding.model_copy(update={"body": rewritten, "suggestion": ""})
             # Resolve attribution for this specific finding. When dedup merged
             # findings from multiple backends, sources_per_finding[idx] holds
             # all contributors as a comma-joined string.
@@ -540,6 +566,7 @@ def draft_review(
     jira_context: str = "",
     sentry_context: str = "",
     repo_path: Path | None = None,
+    prior_comments: list[PriorComment] | None = None,
 ) -> list[ReviewDraft]:
     """Generate review drafts for a PR using all configured LLM backends.
 
@@ -562,6 +589,8 @@ def draft_review(
 
         operator_config = DefaultOperatorConfig()
 
+    from franktheunicorn.review.prior_comments import format_prior_comments
+
     pr_context = build_pr_context(
         pr,
         project_config,
@@ -571,6 +600,7 @@ def draft_review(
         jira_context=jira_context,
         sentry_context=sentry_context,
         repo_path=repo_path,
+        prior_comments=format_prior_comments(prior_comments or []),
     )
     diff = _get_pr_diff(pr, diff)
 
@@ -678,6 +708,8 @@ def draft_review(
         categories_per_finding=categories,
         tone_applied_per_finding=tone_flags,
         rejection_predictor_enabled=getattr(project_config, "rejection_predictor_enabled", False),
+        prior_comments=prior_comments,
+        operator=operator_config.github_username,
     )
     return extra_drafts + llm_drafts
 

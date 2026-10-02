@@ -254,6 +254,25 @@ class GitHubClient(ForgeClient):
         result: list[dict[str, Any]] = response.json()
         return result
 
+    def list_pull_review_comments(
+        self, owner: str, repo: str, pr_number: int
+    ) -> list[dict[str, Any]]:
+        """Every inline review comment on the PR, not one review's worth.
+
+        The review pipeline reads these so a finding that restates one becomes
+        a ``+1`` instead of a second comment on the same line.
+        """
+        url = f"/repos/{owner}/{repo}/pulls/{pr_number}/comments"
+        found: list[dict[str, Any]] = []
+        for page in range(1, 6):
+            response = self._get(url, params={"per_page": 100, "page": page})
+            response.raise_for_status()
+            data: list[dict[str, Any]] = response.json()
+            found.extend(data)
+            if len(data) < 100:
+                break
+        return found
+
     def delete_review_comment(self, owner: str, repo: str, pr_number: int, comment_id: int) -> None:
         """Delete a review comment (for recall). ``pr_number`` is unused on GitHub."""
         del pr_number

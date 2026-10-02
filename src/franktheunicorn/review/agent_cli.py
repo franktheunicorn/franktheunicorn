@@ -42,6 +42,7 @@ from franktheunicorn.review.tool_executor import (
 if TYPE_CHECKING:
     from franktheunicorn.config.models import AgentCLIReviewerConfig
     from franktheunicorn.core.models import Project, PullRequest
+    from franktheunicorn.review.prior_comments import PriorComment
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +64,7 @@ design and semantics first, then dead code or odd structure this change added.
 Skip formatting, naming, and import order.
 
 {reviewing_guidance}
-{review_guidance_section}{review_areas_section}For EACH issue, emit a block in EXACTLY this format, separated by lines of
+{review_guidance_section}{review_areas_section}{prior_comments_section}For EACH issue, emit a block in EXACTLY this format, separated by lines of
 five or more equals signs:
 
 <file_path>:<line_number> - [<Severity>] <Short title>
@@ -112,7 +113,7 @@ finding. Behavior the security model declares trusted is not a finding.
 {comment_voice}
 
 {security_model_section}
-{review_guidance_section}{review_areas_section}For EACH security issue, emit a block in EXACTLY this format, separated by
+{review_guidance_section}{review_areas_section}{prior_comments_section}For EACH security issue, emit a block in EXACTLY this format, separated by
 lines of five or more equals signs:
 
 <file_path>:<line_number> - [<Severity>] security: <Short title>
@@ -173,6 +174,7 @@ def build_review_prompt(
     security_model: str = "",
     review_guidance: str = "",
     review_areas_of_interest: list[str] | None = None,
+    prior_comments: str = "",
 ) -> str:
     """Pick and fill the prompt template for the reviewer's ``review_focus``.
 
@@ -200,6 +202,8 @@ def build_review_prompt(
         if areas
         else ""
     )
+    prior = (prior_comments or "").strip()
+    prior_comments_section = f"\n{prior}\n" if prior else ""
     if config.review_focus == "security":
         section = (
             _SECURITY_MODEL_KNOWN_SECTION.format(security_model=security_model.strip())
@@ -211,12 +215,14 @@ def build_review_prompt(
             security_model_section=section,
             review_guidance_section=guidance_section,
             review_areas_section=areas_section,
+            prior_comments_section=prior_comments_section,
             diff=diff,
         )
     return _PROMPT_TEMPLATE.format(
         reviewing_guidance=REVIEWING_GUIDANCE,
         review_guidance_section=guidance_section,
         review_areas_section=areas_section,
+        prior_comments_section=prior_comments_section,
         diff=diff,
     )
 
@@ -230,6 +236,7 @@ def run_agent_cli_review(
     security_model: str = "",
     review_guidance: str = "",
     review_areas_of_interest: list[str] | None = None,
+    prior_comments: str = "",
 ) -> list[AgentCLIFinding]:
     """
     Run the agent CLI against the diff between ``base_commit`` and HEAD.
@@ -294,7 +301,12 @@ def run_agent_cli_review(
         diff = diff[:cutoff] + "\n[...diff truncated...]\n"
 
     prompt = build_review_prompt(
-        config, diff, security_model, review_guidance, review_areas_of_interest
+        config,
+        diff,
+        security_model,
+        review_guidance,
+        review_areas_of_interest,
+        prior_comments,
     )
 
     cmd = list(config.cli_argv) + config.build_invocation(prompt)
@@ -409,6 +421,8 @@ def create_drafts_from_agent_cli(
     source: str,
     diff_source: str = "",
     deduplicate: bool = True,
+    prior_comments: list[PriorComment] | None = None,
+    operator: str = "",
 ) -> list[ReviewDraft]:
     """
     Convert agent-CLI findings into ``ReviewDraft`` rows, attributed to
@@ -426,8 +440,36 @@ def create_drafts_from_agent_cli(
     # Snapshot existing drafts once so cross-agent dedup compares against
     # both prior tools and agents that already ran this PR.
     existing: list[ReviewDraft] = list(pr.review_drafts.all()) if deduplicate else []
+    seen_comments: set[str] = set()
 
     for finding in findings:
+        if prior_comments:
+            from franktheunicorn.review.prior_comments import adjust_for_prior_comments
+
+            action, rewritten = adjust_for_prior_comments(
+                finding.file_path,
+                finding.line_number,
+                finding.body,
+                prior_comments,
+                operator=operator,
+                seen=seen_comments,
+            )
+            if action == "drop":
+                logger.info(
+                    "Dropped %s finding '%s' — already on the PR",
+                    source,
+                    finding.title,
+                )
+                continue
+            if action == "plus_one":
+                finding = AgentCLIFinding(
+                    file_path=finding.file_path,
+                    line_number=finding.line_number,
+                    severity=finding.severity,
+                    title=finding.title,
+                    body=rewritten,
+                )
+
         matches = check_against_anti_patterns(finding.body, project)
         if matches:
             record_anti_pattern_matches(matches)

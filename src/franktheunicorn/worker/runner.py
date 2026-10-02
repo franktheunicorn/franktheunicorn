@@ -1184,6 +1184,12 @@ def process_pr(
                 exc_info=True,
             )
 
+        from franktheunicorn.review.prior_comments import fetch_prior_comments
+
+        prior_comments = fetch_prior_comments(forge_client, pc.owner, pc.repo, pr.number)
+        if prior_comments:
+            _log(f"PR #{pr.number}: {len(prior_comments)} existing comment(s) to avoid restating")
+
         # Skipped when the LLM has already had its turn and we are only here for a
         # reviewer that hasn't. The gate above lets a PR through if *any* expected
         # source is missing, and without this that re-ran the entire LLM pipeline —
@@ -1211,6 +1217,7 @@ def process_pr(
                 jira_context=jira_ctx,
                 sentry_context=sentry_ctx,
                 repo_path=repo_path,
+                prior_comments=prior_comments,
             )
             _log(f"LLM review complete: {len(drafts)} finding(s) generated")
             logger.info(
@@ -1251,6 +1258,7 @@ def process_pr(
                 project_config=pc,
                 operator_config=effective_config,
                 diff_http=diff_http,
+                prior_comments=prior_comments,
             )
             _log(f"{reviewer.name}: {outcome}")
         if snowflake_config is not None:
@@ -2526,6 +2534,7 @@ def _run_agent_cli_for_pr(
     project_config: ProjectConfig | None = None,
     operator_config: OperatorConfig | None = None,
     diff_http: httpx.Client | None = None,
+    prior_comments: list[Any] | None = None,
 ) -> str:
     """Run one agent-CLI reviewer (claude/codex/pi/...) for a PR. Never raises.
 
@@ -2543,11 +2552,14 @@ def _run_agent_cli_for_pr(
     # Project voice on every focus. It used to ride only the security branch,
     # so a general cursor-agent review of Spark never saw the release-branch
     # guidance the prompt says is authoritative.
+    from franktheunicorn.review.prior_comments import format_prior_comments
+
     review_kwargs: dict[str, Any] = {
         "review_guidance": project_config.review_guidance if project_config else "",
         "review_areas_of_interest": (
             list(project_config.review_areas_of_interest) if project_config else []
         ),
+        "prior_comments": format_prior_comments(prior_comments or []),
     }
     if reviewer.review_focus == "security":
         # Resolved here rather than in run_agent_cli_review because the
@@ -2577,6 +2589,8 @@ def _run_agent_cli_for_pr(
         create_drafts_from_agent_cli,
         source=reviewer.name,
         deduplicate=reviewer.deduplicate,
+        prior_comments=prior_comments,
+        operator=operator_config.github_username if operator_config else "",
     )
 
     return _run_review_tool_for_pr(
