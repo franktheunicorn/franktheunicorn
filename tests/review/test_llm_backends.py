@@ -656,6 +656,7 @@ class TestLogBackendError:
 
         assert any("403" in r.message and "permission" in r.message.lower() for r in caplog.records)
         assert any(r.levelname == "ERROR" for r in caplog.records)
+        assert all(r.exc_info is None for r in caplog.records)
 
     def test_429_logs_at_warning_with_rate_limit_hint(
         self, caplog: pytest.LogCaptureFixture

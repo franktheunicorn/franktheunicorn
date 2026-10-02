@@ -19,6 +19,7 @@ from franktheunicorn.config.models import (
 from franktheunicorn.core.models import PullRequest
 from franktheunicorn.review.tool_executor import ExecResult
 from franktheunicorn.worker.runner import (
+    _GIT_QUERY_TIMEOUT_SECONDS,
     _REMOTE,
     _checkout_pr_head_with_merge,
     _clone_url_for_project,
@@ -363,6 +364,7 @@ class TestEnsureBaseRefAvailable:
         # Only the cat-file presence check runs; no fetch.
         assert executor.run.call_count == 1
         assert executor.run.call_args.args[0] == ["git", "cat-file", "-e", sha]
+        assert executor.run.call_args.kwargs["timeout"] == _GIT_QUERY_TIMEOUT_SECONDS
 
     def test_sha_fetched_via_base_branch_when_absent(self) -> None:
         executor = MagicMock()

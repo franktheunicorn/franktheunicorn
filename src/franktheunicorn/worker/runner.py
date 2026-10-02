@@ -2001,6 +2001,12 @@ def _clone_url_for_project(
 # fetching into the checkout — a branch ref already exists in a fresh clone.
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
+#: cat-file / rev-parse / checkout over a remote wrapper. 15s was enough for a
+#: local git and not for ``sf workspace ssh``: the session spends most of that
+#: opening, the query times out before git runs, and the review is skipped for
+#: a base ref that was already in the clone. Local git still returns immediately.
+_GIT_QUERY_TIMEOUT_SECONDS = 90
+
 
 def _looks_like_sha(ref: str) -> bool:
     return bool(_SHA_RE.match(ref))
@@ -2008,7 +2014,7 @@ def _looks_like_sha(ref: str) -> bool:
 
 def _sha_present(executor: object, cwd: str, sha: str) -> bool:
     result = executor.run(  # type: ignore[attr-defined]
-        ["git", "cat-file", "-e", sha], cwd=cwd, timeout=15
+        ["git", "cat-file", "-e", sha], cwd=cwd, timeout=_GIT_QUERY_TIMEOUT_SECONDS
     )
     return result is not None and result.ok
 
@@ -2045,7 +2051,9 @@ def _ensure_base_ref_available(
     if base_branch:
         branch_ref = f"origin/{base_branch}"
         verify = executor.run(  # type: ignore[attr-defined]
-            ["git", "rev-parse", "--verify", branch_ref], cwd=cwd, timeout=15
+            ["git", "rev-parse", "--verify", branch_ref],
+            cwd=cwd,
+            timeout=_GIT_QUERY_TIMEOUT_SECONDS,
         )
         if verify is not None and verify.ok:
             logger.warning(
@@ -2131,9 +2139,17 @@ def _checkout_pr_head_with_merge(
             base_ref,
         )
         # Abort the failed merge and clean up the temp branch before returning.
-        executor.run(["git", "merge", "--abort"], cwd=cwd, timeout=15)  # type: ignore[attr-defined]
-        executor.run(["git", "checkout", "--detach", head_sha], cwd=cwd, timeout=15)  # type: ignore[attr-defined]
-        executor.run(["git", "branch", "-D", branch_name], cwd=cwd, timeout=15)  # type: ignore[attr-defined]
+        executor.run(  # type: ignore[attr-defined]
+            ["git", "merge", "--abort"], cwd=cwd, timeout=_GIT_QUERY_TIMEOUT_SECONDS
+        )
+        executor.run(  # type: ignore[attr-defined]
+            ["git", "checkout", "--detach", head_sha],
+            cwd=cwd,
+            timeout=_GIT_QUERY_TIMEOUT_SECONDS,
+        )
+        executor.run(  # type: ignore[attr-defined]
+            ["git", "branch", "-D", branch_name], cwd=cwd, timeout=_GIT_QUERY_TIMEOUT_SECONDS
+        )
         return True, None
 
     return True, branch_name
@@ -2141,8 +2157,12 @@ def _checkout_pr_head_with_merge(
 
 def _cleanup_review_branch(executor: object, cwd: str, temp_branch: str) -> None:
     """Detach HEAD and delete the temporary review branch created by _checkout_pr_head_with_merge."""
-    executor.run(["git", "checkout", "--detach", "HEAD"], cwd=cwd, timeout=15)  # type: ignore[attr-defined]
-    executor.run(["git", "branch", "-D", temp_branch], cwd=cwd, timeout=15)  # type: ignore[attr-defined]
+    executor.run(  # type: ignore[attr-defined]
+        ["git", "checkout", "--detach", "HEAD"], cwd=cwd, timeout=_GIT_QUERY_TIMEOUT_SECONDS
+    )
+    executor.run(  # type: ignore[attr-defined]
+        ["git", "branch", "-D", temp_branch], cwd=cwd, timeout=_GIT_QUERY_TIMEOUT_SECONDS
+    )
 
 
 def _resolve_cwd_for_tool(
@@ -2589,7 +2609,7 @@ def _resolve_remote_base_ref(
         result = executor.run(
             ["git", "rev-parse", "--verify", candidate],
             cwd=remote_cwd,
-            timeout=15,
+            timeout=_GIT_QUERY_TIMEOUT_SECONDS,
         )
         if result is not None and result.ok:
             return candidate
@@ -2598,7 +2618,7 @@ def _resolve_remote_base_ref(
         result = executor.run(
             ["git", "rev-parse", "--verify", candidate],
             cwd=remote_cwd,
-            timeout=15,
+            timeout=_GIT_QUERY_TIMEOUT_SECONDS,
         )
         if result is not None and result.ok:
             return candidate

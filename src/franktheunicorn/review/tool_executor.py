@@ -1107,7 +1107,13 @@ class RemoteSSHExecutor:
                 # terminated the session before any framing was printed, and the whole
                 # run came back as "cannot be confirmed to have run at all". In a
                 # subshell that exit sets $? and the framing still gets out.
-                f'( {run_body} ) > "$__frank_o" 2> "$__frank_s"',
+                #
+                # stdin from /dev/null. This script is itself the shell's stdin, and
+                # `codex exec` reads stdin to EOF. It swallowed the printf/echo that
+                # retrieve its output, the shell then hit EOF, and the session came
+                # back as "did not echo its framing" with only the begin marker and
+                # a TUI teardown — after the agent had already run.
+                f'( {run_body} ) < /dev/null > "$__frank_o" 2> "$__frank_s"',
                 "__frank_rc=$?",
                 # The byte count, before base64 gets a chance to fail. Without it,
                 # a remote with no base64(1) still printed both payload markers

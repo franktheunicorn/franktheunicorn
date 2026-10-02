@@ -1425,6 +1425,20 @@ class TestLongCommandsOverAPty:
         assert "FRANK_EOF_" not in mock_run.call_args.kwargs["input"]
 
     @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_a_command_that_reads_stdin_does_not_eat_the_framing(self, mock_run: Any) -> None:
+        """``codex exec`` reads stdin to EOF. The framing script is that stdin, so
+        without a redirect the agent consumes the lines that retrieve its output
+        and the session ends with only the begin marker."""
+        mock_run.side_effect = self._wrapper
+
+        result = self._executor().run_script("cat", timeout=30, label="codex")
+
+        assert result is not None
+        assert result.returncode == 0
+        assert result.stdout == ""
+        assert "< /dev/null" in mock_run.call_args.kwargs["input"]
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
     def test_a_staged_command_keeps_its_quoting_and_newlines(self, mock_run: Any) -> None:
         """base64 inside a quoted heredoc, so a payload full of single quotes,
         newlines and shell metacharacters survives verbatim."""

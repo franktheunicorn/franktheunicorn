@@ -125,7 +125,6 @@ def _log_backend_error(backend_name: str, exc: BaseException) -> None:
             "%s: authentication failed (HTTP 401) — check that your API key is "
             "correct and has not expired.",
             backend_name,
-            exc_info=True,
         )
     elif status_code == 403:
         body = str(exc).lower()
@@ -137,21 +136,18 @@ def _log_backend_error(backend_name: str, exc: BaseException) -> None:
                 "block rather than an API key issue. Check network access, VPN, or "
                 "firewall rules for the backend URL.",
                 backend_name,
-                exc_info=True,
             )
         else:
             logger.error(
                 "%s: permission denied (HTTP 403) — check that your API key has the "
                 "required permissions and that your account is in good standing.",
                 backend_name,
-                exc_info=True,
             )
     elif status_code == 429:
         logger.warning(
             "%s: rate limited (HTTP 429) — the API quota was exceeded. "
             "Findings skipped for this cycle; will retry on the next poll.",
             backend_name,
-            exc_info=True,
         )
     elif status_code is not None and 400 <= status_code < 500:
         logger.error(
@@ -159,7 +155,6 @@ def _log_backend_error(backend_name: str, exc: BaseException) -> None:
             backend_name,
             status_code,
             exc,
-            exc_info=True,
         )
     elif looks_offline(exc):
         # A local model that isn't running is a configuration state, not a crash,
