@@ -318,6 +318,10 @@ copypasta_ignore_patterns:
 # the quota ran dry and ingestion silently degraded to HTML scrapes.
 # 0 disables the skip.
 poll_refresh_hours: 24
+# Re-review a push only when the PR moved within this many days. Title and
+# description still update whenever the listing shows they changed. 0 means
+# every push, however quiet the PR has been.
+review_activity_days: 30
 
 # People whose PRs you typically review or collaborate with
 frequent_contributors:

@@ -307,6 +307,55 @@ class TestReviewSkipReason:
         assert skip.reason == "already-reviewed"
         assert "Force Run" in skip.explanation
 
+    def test_a_push_rereviews_a_recent_pr(self, db_pr: PullRequest) -> None:
+        from django.utils import timezone
+
+        from tests.factories import ReviewDraftFactory
+
+        ReviewDraftFactory(pull_request=db_pr)
+        db_pr.head_sha = "b" * 40
+        db_pr.github_updated_at = timezone.now()
+        db_pr.agent_runs = {
+            "llm": {"status": "ok", "findings": 1, "head_sha": "a" * 40},
+        }
+        db_pr.save()
+        pc = ProjectConfig(owner="apache", repo="spark", auto_review_policy="all")
+
+        assert runner.review_skip_reason(db_pr, pc, None, force=False) is None
+
+    def test_a_quiet_pr_keeps_its_review_after_an_old_push(self, db_pr: PullRequest) -> None:
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        from tests.factories import ReviewDraftFactory
+
+        ReviewDraftFactory(pull_request=db_pr)
+        db_pr.head_sha = "b" * 40
+        db_pr.github_updated_at = timezone.now() - timedelta(days=90)
+        db_pr.agent_runs = {
+            "llm": {"status": "ok", "findings": 1, "stale": True, "head_sha": "a" * 40},
+        }
+        db_pr.save()
+        pc = ProjectConfig(
+            owner="apache", repo="spark", auto_review_policy="all", review_activity_days=30
+        )
+
+        skip = runner.review_skip_reason(db_pr, pc, None, force=False)
+
+        assert skip is not None
+        assert skip.reason == "already-reviewed"
+
+    def test_a_run_records_the_head_it_reviewed(self, db_pr: PullRequest) -> None:
+        db_pr.head_sha = "e" * 40
+        db_pr.save()
+
+        runner.record_agent_run(db_pr, "llm", status="ok", findings=2)
+
+        db_pr.refresh_from_db()
+        assert db_pr.agent_runs["llm"]["head_sha"] == "e" * 40
+        assert "stale" not in db_pr.agent_runs["llm"]
+
     def test_wip_is_named(self, db_pr: PullRequest) -> None:
         db_pr.queue = "wip"
         db_pr.save()

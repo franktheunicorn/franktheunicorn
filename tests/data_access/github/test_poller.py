@@ -808,6 +808,21 @@ def _listed_pr(number: int = 99, **overrides: Any) -> dict[str, Any]:
     return _make_pr_list_item() | {"number": number} | overrides
 
 
+def _detail_with_head(client: _CountingMockClient, sha: str) -> Any:
+    """Replace the mock detail call so a push's new head is what gets stored."""
+
+    def get_pull_request(owner: str, repo: str, pr_number: int) -> dict[str, Any]:
+        client.detail_calls.append(pr_number)
+        detail = _same_repo_detail()
+        detail["head"] = {**detail["head"], "sha": sha}
+        detail["number"] = pr_number
+        detail["additions"] = 31
+        detail["deletions"] = 7
+        return detail
+
+    return get_pull_request
+
+
 @pytest.mark.django_db
 class TestUnchangedPRSkip:
     """An untouched PR must not cost per-PR API calls on every cycle."""
@@ -850,6 +865,59 @@ class TestUnchangedPRSkip:
         client.pr_list = [_listed_pr(requested_reviewers=[{"login": "holdenk"}])]
         assert len(poll_project(client, config, operator_username="holdenk")) == 1
         assert client.detail_calls == [99]
+
+    def test_a_new_description_is_stored(self, tmp_path: Path) -> None:
+        client = _CountingMockClient(tmp_path, [_listed_pr(body="first draft")])
+        config = self._config()
+        poll_project(client, config, operator_username="holdenk")
+
+        client.detail_calls.clear()
+        client.pr_list = [_listed_pr(body="rewritten description")]
+        assert len(poll_project(client, config, operator_username="holdenk")) == 1
+        assert PullRequest.objects.get(number=99).body == "rewritten description"
+
+    def test_a_recent_push_invalidates_the_existing_review(self, tmp_path: Path) -> None:
+        client = _CountingMockClient(tmp_path, [_listed_pr()])
+        config = self._config()
+        poll_project(client, config, operator_username="holdenk")
+        pr = PullRequest.objects.get(number=99)
+        pr.agent_runs = {"llm": {"status": "ok", "findings": 1, "head_sha": pr.head_sha}}
+        pr.save(update_fields=["agent_runs"])
+
+        new_sha = "c" * 40
+        fresh = timezone.now().strftime("%Y-%m-%dT%H:%M:%SZ")
+        client.pr_list = [_listed_pr(updated_at=fresh, head={"sha": new_sha, "ref": "feature"})]
+        client.get_pull_request = _detail_with_head(client, new_sha)  # type: ignore[method-assign]
+
+        assert len(poll_project(client, config, operator_username="holdenk")) == 1
+        pr.refresh_from_db()
+        assert pr.head_sha == new_sha
+        assert pr.agent_runs["llm"]["stale"] is True
+
+    def test_an_old_push_updates_the_sha_without_rereviewing(self, tmp_path: Path) -> None:
+        """Activity outside review_activity_days still stores the new head.
+
+        It does not spend another agent run on a PR that has been quiet.
+        """
+        client = _CountingMockClient(tmp_path, [_listed_pr()])
+        config = self._config(review_activity_days=30)
+        poll_project(client, config, operator_username="holdenk")
+        pr = PullRequest.objects.get(number=99)
+        pr.agent_runs = {"llm": {"status": "ok", "findings": 1, "head_sha": pr.head_sha}}
+        pr.save(update_fields=["agent_runs"])
+
+        new_sha = "d" * 40
+        # The fixture clock is months behind "now", so this push is outside
+        # the default 30-day window.
+        client.pr_list = [
+            _listed_pr(updated_at="2026-04-01T10:00:00Z", head={"sha": new_sha, "ref": "feature"})
+        ]
+        client.get_pull_request = _detail_with_head(client, new_sha)  # type: ignore[method-assign]
+
+        assert len(poll_project(client, config, operator_username="holdenk")) == 1
+        pr.refresh_from_db()
+        assert pr.head_sha == new_sha
+        assert pr.agent_runs["llm"].get("stale") is not True
 
     def test_label_and_title_changes_trigger_refresh(self, tmp_path: Path) -> None:
         client = _CountingMockClient(tmp_path, [_listed_pr()])

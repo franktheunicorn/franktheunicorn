@@ -37,11 +37,13 @@ _warned_disabled_projects: set[tuple[str, str]] = set()
 # so a routing-relevant edit is never skipped as "unchanged".
 _LISTING_FIELDS = (
     "title",
+    "body",
     "state",
     "is_draft",
     "labels",
     "requested_reviewers",
     "assignees",
+    "head_sha",
 )
 
 # Ceiling on how long the operator's own PRs may go without a full refresh,
@@ -317,6 +319,16 @@ def _refresh_pull_request(
 
     # Persist SHAs on the PR so downstream consumers (differential test
     # runner, blame, etc.) don't need to re-hit the GitHub API.
+    # A new head is a push. Re-review it when the PR has moved recently;
+    # an untouched PR from last year is not worth another agent run.
+    previous_head = pr_obj.head_sha
+    if (
+        head_sha
+        and previous_head
+        and head_sha != previous_head
+        and activity_is_recent(pr_obj.github_updated_at, project_config.review_activity_days)
+    ):
+        _mark_reviews_stale(pr_obj)
     if base_sha and pr_obj.base_sha != base_sha:
         pr_obj.base_sha = base_sha
     if head_sha and pr_obj.head_sha != head_sha:
@@ -468,6 +480,9 @@ def _refresh_pull_request(
             "head_branch",
             "base_branch",
             "last_polled_at",
+            "agent_runs",
+            "title",
+            "body",
         ]
     )
     return pr_obj
@@ -561,16 +576,61 @@ def _needs_refresh(
     return timezone.now() - last_polled >= timedelta(hours=window)
 
 
+def activity_is_recent(when: datetime | None, days: int) -> bool:
+    """True when *when* is inside the last *days* days.
+
+    ``days <= 0`` is no limit. A missing timestamp counts as recent: a push
+    we can see should not be dropped because the listing forgot a clock.
+    """
+    if days <= 0 or when is None:
+        return True
+    if timezone.is_naive(when):
+        when = timezone.make_aware(when, datetime.UTC)
+    return timezone.now() - when <= timedelta(days=days)
+
+
+def _listed_head_sha(pr_data: dict[str, Any]) -> str:
+    """Head SHA from a listing payload, or "" when the listing has no head."""
+    head = pr_data.get("head")
+    if isinstance(head, dict):
+        return str(head.get("sha") or "")
+    return ""
+
+
 def _listing_values(pr_data: dict[str, Any]) -> dict[str, Any]:
-    """Project a listing payload onto the stored fields it can be compared to."""
-    return {
+    """Project a listing payload onto the stored fields it can be compared to.
+
+    ``head_sha`` is included only when the listing actually carries one. An
+    empty comparison would treat every stored SHA as a change.
+    """
+    values: dict[str, Any] = {
         "title": pr_data.get("title", ""),
+        "body": pr_data.get("body") or "",
         "state": pr_data.get("state", "open"),
         "is_draft": pr_data.get("draft", False),
         "labels": [lbl.get("name", "") for lbl in pr_data.get("labels", [])],
         "requested_reviewers": [r.get("login", "") for r in pr_data.get("requested_reviewers", [])],
         "assignees": [a.get("login", "") for a in pr_data.get("assignees", [])],
     }
+    head_sha = _listed_head_sha(pr_data)
+    if head_sha:
+        values["head_sha"] = head_sha
+    return values
+
+
+def _mark_reviews_stale(pr_obj: PullRequest) -> None:
+    """The commits these reviews read are no longer the PR head."""
+    runs = dict(pr_obj.agent_runs or {})
+    updated: dict[str, object] = {}
+    changed = False
+    for source, info in runs.items():
+        if isinstance(info, dict) and not info.get("stale"):
+            updated[source] = {**info, "stale": True}
+            changed = True
+        else:
+            updated[source] = info
+    if changed:
+        pr_obj.agent_runs = updated
 
 
 def _close_missing_pull_requests(

@@ -170,7 +170,9 @@ class PullRequest(models.Model):
     last_polled_at = models.DateTimeField(null=True, blank=True)
 
     # Which reviewers have actually had a go at this PR: source key ->
-    # ``{"at": iso8601, "status": "ok"|"failed"|"no-checkout", "findings": int}``.
+    # ``{"at": iso8601, "status": "ok"|"failed"|"no-checkout", "findings": int,
+    # "head_sha": str}``. A push sets ``stale`` so the next poll reviews the
+    # new commits instead of treating the old run as current.
     #
     # Recorded rather than inferred, because inferring it from drafts cannot work:
     # a reviewer that ran and found nothing leaves exactly what a reviewer that

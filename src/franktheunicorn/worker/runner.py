@@ -895,6 +895,7 @@ def record_agent_run(pr: PullRequest, source: str, *, status: str, findings: int
             "at": timezone.now().isoformat(),
             "status": status,
             "findings": findings,
+            "head_sha": pr.head_sha or "",
         }
         PullRequestModel.objects.filter(pk=pr.pk).update(agent_runs=runs)
         pr.agent_runs = runs
@@ -902,18 +903,51 @@ def record_agent_run(pr: PullRequest, source: str, *, status: str, findings: int
         logger.debug("Could not record the %s run for PR #%d", source, pr.number, exc_info=True)
 
 
-def missing_review_sources(pr: PullRequest, operator_config: OperatorConfig | None) -> set[str]:
-    """Reviewers that have never had a turn on *pr*.
+def _run_matches_head(info: object, head_sha: str, *, re_review: bool) -> bool:
+    """Whether this recorded run still covers the PR's current head.
+
+    A run with no ``head_sha`` and no ``stale`` flag predates push tracking.
+    It counts as current so deploying this does not re-review every open PR.
+    A push sets ``stale`` or leaves a recorded sha behind the new head; that
+    run counts only when *re_review* is false (the PR has been quiet longer
+    than ``review_activity_days``).
+    """
+    if not isinstance(info, dict):
+        return False
+    stale = bool(info.get("stale"))
+    recorded = str(info.get("head_sha") or "")
+    moved = stale or (bool(recorded) and bool(head_sha) and recorded != head_sha)
+    return not (moved and re_review)
+
+
+def missing_review_sources(
+    pr: PullRequest,
+    operator_config: OperatorConfig | None,
+    *,
+    review_activity_days: int = 30,
+) -> set[str]:
+    """Reviewers that still need a turn on *pr*'s current head.
 
     A PR carrying drafts but no ``agent_runs`` at all predates this bookkeeping,
     and is treated as fully reviewed. That exemption is deliberate and it is about
     money: without it, deploying this would re-review every open PR in the
     database once, at LLM cost, to discover something the operator already knows.
+
+    A push invalidates a run that recorded a different ``head_sha``. That
+    re-review only happens when the PR moved within ``review_activity_days``.
     """
+    from franktheunicorn.backends.poller import activity_is_recent
+
     runs = pr.agent_runs or {}
     if not runs and pr.review_drafts.exists():
         return set()
-    return expected_review_sources(operator_config) - set(runs)
+    re_review = activity_is_recent(pr.github_updated_at, review_activity_days)
+    satisfied = {
+        name
+        for name, info in runs.items()
+        if _run_matches_head(info, pr.head_sha or "", re_review=re_review)
+    }
+    return expected_review_sources(operator_config) - satisfied
 
 
 def review_skip_reason(
@@ -933,7 +967,11 @@ def review_skip_reason(
     """
     if force:
         return None
-    missing = missing_review_sources(pr, operator_config)
+    missing = missing_review_sources(
+        pr,
+        operator_config,
+        review_activity_days=getattr(pc, "review_activity_days", 30),
+    )
     if not missing and pr.review_drafts.exists():
         return ReviewSkip(
             "already-reviewed",
@@ -1157,7 +1195,11 @@ def process_pr(
         #
         # force bypasses it: "Force Run Agents" means redo the lot.
         drafts: list[Any] = []
-        if force or LLM_REVIEW_SOURCE in missing_review_sources(pr, operator_config):
+        if force or LLM_REVIEW_SOURCE in missing_review_sources(
+            pr,
+            operator_config,
+            review_activity_days=getattr(pc, "review_activity_days", 30),
+        ):
             _log("Running LLM review pipeline...")
             drafts = draft_review(
                 pr,

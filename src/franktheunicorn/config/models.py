@@ -2177,8 +2177,9 @@ class ProjectConfig(BaseModel):
     # written before this field existed default to "mentioned_or_authored".
     auto_review_policy: str = "mentioned_or_authored"
     # Poll cost control. A PR whose upstream ``updated_at`` hasn't moved since
-    # the last poll — and whose listed title/labels/reviewers/assignees/draft
-    # state are unchanged — is skipped: no files/detail/comment fetches, no
+    # the last poll — and whose listed title, description, head SHA, labels,
+    # reviewers, assignees, and draft state are unchanged — is skipped: no
+    # files/detail/comment fetches, no
     # blame git fetches, no downstream review work. Every refreshed PR costs at
     # least three API calls (files, detail, comments), so apache/spark's ~450
     # open PRs came to well over a thousand calls per cycle against a 5000/hour
@@ -2188,7 +2189,14 @@ class ProjectConfig(BaseModel):
     # Some scoring signals age on their own (staleness, "waiting on author"),
     # so an untouched PR is still fully re-processed once this many hours have
     # passed. 0 disables the skip and re-processes everything every cycle.
+    # Title, body, and head SHA are part of that comparison: a renamed PR or
+    # a new description is written through on the next poll, and a new head
+    # SHA is a push.
     poll_refresh_hours: int = 24
+    # Re-run reviews after a push only when the PR itself moved within this
+    # many days. A year-old open PR that we merely learned a head SHA for is
+    # not another agent run. 0 means every push, however old the PR is.
+    review_activity_days: int = 30
     # When True (default), WIP/draft PRs are routed to the "wip" queue and
     # skipped by the review pipeline until they graduate (draft flag cleared,
     # title prefix removed). At that point the normal poll cycle re-routes and
@@ -2286,6 +2294,14 @@ class ProjectConfig(BaseModel):
     def poll_refresh_hours_valid(cls, v: int) -> int:
         if v < 0:
             msg = "poll_refresh_hours must be >= 0 (0 re-processes every PR every cycle)"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("review_activity_days")
+    @classmethod
+    def review_activity_days_valid(cls, v: int) -> int:
+        if v < 0:
+            msg = "review_activity_days must be >= 0 (0 re-reviews every push)"
             raise ValueError(msg)
         return v
 
