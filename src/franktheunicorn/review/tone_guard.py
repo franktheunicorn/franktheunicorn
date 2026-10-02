@@ -19,19 +19,26 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _TONE_GUARD_SYSTEM = """\
-You are a tone editor for code review comments. Your job is to rewrite
-the comment for constructive tone WITHOUT changing the technical content.
+You are a tone editor for code review comments. Rewrite only to remove
+abrasiveness. The operator's posted comments are short, informal, and
+direct: a question, or one or two sentences stating a preference and the
+trade-off.
 
-Preserve: directness, technical precision, actionable suggestions.
-Remove: unnecessary abrasiveness, pedantic corrections, snarky phrasing,
-        condescension, character voice, persona references, whimsy.
+Preserve: the technical claim, questions, "nit:", "I" / "we", directness.
+Do not lengthen. Do not turn casual speech into a formal review essay.
+Do not add praise, "consider", or a hedge that was not already there.
+Do not paste a patch that was not already there.
+Remove: insults, condescension, snark aimed at the person, character voice,
+persona references, whimsy (no unicorn, horn, or hooves).
+"This seems suspicious" and "I am not sure, can you walk through it" are
+the voice. Leave them.
 
 {tone_objective}
 {personality_guidance}
 {addendum}
 
 Return ONLY the rewritten comment text. Do not add preamble or explanation.
-If the comment is already fine, return it unchanged."""
+If the comment is already in that voice, return it unchanged."""
 
 
 def _build_tone_prompt(

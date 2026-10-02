@@ -26,7 +26,7 @@ from franktheunicorn.data_access.package_registry import resolve_call_docs
 from franktheunicorn.data_access.package_registry._helpers import format_docs_block
 from franktheunicorn.review.call_extraction import extract_calls
 from franktheunicorn.review.checks import BaseCheck
-from franktheunicorn.review.prompt import build_user_message, finding_schema_json
+from franktheunicorn.review.prompt import COMMENT_VOICE, build_user_message, finding_schema_json
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -71,10 +71,17 @@ Set severity to one of: critical, important, nit, informational.
 behaviour is not equivalent.
 - "important" for documented complexity issues likely to bite at scale, \
 or wrong concurrency semantics.
-- "nit" for minor style hints from the docs (e.g. preferred kwarg names).
+- "nit" only for a real misuse that is minor, such as an ignored return the
+  docs say matters, on a cold path. Do not flag preferred kwarg names,
+  naming, or other doc style hints.
 
 Prefix every finding's title with "api-misuse:". Cite the doc URL in the \
-body when one is supplied. If you have no findings, return: {{"findings": []}}
+body when one is supplied. The body is a short maintainer comment, not a \
+doc summary.
+
+{comment_voice}
+
+If you have no findings, return: {{"findings": []}}
 """
 
 
@@ -118,7 +125,10 @@ class APIMisuseCheck(BaseCheck):
             else []
         )
 
-        system_prompt = _SYSTEM_PROMPT.format(schema=finding_schema_json())
+        system_prompt = _SYSTEM_PROMPT.format(
+            schema=finding_schema_json(),
+            comment_voice=COMMENT_VOICE,
+        )
         user_message = build_user_message(diff, pr_context)
         if docs:
             user_message = user_message + _DOCS_BLOCK_HEADER + format_docs_block(docs)

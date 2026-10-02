@@ -39,6 +39,10 @@ class PRContext:
     # Per-project watch list (see ProjectConfig.review_areas_of_interest) —
     # short descriptors of areas to flag for extra consideration when touched.
     review_areas_of_interest: list[str] = field(default_factory=list)
+    # Project trust boundaries (ProjectConfig.security_model, resolved).
+    # Security sub-checks read it; a general review does not need it in the
+    # prompt because review_guidance already carries the project voice.
+    security_model: str = ""
     anti_patterns: list[str] = field(default_factory=list)
     personality_identity: str = ""
     personality_internal_voice: str = ""

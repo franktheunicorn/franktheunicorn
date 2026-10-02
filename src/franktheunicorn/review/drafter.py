@@ -132,6 +132,17 @@ def fetch_linked_issues_context(pr: PullRequest) -> str:
         return ""
 
 
+def _security_model_for(project_config: ProjectConfig) -> str:
+    """Trust-boundary text for security sub-checks. Empty if it cannot be resolved."""
+    try:
+        from franktheunicorn.security.triage import resolve_security_model
+
+        return resolve_security_model(project_config)
+    except Exception:
+        logger.debug("Could not resolve security model for prompt context.", exc_info=True)
+        return ""
+
+
 def build_pr_context(
     pr: PullRequest,
     project_config: ProjectConfig,
@@ -183,6 +194,7 @@ def build_pr_context(
         governance=project_config.governance,
         review_guidance=project_config.review_guidance,
         review_areas_of_interest=project_config.review_areas_of_interest,
+        security_model=_security_model_for(project_config),
         anti_patterns=anti_patterns,
         personality_identity=personality.identity if personality else "",
         personality_internal_voice=personality.internal_voice if personality else "",

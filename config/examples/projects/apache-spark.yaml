@@ -3,7 +3,7 @@
 
 owner: "apache"
 repo: "spark"
-review_context: "ASF governance — formal review required for all changes"
+review_context: "ASF project — release branches, public API, vendor-neutral"
 governance: "asf"
 
 # Paths you care about most as a committer
@@ -17,8 +17,8 @@ ignore_paths:
   - "docs/"
   - "resource-managers/"
 
-tone: "constructive and thorough"
-test_expectations: "tests required for all new features and bug fixes"
+tone: "direct"
+test_expectations: "Ask for a test when a behavior change has no coverage, or the existing tests do not actually reach the new path."
 
 # Per-project review voice, prepended to every agent_cli review prompt as
 # authoritative guidance. This is where the project's release-process and
@@ -37,11 +37,11 @@ review_guidance: |
   the `ConfigBindingPolicy` import — never suggest adding it on a pre-4.2
   branch. A new config's `.version(...)` names the target branch's next
   release (4.3.0, not 4.2.0), not master's. Name the specific upcoming release
-  and where it is in its RC cycle when it matters — "lets target 4.4, the 4.3
-  RC is about to cut so only bug fixes land there now" is the call, not a
-  generic "check the branch". Raise it as a question ("is this meant for
-  master only, or does it need a backport?") — the author usually knows the
-  plan.
+  and where it is in its RC cycle when it matters. When you know the release
+  state, say the target plainly ("Let's target 4.4, the 4.3 RC is about to
+  cut so only bug fixes land there now") — that is the comment, not a generic
+  "check the branch". When you do not know the plan, ask ("is this meant for
+  master only, or does it need a backport?"); the author usually knows.
 
   Don't pre-document backports that haven't been decided. "Introduced in 4.3.0;
   also available in 3.5.10, 4.0.5, ..." in a config doc commits to backports
@@ -77,13 +77,29 @@ review_guidance: |
   serialization and snapshot paths actually carry it; a `copy()` that drops
   the new field silently reports empty.
 
-  When you do raise testing, raise it because a behavior change is unverified,
-  and check the test actually exercises the new path — a test that short-
-  circuits before the new branch (`href != null` before the URI parse), or
-  asserts with an input that would pass anyway (`"badlink"` has no scheme so
-  `isSafeHref` accepts it regardless), or passes vacuously (`lastScanSchema == null`
-  substitutes an empty schema so the negative assertion is trivially true),
-  doesn't cover the change. New public config keys belong in SQLConf.scala
+  A cast, overflow, or null-input change has an ANSI answer and a legacy one.
+  Say which. A null input should not NPE when the guard claims it fails
+  closed. An interpreted path and a codegen path, or two copies of a type
+  matrix, move together — timestamp and interval work names the session
+  timezone, NTZ versus LTZ, and the precision boundary. A config whose
+  default is another config should say where the effective value comes from.
+  An `.internal()` config does not go in the user tuning table. A knob the
+  doc says applies to every caller, when only one caller reads it, is the
+  bug. Indexing a List inside a loop, or a max that silently ignores the
+  configured memory cap, is worth a comment even when the small case looks
+  fine. A classic-versus-Connect split is half a fix when the path is
+  shared. A new public type next to an `@Evolving` parent carries the same
+  annotation. Pushdown flags have to actually disable the pushdown. Cleanup
+  registered for the happy path — an Arrow stream, a task listener, a worker
+  session — has to run when a sibling stage fails too.
+
+  If a behavior change has no test, or the existing tests miss the new path,
+  ask for one. That is a good comment. A test that short-circuits before the
+  new branch (`href != null` before the URI parse), asserts with an input
+  that would pass anyway (`"badlink"` has no scheme so `isSafeHref` accepts
+  it regardless), or passes vacuously (`lastScanSchema == null` substitutes
+  an empty schema so the negative assertion is trivially true) does not
+  cover the change. New public config keys belong in SQLConf.scala
   with `.withBindingPolicy` on 4.2+ and `.doc(...)`. String-typed configs need
   string validation, not a stored bool, and the Scala `checkValue` guard doesn't
   fire for Python-side `session.conf.get` reads — so validate in Python too, or
@@ -98,7 +114,9 @@ review_guidance: |
   file the JIRA yourself when you can. When a PR sprawls across surfaces,
   suggest splitting it into separate PRs under an umbrella SPARK JIRA, and ping
   the maintainers who own each surface for a quick look. Don't paste code
-  blocks; describe the direction in prose. Don't ask for tests by default.
+  blocks; describe the direction in prose. Ask for a test when nothing
+  covers the change. Don't ask for one that only re-proves a path an
+  existing test already hits.
 
   Spark has a structured error framework: a new error path should register an
   error condition in `error-conditions.json` and throw via `SparkThrowable`,

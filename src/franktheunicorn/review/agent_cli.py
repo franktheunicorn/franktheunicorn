@@ -32,6 +32,7 @@ from franktheunicorn.review.antipattern import (
 )
 from franktheunicorn.review.coderabbit import parse_prompt_only_output
 from franktheunicorn.review.dedup import is_duplicate_finding
+from franktheunicorn.review.prompt import COMMENT_VOICE, REVIEWING_GUIDANCE
 from franktheunicorn.review.tool_executor import (
     DEFAULT_TIMEOUT_SECONDS,
     LocalExecutor,
@@ -57,38 +58,22 @@ _SEVERITY_CONFIDENCE: dict[str, float] = {
 # Shared prompt template. General-purpose agents (claude, codex, pi) all
 # receive this identical instruction; only argv assembly differs per agent.
 _PROMPT_TEMPLATE = """\
-You are a senior code reviewer. Review the diff below and identify substantive
-issues — bugs, race conditions, security holes, API misuse, missing error
-handling, or breakage of established invariants. Skip stylistic nits unless
-they materially affect readability.
+You are a senior code reviewer. Review the diff the way the maintainer reviews:
+design and semantics first, then dead code or odd structure this change added.
+Skip formatting, naming, and import order.
 
-How to review (match the operator's actual review style):
-- Focus on design, semantics, and correctness — NULL/NaN handling, config
-  vs. param, trust boundaries, ordering, API misuse. These are the comments
-  the operator actually leaves. Style, formatting, and naming are handled by
-  linters; do not surface them.
-- Do NOT default to "add a test." Only raise testing when a behavior change is
-  wholly unverified AND substantive. Never critique test mechanics.
-- Do NOT paste code blocks or ready-made patches. Describe the concern and a
-  concrete direction in prose; the operator writes the fix.
-- Frame as a contributor talking to a contributor: "Maybe…", "Have you
-  considered…?", "I'd lean toward… but open to push back." Propose
-  alternatives, name the trade-off, invite a response. Do not dictate.
-- Keep each finding to 1-3 sentences.
-- When a concern is valid but out of scope, suggest deferring it to a follow-up
-  ticket rather than blocking the PR on it.
-- Question the target branch and backport suitability when the project cuts
-  release branches (see project-specific guidance below if present).
-- Skip a finding you would reject. If you would not leave the comment, do not
-  emit it.
+{reviewing_guidance}
 {review_guidance_section}{review_areas_section}For EACH issue, emit a block in EXACTLY this format, separated by lines of
 five or more equals signs:
 
 <file_path>:<line_number> - [<Severity>] <Short title>
 
-<2-4 sentence explanation of the issue>
+<the GitHub comment: 1-2 sentences in the voice above. This text is what
+gets posted. The direction goes here. Do not write a paragraph.>
 
-**Suggestion:** <concrete fix>
+Do not emit a **Suggestion:** line. That line is posted as a GitHub
+suggestion block and replaces the commented lines verbatim. Only add one
+when you have the exact replacement text for those lines, which is rare.
 
 =============
 
@@ -121,7 +106,10 @@ everything else — no style, naming, test-coverage, or architecture comments.
 
 You are running in a checkout of the repository. Read the surrounding code
 before reporting: whether input is actually attacker-reachable is usually
-decided outside the diff.
+decided outside the diff. If you cannot name the boundary, do not emit the
+finding. Behavior the security model declares trusted is not a finding.
+
+{comment_voice}
 
 {security_model_section}
 {review_guidance_section}{review_areas_section}For EACH security issue, emit a block in EXACTLY this format, separated by
@@ -129,10 +117,13 @@ lines of five or more equals signs:
 
 <file_path>:<line_number> - [<Severity>] security: <Short title>
 
-<2-4 sentence explanation of the issue, including why the input is
-attacker-reachable and which trust boundary it crosses>
+<the GitHub comment: 1-2 sentences in the voice above. Name what looks wrong
+and which trust boundary it crosses. If you are not sure it is reachable,
+ask the author to walk through it instead of writing an advisory. The
+direction goes here.>
 
-**Suggestion:** <concrete fix>
+Do not emit a **Suggestion:** line unless it is the exact replacement text
+for the commented lines. It is posted as a GitHub suggestion block.
 
 =============
 
@@ -216,12 +207,14 @@ def build_review_prompt(
             else _SECURITY_MODEL_UNKNOWN_SECTION
         )
         return _SECURITY_PROMPT_TEMPLATE.format(
+            comment_voice=COMMENT_VOICE,
             security_model_section=section,
             review_guidance_section=guidance_section,
             review_areas_section=areas_section,
             diff=diff,
         )
     return _PROMPT_TEMPLATE.format(
+        reviewing_guidance=REVIEWING_GUIDANCE,
         review_guidance_section=guidance_section,
         review_areas_section=areas_section,
         diff=diff,

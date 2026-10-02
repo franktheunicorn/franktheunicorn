@@ -35,38 +35,99 @@ def _finding_schema() -> str:
         "'important'/'nit'/'nit' respectively, but using the canonical values "
         "is preferred.)\n"
         'If you have no line-specific findings, return "findings": [].'
-        ' Always include "overall_vibe" with at least one sentence.'
+        ' Always include "overall_vibe" with at least one sentence.\n'
+        'Leave "suggestion" as "". That field is posted as a GitHub suggestion '
+        "block and replaces the commented lines verbatim. Put the direction in "
+        '"body" instead.'
     )
 
 
-#: Default reviewing guidance, shaped by diffing the operator's real review
-#: comments against frank's old findings. The operator reviews like a
-#: maintainer talking to a contributor, not a linter talking to a file:
-#: design and semantics first, conversational, short, and happy to defer.
-#: See docs/review-prompt-tuning.md for the corpus this was learned from.
-_REVIEWING_GUIDANCE = """\
-How to review (match the operator's actual review style):
+#: How the operator actually writes on a PR. Learned from Spark review
+#: comments: short, informal, a question or a stated preference, not an
+#: audit writeup. Shared with the agent-CLI prompt so the two paths cannot
+#: drift. Do not tell the model to copy typos from the corpus.
+COMMENT_VOICE = """\
+Comment voice (the finding body is the GitHub comment, postable as-is):
+- One or two sentences. A third only when the middle step is the point.
+  Do not pad, do not restate the diff, do not open with a compliment.
+- When the fact is settled, say it plainly ("Let's target 4.4, the 4.3 RC
+  is about to cut so only bug fixes land there"). When it is a judgment,
+  name the preference and the trade-off and invite pushback ("Maybe set
+  this from the config instead of a param? Testing gets a bit more awkward,
+  so I'm open to push back."). When you are not sure, say so and ask
+  ("I'm not 100% sure the ordering is right — would building the sort once
+  and applying it be simpler?").
+- Questions are a normal comment, not a weak one: "Why do we need this?",
+  "What's this for?", "Would it make sense to only start this when there's
+  a Python job, or is that complexity not worth it?"
+- "nit:" at the start for non-blocking structure. No other labels.
+- Do not paste a replacement patch. The direction goes in the same prose.
+  Quoting a line already in the diff, or a CI error, is fine when that
+  quote is the evidence.
+- Use "I" and "we". No character voice. Match the cadence, not any typos."""
+
+#: What gets commented on, plus the voice above. Design and semantics first;
+#: short nits on dead code and odd structure the PR added are in scope, and
+#: "please add a test" is the comment when nothing covers the change. The
+#: extra bullets are the overlap with other Spark committers' reviews that
+#: she would actually leave: code that is not earning its keep, a test that
+#: cannot fail, a leak on the failure path, and a doc that disagrees with
+#: the code. Style nits stayed out on purpose.
+REVIEWING_GUIDANCE = (
+    """\
+How to review (match the operator's actual review comments):
 - Focus on design, semantics, and correctness — NULL/NaN handling, config
-  vs. param, trust boundaries, ordering, API misuse. These are the comments
-  the operator actually leaves. Style, formatting, and naming are handled by
-  linters; do not surface them.
-- Do NOT default to "add a test." Test coverage is a separate check; only
-  raise testing when a behavior change is wholly unverified AND substantive.
-  Never critique test mechanics (assertion style, message text coupling).
-- Do NOT paste code blocks or ready-made patches. Describe the concern and a
-  concrete direction in prose; the operator writes the fix.
-- Frame as a contributor talking to a contributor: "Maybe…", "Have you
-  considered…?", "I'd lean toward… but open to push back." Propose
-  alternatives, name the trade-off, invite a response. Do not dictate.
-- Keep each finding to 1-3 sentences. The operator's comments are short.
-- When a concern is valid but out of scope for this PR, suggest deferring it to
-  a follow-up JIRA rather than blocking the PR on it.
-- Question the target branch and backport suitability when the project cuts
-  release branches (see project-specific guidance if present).
-- If a decision needs another committer's input, say so ("worth checking with
-  @maintainer") rather than deciding it yourself.
-- Skip a finding you would reject. If you would not leave the comment, do not
-  emit it."""
+  vs. param, a default that contradicts the comment next to it, trust
+  boundaries, ordering, API misuse, who releases a resource. These are the
+  comments the operator actually leaves.
+- Also flag dead or unused code this PR added, and structure that makes the
+  change harder to follow ("nit: this is weird as a function, I'd rather
+  inline the if"). Formatting, naming, and import order belong to the linter;
+  do not surface those.
+- Question code that is not earning its keep: an unreachable branch, an
+  unused default, a helper called from one place, a collection whose order
+  is never read, a Dataset or a collect built to answer something the plan
+  already knows. "Why do we need this?" is a complete comment.
+- Ask for a test when a behavior change has no coverage, or the existing
+  tests do not actually cover it: they return early, the input would pass
+  on the old code too, the assertion is vacuously true, or the suite would
+  stay green if the new behavior were reverted. That is a normal comment.
+  Do not ask when an existing test already exercises the path. Never
+  critique test mechanics.
+- Cleanup that runs only on the success path is a leak. The failure and
+  cancellation paths close the same thing.
+- If the comment, the doc, and the code disagree, that disagreement is the
+  finding. Say which one is wrong.
+- Do NOT paste a ready-made patch. Describe the concern and a direction in
+  prose; the operator writes the fix.
+- Out of scope but real: defer to a follow-up ticket, with a commitment to
+  do it soon, and offer to file it. Do not block the PR on it.
+- Question the target branch when the project cuts release branches. If you
+  know the release state, state the target; if you do not, ask. See
+  project-specific guidance when it is present.
+- If another maintainer owns the surface, say to check with them instead of
+  deciding it.
+- Skip a finding you would not leave.
+
+"""
+    + COMMENT_VOICE
+)
+
+
+def format_security_model_section(security_model: str) -> str:
+    """Render the project's trust-boundary text for a security review prompt.
+
+    Empty when the project has not documented one, so the prompt does not
+    grow a header that says nothing. Behavior the text calls trusted is not
+    a finding; the caller says so around this block.
+    """
+    text = (security_model or "").strip()
+    if not text:
+        return ""
+    return (
+        "Project security model / trust boundaries (authoritative — behavior "
+        "this declares trusted is NOT a finding):\n" + text + "\n"
+    )
 
 
 def build_system_prompt(ctx: PRContext) -> str:
@@ -75,11 +136,25 @@ def build_system_prompt(ctx: PRContext) -> str:
         parts = [
             ctx.personality_identity,
             "",
+            "Operator-facing summaries (overall_vibe, digest) use this voice:",
             ctx.personality_internal_voice,
-            "",
-            f"Review style: {ctx.review_style}.",
-            f"Tone: {ctx.tone}.",
         ]
+        if ctx.personality_external_voice:
+            parts.extend(
+                [
+                    "",
+                    "Finding bodies are GitHub review comments. Write those in this",
+                    "voice, not the one above:",
+                    ctx.personality_external_voice,
+                ]
+            )
+        parts.extend(
+            [
+                "",
+                f"Review style: {ctx.review_style}.",
+                f"Tone: {ctx.tone}.",
+            ]
+        )
     else:
         parts = [
             "You are a code reviewer acting on behalf of an open-source maintainer.",
@@ -109,7 +184,7 @@ def build_system_prompt(ctx: PRContext) -> str:
         parts.append(ctx.personality_review_philosophy)
 
     parts.append("")
-    parts.append(_REVIEWING_GUIDANCE)
+    parts.append(REVIEWING_GUIDANCE)
     if ctx.review_guidance and ctx.review_guidance.strip():
         parts.append("")
         parts.append("Project-specific review guidance (treat as authoritative):")
@@ -168,4 +243,11 @@ def build_user_message(diff: str, ctx: PRContext) -> str:
     return "\n".join(header_parts)
 
 
-__all__ = ["build_system_prompt", "build_user_message", "finding_schema_json"]
+__all__ = [
+    "COMMENT_VOICE",
+    "REVIEWING_GUIDANCE",
+    "build_system_prompt",
+    "build_user_message",
+    "finding_schema_json",
+    "format_security_model_section",
+]

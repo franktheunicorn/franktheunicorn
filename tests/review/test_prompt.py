@@ -59,10 +59,44 @@ class TestBuildSystemPrompt:
         prompt = build_system_prompt(ctx)
         assert "Project-specific review guidance" not in prompt
 
-    def test_default_guidance_discourages_defaulting_to_add_a_test(self) -> None:
+    def test_asks_for_a_test_when_nothing_covers_the_change(self) -> None:
         ctx = make_pr_context()
         prompt = build_system_prompt(ctx)
-        assert "add a test" in prompt.lower()
+        assert "Ask for a test when a behavior change has no coverage" in prompt
+        assert "Do not ask when an existing test already exercises the path" in prompt
+
+    def test_guidance_matches_operator_comment_voice(self) -> None:
+        """Short questions and stated preferences, not a formal review essay."""
+        ctx = make_pr_context()
+        prompt = build_system_prompt(ctx)
+        assert "open to push back" in prompt
+        assert "nit:" in prompt
+        assert "Do not paste a replacement patch" in prompt
+        assert "Have you considered" not in prompt
+
+    def test_guidance_keeps_committer_overlap_she_would_leave(self) -> None:
+        """Patterns other Spark committers hit that she would actually leave.
+
+        Style policing stays out. Asking for a test is in, when nothing covers
+        the change.
+        """
+        prompt = build_system_prompt(make_pr_context())
+        assert "not earning its keep" in prompt
+        assert "stay green if the new behavior were reverted" in prompt
+        assert "only on the success path" in prompt
+        assert "that disagreement is the" in prompt
+        assert "scalafmt" not in prompt
+        assert "import order belong" in prompt
+
+    def test_external_voice_is_for_finding_bodies(self) -> None:
+        ctx = make_pr_context(
+            personality_identity="You are Frank.",
+            personality_internal_voice="Unicorn metaphors welcome.",
+            personality_external_voice="Short GitHub comments. No horn.",
+        )
+        prompt = build_system_prompt(ctx)
+        assert "Finding bodies are GitHub review comments" in prompt
+        assert prompt.index("Unicorn metaphors") < prompt.index("Short GitHub comments")
 
     def test_includes_areas_of_interest_when_set(self) -> None:
         ctx = make_pr_context(

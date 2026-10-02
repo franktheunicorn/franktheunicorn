@@ -5,7 +5,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from franktheunicorn.review.checks import BaseCheck
-from franktheunicorn.review.prompt import build_user_message, finding_schema_json
+from franktheunicorn.review.prompt import (
+    COMMENT_VOICE,
+    build_user_message,
+    finding_schema_json,
+    format_security_model_section,
+)
 
 if TYPE_CHECKING:
     from franktheunicorn.review.backends.base import PRContext
@@ -28,9 +33,22 @@ Focus on:
 - Insecure dependency usage patterns
 - OWASP Top 10 categories generally
 
+A finding is only real if you can name the trust boundary and why the input \
+is attacker-reachable. Behavior the project security model (below, when \
+present) declares trusted is not a finding. If you cannot name the boundary, \
+return nothing for that hunk.
+
+Write the body as a short maintainer comment: what looks wrong, the boundary, \
+and a question if you are not sure it is reachable. No advisory, no patch, \
+no category essay.
+
+{comment_voice}
+
 Do NOT comment on code style, naming, test coverage, architecture, or anything \
 unrelated to security. If the changes introduce no security concerns, return an \
 empty findings array.
+
+{security_model_section}
 
 Return your review as a JSON object: {{"findings": [...]}}
 Each finding must match this schema:
@@ -50,6 +68,8 @@ class SecurityCheck(BaseCheck):
     def build_prompt(self, diff: str, pr_context: PRContext) -> tuple[str, str]:
         system_prompt = _SYSTEM_PROMPT.format(
             schema=finding_schema_json(),
+            security_model_section=format_security_model_section(pr_context.security_model),
+            comment_voice=COMMENT_VOICE,
         )
 
         user_message = build_user_message(diff, pr_context)

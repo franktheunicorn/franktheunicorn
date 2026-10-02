@@ -9,6 +9,13 @@ from tests.conftest import make_pr_context
 
 
 class TestCoverageCheckPrompt:
+    def test_only_flags_unverified_behavior(self) -> None:
+        ctx = make_pr_context()
+        system, _user = CoverageCheck().build_prompt("diff here", ctx)
+        assert "Asking for a test is the right comment" in system
+        assert "vacuously true" in system
+        assert "assertion style" in system
+
     def test_system_prompt_includes_schema(self) -> None:
         ctx = make_pr_context()
         check = CoverageCheck()

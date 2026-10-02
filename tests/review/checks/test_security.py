@@ -24,6 +24,19 @@ class TestSecurityCheckPrompt:
         assert "injection" in system.lower()
         assert "OWASP" in system
 
+    def test_security_model_is_included_when_set(self) -> None:
+        ctx = make_pr_context(security_model="Submitted jobs run arbitrary code by design.")
+        check = SecurityCheck()
+        system, _user = check.build_prompt("diff here", ctx)
+        assert "Submitted jobs run arbitrary code by design." in system
+        assert "NOT a finding" in system
+
+    def test_security_model_section_omitted_when_empty(self) -> None:
+        ctx = make_pr_context(security_model="")
+        check = SecurityCheck()
+        system, _user = check.build_prompt("diff here", ctx)
+        assert "Project security model" not in system
+
     def test_system_prompt_excludes_non_security_concerns(self) -> None:
         ctx = make_pr_context()
         check = SecurityCheck()

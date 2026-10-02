@@ -273,7 +273,12 @@ class TestSecurityFocus:
     def test_default_focus_is_general(self) -> None:
         cfg = AgentCLIReviewerConfig(name="pi")
         assert cfg.review_focus == "general"
-        assert build_review_prompt(cfg, "DIFF").startswith("You are a senior code reviewer")
+        prompt = build_review_prompt(cfg, "DIFF")
+        assert prompt.startswith("You are a senior code reviewer")
+        # Same voice block as the LLM prompt, so the two paths cannot drift.
+        assert "open to push back" in prompt
+        assert "1-2 sentences" in prompt
+        assert "2-4 sentence" not in prompt
 
     def test_an_unknown_focus_is_rejected(self) -> None:
         from pydantic import ValidationError
@@ -285,6 +290,8 @@ class TestSecurityFocus:
         prompt = self._run_and_capture_prompt(self._security_config())
         assert "senior security reviewer" in prompt
         assert "You are a senior code reviewer" not in prompt
+        assert "open to push back" in prompt
+        assert "not a finding" in prompt
 
     def test_the_security_model_is_prepended_to_the_diff(self) -> None:
         prompt = self._run_and_capture_prompt(
@@ -621,3 +628,89 @@ class TestLegacyClaudeCLIPromotion:
         oc = OperatorConfig()
         claude = next(r for r in oc.agent_cli_reviewers if r.name == "claude")
         assert claude.enabled == "auto"
+
+
+class TestTwoModelsOneCommand:
+    """``name`` is the reviewer; ``command`` is the binary. Two models on one
+    binary are two entries, and the one that is not a seed still inherits
+    ``--trust`` / ``--mode ask`` from the seed that owns that binary."""
+
+    def test_command_alias_keeps_each_model(self) -> None:
+        oc = OperatorConfig(
+            agent_cli_reviewers=[
+                AgentCLIReviewerConfig(
+                    name="cursor-agent",
+                    command="cursor",
+                    enabled=True,
+                    model="glm-5.2",
+                    extra_args=["--mode", "ask"],
+                ),
+                AgentCLIReviewerConfig(
+                    name="cursor-agent-k3-max",
+                    command="cursor-agent",
+                    enabled=True,
+                    model="kimi-k3-max",
+                    extra_args=["--mode", "ask"],
+                ),
+            ]
+        )
+        names = [r.name for r in oc.agent_cli_reviewers]
+        assert names.count("cursor-agent") == 1
+        by_name = {r.name: r for r in oc.agent_cli_reviewers}
+        glm = by_name["cursor-agent"]
+        k3 = by_name["cursor-agent-k3-max"]
+        assert glm.cli_argv == ["cursor"]
+        assert k3.cli_argv == ["cursor-agent"]
+        assert glm.model == "glm-5.2"
+        assert k3.model == "kimi-k3-max"
+        assert glm.trust_args == ["--trust"]
+        assert k3.trust_args == ["--trust"]
+
+        glm_argv = [*glm.cli_argv, *glm.build_invocation("P")]
+        k3_argv = [*k3.cli_argv, *k3.build_invocation("P")]
+        assert glm_argv[glm_argv.index("--model") + 1] == "glm-5.2"
+        assert k3_argv[k3_argv.index("--model") + 1] == "kimi-k3-max"
+        assert glm_argv[0] != k3_argv[0]
+
+    def test_same_binary_two_names_both_resolve(self) -> None:
+        remote = RemoteExecutionConfig(
+            mode="ssh",
+            ssh_command=["sf", "workspace", "ssh", "--no-et"],
+            remote_workspace_dir="~/.frank-remote",
+        )
+        oc = OperatorConfig(
+            agent_cli_reviewers=[
+                AgentCLIReviewerConfig(
+                    name="cursor-glm",
+                    command="cursor-agent",
+                    enabled=True,
+                    model="glm-5.2",
+                    remote=remote,
+                ),
+                AgentCLIReviewerConfig(
+                    name="cursor-k3",
+                    command="cursor-agent",
+                    enabled=True,
+                    model="kimi-k3-max",
+                    remote=remote,
+                ),
+            ]
+        )
+        resolved = {r.name: r for r in resolve_agent_cli_reviewers(oc)}
+        assert resolved["cursor-glm"].model == "glm-5.2"
+        assert resolved["cursor-k3"].model == "kimi-k3-max"
+        assert resolved["cursor-glm"].cli_argv == ["cursor-agent"]
+        assert resolved["cursor-k3"].cli_argv == ["cursor-agent"]
+        assert resolved["cursor-glm"].trust_args == ["--trust"]
+        assert resolved["cursor-glm"].extra_args == ["--mode", "ask"]
+        assert resolved["cursor-k3"].extra_args == ["--mode", "ask"]
+
+    def test_explicit_empty_extra_args_are_not_replaced(self) -> None:
+        oc = OperatorConfig(
+            agent_cli_reviewers=[
+                AgentCLIReviewerConfig(name="cursor-bare", command="cursor-agent", extra_args=[])
+            ]
+        )
+        bare = next(r for r in oc.agent_cli_reviewers if r.name == "cursor-bare")
+        assert bare.extra_args == []
+        assert bare.trust_args == ["--trust"]

@@ -44,6 +44,21 @@ class TestBuildPRContext:
         assert ctx.review_style == "direct but kind"
         assert ctx.tone == "constructive"
         assert ctx.test_expectations == "tests required"
+        assert ctx.security_model == ""
+
+    def test_inline_security_model_reaches_context(
+        self,
+        db_pr,
+        operator_config,
+    ) -> None:
+        cfg = ProjectConfig(
+            owner="apache",
+            repo="spark",
+            review_context="ASF governance",
+            security_model="Submitted jobs run arbitrary code by design.",
+        )
+        ctx = build_pr_context(db_pr, cfg, operator_config)
+        assert ctx.security_model == "Submitted jobs run arbitrary code by design."
 
     def test_loads_anti_patterns(
         self,

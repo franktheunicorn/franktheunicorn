@@ -153,3 +153,8 @@ class TestToneGuardPersonality:
         ctx = make_pr_context(personality_external_voice="")
         prompt = _build_tone_prompt(ctx)
         assert "External voice guidance" not in prompt
+
+    def test_does_not_formalize_the_operators_voice(self) -> None:
+        prompt = _build_tone_prompt(make_pr_context())
+        assert "Do not lengthen" in prompt
+        assert "This seems suspicious" in prompt

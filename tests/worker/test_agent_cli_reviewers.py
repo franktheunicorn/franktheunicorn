@@ -737,3 +737,90 @@ class TestReviewerOutcomeLines:
         assert mock_conflict.called
         db_pr.refresh_from_db()
         assert db_pr.agent_runs["claude"]["status"] == "merge-conflict"
+
+    def test_a_general_reviewer_gets_project_guidance(self, db_pr: PullRequest) -> None:
+        """The security branch used to be the only one that saw review_guidance."""
+        from franktheunicorn.worker.runner import _REMOTE
+
+        seen: dict[str, Any] = {}
+
+        def _capture(*_args: Any, **kwargs: Any) -> list[Any]:
+            seen.update(kwargs)
+            return []
+
+        guidance = "Let's target 4.4, the 4.3 RC is about to cut."
+        with (
+            patch(
+                "franktheunicorn.worker.runner._resolve_cwd_for_tool",
+                return_value=("/remote/spark", "origin/master", _REMOTE),
+            ),
+            patch("franktheunicorn.review.agent_cli.run_agent_cli_review", side_effect=_capture),
+        ):
+            _run_agent_cli_for_pr(
+                db_pr,
+                _ssh_reviewer(),
+                repo_path=None,
+                clone_url="https://example.com/a/b.git",
+                project_config=ProjectConfig(
+                    owner="apache",
+                    repo="spark",
+                    review_guidance=guidance,
+                    review_areas_of_interest=["vector type — flag"],
+                ),
+            )
+
+        assert seen["review_guidance"] == guidance
+        assert seen["review_areas_of_interest"] == ["vector type — flag"]
+        assert "security_model" not in seen
+
+
+TWO_MODELS_YAML = """\
+github_username: holdenk
+github_token: "x"
+agent_cli_reviewers:
+  - name: "cursor-agent"
+    command: "cursor"
+    enabled: true
+    model: "glm-5.2"
+    model_flag: "--model"
+    prompt_mode: "flag"
+    prompt_arg: "-p"
+    extra_args: ["--mode", "ask"]
+    remote:
+      mode: ssh
+      ssh_command: ["sf", "workspace", "ssh", "--no-et"]
+      remote_workspace_dir: ~/.frank-remote
+  - name: "cursor-agent-k3-max"
+    command: "cursor-agent"
+    enabled: true
+    model: "kimi-k3-max"
+    model_flag: "--model"
+    prompt_mode: "flag"
+    prompt_arg: "-p"
+    extra_args: ["--mode", "ask"]
+    remote:
+      mode: ssh
+      ssh_command: ["sf", "workspace", "ssh", "--no-et"]
+      remote_workspace_dir: ~/.frank-remote
+"""
+
+
+class TestTwoModelsOnOneCommand:
+    def test_the_yaml_shape_keeps_both_models(self, tmp_path: Path) -> None:
+        oc = _load(tmp_path, TWO_MODELS_YAML)
+        by_name = {rc.name: rc for rc in oc.agent_cli_reviewers}
+
+        glm = by_name["cursor-agent"]
+        k3 = by_name["cursor-agent-k3-max"]
+        assert glm.cli_argv == ["cursor"]
+        assert glm.model == "glm-5.2"
+        assert glm.trust_args == ["--trust"]
+        assert glm.remote.ssh_command == ["sf", "workspace", "ssh", "--no-et"]
+        assert k3.cli_argv == ["cursor-agent"]
+        assert k3.model == "kimi-k3-max"
+        assert k3.trust_args == ["--trust"]
+        assert [rc.name for rc in oc.agent_cli_reviewers].count("cursor-agent") == 1
+
+        resolved = {rc.name: rc for rc in resolve_agent_cli_reviewers(oc)}
+        assert resolved["cursor-agent"].model == "glm-5.2"
+        assert resolved["cursor-agent-k3-max"].model == "kimi-k3-max"

@@ -7,7 +7,15 @@ import re
 import shlex
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    field_validator,
+    model_validator,
+)
 
 from franktheunicorn.config.schema import GITHUB_NAME_PATTERN, KNOWN_GOVERNANCE_VALUES
 
@@ -242,9 +250,16 @@ class AgentCLIReviewerConfig(BaseModel):
     Generalizes :class:`ClaudeCLIConfig`. Any headless coding agent that
     accepts a prompt on the command line and emits free-form text can act
     as a reviewer: we feed it the shared block-format prompt and parse the
-    output with the shared parser. The three seeded reviewers are
-    ``claude``, ``codex``, and ``pi``; they differ only in how a prompt is
-    turned into argv:
+    output with the shared parser. The seeded reviewers are ``claude``,
+    ``codex``, ``pi``, and ``cursor-agent``; they differ only in how a
+    prompt is turned into argv.
+
+    ``name`` is the identity and ``cli_path`` (YAML: ``command``) is the
+    binary. Two entries can exec the same binary at two models; findings
+    and ``agent_runs`` are keyed by name, so the second entry is a different
+    reviewer rather than a second copy of the first. An entry whose name is
+    not a seed still picks up that binary's unset fields (``trust_args``,
+    ``--mode ask``) from the seed that owns the binary.
 
     * ``prompt_mode="flag"`` (claude, pi) → ``<cli> [--model M] <extra> -p <prompt>``
     * ``prompt_mode="subcommand"`` (codex) → ``<cli> exec [--model M] <extra> <prompt>``
@@ -254,9 +269,19 @@ class AgentCLIReviewerConfig(BaseModel):
     (resolved at worker startup — see ``worker.runner``).
     """
 
+    model_config = ConfigDict(populate_by_name=True)
+
     name: str
     enabled: bool | Literal["auto"] = "auto"
-    cli_path: str = ""
+    #: Binary or shell-split command (``"uv run claude"``). Defaults to
+    #: ``name``. ``command`` is the same field under the name operator.yaml
+    #: actually uses; without the alias it was dropped and ``cli_path`` fell
+    #: back to ``name``, so a second model looked for a binary called
+    #: ``cursor-agent-k3-max``.
+    cli_path: str = Field(
+        default="",
+        validation_alias=AliasChoices("cli_path", "command"),
+    )
     model: str = ""
     model_flag: str = "--model"
     prompt_mode: Literal["flag", "subcommand"] = "flag"
@@ -421,6 +446,28 @@ def _default_agent_cli_reviewers() -> list[AgentCLIReviewerConfig]:
             extra_args=["--mode", "ask"],
         ),
     ]
+
+
+def _fill_unset_reviewer_fields(
+    supplied: AgentCLIReviewerConfig, seed: AgentCLIReviewerConfig
+) -> None:
+    """Copy seed fields the operator did not write.
+
+    ``model_fields_set`` is the line: an explicit ``model: ""`` or
+    ``extra_args: []`` stays. ``name`` and ``cli_path`` are the identity and
+    the binary, so a second model on the same command keeps both. Lists and
+    nested models are copied so two entries do not share a mutable
+    ``extra_args``.
+    """
+    for field_name in type(seed).model_fields:
+        if field_name in ("name", "cli_path") or field_name in supplied.model_fields_set:
+            continue
+        value = getattr(seed, field_name)
+        if isinstance(value, BaseModel):
+            value = value.model_copy(deep=True)
+        elif isinstance(value, list):
+            value = list(value)
+        setattr(supplied, field_name, value)
 
 
 class SnowflakeReviewConfig(BaseModel):
@@ -1800,8 +1847,9 @@ class OperatorConfig(BaseModel):
           into the registry as the ``claude`` entry, replacing the seed so
           the two never double-run (dedupe by name).
         """
+        seeds = _default_agent_cli_reviewers()
         by_name = {rc.name: rc for rc in self.agent_cli_reviewers}
-        for seed in _default_agent_cli_reviewers():
+        for seed in seeds:
             if seed.name not in by_name:
                 self.agent_cli_reviewers.append(seed)
                 by_name[seed.name] = seed
@@ -1816,11 +1864,23 @@ class OperatorConfig(BaseModel):
             # model_fields_set is what makes this safe: only fields the operator
             # didn't write are filled, so an explicit `model: ""` still means
             # "pass no flag".
-            supplied = by_name[seed.name]
-            for field_name in type(seed).model_fields:
-                if field_name == "name" or field_name in supplied.model_fields_set:
-                    continue
-                setattr(supplied, field_name, getattr(seed, field_name))
+            _fill_unset_reviewer_fields(by_name[seed.name], seed)
+
+        # A second model on a seeded binary is a different name, so the merge
+        # above never sees it. Fill from the seed that owns that binary —
+        # otherwise ``cursor-agent-k3-max`` with ``command: cursor-agent`` runs
+        # without ``--trust`` and exits 1 on the first checkout. Match the
+        # original seeds, not the registry: an override that points the
+        # ``cursor-agent`` *name* at ``command: cursor`` must not become the
+        # template for every other entry that still execs ``cursor-agent``.
+        seed_names = {seed.name for seed in seeds}
+        seeds_by_binary = {seed.cli_argv[0]: seed for seed in seeds}
+        for entry in self.agent_cli_reviewers:
+            if entry.name in seed_names:
+                continue
+            binary_seed = seeds_by_binary.get(entry.cli_argv[0])
+            if binary_seed is not None:
+                _fill_unset_reviewer_fields(entry, binary_seed)
 
         # Promote iff the operator actually provided a ``claude_cli:`` block.
         # ``model_fields_set`` distinguishes "explicitly configured" (even

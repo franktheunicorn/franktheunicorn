@@ -175,7 +175,13 @@ Tools already defined in the namespace:
   ripgrep(pattern), list_context()  -> USE THESE to navigate; never try to read
                                        the whole PR at once.
 - emit_finding(file_path, body, line=, severity=, confidence=, suggestion=)
-                                -> record each issue you find.
+                                -> record each issue you find. The body is a
+                                   GitHub comment: one or two sentences, a
+                                   question or a stated preference, no patch,
+                                   no formatting nit. Leave suggestion empty
+                                   unless it is the exact replacement text for
+                                   those lines. Skip a finding you would
+                                   not leave.
 
 Strategy: decompose. Use the search tools to locate risk, split large files by
 calling llm() recursively on each chunk, then emit_finding() for every concrete

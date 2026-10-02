@@ -294,6 +294,29 @@ digest_enabled: false
 #                                    # grant than "this is the directory I meant"
 #     extra_args: ["--mode", "ask"]  # read-only Q&A mode; the actual containment
 #
+# Two models, one binary. `name` is the identity (findings, agent_runs);
+# `command` is the binary (`cli_path` is the same field). A second entry
+# whose name is not a seed still inherits that binary's unset fields, so
+# you do not have to restate `--trust` / `--mode ask`. Naming one of them
+# `cursor-agent` replaces the seed instead of running it a third time.
+#   - name: "cursor-agent"
+#     command: "cursor"              # or cli_path; same field
+#     enabled: true
+#     model: "glm-5.2"
+#     model_flag: "--model"
+#     prompt_mode: "flag"
+#     prompt_arg: "-p"
+#     extra_args: ["--mode", "ask"]
+#     # remote: { mode: ssh, ssh_command: ["sf", "workspace", "ssh", "--no-et"], ... }
+#   - name: "cursor-agent-k3-max"
+#     command: "cursor-agent"
+#     enabled: true
+#     model: "kimi-k3-max"
+#     model_flag: "--model"
+#     prompt_mode: "flag"
+#     prompt_arg: "-p"
+#     extra_args: ["--mode", "ask"]
+#
 # A second, security-only pass over each PR diff. Same binary as the
 # cursor-agent seed, but `review_focus: security` swaps the general review
 # prompt for a security one and prepends the project's security model —
@@ -303,10 +326,10 @@ digest_enabled: false
 # real trust-boundary crossings instead of behavior the project documents as
 # trusted. A SEPARATE entry, not a flag on the main reviewer: findings are
 # attributed by entry name, so one entry doing both jobs would cost the
-# general pass. `cli_path` must be set explicitly — it defaults to `name`,
-# and there is no binary called "cursor-agent-security".
+# general pass. `command` / `cli_path` must be set explicitly — it defaults
+# to `name`, and there is no binary called "cursor-agent-security".
 #   - name: "cursor-agent-security"
-#     cli_path: "cursor-agent"
+#     command: "cursor-agent"
 #     review_focus: "security"       # general (default) | security
 #     prompt_mode: "flag"
 #     prompt_arg: "-p"

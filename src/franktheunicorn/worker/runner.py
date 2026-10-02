@@ -2478,7 +2478,15 @@ def _run_agent_cli_for_pr(
         run_agent_cli_review,
     )
 
-    run_review: Callable[..., list[Any]] = run_agent_cli_review
+    # Project voice on every focus. It used to ride only the security branch,
+    # so a general cursor-agent review of Spark never saw the release-branch
+    # guidance the prompt says is authoritative.
+    review_kwargs: dict[str, Any] = {
+        "review_guidance": project_config.review_guidance if project_config else "",
+        "review_areas_of_interest": (
+            list(project_config.review_areas_of_interest) if project_config else []
+        ),
+    }
     if reviewer.review_focus == "security":
         # Resolved here rather than in run_agent_cli_review because the
         # review-tool scaffold's run_review signature has no project config —
@@ -2500,14 +2508,8 @@ def _run_agent_cli_for_pr(
                 project_config.owner if project_config else "?",
                 project_config.repo if project_config else "?",
             )
-        run_review = partial(
-            run_agent_cli_review,
-            security_model=security_model,
-            review_guidance=(project_config.review_guidance if project_config else ""),
-            review_areas_of_interest=(
-                project_config.review_areas_of_interest if project_config else []
-            ),
-        )
+        review_kwargs["security_model"] = security_model
+    run_review = partial(run_agent_cli_review, **review_kwargs)
 
     create_drafts = partial(
         create_drafts_from_agent_cli,
