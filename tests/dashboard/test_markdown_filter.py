@@ -198,3 +198,60 @@ def test_an_info_string_still_opens_a_fence() -> None:
 
     assert "&lt;!-- keep --&gt;" in result
     assert "drop" not in result
+
+
+class TestInlineCodeSpansProtectTheirComments:
+    """`` `<!-- x -->` `` is visible code on GitHub, not a comment.
+
+    The fence tracker only watches whole lines; a comment inside an inline
+    code span was stripped out of the middle of a sentence, deleting text the
+    PR author meant to be read.
+    """
+
+    def test_a_comment_inside_a_code_span_is_kept(self) -> None:
+        result = render_markdown("Leave `<!-- fill me in -->` in place.\n")
+
+        assert "<code>&lt;!-- fill me in --&gt;</code>" in result
+
+    def test_a_longer_backtick_run_needs_an_exact_close(self) -> None:
+        body = "`` `<!-- kept -->` `` and `<!-- also kept -->`\n"
+
+        result = render_markdown(body)
+
+        assert "&lt;!-- kept --&gt;" in result
+        assert "&lt;!-- also kept --&gt;" in result
+
+    def test_a_comment_beside_a_code_span_is_still_stripped(self) -> None:
+        result = render_markdown("`code` <!-- drop --> visible\n")
+
+        assert "<code>code</code>" in result
+        assert "drop" not in result
+        assert "visible" in result
+
+    def test_a_comment_opening_first_swallows_backticks(self) -> None:
+        """Whichever construct opens first wins: this comment ends at `-->`."""
+        result = render_markdown("<!-- drop `with` backticks --> visible\n")
+
+        assert "drop" not in result
+        assert "visible" in result
+
+    def test_a_span_spanning_lines_protects_across_them(self) -> None:
+        body = "`start\n<!-- kept -->\nend` after\n"
+
+        result = render_markdown(body)
+
+        assert "&lt;!-- kept --&gt;" in result
+        assert "after" in result
+
+    def test_a_blank_line_ends_an_unclosed_span(self) -> None:
+        """An opener that never closes in its paragraph is a literal backtick."""
+        result = render_markdown("`unclosed\n\n<!-- drop --> visible\n")
+
+        assert "drop" not in result
+        assert "visible" in result
+
+    def test_an_unclosed_comment_is_not_a_comment(self) -> None:
+        """No `-->` means literal text to the parser, so nothing is deleted."""
+        result = render_markdown("keep <!-- this text\n")
+
+        assert "&lt;!-- this text" in result

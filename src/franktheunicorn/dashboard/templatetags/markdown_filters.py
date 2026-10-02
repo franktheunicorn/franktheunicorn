@@ -23,8 +23,6 @@ register = template.Library()
 # in the configuration it was in, so raw HTML is still escaped (``<script>``,
 # ``<img onerror=...>``: PR bodies are attacker-controlled) and the markdown
 # around it still renders.
-_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
-
 #: Candidate fence line: up to three leading spaces, three or more backticks
 #: or tildes, then the info string. Whether it actually opens or closes a block
 #: is decided by ``_opens_fence`` / ``_closes_fence`` — matching the marker
@@ -63,13 +61,54 @@ def _closes_fence(line: str, marker: str) -> bool:
     return found[0] == marker[0] and len(found) >= len(marker) and not rest.strip()
 
 
-def strip_html_comments(text: str) -> str:
-    """Remove ``<!-- ... -->`` outside fenced code blocks.
+def _strip_outside_code_spans(text: str) -> str:
+    """Remove HTML comments from text that holds no fenced code block.
 
-    A comment inside a fence is content — a PR body explaining the template's
-    own markers, say — and GitHub shows it, so the fence is copied through
-    untouched. (A four-space-indented code block is not tracked; a comment
-    there is stripped. PR bodies use fences.)
+    An inline code span protects its contents the way a fence does:
+    `` `<!-- x -->` `` is visible code on GitHub, not a comment. A span opens
+    on a backtick run and closes on a run of exactly the same length, and
+    cannot cross a blank line. Whichever construct opens first wins, so a
+    comment that opens first swallows backticks whole and a span that opens
+    first swallows comment markers. An opener that never closes is literal
+    text to the parser; treating the rest of the paragraph as protected
+    anyway errs toward showing text, never deleting it.
+    """
+    out: list[str] = []
+    i = 0
+    span = 0  # Backtick-run length holding a code span open; 0 = outside one.
+    while i < len(text):
+        if text[i] == "`":
+            j = i
+            while j < len(text) and text[j] == "`":
+                j += 1
+            if span and j - i == span:
+                span = 0
+            elif not span:
+                span = j - i
+            out.append(text[i:j])
+            i = j
+            continue
+        if not span and text.startswith("<!--", i):
+            end = text.find("-->", i + 4)
+            if end == -1:
+                break  # Never closes, so never a comment: keep the rest.
+            i = end + 3
+            continue
+        out.append(text[i])
+        i += 1
+        if span and text[i - 1 : i + 1] == "\n\n":
+            span = 0  # A paragraph boundary ends any span.
+    out.append(text[i:])
+    return "".join(out)
+
+
+def strip_html_comments(text: str) -> str:
+    """Remove ``<!-- ... -->`` outside code.
+
+    A comment inside a fence or an inline code span is content — a PR body
+    explaining the template's own markers, say — and GitHub shows it, so code
+    is copied through untouched. (A four-space-indented code block is not
+    tracked; a comment there is stripped. PR bodies use fences.)
     """
     if "<!--" not in text:
         return text
@@ -80,7 +119,7 @@ def strip_html_comments(text: str) -> str:
         if fence is None:
             marker = _opens_fence(line)
             if marker is not None:
-                out.append(_HTML_COMMENT_RE.sub("", "".join(plain)))
+                out.append(_strip_outside_code_spans("".join(plain)))
                 plain = []
                 fence = marker
                 out.append(line)
@@ -90,7 +129,7 @@ def strip_html_comments(text: str) -> str:
             out.append(line)
             if _closes_fence(line, fence):
                 fence = None
-    out.append(_HTML_COMMENT_RE.sub("", "".join(plain)))
+    out.append(_strip_outside_code_spans("".join(plain)))
     return "".join(out)
 
 
