@@ -276,6 +276,33 @@ class TestResolveBaseRef:
         pr = self._pr(base_sha="", base_branch="branch-4.0")
         assert _resolve_base_ref(repo, pr) == "origin/branch-4.0"
 
+    def test_skips_when_known_base_branch_absent(self, tmp_path: Path) -> None:
+        """base_branch is set but origin/branch-4.0 isn't in the clone (stale
+        clone / fetch failed / branch deleted). Must NOT fall back to main —
+        that would diff a branch-4.0 PR against main."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "master"], cwd=repo, check=True)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "c",
+            ],
+            cwd=repo,
+            check=True,
+        )
+        # origin/main exists, so a fall-through would resolve — that's the bug.
+        subprocess.run(["git", "branch", "-f", "origin/main", "master"], cwd=repo, check=True)
+        pr = self._pr(base_sha="", base_branch="branch-4.0")
+        assert _resolve_base_ref(repo, pr) is None
+
     def test_falls_back_to_main_when_no_base_info(self, tmp_path: Path) -> None:
         repo = tmp_path / "repo"
         repo.mkdir()
@@ -331,14 +358,19 @@ class TestResolveRemoteBaseRef:
         pr = self._pr(base_sha="", base_branch="branch-4.0")
         assert _resolve_remote_base_ref(executor, "/srv/repo", pr) == "origin/branch-4.0"
 
-    def test_falls_back_to_main(self) -> None:
+    def test_skips_when_known_base_branch_absent(self) -> None:
+        # base_branch is set but origin/branch-4.0 isn't in the remote checkout.
+        # Falling back to main here would diff a branch-4.0 PR against main.
         executor = self._ssh_executor()
-        # First rev-parse (origin/branch-4.0) fails, second (origin/main) ok.
-        executor.run.side_effect = [
-            ExecResult(returncode=128, stdout="", stderr=""),
-            ExecResult(returncode=0, stdout="", stderr=""),
-        ]
+        executor.run.return_value = ExecResult(returncode=128, stdout="", stderr="")
         pr = self._pr(base_sha="", base_branch="branch-4.0")
+        assert _resolve_remote_base_ref(executor, "/srv/repo", pr) is None
+
+    def test_falls_back_to_main_only_when_no_base_info(self) -> None:
+        # No base_sha, no base_branch — the genuine pre-migration case.
+        executor = self._ssh_executor()
+        executor.run.return_value = ExecResult(returncode=0, stdout="", stderr="")
+        pr = self._pr(base_sha="", base_branch="")
         assert _resolve_remote_base_ref(executor, "/srv/repo", pr) == "origin/main"
 
 

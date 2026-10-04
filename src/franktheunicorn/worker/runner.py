@@ -2665,7 +2665,8 @@ def _resolve_remote_base_ref(
     Prefers ``pr.base_sha`` (the PR's exact base, fetched by the caller) and
     then ``origin/<pr.base_branch>`` before falling back to main/master —
     see ``_resolve_base_ref`` for why the fallback to main is wrong for any
-    PR whose base isn't main.
+    PR whose base isn't main. A PR with a known ``base_branch`` whose ref
+    isn't in the remote checkout does NOT fall through to main; we skip.
     """
     from franktheunicorn.review.tool_executor import RemoteSSHExecutor
 
@@ -2686,6 +2687,14 @@ def _resolve_remote_base_ref(
         )
         if result is not None and result.ok:
             return candidate
+        logger.warning(
+            "PR #%d base branch %s not present in %s after fetch; skipping the "
+            "remote review tool rather than diffing against the wrong base.",
+            pr.number,
+            base_branch,
+            remote_cwd,
+        )
+        return None
 
     for candidate in ("origin/main", "origin/master"):
         result = executor.run(
@@ -2719,9 +2728,13 @@ def _resolve_base_ref(repo_path: Path, pr: PullRequest) -> str | None:
     2. ``origin/<pr.base_branch>`` — the PR's actual base-branch tip, when
        base_sha is unknown but the branch is. Approximates the PR diff
        against the current tip rather than the exact base.
-    3. ``origin/main`` / ``origin/master`` — last resort, for PRs with no
-       base info recorded (pre-migration rows). Preserves the historical
-       behaviour, including its wrongness for non-main PRs.
+    3. ``origin/main`` / ``origin/master`` — last resort, ONLY for PRs with
+       no base info recorded (pre-migration rows). A PR with a known
+       ``base_branch`` whose ref isn't in the clone does NOT fall through
+       here — that would diff a branch-4.0 PR against main. The repo manager
+       already ran ``git fetch origin`` (all branches), so a missing
+       ``origin/<base_branch>`` after that means the branch is gone, and we
+       skip rather than guess.
 
     Returns ``None`` (and logs) when no base can be determined.
     """
@@ -2742,6 +2755,14 @@ def _resolve_base_ref(repo_path: Path, pr: PullRequest) -> str | None:
         )
         if result.returncode == 0:
             return candidate
+        logger.warning(
+            "PR #%d base branch %s not present in %s after fetch; skipping the "
+            "local review tool rather than diffing against the wrong base.",
+            pr.number,
+            base_branch,
+            repo_path,
+        )
+        return None
 
     for candidate in ("origin/main", "origin/master"):
         result = subprocess.run(
