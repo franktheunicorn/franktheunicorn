@@ -955,9 +955,13 @@ class TestSecurityReportTriage:
         mock_config.return_value = OperatorConfig(github_username="testuser")
         report = SecurityReportFactory()
 
-        response = client.post(f"/security/{report.pk}/triage/")
+        # No llm_backends AND no usable agent-cli reviewer → no triage backend.
+        # (The default OperatorConfig seeds agent_cli_reviewers, so patch the
+        # resolver to make "none installed" deterministic across machines.)
+        with patch("franktheunicorn.worker.runner.resolve_agent_cli_reviewers", return_value=[]):
+            response = client.post(f"/security/{report.pk}/triage/")
         assert response.status_code == 200
-        assert b"No LLM backend configured" in response.content
+        assert b"No triage backend configured" in response.content
 
     @patch("franktheunicorn.core.models.WorkerCommand.objects")
     @patch("franktheunicorn.config.loader.get_operator_config")
@@ -1490,10 +1494,11 @@ class TestSecurityGuidanceDistill:
 
         mock_config.return_value = OperatorConfig(github_username="testuser")
 
-        response = client.post("/security/guidance/distill/", follow=True)
+        with patch("franktheunicorn.worker.runner.resolve_agent_cli_reviewers", return_value=[]):
+            response = client.post("/security/guidance/distill/", follow=True)
 
         assert response.status_code == 200
-        assert "No LLM backend configured" in response.content.decode()
+        assert "No triage backend configured" in response.content.decode()
 
 
 @pytest.mark.django_db
@@ -2518,10 +2523,11 @@ class TestSecurityReportRerunTriageFailed:
 
         mock_config.return_value = OperatorConfig(github_username="testuser")
 
-        response = client.post("/security/rerun-triage-failed/", follow=True)
+        with patch("franktheunicorn.worker.runner.resolve_agent_cli_reviewers", return_value=[]):
+            response = client.post("/security/rerun-triage-failed/", follow=True)
 
         assert response.status_code == 200
-        assert "No LLM backend configured" in response.content.decode()
+        assert "No triage backend configured" in response.content.decode()
 
 
 @pytest.mark.django_db
@@ -2691,7 +2697,7 @@ class TestSecurityReportRerunDuplicates:
 
         assert response.status_code == 200
         content = response.content.decode()
-        assert "No LLM backend configured" in content
+        assert "No triage backend configured" in content
         b.refresh_from_db()
         assert b.duplicate_of_id is None
 

@@ -1594,11 +1594,17 @@ def security_report_rerun_triage(request: HttpRequest) -> HttpResponse:
         queue_triage,
         queue_version_follow_on,
     )
-    from franktheunicorn.security.triage import procedural_close_if_evidence
+    from franktheunicorn.security.triage import (
+        procedural_close_if_evidence,
+        triage_backend_configured,
+    )
 
     operator_config = get_operator_config()
-    if not operator_config.llm_backends:
-        messages.error(request, "No LLM backend configured. Add one to operator.yaml.")
+    if not triage_backend_configured(operator_config):
+        messages.error(
+            request,
+            "No triage backend configured. Add an llm_backends or agent_cli_reviewers entry.",
+        )
         return _back_to_security_list(request)
 
     # The working set: reports the machine may touch (new / triaging) plus
@@ -1729,11 +1735,17 @@ def security_report_rerun_triage_failed(request: HttpRequest) -> HttpResponse:
 
     from franktheunicorn.config.loader import get_operator_config
     from franktheunicorn.security.queue import PRIORITY_BULK, queue_triage
-    from franktheunicorn.security.triage import procedural_close_if_evidence
+    from franktheunicorn.security.triage import (
+        procedural_close_if_evidence,
+        triage_backend_configured,
+    )
 
     operator_config = get_operator_config()
-    if not operator_config.llm_backends:
-        messages.error(request, "No LLM backend configured. Add one to operator.yaml.")
+    if not triage_backend_configured(operator_config):
+        messages.error(
+            request,
+            "No triage backend configured. Add an llm_backends or agent_cli_reviewers entry.",
+        )
         return _back_to_security_list(request)
 
     latest_triage = WorkerCommand.objects.filter(
@@ -1846,7 +1858,10 @@ def security_report_rerun_duplicates(request: HttpRequest) -> HttpResponse:
     operator_config = get_operator_config()
     backend = resolve_triage_backend(operator_config)
     if backend is None:
-        messages.error(request, "No LLM backend configured. Add one to operator.yaml.")
+        messages.error(
+            request,
+            "No triage backend configured. Add an llm_backends or agent_cli_reviewers entry.",
+        )
         return _back_to_security_list(request)
 
     config = operator_config.security_triage.duplicates
@@ -2298,14 +2313,15 @@ def security_report_triage(request: HttpRequest, report_id: int) -> HttpResponse
 
     try:
         from franktheunicorn.config.loader import get_operator_config
+        from franktheunicorn.security.triage import triage_backend_configured
 
         operator_config = get_operator_config()
 
-        if not operator_config.llm_backends:
+        if not triage_backend_configured(operator_config):
             return _render_triage_area(
                 request,
                 report,
-                notice="No LLM backend configured. Add one to operator.yaml.",
+                notice="No triage backend configured. Add an llm_backends or agent_cli_reviewers entry.",
                 notice_level="failed",
             )
 
@@ -3892,10 +3908,14 @@ def security_guidance_distill(request: HttpRequest) -> HttpResponse:
     """
     from franktheunicorn.config.loader import get_operator_config
     from franktheunicorn.security.learning import RULED_STATUSES, distill_triage_guidance
+    from franktheunicorn.security.triage import triage_backend_configured
 
     operator_config = get_operator_config()
-    if not operator_config.llm_backends:
-        messages.error(request, "No LLM backend configured. Add one to operator.yaml.")
+    if not triage_backend_configured(operator_config):
+        messages.error(
+            request,
+            "No triage backend configured. Add an llm_backends or agent_cli_reviewers entry.",
+        )
         return _back_to_guidance(request)
 
     projects = list(

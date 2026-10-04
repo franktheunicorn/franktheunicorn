@@ -38,6 +38,17 @@ def _reset_health() -> None:
     _triage_backend_health.reset()
 
 
+@pytest.fixture(autouse=True)
+def _no_agent_cli_reviewers() -> Any:
+    """The default OperatorConfig seeds agent_cli_reviewers, and on a machine
+    with claude/cursor-agent installed those resolve as triage backends — which
+    would make the llm_backends-focused tests below nondeterministic. Patch the
+    resolver to [] by default; tests that exercise the agent-cli path override
+    the patch locally with their own ``with patch(...)``."""
+    with patch("franktheunicorn.worker.runner.resolve_agent_cli_reviewers", return_value=[]):
+        yield
+
+
 class TestBackendHealth:
     def test_a_backend_is_alive_until_marked_down(self) -> None:
         from franktheunicorn.security.triage import _backend_key, _triage_backend_health
@@ -122,6 +133,58 @@ class TestSeedTriageBackendHealth:
         total, disabled = seed_triage_backend_health(cfg)
         assert (total, disabled) == (1, 0)
         assert len(_get_triage_backends(cfg)) == 1
+
+    def test_agent_cli_reviewers_back_triage_when_no_api_backend(self) -> None:
+        """The reported bug: a deployment with agent_cli_reviewers but no
+        llm_backends used to log "Every triage backend failed its boot probe"
+        and sit idle. Now the resolved reviewers are triage backends too."""
+        from franktheunicorn.config.models import AgentCLIReviewerConfig
+        from franktheunicorn.security.triage import (
+            _get_triage_backends,
+            seed_triage_backend_health,
+        )
+
+        cfg = _operator_config(llm_backends=[])
+        reviewer = AgentCLIReviewerConfig(name="claude", cli_path="claude")
+        with patch(
+            "franktheunicorn.worker.runner.resolve_agent_cli_reviewers",
+            return_value=[reviewer],
+        ):
+            total, disabled = seed_triage_backend_health(cfg)
+            backends = _get_triage_backends(cfg)
+
+        # The agent-cli backend is unchecked (no probe) → OK, not disabled.
+        assert total == 1
+        assert disabled == 0
+        assert len(backends) == 1
+        assert backends[0]._config.provider == "agent-cli"
+        assert backends[0]._config.reviewer == "claude"
+
+    def test_agent_cli_falls_through_after_api_backends(self) -> None:
+        """An explicit llm_backends entry wins; agent-cli is the tail fallback."""
+        from franktheunicorn.config.models import AgentCLIReviewerConfig
+        from franktheunicorn.security.triage import _get_triage_backends
+
+        cfg = _operator_config(llm_backends=[LLMBackendConfig(provider="stub")])
+        reviewer = AgentCLIReviewerConfig(name="claude", cli_path="claude")
+        with patch(
+            "franktheunicorn.worker.runner.resolve_agent_cli_reviewers",
+            return_value=[reviewer],
+        ):
+            backends = _get_triage_backends(cfg)
+        assert [b._config.provider for b in backends] == ["stub", "agent-cli"]
+
+    def test_disabled_agent_cli_reviewer_is_not_a_triage_backend(self) -> None:
+        """resolve_agent_cli_reviewers already drops enabled=False and
+        auto-but-uninstalled; triage trusts that resolution."""
+        from franktheunicorn.security.triage import _get_triage_backends
+
+        cfg = _operator_config(llm_backends=[])
+        with patch(
+            "franktheunicorn.worker.runner.resolve_agent_cli_reviewers",
+            return_value=[],
+        ):
+            assert _get_triage_backends(cfg) == []
 
     def test_the_override_is_probed_too(self) -> None:
         from franktheunicorn.security.triage import seed_triage_backend_health

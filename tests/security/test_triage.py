@@ -19,6 +19,16 @@ from franktheunicorn.security.triage import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_agent_cli_reviewers() -> Any:
+    """The default OperatorConfig seeds agent_cli_reviewers, and on a machine
+    with claude/cursor-agent installed those resolve as triage backends — which
+    would make the llm_backends-focused tests below nondeterministic. Patch the
+    resolver to [] so only the llm_backends each test configures are seen."""
+    with patch("franktheunicorn.worker.runner.resolve_agent_cli_reviewers", return_value=[]):
+        yield
+
+
 class _MockLLMBackend(BaseLLMBackend):
     """Test backend that returns canned responses."""
 

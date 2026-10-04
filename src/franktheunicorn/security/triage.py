@@ -676,7 +676,8 @@ _triage_backend_health = _BackendHealth()
 def _triage_backend_configs(operator_config: OperatorConfig) -> list[LLMBackendConfig]:
     """The configs triage would consider, in order, before health filtering.
 
-    Override first if set, then ``llm_backends`` — the same shape
+    Override first if set, then ``llm_backends``, then resolved
+    ``agent_cli_reviewers`` as agent-cli backends — the same shape
     :func:`_get_triage_backends` builds backends from — minus dedup and minus
     health, so the health check and the live build see the same candidates.
     """
@@ -685,7 +686,32 @@ def _triage_backend_configs(operator_config: OperatorConfig) -> list[LLMBackendC
     if override is not None:
         configs.append(override)
     configs.extend(operator_config.llm_backends)
+    configs.extend(_agent_cli_triage_configs(operator_config))
     return configs
+
+
+def _agent_cli_triage_configs(operator_config: OperatorConfig) -> list[LLMBackendConfig]:
+    """Resolved ``agent_cli_reviewers`` wrapped as agent-cli backend configs.
+
+    Triage falls through to these when no API backend is configured or every
+    API backend is down, so a deployment that drives a coding-agent CLI for
+    review (claude / cursor-agent / codex, local or over SSH) gets triage for
+    free — the alternative was "Every triage backend failed its boot probe"
+    and a backlog that never moved. Only resolved (enabled + installed)
+    reviewers: an ``auto`` entry whose binary isn't on PATH is not a
+    candidate, and ``enabled: false`` is respected.
+
+    ``model`` is left empty so the borrowed reviewer entry's own model wins.
+    The dedup key includes ``reviewer``, so two reviewers are distinct; an
+    explicit ``llm_backends`` agent-cli entry with the same reviewer+model
+    dedups against this one.
+    """
+    from franktheunicorn.worker.runner import resolve_agent_cli_reviewers
+
+    return [
+        LLMBackendConfig(provider="agent-cli", reviewer=rc.name)
+        for rc in resolve_agent_cli_reviewers(operator_config)
+    ]
 
 
 def seed_triage_backend_health(operator_config: OperatorConfig) -> tuple[int, int]:
@@ -772,8 +798,10 @@ def _get_triage_backends(operator_config: OperatorConfig) -> list[BaseLLMBackend
     """Triage's backends, in fallthrough order.
 
     Its own ``security_triage.llm_backend`` first if configured, then
-    ``llm_backends`` in order. The override exists because ``llm_backends[0]``
-    is shared by three unrelated consumers — triage, ``review/shepherding.py``
+    ``llm_backends`` in order, then resolved ``agent_cli_reviewers`` as
+    agent-cli backends — so a deployment with no API key but a coding-agent
+    CLI still gets triage instead of "Every backend failed". The override
+    exists because ``llm_backends[0]`` is shared by three unrelated consumers — triage, ``review/shepherding.py``
     and the ``llm_checks`` path — so "which model does triage use" was not
     separately expressible, and picking one for triage picked it for the other
     two. That is a real bind rather than a tidiness complaint: triage reads
@@ -801,6 +829,7 @@ def _get_triage_backends(operator_config: OperatorConfig) -> list[BaseLLMBackend
         )
         configs.append(override)
     configs.extend(operator_config.llm_backends)
+    configs.extend(_agent_cli_triage_configs(operator_config))
 
     backends: list[BaseLLMBackend] = []
     seen: set[tuple[str, str, str, str, str]] = set()
@@ -833,6 +862,18 @@ def resolve_triage_backend(operator_config: OperatorConfig) -> BaseLLMBackend | 
     know which backend triage would use."""
     backends = _get_triage_backends(operator_config)
     return backends[0] if backends else None
+
+
+def triage_backend_configured(operator_config: OperatorConfig) -> bool:
+    """Whether triage has any backend configured at all — the dashboard's gate.
+
+    Cheaper than :func:`resolve_triage_backend` (no backend construction) and
+    the exact check the boot probe runs over, so the button's "is there
+    something to call" matches what the worker actually calls. Includes
+    ``agent_cli_reviewers`` — a deployment with a coding-agent CLI but no
+    ``llm_backends`` entry still has triage.
+    """
+    return bool(_triage_backend_configs(operator_config))
 
 
 def _call_llm(

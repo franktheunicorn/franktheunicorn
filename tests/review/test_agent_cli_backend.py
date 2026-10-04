@@ -416,13 +416,36 @@ class TestTriageBackendSelection:
 
         assert resolve_triage_backend(config) is not None
 
+    def test_agent_cli_reviewers_back_triage_with_no_api_backend(self) -> None:
+        """The reported bug: agent_cli_reviewers present, no llm_backends, used
+        to leave triage with no backend. Now a resolved reviewer is a triage
+        backend — no override, no llm_backends needed."""
+        from franktheunicorn.config.models import AgentCLIReviewerConfig
+        from franktheunicorn.security.triage import resolve_triage_backend
+
+        config = OperatorConfig()
+        config.llm_backends = []
+        config.security_triage.llm_backend = None
+        reviewer = AgentCLIReviewerConfig(name="claude", cli_path="claude")
+        with patch(
+            "franktheunicorn.worker.runner.resolve_agent_cli_reviewers",
+            return_value=[reviewer],
+        ):
+            backend = resolve_triage_backend(config)
+        assert backend is not None
+        assert backend._config.provider == "agent-cli"
+        assert backend._config.reviewer == "claude"
+
     def test_no_backends_and_no_override_is_still_none(self) -> None:
         from franktheunicorn.security.triage import resolve_triage_backend
 
         config = OperatorConfig()
         config.llm_backends = []
-
-        assert resolve_triage_backend(config) is None
+        # The default OperatorConfig seeds agent_cli_reviewers; on a machine with
+        # claude installed those would resolve as triage backends. This test is
+        # about "no backend at all", so make "no agent-cli available" explicit.
+        with patch("franktheunicorn.worker.runner.resolve_agent_cli_reviewers", return_value=[]):
+            assert resolve_triage_backend(config) is None
 
     def test_the_override_being_in_force_is_logged(self, caplog: Any) -> None:
         """A second place a model can come from is a second place to look when the
