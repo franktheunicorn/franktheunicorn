@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 import pytest
@@ -500,6 +501,10 @@ class TestYAMLErrorHandling:
         assert [c.full_name for c in configs] == ["apache/spark"]
         assert name in caplog.text
 
+    @pytest.mark.skipif(
+        hasattr(os, "geteuid") and os.geteuid() == 0,
+        reason="root reads a chmod 000 file, so the file is not unreadable",
+    )
     def test_an_unreadable_file_is_named_not_raised(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
