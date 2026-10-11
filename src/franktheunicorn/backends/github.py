@@ -124,6 +124,37 @@ class GitHubClient(ForgeClient):
                 break
         return result
 
+    def list_pull_requests_page(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        state: str = "closed",
+        page: int = 1,
+        per_page: int = 100,
+        sort: str = "created",
+    ) -> list[dict[str, Any]]:
+        """One page of PRs in *state*, newest first by *sort*.
+
+        No scrape fallback, unlike :meth:`list_pull_requests`: the search page
+        the scrape reads has no stable paging and no ``merged_at``, and a walk
+        through history that cannot tell merged from unmerged is worse than one
+        that stops. A 401/403 raises and the caller says so.
+        """
+        response = self._get(
+            f"/repos/{owner}/{repo}/pulls",
+            params={
+                "state": state,
+                "sort": sort,
+                "direction": "desc",
+                "per_page": min(per_page, 100),
+                "page": page,
+            },
+        )
+        response.raise_for_status()
+        data: list[dict[str, Any]] = response.json()
+        return data
+
     def get_pull_request(self, owner: str, repo: str, pr_number: int) -> dict[str, Any]:
         """Fetch a single PR detail (includes mergeable status)."""
         url = f"/repos/{owner}/{repo}/pulls/{pr_number}"

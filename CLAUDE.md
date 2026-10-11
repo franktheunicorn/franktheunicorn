@@ -33,6 +33,31 @@ src/franktheunicorn/
                      #   tone guard, anti-pattern matching, deduplication
                      #   (auto_poster.py is present but not wired — see
                      #    "Auto-posting" under Important Design Decisions)
+                     #   zombie.py is the closed-PR follow-up: walk a project's
+                     #   closed-but-unmerged PRs newest-first (one listing call
+                     #   per 100, by `created` desc so PR numbers descend and the
+                     #   lowest number examined is a resumable cursor, plus an
+                     #   `updated`-sorted catch-up pass so a stale bot closing a
+                     #   two-year-old PR last night is still seen), keep those
+                     #   that name a JIRA ticket that is not closed, and ask the
+                     #   model two questions separately — does the ticket still
+                     #   make sense, did the fix — plus what the fix needs to land
+                     #   today. One ZombieAssessment per PR, created `unassessed`
+                     #   *before* the model is asked so the Zombie Queue tab shows
+                     #   what was found even with no backend or no budget; the LLM
+                     #   budget is then spent newest-first across everything
+                     #   unassessed, which is what makes a run bounded and the
+                     #   backlog finish. The PR rows go in with state=closed and
+                     #   queue="zombie" — the one queue whose members are not open
+                     #   PRs, so index()'s state filter is per tab. Dismissing
+                     #   keeps the row (a re-scan skips any PR that has one), the
+                     #   assessment and an OperatorAction. Never automatic: the
+                     #   scan_zombie_prs sweep (targetless, bulk) is queued by the
+                     #   tab's button or `manage.py find_zombie_prs --queue`;
+                     #   assess_zombie_pr (per PR, interactive) is the detail
+                     #   page's Re-assess. Needs the project's jira.enabled +
+                     #   jira.server — without them there is no way to tell an
+                     #   open ticket from a closed one, and that is the question.
   backends/          # Forge clients (GitHub, Gitea, GitLab) + posters
   personalities/     # Reviewer voice loader (markdown personalities)
   security/          # Security-report triage pipeline (CVE lookup,
@@ -325,7 +350,7 @@ If any check fails, the commit or push is blocked and the agent must fix the iss
 
 When working on features, know which version they belong to:
 
-- **v1 (now):** PR ingestion, scoring, draft reviews, anti-patterns, dashboard, digest, test verification, workspace mode
+- **v1 (now):** PR ingestion, scoring, draft reviews, anti-patterns, dashboard, digest, test verification, workspace mode, Zombie Queue (closed-PR follow-up)
 - **v1.25:** Direct agent feedback channel (Claude Code / Codex session links)
 - **v1.5:** Community context search, JIRA, CodeRabbit, auto-posting, CLI triage
 - **v1.75:** Rejection predictor (sklearn), auto-suppress low-value findings

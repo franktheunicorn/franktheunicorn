@@ -31,6 +31,10 @@ Commands supported:
   gives the check half a ref to test for CVE-carrying reports.
 - ``run_agents``: force-run the review pipeline on a PR (no trusted-author
   gate, no dedup against existing drafts).
+- ``scan_zombie_prs``: the closed-PR follow-up sweep — every JIRA-enabled
+  project's closed-but-unmerged PRs, newest first, kept when the JIRA is still
+  open and assessed by the model. Bounded per run, resumes from a cursor.
+- ``assess_zombie_pr``: the per-PR re-run of that assessment.
 """
 
 from __future__ import annotations
@@ -316,6 +320,8 @@ def _dispatch(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
         "check_fixes_landed": _check_fixes_landed,
         "check_cve_fixes_landed": _check_cve_fixes_landed,
         "run_agents": _run_agents,
+        "scan_zombie_prs": _scan_zombie_prs,
+        "assess_zombie_pr": _assess_zombie_pr,
     }
     handler = handlers.get(cmd.command)
     if handler is None:
@@ -715,3 +721,33 @@ def _run_agents(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
         cmd.log = f"{summary}\n{joined}"
     else:
         cmd.log = summary
+
+
+def _scan_zombie_prs(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
+    """The Zombie Queue sweep: closed-unmerged PRs whose JIRA is still open.
+
+    Targetless and per project like the git sweeps — the listing is per
+    project, and the cursor it resumes from is per project.
+    """
+    from franktheunicorn.review.zombie import scan_project, zombie_projects
+
+    projects = [project for project, _config in zombie_projects()]
+    if not projects:
+        cmd.log = (
+            "zombie scan: no enabled project has jira.enabled and jira.server set, so there "
+            "is no ticket to check a closed PR against"
+        )
+        logger.info(cmd.log)
+        return
+    cmd.log = _sweep_log(cmd, projects, scan_project, operator_config)
+
+
+def _assess_zombie_pr(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
+    """The detail page's "Re-assess" button: one PR, one LLM call."""
+    if cmd.pull_request is None:
+        msg = "assess_zombie_pr requires a pull_request target"
+        raise ValueError(msg)
+
+    from franktheunicorn.review.zombie import assess_pr
+
+    cmd.log = assess_pr(cmd.pull_request, operator_config)
