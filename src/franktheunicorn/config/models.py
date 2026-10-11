@@ -1766,6 +1766,38 @@ class ForgeRegistryEntry(BaseModel):
         return self
 
 
+class MergeIntentConfig(BaseModel):
+    """The intending-to-merge queue: PRs an approver has already said yes to.
+
+    On by default. The only cost is one reviews read per PR the poller
+    refreshes anyway, and the queue is empty until somebody approves
+    something, so there is nothing for a flag to protect — turning it off is
+    for an operator who wants that API call back.
+    """
+
+    enabled: bool = True
+    #: Forge logins whose approval or "LGTM pending CI" puts a PR in the
+    #: queue. Empty means the operator alone (``github_username``); list
+    #: several to track a co-maintainer's approvals too.
+    approvers: list[str] = Field(default_factory=list)
+    #: Refresh ``PullRequest.ci_status`` for queued PRs (and the operator's
+    #: own) from the forge's check runs, so "pending CI" can be answered
+    #: without opening the PR. One or two extra reads per queued PR.
+    track_ci: bool = True
+
+    @field_validator("approvers")
+    @classmethod
+    def approvers_normalised(cls, v: list[str]) -> list[str]:
+        cleaned = [login.strip().lstrip("@") for login in v]
+        return [login for login in cleaned if login]
+
+    def approvers_for(self, operator_username: str) -> list[str]:
+        """The effective approver list: configured, else the operator."""
+        if self.approvers:
+            return list(self.approvers)
+        return [operator_username] if operator_username else []
+
+
 class OperatorConfig(BaseModel):
     """Top-level operator config loaded from operator.yaml."""
 
@@ -1800,6 +1832,7 @@ class OperatorConfig(BaseModel):
     perplexity: PerplexityConfig = Field(default_factory=PerplexityConfig)
     fine_tuning: FineTuningConfig = Field(default_factory=FineTuningConfig)
     security_triage: SecurityTriageConfig = Field(default_factory=SecurityTriageConfig)
+    merge_intent: MergeIntentConfig = Field(default_factory=MergeIntentConfig)
     # Multiple LLM backends can run in parallel. Each produces findings
     # independently; results are combined and deduped via anti-patterns.
     llm_backends: list[LLMBackendConfig] = Field(default_factory=list)

@@ -641,3 +641,13 @@ thead th { border-bottom: 2px solid var(--border); }
     font-size: 0.78rem;
     margin-top: 0.25rem;
 }
+
+/* Intending-to-merge: an approver already said yes. Green for a plain
+   approval, yellow for one gated on CI; the CI chip beside it answers the gate. */
+.badge-intent { display: inline-block; background: var(--green-bg); color: var(--green); padding: 0.05rem 0.35rem; border-radius: 3px; font-weight: 600; font-size: 0.75rem; }
+.badge-intent.conditional { background: var(--yellow-bg); color: var(--yellow); }
+.badge-ci { display: inline-block; padding: 0.05rem 0.35rem; border-radius: 3px; font-weight: 600; font-size: 0.75rem; background: var(--border); color: var(--muted); }
+.badge-ci.pass { background: var(--green-bg); color: var(--green); }
+.badge-ci.fail { background: var(--red-bg); color: var(--red); }
+.badge-ci.pending { background: var(--yellow-bg); color: var(--yellow); }
+.intent-excerpt { color: var(--muted); font-style: italic; }

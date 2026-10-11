@@ -115,6 +115,22 @@ class MockForgeClient(ForgeClient):
         """Return an empty list — mock mode doesn't track posted comments."""
         return []
 
+    def list_pull_request_reviews(
+        self, owner: str, repo: str, pr_number: int
+    ) -> list[dict[str, Any]]:
+        """Load submitted reviews from fixture or return an empty list."""
+        fixture_path = self._fixtures_dir / f"{owner}_{repo}_pr{pr_number}_reviews.json"
+        if fixture_path.exists():
+            return _load_json_fixture(fixture_path)
+        return []
+
+    def get_commit_ci_status(self, owner: str, repo: str, sha: str) -> str:
+        """Read a one-word CI verdict from fixture or return unknown."""
+        fixture_path = self._fixtures_dir / f"{owner}_{repo}_ci_{sha}.txt"
+        if fixture_path.exists():
+            return fixture_path.read_text().strip()
+        return ""
+
     def get_issue_comments(
         self,
         owner: str,

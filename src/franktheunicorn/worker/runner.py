@@ -1522,6 +1522,7 @@ def _run_cycle(
                 operator_username=operator_username,
                 repo_path=repo_path,
                 skipped_prs=project_skipped,  # type: ignore[arg-type]
+                merge_intent=operator_config.merge_intent if operator_config else None,
             )
             logger.info(
                 "Polled %s/%s: %d refreshed, %d unchanged",
