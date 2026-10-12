@@ -62,6 +62,33 @@ class TestUntriagedByProject:
         assert grouped[included.project] == [included]
 
 
+@pytest.mark.django_db
+class TestAgentScopedSelectors:
+    """Each cloud-agent button's selector narrows to the press's agent scope."""
+
+    def test_untriaged_by_project(self) -> None:
+        agents = SecurityReportFactory(status="new", source_agent="xbow")
+        SecurityReportFactory(status="new", project=agents.project, source_agent="")
+
+        grouped = untriaged_by_project("xbow")
+
+        assert grouped == {agents.project: [agents]}
+
+    def test_valid_reports(self) -> None:
+        SecurityReportFactory(status="valid", source_agent="xbow")
+        persons = SecurityReportFactory(status="valid", source_agent="")
+
+        assert valid_reports("none") == [persons]
+
+    def test_fix_landed_candidates(self) -> None:
+        agents = SecurityReportFactory(fix_landed_status="indeterminate", source_agent="xbow")
+        SecurityReportFactory(fix_landed_status="indeterminate", source_agent="")
+
+        grouped = fix_landed_candidates("any")
+
+        assert grouped == {agents.project: [agents]}
+
+
 class TestBuildRecheckPrompt:
     @pytest.mark.django_db
     def test_the_prompt_lists_reports_and_demands_json(self) -> None:

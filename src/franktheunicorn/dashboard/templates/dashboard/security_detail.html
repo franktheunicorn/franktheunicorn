@@ -20,6 +20,9 @@
         {# Which archive, and which finding within it — the ids the archive's own #}
         {# other files refer to, so the operator can go back to the bundle. #}
         {% if report.source_archive %}<dt>Archive:</dt><dd>{{ report.source_archive }}</dd>{% endif %}
+        {# Another agent's output, said where the provenance is read. Links to the #}
+        {# list scoped to that agent: the rest of its findings are the context. #}
+        {% if report.source_agent %}<dt>Agent:</dt><dd><a class="agent-badge" href="{% url 'dashboard:security_list' %}?agent={{ report.source_agent|urlencode }}" title="Produced by an automated agent, not a person — show its other reports">🤖 {{ report.source_agent }}</a></dd>{% endif %}
         {% if report.finding_id %}<dt>Finding:</dt><dd>{{ report.finding_id }}</dd>{% endif %}
         {% if report.priority %}
         <dt>Priority:</dt>

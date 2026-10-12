@@ -41,6 +41,7 @@ from typing import IO, TYPE_CHECKING
 from django.db import transaction
 
 from franktheunicorn.core.models import SecurityReport
+from franktheunicorn.security.agent_source import clean_agent_name
 from franktheunicorn.security.scan_archive import (
     MAX_FINDINGS,
     ScanArchive,
@@ -266,6 +267,7 @@ def import_reports_from_zip(
     require_security_content: bool = True,
     max_entries: int = MAX_ENTRIES,
     archive_label: str = "",
+    source_agent: str = "",
 ) -> ZipImportResult:
     """Create a :class:`SecurityReport` for each report file in *source*.
 
@@ -315,11 +317,24 @@ def import_reports_from_zip(
     whole import runs inside one HTTP request, which the single-transaction walk
     made cheap enough not to matter.
 
+    ``source_agent`` names the automated agent that produced the archive, or ""
+    when people did. Every report this run *creates* gets it; a duplicate keeps
+    whatever its earlier import said, since that row may have been relabelled by
+    hand since. Validated here rather than at each door, so the dashboard and the
+    command refuse a reserved word ("all", "none", "any") with one message.
+
     Never raises for a bad archive: a corrupt or non-zip file comes back as
     ``result.error`` so the caller can show it. Per-entry problems are recorded
     against the entry and the rest of the archive still imports.
     """
     result = ZipImportResult()
+    try:
+        source_agent = clean_agent_name(source_agent)
+    except ValueError as exc:
+        # Before the archive is opened. An agent's findings filed as human-sent
+        # is the mislabel that defeats the whole field, so nothing imports.
+        result.error = str(exc)
+        return result
     # Recorded on every row for provenance. Derived from a path when the caller
     # didn't name it; the dashboard passes the upload's filename, which is the
     # only name a browser upload has.
@@ -368,6 +383,7 @@ def import_reports_from_zip(
                 require_security_content,
                 max_entries,
                 archive_label,
+                source_agent,
             )
     except zipfile.BadZipFile:
         result.error = "not a valid zip archive"
@@ -623,6 +639,7 @@ def _import_entries(
     require_security_content: bool,
     max_entries: int,
     archive_label: str,
+    source_agent: str = "",
 ) -> None:
     """Walk the archive in name order, recording an outcome for every entry."""
     candidates = [info for info in archive.infolist() if not _is_ignorable(info)]
@@ -696,6 +713,22 @@ def _import_entries(
             archive_label,
             {name: text.encode("utf-8") for name, text in expanded.residuals.items()},
         )
+        if source_agent:
+            _stamp_agent(result, source_agent)
+
+
+def _stamp_agent(result: ZipImportResult, source_agent: str) -> None:
+    """Label every report this run created with the agent that produced it.
+
+    One UPDATE at the end of the walk's transaction rather than a seventh
+    parameter threaded through both creation paths. Inside the transaction is
+    what makes that safe: a triage command queued mid-walk is not visible to the
+    worker until commit, and by then the label is on the row, so the triage
+    prompt always knows it is reading another agent's output.
+    """
+    ids = [entry.report_id for entry in result.entries if entry.outcome == "imported"]
+    if ids:
+        SecurityReport.objects.filter(pk__in=ids).update(source_agent=source_agent)
 
 
 class _BudgetedReader:

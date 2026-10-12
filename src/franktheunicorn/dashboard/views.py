@@ -12,6 +12,7 @@ import re
 from datetime import timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
+from urllib.parse import urlencode
 
 if TYPE_CHECKING:
     from franktheunicorn.config.models import OperatorConfig, ProjectConfig
@@ -49,6 +50,7 @@ from franktheunicorn.core.models import (
     TestRun,
     WorkerCommand,
 )
+from franktheunicorn.security import agent_source
 
 logger = logging.getLogger(__name__)
 
@@ -1093,7 +1095,24 @@ def security_report_list(request: HttpRequest) -> HttpResponse:
     sort = request.GET.get("sort", _DEFAULT_SECURITY_SORT)
     if sort not in _SECURITY_SORTS:
         sort = _DEFAULT_SECURITY_SORT
-    reports = SecurityReport.objects.select_related("project").order_by(*_SECURITY_SORTS[sort])
+    # Which source the page shows: one agent's reports, any agent's, none, or all.
+    # It scopes the rows, the tab counts, the Export button and — through a hidden
+    # field in each form — every bulk button, so it is the one control for "work
+    # on what came from agent X". A scope that can't parse falls back to "all" here
+    # with a warning, because this page only reads; the buttons refuse instead.
+    agent_scope = agent_source.parse_scope(request.GET.get("agent"))
+    if agent_scope is None:
+        messages.warning(
+            request,
+            f"{request.GET.get('agent', '').strip()!r} isn't an agent name. Showing every source.",
+        )
+        agent_scope = agent_source.SCOPE_ALL
+    scoped = agent_source.scope_q(agent_scope)
+    reports = (
+        SecurityReport.objects.select_related("project")
+        .filter(scoped)
+        .order_by(*_SECURITY_SORTS[sort])
+    )
 
     # The CVE lookup box. One exact assigned-CVE hit goes straight to the
     # report — "brings up the local entry" is the point of the box — while
@@ -1135,7 +1154,9 @@ def security_report_list(request: HttpRequest) -> HttpResponse:
     else:
         reports = reports.filter(_security_tab_q(status_filter))
 
-    all_reports = SecurityReport.objects.all()
+    # Counted inside the scope: a tab badge that counts every source above a list
+    # of one agent's rows is a count the rows can't account for.
+    all_reports = SecurityReport.objects.filter(scoped)
     tabs_with_counts: list[dict[str, str | int]] = []
     for tab in SECURITY_STATUS_TABS:
         count = all_reports.filter(_security_tab_q(tab["key"])).count()
@@ -1152,10 +1173,53 @@ def security_report_list(request: HttpRequest) -> HttpResponse:
         # The tab counts know nothing about the CVE filter — count what it matched.
         filtered_count = reports.count()
 
+    # Every link on the page that keeps the view (tabs, sort, export) appends this.
+    # Safe to echo: parse_scope folds a name to [a-z0-9._-], so no `&` gets in.
+    agent_query = (
+        "" if agent_scope == agent_source.SCOPE_ALL else "&" + urlencode({"agent": agent_scope})
+    )
+    status_query = "" if status_filter == "all" else "&" + urlencode({"status": status_filter})
+    scope_options = [
+        {
+            "key": option.key,
+            "label": option.label,
+            "count": option.count,
+            "breakdown": option.breakdown,
+            "query": f"?sort={sort}{status_query}"
+            + (
+                ""
+                if option.key == agent_source.SCOPE_ALL
+                else "&" + urlencode({"agent": option.key})
+            ),
+        }
+        for option in agent_source.scope_options()
+    ]
+    if agent_scope not in {option["key"] for option in scope_options}:
+        # A name nobody has imported under — a stale bookmark, a relabelled
+        # archive. Shown as a chip so the page says what it is filtering on and
+        # the empty list below has a visible reason.
+        scope_options.append(
+            {
+                "key": agent_scope,
+                "label": "Any agent"
+                if agent_scope == agent_source.SCOPE_ANY_AGENT
+                else agent_scope,
+                "count": 0,
+                "breakdown": "",
+                "query": f"?sort={sort}{status_query}{agent_query}",
+            }
+        )
+
     return render(
         request,
         "dashboard/security_list.html",
         {
+            "agent_scope": agent_scope,
+            "agent_scope_label": agent_source.scope_label(agent_scope),
+            "agent_query": agent_query,
+            "scope_options": scope_options,
+            "known_agents": agent_source.known_agents(),
+            "reverify_cap": _bulk_verify_cap(),
             "reports": reports[:SECURITY_LIST_ROW_CAP],
             "status_tabs": tabs_with_counts,
             # So the page can say it is showing 100 of N. The tab badge counts the
@@ -1204,6 +1268,13 @@ def security_report_list(request: HttpRequest) -> HttpResponse:
     )
 
 
+def _bulk_verify_cap() -> int:
+    """The Confirm / Re-verify button's per-press coding-agent cap, for its label."""
+    from franktheunicorn.security.verifier import MAX_BULK_VERIFY
+
+    return MAX_BULK_VERIFY
+
+
 def _has_sheet_undo() -> bool:
     """Whether the last sheet import left snapshots an undo could restore."""
     from franktheunicorn.security.sheet_sync import latest_snapshot_import_id
@@ -1223,6 +1294,11 @@ def _imported_archives() -> list[dict[str, object]]:
 
     ``touched`` counts reports the operator has already worked on, which is what
     makes dropping unsafe; the confirm text quotes it.
+
+    ``agent`` is the archive's label when every row agrees on one, and
+    ``agent_mixed`` says when they don't (a row relabelled by hand since). The
+    row's relabel form is how an archive imported before agents had a field gets
+    one: re-uploading it is a no-op, since every entry dedups.
     """
     rows = (
         SecurityReport.objects.exclude(source_archive="")
@@ -1233,10 +1309,16 @@ def _imported_archives() -> list[dict[str, object]]:
             touched=Count("pk", filter=~Q(status="new")),
             first_seen=Min("created_at"),
             last_seen=Max("created_at"),
+            agent=Max("source_agent"),
+            agent_low=Min("source_agent"),
         )
         .order_by("-last_seen")
     )
-    return list(rows)
+    archives: list[dict[str, object]] = []
+    for row in rows:
+        row["agent_mixed"] = row["agent"] != row.pop("agent_low")
+        archives.append(row)
+    return archives
 
 
 def _zip_import_command() -> str:
@@ -1433,6 +1515,9 @@ def security_report_upload(request: HttpRequest) -> HttpResponse:
         # scans of one repo share entry paths, so without it the list has pairs of
         # identically-titled reports from different archives.
         archive_label=upload.name or "",
+        # Validated by the importer, which refuses the whole archive for a
+        # reserved word rather than filing an agent's output as human-sent.
+        source_agent=request.POST.get("source_agent", ""),
     )
 
     if result.error and not result.imported:
@@ -1574,6 +1659,38 @@ def project_wipe_prs(request: HttpRequest, project_id: int) -> HttpResponse:
     return redirect(target)
 
 
+@require_POST
+def security_archive_set_agent(request: HttpRequest) -> HttpResponse:
+    """Label every report from one archive with the agent that produced it.
+
+    The backfill for archives imported before reports had an agent, and the fix
+    for one imported under the wrong name. Re-uploading can't do either: every
+    entry dedups against the rows already there, and a duplicate keeps its label.
+    Matched on the exact archive name, like the drop beside it. A blank name
+    means "people sent these" and clears the label, which is a real answer
+    rather than an error.
+    """
+    archive = request.POST.get("archive", "").strip()
+    if not archive:
+        messages.error(request, "No archive named — nothing was relabelled.")
+        return _back_to_security_list(request)
+    try:
+        agent = agent_source.clean_agent_name(request.POST.get("source_agent", ""))
+    except ValueError as exc:
+        messages.error(request, f"Nothing relabelled: {exc}")
+        return _back_to_security_list(request)
+
+    updated = SecurityReport.objects.filter(source_archive=archive).update(source_agent=agent)
+    if not updated:
+        messages.warning(request, f"No reports left from {archive}.")
+    elif agent:
+        messages.success(request, f"Labelled {updated} report(s) from {archive} as agent {agent}.")
+    else:
+        messages.success(request, f"Cleared the agent label on {updated} report(s) from {archive}.")
+    logger.info("Set source_agent=%r on %d report(s) from archive %s", agent, updated, archive)
+    return _back_to_security_list(request)
+
+
 def _back_to_security_list(request: HttpRequest) -> HttpResponse:
     """Reload the security list, whether htmx made the request or the form did.
 
@@ -1585,11 +1702,38 @@ def _back_to_security_list(request: HttpRequest) -> HttpResponse:
 
     The plain ``redirect`` is the no-JS path: the button sits in a real form with a
     real action, so it works with htmx switched off.
+
+    Keeps the agent scope the form carried, so a button pressed on one agent's
+    reports lands back on that agent's reports — the flash is about them, and
+    tab counts for the whole backlog under it would read as the button's result.
     """
     target = reverse("dashboard:security_list")
+    scope = agent_source.parse_scope(request.POST.get("agent"))
+    if scope and scope != agent_source.SCOPE_ALL:
+        target += "?" + urlencode({"agent": scope})
     if request.headers.get("HX-Request") == "true":
         return HttpResponse(status=204, headers={"HX-Redirect": target})
     return redirect(target)
+
+
+def _bulk_scope(request: HttpRequest) -> str | None:
+    """The agent scope a bulk button was pressed under, or None after saying why not.
+
+    Every bulk form carries the list page's source scope in a hidden ``agent``
+    field, so a button pressed while looking at one agent's reports acts on those
+    reports. Absent is "all", which is what every button did before scopes and
+    what a form without the field still means. Unparseable is a refusal, never
+    "all": the buttons spend LLM calls and agent runs, and a typo must not turn a
+    press on twenty reports into one on two thousand.
+    """
+    scope = agent_source.parse_scope(request.POST.get("agent"))
+    if scope is None:
+        messages.error(
+            request,
+            f"{request.POST.get('agent', '').strip()!r} isn't an agent scope — nothing "
+            "was run. Pick a source from the Source row and press again.",
+        )
+    return scope
 
 
 def _branch_sweep_gate_reason(operator_config: OperatorConfig) -> str:
@@ -1654,6 +1798,9 @@ def security_report_rerun_triage(request: HttpRequest) -> HttpResponse:
         triage_backend_configured,
     )
 
+    scope = _bulk_scope(request)
+    if scope is None:
+        return _back_to_security_list(request)
     operator_config = get_operator_config()
     if not triage_backend_configured(operator_config):
         messages.error(
@@ -1668,6 +1815,7 @@ def security_report_rerun_triage(request: HttpRequest) -> HttpResponse:
     candidates = list(
         SecurityReport.objects.select_related("project")
         .filter(status__in=["new", "triaging", "valid"])
+        .filter(agent_source.scope_q(scope))
         .order_by("-priority", "created_at")
     )
 
@@ -1757,10 +1905,14 @@ def security_report_rerun_triage(request: HttpRequest) -> HttpResponse:
         parts.append(f"{followon_skipped} version follow-on skipped (verifier off or no project)")
     if ruled_skipped:
         parts.append(f"{ruled_skipped} skipped (operator-ruled: notes, a CVE, or a fix branch)")
-    messages.success(request, "Re-ran triage: " + ", ".join(parts) + ".")
+    messages.success(
+        request, f"Re-ran triage{agent_source.scope_suffix(scope)}: " + ", ".join(parts) + "."
+    )
     logger.info(
-        "Bulk re-triage: procedural_closed=%d triage_queued=%d triage_inflight=%d "
-        "followon_queued=%d followon_inflight=%d followon_skipped=%d ruled_skipped=%d",
+        "Bulk re-triage (agent scope %s): procedural_closed=%d triage_queued=%d "
+        "triage_inflight=%d followon_queued=%d followon_inflight=%d followon_skipped=%d "
+        "ruled_skipped=%d",
+        scope,
         procedural_closed,
         triage_queued,
         triage_skipped_inflight,
@@ -1795,6 +1947,9 @@ def security_report_rerun_triage_failed(request: HttpRequest) -> HttpResponse:
         triage_backend_configured,
     )
 
+    scope = _bulk_scope(request)
+    if scope is None:
+        return _back_to_security_list(request)
     operator_config = get_operator_config()
     if not triage_backend_configured(operator_config):
         messages.error(
@@ -1808,6 +1963,7 @@ def security_report_rerun_triage_failed(request: HttpRequest) -> HttpResponse:
     ).order_by("-created_at")
     candidates = list(
         SecurityReport.objects.select_related("project")
+        .filter(agent_source.scope_q(scope))
         .annotate(last_triage_status=Subquery(latest_triage.values("status")[:1]))
         .filter(last_triage_status="failed")
         .order_by("-priority", "created_at")
@@ -1840,9 +1996,14 @@ def security_report_rerun_triage_failed(request: HttpRequest) -> HttpResponse:
         )
     if not candidates:
         parts = ["no failed triage runs in the queue"]
-    messages.success(request, "Re-run failed triage: " + ", ".join(parts) + ".")
+    messages.success(
+        request,
+        f"Re-run failed triage{agent_source.scope_suffix(scope)}: " + ", ".join(parts) + ".",
+    )
     logger.info(
-        "Bulk re-triage of failures: requeued=%d procedural_closed=%d ruled_skipped=%d",
+        "Bulk re-triage of failures (agent scope %s): requeued=%d procedural_closed=%d "
+        "ruled_skipped=%d",
+        scope,
         requeued,
         procedural_closed,
         ruled_skipped,
@@ -1868,9 +2029,13 @@ def security_report_rerun_procedural(request: HttpRequest) -> HttpResponse:
     """
     from franktheunicorn.security.triage import procedural_close_if_evidence
 
+    scope = _bulk_scope(request)
+    if scope is None:
+        return _back_to_security_list(request)
     candidates = list(
         SecurityReport.objects.select_related("project")
         .filter(status="new")
+        .filter(agent_source.scope_q(scope))
         .order_by("-priority", "created_at")
     )
 
@@ -1886,8 +2051,16 @@ def security_report_rerun_procedural(request: HttpRequest) -> HttpResponse:
     parts = [f"{closed} closed without a model (auth-disabled)"]
     if ruled_skipped:
         parts.append(f"{ruled_skipped} skipped (operator-ruled: notes, a CVE, or a fix branch)")
-    messages.success(request, "Re-ran procedural close: " + ", ".join(parts) + ".")
-    logger.info("Bulk procedural re-trigger: closed=%d ruled_skipped=%d", closed, ruled_skipped)
+    messages.success(
+        request,
+        f"Re-ran procedural close{agent_source.scope_suffix(scope)}: " + ", ".join(parts) + ".",
+    )
+    logger.info(
+        "Bulk procedural re-trigger (agent scope %s): closed=%d ruled_skipped=%d",
+        scope,
+        closed,
+        ruled_skipped,
+    )
     return _back_to_security_list(request)
 
 
@@ -1905,11 +2078,19 @@ def security_report_rerun_duplicates(request: HttpRequest) -> HttpResponse:
 
     Runs regardless of ``security_triage.duplicates.enabled``: that flag gates the
     automatic triage-time path, and an operator pressing a button has asked for it.
+
+    Scoped to one source, it compares that source's reports with each other —
+    ``redetect_across_backlog`` leaves alone any link whose other end it wasn't
+    shown, so a scoped press can't clear a link into the rest of the backlog. To
+    catch an agent's finding that duplicates a person's report, press it on All.
     """
     from franktheunicorn.config.loader import get_operator_config
     from franktheunicorn.security.duplicates import redetect_across_backlog
     from franktheunicorn.security.triage import resolve_triage_backend
 
+    scope = _bulk_scope(request)
+    if scope is None:
+        return _back_to_security_list(request)
     operator_config = get_operator_config()
     backend = resolve_triage_backend(operator_config)
     if backend is None:
@@ -1920,7 +2101,11 @@ def security_report_rerun_duplicates(request: HttpRequest) -> HttpResponse:
         return _back_to_security_list(request)
 
     config = operator_config.security_triage.duplicates
-    candidates = list(SecurityReport.objects.select_related("project", "duplicate_of"))
+    candidates = list(
+        SecurityReport.objects.select_related("project", "duplicate_of").filter(
+            agent_source.scope_q(scope)
+        )
+    )
 
     result = redetect_across_backlog(candidates, config, backend)
     if result is None:
@@ -1935,8 +2120,16 @@ def security_report_rerun_duplicates(request: HttpRequest) -> HttpResponse:
     parts = [f"{linked} linked"]
     if cleared:
         parts.append(f"{cleared} stale link(s) cleared")
-    messages.success(request, "Re-checked duplicates: " + ", ".join(parts) + ".")
-    logger.info("Bulk duplicate re-check (LLM): linked=%d cleared=%d", linked, cleared)
+    messages.success(
+        request,
+        f"Re-checked duplicates{agent_source.scope_suffix(scope)}: " + ", ".join(parts) + ".",
+    )
+    logger.info(
+        "Bulk duplicate re-check (LLM, agent scope %s): linked=%d cleared=%d",
+        scope,
+        linked,
+        cleared,
+    )
     return _back_to_security_list(request)
 
 
@@ -1987,18 +2180,28 @@ def security_report_export_csv(request: HttpRequest) -> HttpResponseBase:
         # to be wrong about a security backlog.
         return HttpResponse("Unknown status filter.", status=400)
 
+    # The list page's source scope, honoured for the same reason status is. A
+    # scope that doesn't parse is a 400, not "all": the page's own Export button
+    # only ever renders a parsed one, so this is a hand-edited URL, and widening a
+    # sheet of one agent's findings to the whole backlog is the wrong way to fail.
+    agent = agent_source.parse_scope(request.GET.get("agent"))
+    if agent is None:
+        return HttpResponse("Unknown agent filter.", status=400)
+
     sort = request.GET.get("sort", DEFAULT_EXPORT_SORT)
     if sort not in EXPORT_SORTS:
         sort = DEFAULT_EXPORT_SORT
     full = request.GET.get("full") == "1"
-    reports = reports_for_export(status=status, limit=MAX_SECURITY_CSV_EXPORT_ROWS, sort=sort)
+    reports = reports_for_export(
+        status=status, limit=MAX_SECURITY_CSV_EXPORT_ROWS, sort=sort, agent=agent
+    )
 
     # .iterator() so a big backlog isn't fully materialised to serve a stream.
     response = StreamingHttpResponse(
         stream_reports_csv(reports.iterator(chunk_size=200), full=full),
         content_type="text/csv; charset=utf-8",
     )
-    filename = export_filename(full=full, status=status)
+    filename = export_filename(full=full, status=status, agent=agent)
     response["Content-Disposition"] = f'attachment; filename="{filename}"'
     # This file is unfixed vulnerability reports, and with full=1 it's a working
     # description of how to exploit them. Without no-store it's heuristically
@@ -2007,8 +2210,9 @@ def security_report_export_csv(request: HttpRequest) -> HttpResponseBase:
     # download was deleted.
     response["Cache-Control"] = "no-store"
     logger.info(
-        "Security CSV export: status=%s sort=%s full=%s (cap %d rows)",
+        "Security CSV export: status=%s agent=%s sort=%s full=%s (cap %d rows)",
         status or "all",
+        agent,
         sort,
         full,
         MAX_SECURITY_CSV_EXPORT_ROWS,
@@ -2166,6 +2370,11 @@ def security_report_create(request: HttpRequest) -> HttpResponse:
         if not raw_text:
             return HttpResponse("Report text is required.", status=400)
 
+        try:
+            source_agent = agent_source.clean_agent_name(request.POST.get("source_agent", ""))
+        except ValueError as exc:
+            return HttpResponse(str(exc), status=400)
+
         project = None
         if project_id:
             project = Project.objects.filter(pk=project_id).first()
@@ -2184,6 +2393,7 @@ def security_report_create(request: HttpRequest) -> HttpResponse:
             reporter_name=reporter_name or parsed.from_name,
             reporter_email=reporter_email or parsed.from_email,
             source="paste",
+            source_agent=source_agent,
         )
 
         # Queue auto-triage if configured — runs in the worker, not inline.
@@ -2202,7 +2412,7 @@ def security_report_create(request: HttpRequest) -> HttpResponse:
     return render(
         request,
         "dashboard/security_create.html",
-        {"projects": projects},
+        {"projects": projects, "known_agents": agent_source.known_agents()},
     )
 
 
@@ -2868,11 +3078,14 @@ def security_match_branches(request: HttpRequest) -> HttpResponse:
     from franktheunicorn.security.branch_scan import projects_with_open_reports
     from franktheunicorn.security.queue import queue_branch_sweep
 
+    scope = _bulk_scope(request)
+    if scope is None:
+        return _back_to_security_list(request)
     reason = _branch_sweep_gate_reason(get_operator_config())
     if reason:
         messages.error(request, reason)
         return _back_to_security_list(request)
-    if not projects_with_open_reports():
+    if not projects_with_open_reports(scope):
         messages.info(
             request,
             "No open report is attached to a project, so there is no repo to look at. "
@@ -2880,17 +3093,20 @@ def security_match_branches(request: HttpRequest) -> HttpResponse:
         )
         return _back_to_security_list(request)
 
-    if queue_branch_sweep("match_security_branches"):
+    if queue_branch_sweep("match_security_branches", agent_scope=scope):
         messages.success(
             request,
-            "Queued the branch sweep: frank will fetch origin and look for the branch "
+            f"Queued the branch sweep{agent_source.scope_suffix(scope)}: frank will fetch "
+            "origin and look for the branch "
             "carrying each report's fix. Slow — a few hundred branches per project — and "
             "it runs at bulk priority, so it waits behind nothing but other bulk work. "
             "Confident matches are recorded as the fix branch; the rest show as "
             "suggestions on the reports.",
         )
     else:
-        messages.info(request, "A branch sweep is already queued or running.")
+        messages.info(
+            request, "A branch sweep covering these reports is already queued or running."
+        )
     return _back_to_security_list(request)
 
 
@@ -2908,11 +3124,14 @@ def security_scan_fixed(request: HttpRequest) -> HttpResponse:
     from franktheunicorn.security.branch_scan import projects_with_open_reports
     from franktheunicorn.security.queue import queue_branch_sweep
 
+    scope = _bulk_scope(request)
+    if scope is None:
+        return _back_to_security_list(request)
     reason = _branch_sweep_gate_reason(get_operator_config())
     if reason:
         messages.error(request, reason)
         return _back_to_security_list(request)
-    if not projects_with_open_reports():
+    if not projects_with_open_reports(scope):
         # Asked first and separately: the count below also requires a project, so
         # a backlog of pasted reports that all carry patches and none of which has
         # a project produced "no report carries a proposed patch" — a false reason,
@@ -2927,6 +3146,7 @@ def security_scan_fixed(request: HttpRequest) -> HttpResponse:
     patchable = (
         SecurityReport.objects.filter(project__isnull=False, status__in=("new", "valid"))
         .filter(fixed_in_branch="")
+        .filter(agent_source.scope_q(scope))
         .exclude(proposed_patch="")
         .count()
     )
@@ -2939,15 +3159,17 @@ def security_scan_fixed(request: HttpRequest) -> HttpResponse:
         )
         return _back_to_security_list(request)
 
-    if queue_branch_sweep("scan_security_fixed"):
+    if queue_branch_sweep("scan_security_fixed", agent_scope=scope):
         messages.success(
             request,
             f"Queued the already-fixed sweep over {patchable} report(s) with a proposed "
-            "patch. It fetches origin and reverse-applies each patch, which is proof "
+            f"patch{agent_source.scope_suffix(scope)}. It fetches origin and reverse-applies each patch, which is proof "
             "rather than a guess — but it is a checkout per branch, so give it a while.",
         )
     else:
-        messages.info(request, "An already-fixed sweep is already queued or running.")
+        messages.info(
+            request, "An already-fixed sweep covering these reports is already queued or running."
+        )
     return _back_to_security_list(request)
 
 
@@ -3001,11 +3223,14 @@ def security_check_fixes_landed(request: HttpRequest) -> HttpResponse:
     from franktheunicorn.security.branch_scan import projects_with_open_reports
     from franktheunicorn.security.queue import queue_branch_sweep
 
+    scope = _bulk_scope(request)
+    if scope is None:
+        return _back_to_security_list(request)
     reason = _branch_sweep_gate_reason(get_operator_config())
     if reason:
         messages.error(request, reason)
         return _back_to_security_list(request)
-    if not projects_with_open_reports():
+    if not projects_with_open_reports(scope):
         messages.info(
             request,
             "No open report is attached to a project, so there is no repo to look at. "
@@ -3014,6 +3239,7 @@ def security_check_fixes_landed(request: HttpRequest) -> HttpResponse:
         return _back_to_security_list(request)
     checkable = (
         SecurityReport.objects.filter(project__isnull=False)
+        .filter(agent_source.scope_q(scope))
         .exclude(status__in=SecurityReport.NO_FIX_OWED_STATUSES)
         .filter(Q(fix_branch__gt="") | Q(fix_branch_sha__gt="") | Q(fixed_in_branch__gt=""))
         .exclude(fix_landed_status="released")
@@ -3027,16 +3253,19 @@ def security_check_fixes_landed(request: HttpRequest) -> HttpResponse:
         )
         return _back_to_security_list(request)
 
-    if queue_branch_sweep("check_fixes_landed"):
+    if queue_branch_sweep("check_fixes_landed", agent_scope=scope):
         messages.success(
             request,
-            f"Queued the fix-landed check over {checkable} report(s) with a fix branch. "
+            f"Queued the fix-landed check over {checkable} report(s) with a fix branch"
+            f"{agent_source.scope_suffix(scope)}. "
             "It fetches origin and tests each branch's tip against master, the release "
             "lines and the release tags — proof, not a guess. Verdicts land on the "
             "reports; the ones git can't prove come back indeterminate.",
         )
     else:
-        messages.info(request, "A fix-landed check is already queued or running.")
+        messages.info(
+            request, "A fix-landed check covering these reports is already queued or running."
+        )
     return _back_to_security_list(request)
 
 
@@ -3054,11 +3283,14 @@ def security_check_cve_fixes_landed(request: HttpRequest) -> HttpResponse:
     from franktheunicorn.security.branch_scan import projects_with_open_reports
     from franktheunicorn.security.queue import queue_branch_sweep
 
+    scope = _bulk_scope(request)
+    if scope is None:
+        return _back_to_security_list(request)
     reason = _branch_sweep_gate_reason(get_operator_config())
     if reason:
         messages.error(request, reason)
         return _back_to_security_list(request)
-    if not projects_with_open_reports():
+    if not projects_with_open_reports(scope):
         messages.info(
             request,
             "No open report is attached to a project, so there is no repo to look at. "
@@ -3068,6 +3300,7 @@ def security_check_cve_fixes_landed(request: HttpRequest) -> HttpResponse:
     with_cve = (
         SecurityReport.objects.exclude(status__in=SecurityReport.NO_FIX_OWED_STATUSES)
         .filter(matched_cve_id__gt="")
+        .filter(agent_source.scope_q(scope))
         .count()
     )
     if not with_cve:
@@ -3079,17 +3312,20 @@ def security_check_cve_fixes_landed(request: HttpRequest) -> HttpResponse:
         )
         return _back_to_security_list(request)
 
-    if queue_branch_sweep("check_cve_fixes_landed"):
+    if queue_branch_sweep("check_cve_fixes_landed", agent_scope=scope):
         messages.success(
             request,
-            f"Queued the CVE fix check ({with_cve} open report(s) carry a CVE). It "
+            f"Queued the CVE fix check ({with_cve} open report(s) carry a CVE"
+            f"{agent_source.scope_suffix(scope)}). It "
             "fetches origin, ties CVE-named branches to reports that lack one, then "
             "tests every recorded branch against master, the release lines and the "
             "release tags. Slow — a branch walk plus ancestry checks per project — "
             "and it runs at bulk priority.",
         )
     else:
-        messages.info(request, "A CVE fix check is already queued or running.")
+        messages.info(
+            request, "A CVE fix check covering these reports is already queued or running."
+        )
     return _back_to_security_list(request)
 
 
@@ -3107,6 +3343,9 @@ def security_fix_landed_recheck(request: HttpRequest) -> HttpResponse:
     from franktheunicorn.security.queue import PRIORITY_INTERACTIVE, queue_recheck_poll
     from franktheunicorn.security.recheck import fix_landed_candidates, launch_fix_landed_recheck
 
+    scope = _bulk_scope(request)
+    if scope is None:
+        return _back_to_security_list(request)
     operator_config = get_operator_config()
     config = operator_config.security_triage.fix_agent
     if not config.enabled:
@@ -3123,12 +3362,13 @@ def security_fix_landed_recheck(request: HttpRequest) -> HttpResponse:
         )
         return _back_to_security_list(request)
 
-    grouped = fix_landed_candidates()
+    grouped = fix_landed_candidates(scope)
     if not grouped:
         messages.info(
             request,
             "No report is waiting on this — the fallback covers reports whose git "
-            "fix-landed check came back indeterminate, and there are none.",
+            f"fix-landed check came back indeterminate, and there are none"
+            f"{agent_source.scope_suffix(scope)}.",
         )
         return _back_to_security_list(request)
 
@@ -3178,7 +3418,8 @@ def security_fix_landed_recheck(request: HttpRequest) -> HttpResponse:
         messages.success(
             request,
             f"Fix-landed agent launched for {launched} project(s) covering {covered} "
-            "report(s) — verdicts land on the reports as the runs finish. The agent's "
+            f"report(s){agent_source.scope_suffix(scope)} — verdicts land on the reports "
+            "as the runs finish. The agent's "
             "answer is a pointer; git's ancestry check is the proof.",
         )
     for failure in failures:
@@ -3199,6 +3440,9 @@ def security_recheck_fixed(request: HttpRequest) -> HttpResponse:
     from franktheunicorn.security.queue import PRIORITY_INTERACTIVE, queue_recheck_poll
     from franktheunicorn.security.recheck import launch_recheck, untriaged_by_project
 
+    scope = _bulk_scope(request)
+    if scope is None:
+        return _back_to_security_list(request)
     operator_config = get_operator_config()
     config = operator_config.security_triage.fix_agent
     if not config.enabled:
@@ -3215,9 +3459,12 @@ def security_recheck_fixed(request: HttpRequest) -> HttpResponse:
         )
         return _back_to_security_list(request)
 
-    grouped = untriaged_by_project()
+    grouped = untriaged_by_project(scope)
     if not grouped:
-        messages.info(request, "No untriaged reports with a project to check.")
+        messages.info(
+            request,
+            f"No untriaged reports with a project to check{agent_source.scope_suffix(scope)}.",
+        )
         return _back_to_security_list(request)
 
     # A launched run older than the poll's own timeout outlived its poll
@@ -3278,8 +3525,9 @@ def security_recheck_fixed(request: HttpRequest) -> HttpResponse:
     if launched:
         messages.success(
             request,
-            f"Recheck launched for {launched} project(s) covering {covered} report(s) — "
-            "verdicts land on the reports as the runs finish.",
+            f"Recheck launched for {launched} project(s) covering {covered} report(s)"
+            f"{agent_source.scope_suffix(scope)} — verdicts land on the reports as the "
+            "runs finish.",
         )
     for failure in failures:
         messages.error(request, f"Recheck not launched for {failure}.")
@@ -3305,6 +3553,9 @@ def security_check_valid_fixed(request: HttpRequest) -> HttpResponse:
         valid_reports,
     )
 
+    scope = _bulk_scope(request)
+    if scope is None:
+        return _back_to_security_list(request)
     operator_config = get_operator_config()
     config = operator_config.security_triage.fix_agent
     if not config.enabled:
@@ -3322,9 +3573,11 @@ def security_check_valid_fixed(request: HttpRequest) -> HttpResponse:
         )
         return _back_to_security_list(request)
 
-    reports = valid_reports()
+    reports = valid_reports(scope)
     if not reports:
-        messages.info(request, "No valid reports with a project to check.")
+        messages.info(
+            request, f"No valid reports with a project to check{agent_source.scope_suffix(scope)}."
+        )
         return _back_to_security_list(request)
 
     # Same stale-run rule as the other recheck buttons: a launched run older
@@ -3376,8 +3629,9 @@ def security_check_valid_fixed(request: HttpRequest) -> HttpResponse:
     if launched:
         messages.success(
             request,
-            f"Launched {launched} agent(s), one per valid report — verdicts land on "
-            "the reports as the runs finish.",
+            f"Launched {launched} agent(s), one per valid report"
+            f"{agent_source.scope_suffix(scope)} — verdicts land on the reports as the "
+            "runs finish.",
         )
     if skipped:
         messages.info(request, f"{skipped} report(s) already have a check running.")
@@ -3397,6 +3651,102 @@ def security_check_valid_fixed(request: HttpRequest) -> HttpResponse:
         shown = "; ".join(failures[:5])
         more = f" (+{len(failures) - 5} more)" if len(failures) > 5 else ""
         messages.error(request, f"Valid-check not launched for {shown}{more}.")
+    return _back_to_security_list(request)
+
+
+@require_POST
+def security_reverify(request: HttpRequest) -> HttpResponse:
+    """Confirm / re-verify open reports against the code (bulk, scoped).
+
+    The question to ask of another agent's findings before anyone spends time on
+    them — is the hole actually in this code? — and the one worth asking again of
+    any report once the code has moved. Triage judges the *report*; this reads
+    the *repository*, so it is the check that catches the commonest failure of
+    machine-written findings: a cited file or function that isn't there, or a
+    patch that doesn't apply to anything.
+
+    Two depths, picked beside the button:
+
+    * ``git`` queues the version map for every candidate — ``git ls-tree`` of the
+      cited files and ``git apply --check`` of the proposed patch on each active
+      release branch. No agent, so no cap.
+    * ``agent`` does that and also queues the deep verifier (a coding agent in a
+      checkout, once per active branch) for at most ``MAX_BULK_VERIFY`` reports a
+      press, least recently sent first.
+
+    Both are worker commands through the one queue, so the in-flight dedup makes
+    a double press one run. Skips what :func:`reverify_candidates` skips, and the
+    flash says how many and why.
+    """
+    from franktheunicorn.config.loader import get_operator_config
+    from franktheunicorn.security.queue import (
+        PRIORITY_BULK,
+        queue_verification,
+        queue_version_map,
+        verifier_gate_reason,
+    )
+    from franktheunicorn.security.verifier import MAX_BULK_VERIFY, reverify_candidates
+
+    scope = _bulk_scope(request)
+    if scope is None:
+        return _back_to_security_list(request)
+    depth = request.POST.get("depth", "git")
+    if depth not in ("git", "agent"):
+        messages.error(request, f"Unknown verification depth {depth!r} — nothing was queued.")
+        return _back_to_security_list(request)
+
+    # Both depths share the verifier's checkout, so they share its gate — asked
+    # here so a press that can't work says why on the page.
+    reason = verifier_gate_reason(get_operator_config())
+    if reason:
+        messages.error(request, f"Can't verify against the code: {reason}.")
+        return _back_to_security_list(request)
+
+    candidates = list(reverify_candidates(scope))
+    suffix = agent_source.scope_suffix(scope)
+    if not candidates:
+        messages.info(
+            request,
+            f"Nothing to verify{suffix}: no open report with a project and no confirmed "
+            "fix branch. Reports ruled invalid, expected or duplicate are never re-verified, "
+            "and one with no project has no repo to read.",
+        )
+        return _back_to_security_list(request)
+
+    # Bulk priority even though a person pressed it: this is many commands, and
+    # the interactive lane exists so a single click doesn't wait behind them.
+    mapped = sum(queue_version_map(report, priority=PRIORITY_BULK) for report in candidates)
+    parts = [f"{mapped} queued for the git check (cited files + patch, every active branch)"]
+    if len(candidates) > mapped:
+        parts.append(f"{len(candidates) - mapped} already had one in flight")
+
+    remaining = 0
+    if depth == "agent":
+        batch = candidates[:MAX_BULK_VERIFY]
+        verified = sum(queue_verification(report, priority=PRIORITY_BULK) for report in batch)
+        parts.append(f"{verified} sent to the coding agent")
+        if len(batch) > verified:
+            parts.append(f"{len(batch) - verified} already being verified")
+        remaining = len(candidates) - len(batch)
+
+    messages.success(request, f"Confirm / re-verify{suffix}: " + ", ".join(parts) + ".")
+    if remaining > 0:
+        # Never silently: the cap is the difference between "the backlog is being
+        # verified" and "the first 25 of it are".
+        messages.info(
+            request,
+            f"The coding agent stopped at {MAX_BULK_VERIFY} reports a press — {remaining} "
+            "more not sent. Press again to carry on; least recently verified go first.",
+        )
+    logger.info(
+        "Bulk re-verify (agent scope %s, depth %s): %d candidate(s), %d version map(s) "
+        "queued, %d left for a later press",
+        scope,
+        depth,
+        len(candidates),
+        mapped,
+        remaining,
+    )
     return _back_to_security_list(request)
 
 

@@ -276,6 +276,46 @@ class TestBranchSweepQueue:
 
 
 @pytest.mark.django_db
+class TestScopedSweepQueue:
+    """A sweep scoped to one agent's reports, and what counts as already in flight."""
+
+    def _kwargs(self) -> list[dict[str, str]]:
+        return list(
+            WorkerCommand.objects.filter(command="match_security_branches")
+            .order_by("pk")
+            .values_list("kwargs", flat=True)
+        )
+
+    def test_the_scope_rides_in_kwargs_and_the_default_stores_nothing(self) -> None:
+        assert queue_branch_sweep("match_security_branches") is True
+        WorkerCommand.objects.update(status="completed")
+        assert queue_branch_sweep("match_security_branches", agent_scope="xbow") is True
+
+        assert self._kwargs() == [{}, {"agent_scope": "xbow"}]
+
+    def test_a_sweep_over_everything_covers_a_scoped_press(self) -> None:
+        assert queue_branch_sweep("match_security_branches") is True
+        assert queue_branch_sweep("match_security_branches", agent_scope="xbow") is False
+
+    def test_the_same_scope_is_one_command(self) -> None:
+        assert queue_branch_sweep("match_security_branches", agent_scope="xbow") is True
+        assert queue_branch_sweep("match_security_branches", agent_scope="xbow") is False
+
+    def test_one_agents_sweep_says_nothing_about_another_agent_or_everything(self) -> None:
+        """Declining these would drop the press: the running sweep never looks at
+        the reports it was asked about."""
+        assert queue_branch_sweep("match_security_branches", agent_scope="xbow") is True
+        assert queue_branch_sweep("match_security_branches", agent_scope="claude-code") is True
+        assert queue_branch_sweep("match_security_branches") is True
+        assert len(self._kwargs()) == 3
+
+    def test_every_agent_covers_one_agent_but_not_the_human_reports(self) -> None:
+        assert queue_branch_sweep("match_security_branches", agent_scope="any") is True
+        assert queue_branch_sweep("match_security_branches", agent_scope="xbow") is False
+        assert queue_branch_sweep("match_security_branches", agent_scope="none") is True
+
+
+@pytest.mark.django_db
 class TestFixLandedQueue:
     """The per-report "Check if landed" button's door."""
 

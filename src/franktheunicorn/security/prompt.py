@@ -61,6 +61,7 @@ def build_triage_prompt(
     security_model: str = "",
     cve_candidates: list[object] | None = None,
     learned_guidance: str = "",
+    source_agent: str = "",
 ) -> tuple[str, str]:
     """Build system + user prompts for triage analysis.
 
@@ -78,6 +79,11 @@ def build_triage_prompt(
     ``learned_guidance`` is the distilled addendum built from prior operator
     agree/disagree feedback (see ``security/learning.py``). When provided,
     it is appended to the system prompt.
+
+    ``source_agent`` names the automated agent that produced the report, when
+    one did (``SecurityReport.source_agent``). Its findings fail differently
+    from a person's, and the model is told how, so a confidently-worded scanner
+    finding isn't graded on its confidence.
 
     Returns (system_prompt, user_message).
     """
@@ -137,6 +143,18 @@ def build_triage_prompt(
         f"**POC Steps:**\n{parsed_poc}\n",
         f"**Claimed Impact:** {parsed_impact}\n",
     ]
+
+    if source_agent:
+        parts.append(
+            "\n## Provenance\n"
+            f"This report was produced by an automated agent ({source_agent}), not "
+            "written by a person. Machine-generated findings commonly cite files, "
+            "functions or call paths that don't exist or don't behave as described, "
+            "assert severity without demonstrating impact, and report one root cause "
+            "once per call site. Judge the POC and the impact on what is actually "
+            "shown; treat the agent's own severity or confidence as its opinion, not "
+            "evidence.\n"
+        )
 
     if security_model:
         parts.append(

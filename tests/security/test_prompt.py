@@ -177,6 +177,25 @@ class TestBuildTriagePrompt:
         )
         assert "OPERATOR-LEARNED TRIAGE GUIDANCE" not in system
 
+    def test_an_agent_report_says_so_and_how_those_fail(self) -> None:
+        _, user = build_triage_prompt(
+            parsed_component="x",
+            parsed_poc="y",
+            parsed_impact="z",
+            project_context="",
+            source_agent="xbow",
+        )
+        assert "## Provenance" in user
+        assert "automated agent (xbow)" in user
+        # The point: the agent's confidence is not evidence.
+        assert "opinion, not evidence" in user
+
+    def test_a_persons_report_carries_no_provenance_block(self) -> None:
+        _, user = build_triage_prompt(
+            parsed_component="x", parsed_poc="y", parsed_impact="z", project_context=""
+        )
+        assert "## Provenance" not in user
+
 
 class TestParsePromptTruncation:
     """A bulk import doesn't self-limit the way a pasted report does."""

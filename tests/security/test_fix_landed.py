@@ -398,13 +398,16 @@ class TestCveFixesComposite:
 
         project = ProjectFactory()
         order: list[str] = []
+        scopes: list[str] = []
 
-        def _match(p: Any, _c: Any) -> BranchMatchRun:
+        def _match(p: Any, _c: Any, *, agent_scope: str) -> BranchMatchRun:
             order.append("match")
+            scopes.append(agent_scope)
             return BranchMatchRun(project=p.full_name, applied=1)
 
-        def _check(p: Any, _c: Any) -> FixLandedRun:
+        def _check(p: Any, _c: Any, *, agent_scope: str) -> FixLandedRun:
             order.append("check")
+            scopes.append(agent_scope)
             return FixLandedRun(project=p.full_name, merged=1)
 
         with (
@@ -417,9 +420,11 @@ class TestCveFixesComposite:
                 side_effect=_check,
             ),
         ):
-            run = check_cve_fixes(project, _operator())
+            run = check_cve_fixes(project, _operator(), agent_scope="xbow")
 
         assert order == ["match", "check"]
+        # Both halves honour the press's agent scope, not just the first.
+        assert scopes == ["xbow", "xbow"]
         assert run.error == ""
         assert "1 branch(es) recorded" in run.summary()
         assert "1 merged" in run.summary()
@@ -441,3 +446,23 @@ class TestCveFixesComposite:
         assert run.error == "no checkout"
         assert "did not run" in run.summary()
         assert not landed.called
+
+
+@pytest.mark.django_db
+class TestAgentScope:
+    def test_the_sweep_only_checks_the_scopes_reports(self) -> None:
+        project = ProjectFactory()
+        agents = SecurityReportFactory(
+            project=project, fix_branch_sha="abc123", source_agent="xbow"
+        )
+        persons = SecurityReportFactory(project=project, fix_branch_sha="abc123", source_agent="")
+        executor = _Executor(shas=("abc123",), ancestors=(("abc123", "origin/master"),))
+
+        with patch("franktheunicorn.review.tool_executor.make_executor", return_value=executor):
+            run = check_project_fixes(project, _operator(), agent_scope="xbow")
+
+        agents.refresh_from_db()
+        persons.refresh_from_db()
+        assert run.reports_considered == 1
+        assert agents.fix_landed_status == "merged"
+        assert persons.fix_landed_status == ""

@@ -26,6 +26,7 @@
   - [4.8 Telemetry](#48-telemetry)
   - [4.9 Sharing the Backlog for Outside Review](#49-sharing-the-backlog-for-outside-review)
   - [4.10 Deep Verification of Security Reports](#410-deep-verification-of-security-reports)
+  - [4.11 Reports From Another Agent](#411-reports-from-another-agent)
 - [5. Remote CI Trust](#5-remote-ci-trust)
   - [5.1 The Appeal](#51-the-appeal)
   - [5.2 Why It Is Not Safe to Trust PR-branch CI By Default](#52-why-it-is-not-safe-to-trust-pr-branch-ci-by-default)
@@ -578,6 +579,56 @@ table, which invites being trusted more than it has earned.
   and it will sometimes over-state: a line whose early releases predate the vulnerable code gets
   listed anyway. The trade was made knowingly — the alternative is per-tag verification, which is
   a great deal more agent time for a distinction that usually doesn't change what you ship.
+
+### 4.11 Reports From Another Agent
+
+**What happens:** `SecurityReport.source_agent` names the automated agent that produced a
+report — blank for one a person sent. The operator sets it at import (the Agent box beside the
+zip upload, `import_security_zip --agent`, the paste form) or afterwards per archive (the
+relabel field in the Imported archives table). `security/agent_source.py` turns it into a
+*scope* — one agent, `any` agent, `none` (people only) or `all` — which filters the list, its
+tab counts and the CSV export, and rides into every bulk button as a hidden field. Triage is
+told when a report is machine-written (a `## Provenance` block in the analysis prompt). The
+**✓ Confirm / Re-verify** button re-checks open reports in the scope against the code: the git
+version map for all of them, plus — when asked — the deep verifier (§4.10) for at most 25 a
+press, least recently verified first.
+
+**Risk:** another agent's output is volume. A scanner archive is a hundred findings nobody has
+read, which is the opposite of the reviewed intake §4.10's mitigations lean on. Some of those
+findings will be machine restatements of text the scanner itself read — code comments, issue
+bodies, test fixtures — so a payload planted where the *scanner* looked arrives here looking
+like the scanner's own words. The bulk button exists precisely to send that volume to a coding
+agent with tool access.
+
+**Current mitigations:**
+
+- **A press, per scope, capped.** Nothing re-verifies on its own; the agent depth is opt-in at
+  the button, and 25 reports a press bounds a mistake at 25 × (branches + 1) agent runs.
+- **A scope that doesn't parse is refused, never widened.** Every bulk view, the worker's sweep
+  handlers and the export refuse rather than fall back to `all`, so a typo cannot turn a press
+  on one agent's twenty findings into one on the whole backlog — or a sheet of one agent's
+  reports into the whole unfixed backlog in a shared Drive.
+- **Everything §4.10 does still applies per report**: the data-not-instructions framing, the
+  injection scan, the distinct checkout. The triage prompt's provenance block tells the model
+  that machine-written findings cite code that isn't there and grade their own severity, so the
+  scanner's confidence is not graded as evidence.
+- **The label is display and selection only.** It never changes a status, a verdict or a gate;
+  it is never written back from the review sheet (read-only column).
+
+**Remaining gaps:**
+
+- **The label is the operator's word, not a check.** Nothing verifies that an archive came from
+  the agent it is filed under, or that a "person-sent" paste wasn't machine-written. A wrong
+  label mis-scopes the buttons; it doesn't widen any of them.
+- **`verifier.refuse_on_injection` is not tied to the label.** Bulk import of somebody else's
+  scanner output is one of the two cases §4.10 says to turn it on for, and the operator now has
+  the field that identifies those reports. Refusing automatically on agent-sourced reports with
+  injection hits is the obvious next step and has not been taken, because the false-positive
+  case (a report *about* prompt injection quoting its payload) is at least as common in
+  scanner output.
+- **Scoped duplicate re-checks only compare within the scope.** A scoped press can't clear a
+  link into the rest of the backlog, which is safe, but it also can't find an agent's finding
+  that duplicates a person's report — that takes a press on All.
 
 ---
 

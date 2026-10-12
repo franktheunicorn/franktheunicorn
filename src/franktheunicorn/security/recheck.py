@@ -31,6 +31,7 @@ from django.db.models import F, OuterRef, Subquery
 from django.utils import timezone
 
 from franktheunicorn.core.models import SecurityRecheckRun, SecurityReport
+from franktheunicorn.security import agent_source
 from franktheunicorn.security.fix_agent import (
     FAILED_RUN_STATUSES,
     FixAgentError,
@@ -62,7 +63,9 @@ _REPORT_CHARS = 600
 _MAX_REPORTS_PER_RUN = 50
 
 
-def untriaged_by_project() -> dict[Project, list[SecurityReport]]:
+def untriaged_by_project(
+    agent_scope: str = agent_source.SCOPE_ALL,
+) -> dict[Project, list[SecurityReport]]:
     """The backlog this batch would cover: untriaged reports with a project.
 
     Project-less reports are excluded — the agent clones the project's repo,
@@ -82,9 +85,13 @@ def untriaged_by_project() -> dict[Project, list[SecurityReport]]:
     cloud agent to wonder about the same report is the spend this filter exists to
     avoid. ``operator_has_ruled`` draws the line the other way for its own purposes;
     see its docstring for why the two disagree.
+
+    *agent_scope* narrows to one source's reports (see :mod:`agent_source`), so
+    a press on one agent's backlog pays for that backlog only.
     """
     reports = (
         SecurityReport.objects.filter(status="new", project__isnull=False, fixed_in_branch="")
+        .filter(agent_source.scope_q(agent_scope))
         .select_related("project")
         .order_by("-priority", "pk")
     )
@@ -309,7 +316,9 @@ def apply_recheck_results(run: SecurityRecheckRun, result: str) -> int:
 # ---------------------------------------------------------------------------
 
 
-def fix_landed_candidates() -> dict[Project, list[SecurityReport]]:
+def fix_landed_candidates(
+    agent_scope: str = agent_source.SCOPE_ALL,
+) -> dict[Project, list[SecurityReport]]:
     """Reports whose git fix-landed check came back indeterminate, per project.
 
     That is the fallback's whole remit: git said "I can't prove this either
@@ -321,6 +330,7 @@ def fix_landed_candidates() -> dict[Project, list[SecurityReport]]:
     """
     reports = (
         SecurityReport.objects.filter(fix_landed_status="indeterminate", project__isnull=False)
+        .filter(agent_source.scope_q(agent_scope))
         .exclude(status__in=SecurityReport.NO_FIX_OWED_STATUSES)
         .select_related("project")
         .order_by("-priority", "pk")
@@ -444,7 +454,7 @@ def apply_fix_landed_results(run: SecurityRecheckRun, result: str) -> int:
 MAX_VALID_CHECK_LAUNCHES = 25
 
 
-def valid_reports() -> list[SecurityReport]:
+def valid_reports(agent_scope: str = agent_source.SCOPE_ALL) -> list[SecurityReport]:
     """The triaged-real backlog: reports the operator ruled ``valid``, with a repo.
 
     ``status="valid"`` is the operator's own ruling (the machine's suggestion
@@ -475,6 +485,7 @@ def valid_reports() -> list[SecurityReport]:
     )
     return list(
         SecurityReport.objects.filter(status="valid", project__isnull=False)
+        .filter(agent_source.scope_q(agent_scope))
         .select_related("project")
         .annotate(last_valid_check=Subquery(last_launch))
         .order_by(F("last_valid_check").asc(nulls_first=True), "-priority", "pk")

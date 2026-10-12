@@ -508,6 +508,20 @@ class TestSecurityModelThreading:
         assert "Loaded models are trusted; data files are not." in user
         assert "CVE-2025-30065" in user
 
+    def test_analyze_report_tells_the_model_an_agent_wrote_it(self, db: Any) -> None:
+        """The import stamps source_agent in the same transaction as the triage
+        command, so the prompt always knows it is reading another agent's output."""
+        from franktheunicorn.security.triage import _analyze_report
+        from tests.factories import SecurityReportFactory
+
+        backend = _CapturingBackend(responses=[self._analyze_json()])
+        report = SecurityReportFactory(status="triaging", source_agent="xbow")
+
+        _analyze_report(report, backend, "")
+
+        _system, user = backend.calls[-1]
+        assert "automated agent (xbow)" in user
+
     @patch("franktheunicorn.security.triage.search_cves", return_value=[])
     @patch("franktheunicorn.security.triage._get_triage_backends")
     def test_triage_report_threads_project_security_model(

@@ -1092,6 +1092,7 @@ def _analyze_report(
         security_model=security_model,
         cve_candidates=cve_candidates,
         learned_guidance=learned_guidance,
+        source_agent=report.source_agent,
     )
 
     project_id = report.project_id if report.project else None

@@ -1178,6 +1178,16 @@ class SecurityReport(models.Model):
     # what was scanned.
     source_archive = models.CharField(max_length=255, blank=True, default="")
 
+    # Which automated agent produced this report, or "" for one a person sent.
+    # Orthogonal to ``source``, which is the *door* (paste, email, zip): another
+    # agent's findings arrive through all three, and a human's backlog arrives as
+    # a zip too. Named by the operator at import — no archive we've seen says who
+    # wrote it, and guessing from a manifest's shape is wrong exactly when it
+    # matters. Normalised by ``security.agent_source.clean_agent_name`` so
+    # "Claude Code" and "claude-code" are one filter, not two. Indexed because
+    # every bulk button and the list's source row filter on it.
+    source_agent = models.CharField(max_length=100, blank=True, default="", db_index=True)
+
     # Email metadata (populated when source=email)
     email_message_id = models.CharField(max_length=500, blank=True, default="")
     email_received_at = models.DateTimeField(null=True, blank=True)
