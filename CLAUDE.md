@@ -198,6 +198,16 @@ src/franktheunicorn/
                      #   not part of the live review path)
   fine_tuning/       # Axolotl pipeline + evaluator. Optional v2 install
                      #   extra; not imported on the live review path.
+  magpie/            # Pinned Apache Magpie integration: magpie-pin.yaml is
+                     #   the lock (one upstream commit, a sha256 per vendored
+                     #   file, the pinned Python tools), vendored/ holds
+                     #   upstream skill text copied with a provenance header
+                     #   and read via vendored_text() as prompt material, and
+                     #   sync.py backs `manage.py magpie_sync` (--check is the
+                     #   offline CI gate, --sync regenerates, --bump re-pins).
+                     #   Nothing here fetches a floating ref; see
+                     #   docs/magpie-integration.md for what is borrowed, why,
+                     #   and how each piece reaches the remote agent host.
   data_access/       # Dual-path data fetchers (API + scrape)
     github/          #   PRs, diffs, reviews, blame, users
     jira/            #   Ticket fetch + cache (v1.5)

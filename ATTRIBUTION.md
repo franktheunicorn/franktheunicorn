@@ -14,3 +14,15 @@ All visual assets in this project are released under CC0 1.0 Universal
 
 While CC0 does not require attribution, we credit the artists because
 it's the right thing to do.
+
+## Code and Text
+
+| Origin | What | Where in this repo | Revision | License |
+|--------|------|--------------------|----------|---------|
+| [Apache Magpie](https://github.com/apache/magpie) (The Apache Software Foundation) | Vendored skill text used as prompt material, and Python tools run at a pinned revision | `src/franktheunicorn/magpie/vendored/` (each file opens with a provenance header naming its upstream path and commit); tools are pinned in `src/franktheunicorn/magpie/magpie-pin.yaml` | The commit in `magpie-pin.yaml` | [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0) |
+
+Apache-2.0 asks that redistributed source keep its notices. Every vendored
+file keeps Magpie's own SPDX header in its body, and the provenance header
+above it names the exact upstream path and commit so the copy can be diffed
+against its source. `manage.py magpie_sync --check` verifies the copies match
+the lock; see `docs/magpie-integration.md` for what is borrowed and why.
