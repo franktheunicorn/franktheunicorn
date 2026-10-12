@@ -11,7 +11,7 @@ import logging
 import re
 from datetime import timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from franktheunicorn.config.models import OperatorConfig, ProjectConfig
@@ -35,9 +35,11 @@ from franktheunicorn.core.models import (
     AgentFeedback,
     AgentVibe,
     AntiPattern,
+    CICheckHistory,
     CostRecord,
     DependencyChange,
     EmailScanRecord,
+    MergeReadinessFeedback,
     OperatorAction,
     Project,
     PullRequest,
@@ -49,12 +51,25 @@ from franktheunicorn.core.models import (
     TestRun,
     WorkerCommand,
 )
+from franktheunicorn.scoring.merge_readiness import (
+    ALMOST_READY_QUEUE,
+    LISTED_VERDICTS,
+    READINESS_UPDATE_FIELDS,
+    build_rebase_request,
+    learned_rules_summary,
+    record_merge_feedback,
+    refresh_merge_readiness,
+    refresh_review_and_ci_state,
+)
 
 logger = logging.getLogger(__name__)
 
-# Queue definitions for the tab bar.
+# Queue definitions for the tab bar. "almost-ready" is not a PullRequest.queue
+# value: it cuts across the moderation queues (a new contributor's PR can be
+# almost ready) and is filtered on merge_readiness_verdict instead.
 QUEUE_TABS: list[dict[str, str]] = [
     {"key": "review", "label": "Review"},
+    {"key": ALMOST_READY_QUEUE, "label": "Almost Ready to Merge"},
     {"key": "your-prs", "label": "Your PRs"},
     {"key": "mentioned", "label": "Mentioned"},
     {"key": "ai-generated", "label": "AI-Generated"},
@@ -129,10 +144,10 @@ def index(request: HttpRequest) -> HttpResponse:
 
     prs = (
         PullRequest.objects.select_related("project")
-        .filter(state="open", queue=queue, project__enabled=True)
+        .filter(_queue_q(queue), state="open", project__enabled=True)
         .filter(Project.configured_q(lookup="project"))
         .annotate(last_local_action_at=Max("actions__created_at"))
-        .order_by("-interest_score", "-github_updated_at")
+        .order_by(*_queue_ordering(queue))
     )
 
     if workspace_projects is not None:
@@ -180,6 +195,21 @@ def index(request: HttpRequest) -> HttpResponse:
             pr.findings_count = finding_counts.get(pr.pk, 0)  # type: ignore[attr-defined]
             pr.latest_test_verdict = latest_verdicts.get(pr.pk)  # type: ignore[attr-defined]
 
+    # The almost-ready tab carries its own per-PR panel (verdict, reasons,
+    # buttons) and a header of what the queue has learned from past verdicts.
+    learned_rules: list[str] = []
+    if queue == ALMOST_READY_QUEUE:
+        operator_username = _operator_username()
+        config_by_name = _project_configs_by_name()
+        for pr in pr_list:
+            pr.candidate = _merge_candidate_context(  # type: ignore[attr-defined]
+                pr, config_by_name.get(pr.project.full_name.lower()), operator_username
+            )
+        for project_row in {pr.project for pr in pr_list}:
+            learned_rules.extend(
+                f"{project_row.full_name}: {line}" for line in learned_rules_summary(project_row)
+            )
+
     # Count PRs per queue for tab badges (respects the same project/type filters).
     base_qs = PullRequest.objects.filter(state="open", project__enabled=True).filter(
         Project.configured_q(lookup="project")
@@ -191,7 +221,7 @@ def index(request: HttpRequest) -> HttpResponse:
     if parsed_project is not None:
         base_qs = base_qs.filter(project__owner=parsed_project[0], project__repo=parsed_project[1])
     queue_counts: dict[str, int] = {
-        tab["key"]: base_qs.filter(queue=tab["key"]).count() for tab in QUEUE_TABS
+        tab["key"]: base_qs.filter(_queue_q(tab["key"])).count() for tab in QUEUE_TABS
     }
     queue_tabs_with_counts = [
         {**tab, "count": queue_counts.get(tab["key"], 0)} for tab in QUEUE_TABS
@@ -224,8 +254,23 @@ def index(request: HttpRequest) -> HttpResponse:
             "active_project": active_project,
             "available_project_types": available_project_types,
             "available_projects": available_projects,
+            "learned_rules": learned_rules,
+            "almost_ready_queue": ALMOST_READY_QUEUE,
         },
     )
+
+
+def _queue_q(queue: str) -> Q:
+    """The filter behind one tab: a routing queue, or the readiness verdict."""
+    if queue == ALMOST_READY_QUEUE:
+        return Q(merge_readiness_verdict__in=LISTED_VERDICTS)
+    return Q(queue=queue)
+
+
+def _queue_ordering(queue: str) -> tuple[str, ...]:
+    if queue == ALMOST_READY_QUEUE:
+        return ("-merge_readiness_score", "-interest_score", "-github_updated_at")
+    return ("-interest_score", "-github_updated_at")
 
 
 @require_POST
@@ -506,11 +551,17 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
 
     prev_pr, next_pr = _adjacent_prs(pr)
 
+    # Merge readiness: the verdict and, when it is "not ready", exactly why —
+    # the detail page is where "why isn't this in the almost-ready tab" gets
+    # answered.
+    candidate = _merge_candidate_context(pr, project_config, operator_config.github_username)
+
     return render(
         request,
         "dashboard/pr_detail.html",
         {
             "pr": pr,
+            "candidate": candidate,
             "drafts": drafts,
             "suppressed_drafts": suppressed_drafts,
             "agent_vibes": agent_vibes,
@@ -875,10 +926,28 @@ def stats(request: HttpRequest) -> HttpResponse:
     suppressed_count = ReviewDraft.objects.filter(is_auto_suppressed=True).count()
     scored_count = ReviewDraft.objects.filter(rejection_probability__isnull=False).count()
 
+    # Almost-ready-to-merge feedback: what the operator said, and the top
+    # reasons for sending a candidate back.
+    merge_verdicts: dict[str, int] = {
+        row["verdict"]: row["count"]
+        for row in MergeReadinessFeedback.objects.values("verdict").annotate(count=Count("id"))
+    }
+    merge_reasons = list(
+        MergeReadinessFeedback.objects.filter(verdict="not-ready")
+        .exclude(reason_code="")
+        .values("reason_code")
+        .annotate(count=Count("id"))
+        .order_by("-count")[:5]
+    )
+    flaky_checks_known = CICheckHistory.objects.filter(flaky_count__gt=0).count()
+
     return render(
         request,
         "dashboard/stats.html",
         {
+            "merge_verdicts": merge_verdicts,
+            "merge_reasons": merge_reasons,
+            "flaky_checks_known": flaky_checks_known,
             "action_counts": action_counts,
             "total_cost": total_cost.get("total") or Decimal("0"),
             "total_tokens_in": total_cost.get("total_tokens_in") or 0,
@@ -984,10 +1053,349 @@ def merge_pr(request: HttpRequest, pr_id: int) -> HttpResponse:
         github_client.close()
 
     if result.success:
+        try:
+            record_merge_feedback(pr, "merged")
+        except Exception:
+            logger.debug("Could not record merge feedback for PR #%d", pr.number, exc_info=True)
         return HttpResponse(
             f'<div class="merge-result ok-note">Merged PR #{pr.number} via {result.method}.</div>'
         )
     return HttpResponse(f'<div class="merge-result error-note">Merge failed: {result.error}</div>')
+
+
+# --- Almost Ready to Merge (merge candidates) ---
+
+
+def _operator_username() -> str:
+    try:
+        from franktheunicorn.config.loader import get_operator_config
+
+        return get_operator_config().github_username or ""
+    except Exception:
+        return ""
+
+
+def _project_configs_by_name() -> dict[str, ProjectConfig]:
+    """All project configs keyed by lower-cased ``owner/repo``."""
+    from django.conf import settings
+
+    from franktheunicorn.config.loader import load_project_configs
+
+    try:
+        configs = load_project_configs(getattr(settings, "FRANK_PROJECTS_DIR", ""))
+    except Exception:
+        return {}
+    return {f"{c.owner}/{c.repo}".lower(): c for c in configs}
+
+
+def _project_config_or_default(pr: PullRequest) -> ProjectConfig:
+    """The PR's project config, or a default one so the buttons still render.
+
+    A PR ingested without YAML (tests, a lookup on an unconfigured repo) gets
+    default readiness settings and a disabled merge queue.
+    """
+    from franktheunicorn.config.loader import get_project_config
+    from franktheunicorn.config.models import ProjectConfig as _ProjectConfig
+
+    try:
+        found = get_project_config(pr.project.full_name)
+    except Exception:
+        found = None
+    if found is not None:
+        return found
+    return _ProjectConfig(owner=pr.project.owner, repo=pr.project.repo)
+
+
+def _merge_candidate_context(
+    pr: PullRequest,
+    project_config: ProjectConfig | None,
+    operator_username: str,
+    *,
+    note: str = "",
+    error: bool = False,
+) -> dict[str, object]:
+    """Everything ``_merge_candidate.html`` renders for one PR."""
+    from franktheunicorn.worker.merge_queue import evaluate_merge_eligibility
+
+    detail: dict[str, Any] = (
+        pr.merge_readiness_detail if isinstance(pr.merge_readiness_detail, dict) else {}
+    )
+    ci_raw = detail.get("ci")
+    ci: dict[str, Any] = ci_raw if isinstance(ci_raw, dict) else {}
+    confidence_raw = ci.get("flake_confidence")
+    confidence: dict[str, Any] = confidence_raw if isinstance(confidence_raw, dict) else {}
+    urls = {
+        str(c.get("name")): str(c.get("url") or "")
+        for c in (pr.ci_checks or [])
+        if isinstance(c, dict) and c.get("name")
+    }
+    failing_raw = ci.get("failing")
+    failing = [str(n) for n in failing_raw] if isinstance(failing_raw, list) else []
+    failing_checks = [
+        {
+            "name": name,
+            "url": urls.get(name, ""),
+            "confidence": round(float(confidence.get(name, 0.0)) * 100),
+        }
+        for name in failing
+    ]
+    approvers_raw = detail.get("approvers")
+    approvers = [str(a) for a in approvers_raw] if isinstance(approvers_raw, list) else []
+    op = operator_username.lower()
+    is_own = pr.is_operator_pr or (bool(op) and pr.author.lower() == op)
+    operator_approved = bool(op) and op in {a.lower() for a in approvers}
+
+    # isinstance rather than a truthiness check: a test double standing in for
+    # the project config must not be mistaken for an enabled merge queue.
+    from franktheunicorn.config.models import MergeQueueConfig, MergeReadinessConfig
+
+    merge_enabled = False
+    merge_eligible = False
+    merge_command = ""
+    merge_details: list[str] = []
+    merge_queue = getattr(project_config, "merge_queue", None)
+    if isinstance(merge_queue, MergeQueueConfig) and merge_queue.enabled:
+        merge_enabled = True
+        eligibility = evaluate_merge_eligibility(pr, merge_queue)
+        merge_eligible = eligibility.eligible
+        merge_details = eligibility.details
+        merge_command = str(pr.number) if merge_queue.merge_script else ""
+
+    readiness_cfg = getattr(project_config, "merge_readiness", None)
+    if not isinstance(readiness_cfg, MergeReadinessConfig):
+        readiness_cfg = (
+            _project_config_or_default(pr).merge_readiness
+            if project_config is None
+            else MergeReadinessConfig()
+        )
+    rebase_requested = bool(pr.rebase_requested_sha) and pr.rebase_requested_sha == pr.head_sha
+    ci_status = str(ci.get("status") or "unknown")
+
+    def _str_list(key: str) -> list[str]:
+        raw = detail.get(key)
+        return [str(x) for x in raw] if isinstance(raw, list) else []
+
+    ci_reasons_raw = ci.get("reasons")
+    return {
+        "verdict": pr.merge_readiness_verdict,
+        "score": pr.merge_readiness_score,
+        "reasons": _str_list("reasons"),
+        "blockers": _str_list("blockers"),
+        "ci_status": ci_status,
+        "ci_reasons": [str(r) for r in ci_reasons_raw] if isinstance(ci_reasons_raw, list) else [],
+        "failing_checks": failing_checks,
+        "approvers": approvers,
+        "stale_approvers": _str_list("stale_approvers"),
+        "changes_requested_by": _str_list("changes_requested_by"),
+        "operator_approved": operator_approved,
+        "is_own": is_own,
+        "can_lgtm": not is_own and not operator_approved,
+        "merge_enabled": merge_enabled,
+        "merge_eligible": merge_eligible,
+        "merge_command": merge_command,
+        "merge_details": merge_details,
+        "rebase_requested": rebase_requested,
+        "rebase_preview": build_rebase_request(pr, readiness_cfg) if ci_status == "flaky" else "",
+        "dismissed_here": bool(pr.head_sha) and pr.merge_readiness_dismissed_sha == pr.head_sha,
+        "evaluated_at": str(detail.get("evaluated_at") or ""),
+        "reason_choices": MergeReadinessFeedback.REASON_CHOICES,
+        "note": note,
+        "error": error,
+    }
+
+
+def _candidate_response(
+    request: HttpRequest,
+    pr: PullRequest,
+    project_config: ProjectConfig,
+    operator_username: str,
+    *,
+    note: str = "",
+    error: bool = False,
+) -> HttpResponse:
+    """Re-render the candidate panel after an action (htmx outerHTML swap)."""
+    return render(
+        request,
+        "dashboard/_merge_candidate.html",
+        {
+            "pr": pr,
+            "cand": _merge_candidate_context(
+                pr, project_config, operator_username, note=note, error=error
+            ),
+        },
+    )
+
+
+def _reevaluate_candidate(pr: PullRequest, project_config: ProjectConfig, username: str) -> None:
+    try:
+        refresh_merge_readiness(pr, project_config, username)
+    except Exception:
+        logger.warning("Merge readiness re-score failed for PR #%d", pr.number, exc_info=True)
+
+
+@require_POST
+def merge_candidate_lgtm(request: HttpRequest, pr_id: int) -> HttpResponse:
+    """Post an approving review (the LGTM) on the forge and record it."""
+    pr = get_object_or_404(PullRequest.objects.select_related("project"), pk=pr_id)
+    username = _operator_username()
+    pc = _project_config_or_default(pr)
+    if pr.is_operator_pr or (username and pr.author.lower() == username.lower()):
+        return _candidate_response(
+            request, pr, pc, username, note="You can't LGTM your own PR.", error=True
+        )
+    client = _make_posting_client(pr)
+    if client is None:
+        return _candidate_response(
+            request,
+            pr,
+            pc,
+            username,
+            note="Cannot approve: no forge client/token configured.",
+            error=True,
+        )
+    from franktheunicorn.backends.base import ReviewBody
+
+    try:
+        try:
+            client.create_review(  # type: ignore[attr-defined]
+                pr.project.owner,
+                pr.project.repo,
+                pr.number,
+                ReviewBody(event="APPROVE", body=pc.merge_readiness.lgtm_body),
+            )
+        finally:
+            client.close()  # type: ignore[attr-defined]
+    except Exception:
+        logger.exception("LGTM failed for PR #%d", pr.number)
+        return _candidate_response(
+            request, pr, pc, username, note="Approve failed (see worker/web log).", error=True
+        )
+    record_merge_feedback(pr, "lgtm", operator_username=username)
+    _reevaluate_candidate(pr, pc, username)
+    return _candidate_response(request, pr, pc, username, note="Approved on the forge.")
+
+
+@require_POST
+def merge_candidate_dismiss(request: HttpRequest, pr_id: int) -> HttpResponse:
+    """ "Not ready": record why, park the PR until the next push, and learn."""
+    pr = get_object_or_404(PullRequest.objects.select_related("project"), pk=pr_id)
+    username = _operator_username()
+    pc = _project_config_or_default(pr)
+    reason_code = request.POST.get("reason_code", "").strip()
+    valid = {code for code, _ in MergeReadinessFeedback.REASON_CHOICES}
+    if reason_code and reason_code not in valid:
+        return _candidate_response(
+            request, pr, pc, username, note="Unknown reason code.", error=True
+        )
+    reason_text = request.POST.get("reason_text", "").strip()
+    record_merge_feedback(
+        pr,
+        "not-ready",
+        reason_code=reason_code,
+        reason_text=reason_text,
+        operator_username=username,
+    )
+    _reevaluate_candidate(pr, pc, username)
+    return _candidate_response(
+        request,
+        pr,
+        pc,
+        username,
+        note="Noted. It comes back if the author pushes; the reason feeds the ranking.",
+    )
+
+
+@require_POST
+def merge_candidate_request_rebase(request: HttpRequest, pr_id: int) -> HttpResponse:
+    """Ask the author to rebase so CI re-runs — the one-click answer to a flake."""
+    pr = get_object_or_404(PullRequest.objects.select_related("project"), pk=pr_id)
+    username = _operator_username()
+    pc = _project_config_or_default(pr)
+    if pr.rebase_requested_sha and pr.rebase_requested_sha == pr.head_sha:
+        return _candidate_response(
+            request, pr, pc, username, note="Already asked at this commit.", error=True
+        )
+    client = _make_posting_client(pr)
+    if client is None:
+        return _candidate_response(
+            request,
+            pr,
+            pc,
+            username,
+            note="Cannot comment: no forge client/token configured.",
+            error=True,
+        )
+    body = build_rebase_request(pr, pc.merge_readiness)
+    from franktheunicorn.backends.base import ReviewBody
+
+    try:
+        try:
+            try:
+                client.create_issue_comment(  # type: ignore[attr-defined]
+                    pr.project.owner, pr.project.repo, pr.number, body
+                )
+            except NotImplementedError:
+                client.create_review(  # type: ignore[attr-defined]
+                    pr.project.owner,
+                    pr.project.repo,
+                    pr.number,
+                    ReviewBody(event="COMMENT", body=body),
+                )
+        finally:
+            client.close()  # type: ignore[attr-defined]
+    except Exception:
+        logger.exception("Rebase request failed for PR #%d", pr.number)
+        return _candidate_response(
+            request, pr, pc, username, note="Comment failed (see web log).", error=True
+        )
+    record_merge_feedback(pr, "rebase-requested", operator_username=username)
+    _reevaluate_candidate(pr, pc, username)
+    return _candidate_response(
+        request, pr, pc, username, note=f"Asked {pr.author} to rebase; CI re-check on next poll."
+    )
+
+
+@require_POST
+def merge_candidate_refresh(request: HttpRequest, pr_id: int) -> HttpResponse:
+    """Re-fetch head, reviews and CI for one PR now, then re-score.
+
+    Four read calls in-request (no container, no Docker socket), for the
+    moment after an author pushes when the next poll is an hour away.
+    """
+    pr = get_object_or_404(PullRequest.objects.select_related("project"), pk=pr_id)
+    username = _operator_username()
+    pc = _project_config_or_default(pr)
+    client = _make_posting_client(pr)
+    if client is None:
+        return _candidate_response(
+            request,
+            pr,
+            pc,
+            username,
+            note="Cannot refresh: no forge client/token configured.",
+            error=True,
+        )
+    try:
+        try:
+            detail = client.get_pull_request(  # type: ignore[attr-defined]
+                pr.project.owner, pr.project.repo, pr.number
+            )
+            head = detail.get("head") if isinstance(detail, dict) else None
+            if isinstance(head, dict) and head.get("sha"):
+                pr.head_sha = str(head["sha"])
+            if isinstance(detail, dict) and isinstance(detail.get("mergeable"), bool):
+                pr.mergeable = detail["mergeable"]
+            refresh_review_and_ci_state(client, pr, pc)  # type: ignore[arg-type]
+        finally:
+            client.close()  # type: ignore[attr-defined]
+    except Exception:
+        logger.exception("Merge candidate refresh failed for PR #%d", pr.number)
+        return _candidate_response(
+            request, pr, pc, username, note="Refresh failed (see web log).", error=True
+        )
+    pr.save(update_fields=["head_sha", "mergeable", *READINESS_UPDATE_FIELDS, "updated_at"])
+    _reevaluate_candidate(pr, pc, username)
+    return _candidate_response(request, pr, pc, username, note="Refreshed from the forge.")
 
 
 # --- Security Report Triage ---

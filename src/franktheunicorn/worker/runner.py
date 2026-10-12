@@ -1315,10 +1315,32 @@ def process_pr(
                 logger.exception("Error in LLM checks for PR #%d", pr.number)
 
         _log("Agent run complete.")
+        _refresh_merge_readiness_after_review(pr, pc, operator_config)
         return drafts
     finally:
         if close_http:
             diff_http.close()
+
+
+def _refresh_merge_readiness_after_review(
+    pr: PullRequest, pc: ProjectConfig, operator_config: OperatorConfig | None
+) -> None:
+    """Re-score merge readiness now that the review has (or hasn't) found things.
+
+    The poller scores readiness before the review pipeline runs, so a PR
+    whose review then finds a critical issue — or finds nothing, which is
+    the "clean review" signal — would carry a stale verdict until the next
+    refresh. No network: it reads the drafts the run just wrote.
+    """
+    if not pc.merge_readiness.enabled:
+        return
+    try:
+        from franktheunicorn.scoring.merge_readiness import refresh_merge_readiness
+
+        username = operator_config.github_username if operator_config is not None else ""
+        refresh_merge_readiness(pr, pc, username or "")
+    except Exception:
+        logger.debug("Merge readiness re-score failed for PR #%d", pr.number, exc_info=True)
 
 
 def _drain_worker_commands(operator_config: OperatorConfig | None) -> None:

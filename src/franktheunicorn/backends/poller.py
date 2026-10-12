@@ -21,6 +21,12 @@ from franktheunicorn.backends.base import MAX_LISTED_PULL_REQUESTS, ForgeClient
 from franktheunicorn.config.models import ProjectConfig
 from franktheunicorn.core.models import Project, PullRequest, ReviewDraft
 from franktheunicorn.core.session_detector import detect_agent_session
+from franktheunicorn.scoring.merge_readiness import (
+    LISTED_VERDICTS,
+    READINESS_UPDATE_FIELDS,
+    refresh_merge_readiness,
+    refresh_review_and_ci_state,
+)
 from franktheunicorn.scoring.scorer import score_pull_request_from_model
 
 logger = logging.getLogger(__name__)
@@ -50,6 +56,14 @@ _LISTING_FIELDS = (
 # regardless of poll_refresh_hours: shepherding and the merge queue read
 # pr.mergeable, which only the per-PR detail call updates.
 _OPERATOR_PR_REFRESH_HOURS = 1
+
+# The same ceiling for almost-ready candidates and PRs we asked to rebase: a
+# check finishing does not bump the PR's updated_at, so without this a merge
+# candidate whose CI went green at 09:05 showed "CI still running" until the
+# next day. Candidates are a handful of rows; PRs with CI merely pending are
+# many more, so they get a longer window.
+_CANDIDATE_REFRESH_HOURS = 1
+_CI_PENDING_REFRESH_HOURS = 6
 
 # Consecutive per-PR refresh failures before abandoning the project this cycle.
 # The three network calls are caught individually, so what reaches the guard is
@@ -154,6 +168,9 @@ def poll_project(
             "base_sha",
             "score_breakdown",
             "is_operator_pr",
+            "merge_readiness_verdict",
+            "rebase_requested_sha",
+            "ci_status",
             *_LISTING_FIELDS,
         )
     }
@@ -338,6 +355,11 @@ def _refresh_pull_request(
     if base_branch and pr_obj.base_branch != base_branch:
         pr_obj.base_branch = base_branch
 
+    # Reviews and CI for the almost-ready-to-merge queue: three more read
+    # calls, each degrading on its own (scoring/merge_readiness.py).
+    if project_config.merge_readiness.enabled:
+        refresh_review_and_ci_state(client, pr_obj, project_config)
+
     # Fetch blame data if repo clone is available (v1.25).
     blame_data: list[dict[str, object]] | None = None
     if repo_path is not None and repo_path.is_dir() and changed_files and base_sha:
@@ -462,6 +484,12 @@ def _refresh_pull_request(
         project_config,
     )
 
+    # Merge readiness reads the routing flags and the fresh review/CI state,
+    # so it goes last. The review pipeline re-evaluates after it runs, since
+    # "your review found nothing serious" is one of the signals.
+    if project_config.merge_readiness.enabled:
+        refresh_merge_readiness(pr_obj, project_config, operator_username, save=False)
+
     pr_obj.save(
         update_fields=[
             "interest_score",
@@ -482,6 +510,7 @@ def _refresh_pull_request(
             "last_polled_at",
             "title",
             "body",
+            *READINESS_UPDATE_FIELDS,
         ]
     )
     return pr_obj
@@ -572,6 +601,13 @@ def _needs_refresh(
     window = refresh_hours
     if known.get("is_operator_pr"):
         window = min(refresh_hours, _OPERATOR_PR_REFRESH_HOURS)
+    # An almost-ready candidate, or a PR we asked to rebase, is waiting on CI
+    # that reports nowhere the listing can see. Pending CI on everything else
+    # gets a longer window: on a busy repo that is most of the open PRs.
+    if known.get("merge_readiness_verdict") in LISTED_VERDICTS or known.get("rebase_requested_sha"):
+        window = min(window, _CANDIDATE_REFRESH_HOURS)
+    elif known.get("ci_status") == "pending":
+        window = min(window, _CI_PENDING_REFRESH_HOURS)
     return timezone.now() - last_polled >= timedelta(hours=window)
 
 
@@ -1012,6 +1048,20 @@ def ingest_single_pr(
 
     pr_obj = _upsert_pull_request(project, pr_data, changed_files)
 
+    # The single-PR payload carries the refs the list payload lacks; the
+    # merge-readiness fetch below needs the head.
+    head_data = pr_data.get("head")
+    if isinstance(head_data, dict) and head_data.get("sha"):
+        pr_obj.head_sha = str(head_data["sha"])
+    base_data = pr_data.get("base")
+    if isinstance(base_data, dict):
+        if base_data.get("sha"):
+            pr_obj.base_sha = str(base_data["sha"])
+        if base_data.get("ref"):
+            pr_obj.base_branch = str(base_data["ref"])
+    if isinstance(pr_data.get("mergeable"), bool):
+        pr_obj.mergeable = pr_data["mergeable"]
+
     if project_config:
         score, breakdown = score_pull_request_from_model(
             pr=pr_obj,
@@ -1020,6 +1070,8 @@ def ingest_single_pr(
         )
         pr_obj.interest_score = score
         pr_obj.score_breakdown = breakdown
+        if project_config.merge_readiness.enabled:
+            refresh_review_and_ci_state(client, pr_obj, project_config)
 
     # Hydrate contributors_cache if missing so new-contributor detection isn't
     # limited to DB-only PR authors (which are sparse on first/force ingest).
@@ -1033,6 +1085,10 @@ def ingest_single_pr(
         _has_contributor_evidence(project),
         project_config if isinstance(project_config, ProjectConfig) else None,
     )
+    if project_config and project_config.merge_readiness.enabled:
+        refresh_merge_readiness(
+            pr_obj, project_config, operator_config.github_username or "", save=False
+        )
 
     pr_obj.save(
         update_fields=[
@@ -1044,6 +1100,11 @@ def ingest_single_pr(
             "is_mentioned",
             "is_low_context",
             "is_likely_unowned",
+            "head_sha",
+            "base_sha",
+            "base_branch",
+            "mergeable",
+            *READINESS_UPDATE_FIELDS,
         ]
     )
     return pr_obj

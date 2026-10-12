@@ -1177,6 +1177,105 @@ class MergeQueueConfig(BaseModel):
         return self
 
 
+# Check names (lowercased, fnmatch) that do not flake: a lint, type-check or
+# compile step that fails is a real failure until the operator says otherwise.
+DEFAULT_DETERMINISTIC_CHECKS: tuple[str, ...] = (
+    "*lint*",
+    "*format*",
+    "*mypy*",
+    "*type*check*",
+    "*compile*",
+    "*scalastyle*",
+    "*checkstyle*",
+    "*license*",
+    "*ruff*",
+    "*black*",
+)
+
+DEFAULT_REBASE_REQUEST_TEMPLATE = (
+    "Hi @{author}, thanks for the PR! CI failed on {checks}, which looks like it "
+    "may be a flaky or unrelated failure rather than something in this change. "
+    "Could you rebase onto the latest `{base_branch}` (or push an empty commit) to "
+    "re-trigger CI? If it comes back green I'm happy to take another look."
+)
+
+
+class MergeReadinessConfig(BaseModel):
+    """Config for the "Almost Ready to Merge" queue.
+
+    Which open PRs probably deserve an LGTM or a merge from the operator, so
+    they can go in and merge the happy ones. On by default: it costs three read
+    calls per refreshed PR (reviews, check runs, commit statuses) and does
+    nothing else until a button is pressed. The learning half — dismissal
+    reasons, flake confirmations — needs no flag either; it only has data once
+    the operator has said something. Scoring lives in
+    ``scoring/merge_readiness.py``.
+    """
+
+    enabled: bool = True
+    # Readiness score (0-1) at or above which a PR is listed as almost ready.
+    ready_threshold: float = 0.5
+    # Glob patterns (case-insensitive, matched against the check name) the
+    # project already knows to be flaky. A failure on one of these is "probably
+    # a flake" from day one; every other check has to earn it through the
+    # learned history (a rebase that went green, or the operator saying so).
+    flaky_checks: list[str] = Field(default_factory=list)
+    # A failing check whose name matches one of these is assumed real — lint,
+    # type and compile steps don't flake. Learned history can still override.
+    deterministic_checks: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_DETERMINISTIC_CHECKS)
+    )
+    # Bigger than this (additions + deletions) is never "almost ready": it
+    # needs a real review session, not a one-click LGTM.
+    max_diff_lines: int = 2000
+    # Older than this (days since the upstream update) is stale, not ready.
+    # 0 disables the staleness blocker.
+    stale_after_days: int = 90
+    # Unknown CI (no checks reported for the head) counts as not ready when
+    # True. Set False for forges or repos with no CI at all.
+    require_ci: bool = True
+    # Require an approval from someone in ``committers`` before a PR is listed.
+    require_committer_approval: bool = False
+    # Body of the approving review the LGTM button posts.
+    lgtm_body: str = "LGTM"
+    # The comment the "Ask to rebase" button posts on a PR whose CI failure
+    # looks like a flake. ``{author}``, ``{checks}`` and ``{base_branch}`` are
+    # filled in.
+    rebase_request_template: str = DEFAULT_REBASE_REQUEST_TEMPLATE
+
+    @field_validator("ready_threshold")
+    @classmethod
+    def ready_threshold_in_range(cls, v: float) -> float:
+        if not 0.0 <= v <= 1.0:
+            msg = "merge_readiness.ready_threshold must be between 0.0 and 1.0"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("max_diff_lines")
+    @classmethod
+    def max_diff_lines_positive(cls, v: int) -> int:
+        if v <= 0:
+            msg = "merge_readiness.max_diff_lines must be positive"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("stale_after_days")
+    @classmethod
+    def stale_after_days_non_negative(cls, v: int) -> int:
+        if v < 0:
+            msg = "merge_readiness.stale_after_days must be >= 0 (0 disables)"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("rebase_request_template")
+    @classmethod
+    def rebase_request_template_not_empty(cls, v: str) -> str:
+        if not v.strip():
+            msg = "merge_readiness.rebase_request_template must not be empty"
+            raise ValueError(msg)
+        return v
+
+
 class SupportedAgentConfig(BaseModel):
     """Config for a supported AI agent type in direct feedback."""
 
@@ -2239,6 +2338,9 @@ class ProjectConfig(BaseModel):
     # v2 features
     fine_tuned_model: FineTunedModelConfig = Field(default_factory=FineTunedModelConfig)
     merge_queue: MergeQueueConfig = Field(default_factory=MergeQueueConfig)
+    # The "Almost Ready to Merge" queue: PRs that probably deserve an LGTM or a
+    # merge. On by default (see MergeReadinessConfig).
+    merge_readiness: MergeReadinessConfig = Field(default_factory=MergeReadinessConfig)
     # Shepherding pass over the operator's own PRs (draft replies to
     # reviewers, rebase/staleness alerts). v2 — opt-in per project.
     shepherding_enabled: bool = False

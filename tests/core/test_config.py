@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 import pytest
@@ -508,6 +509,11 @@ class TestYAMLErrorHandling:
         locked = projects_dir / "locked.yaml"
         locked.write_text("owner: apache\nrepo: spark\n")
         locked.chmod(0o000)
+        if os.geteuid() == 0:
+            # Root reads a 0o000 file just fine, so the premise does not hold
+            # (containers and CI runners commonly run as root).
+            locked.chmod(0o644)
+            pytest.skip("running as root: an unreadable file cannot be staged")
         try:
             with caplog.at_level(logging.WARNING):
                 assert load_project_configs(projects_dir) == []

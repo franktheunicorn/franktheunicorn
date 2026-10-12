@@ -52,22 +52,7 @@
   </tbody>
 </table>
 
-<script>
-function copyMergeCommand(btn) {
-  var cmd = btn.getAttribute("data-command");
-  // navigator.clipboard is undefined on insecure origins (plain-HTTP over
-  // Tailscale is the documented phone use case) — fall back to a prompt.
-  if (!navigator.clipboard) {
-    window.prompt("Copy the merge command:", cmd);
-    return;
-  }
-  navigator.clipboard.writeText(cmd).then(function() {
-    var orig = btn.textContent;
-    btn.textContent = "Copied!";
-    setTimeout(function() { btn.textContent = orig; }, 1500);
-  });
-}
-</script>
+{# copyMergeCommand lives in shortcuts.js — shared with the almost-ready tab. #}
 {% else %}
 <p>No PRs in the merge queue. Enable merge_queue in your project config to track PRs here.</p>
 {% endif %}

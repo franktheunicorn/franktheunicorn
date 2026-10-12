@@ -84,6 +84,11 @@
 </dl>
 {% endif %}
 
+{% if candidate %}
+<h3 style="margin-top: 1.5rem;">Merge Readiness</h3>
+{% include "dashboard/_merge_candidate.html" with cand=candidate %}
+{% endif %}
+
 <div style="margin-bottom: 0.75rem; margin-top: 1.5rem; display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: flex-start;">
     <div>
         <button class="action-btn"

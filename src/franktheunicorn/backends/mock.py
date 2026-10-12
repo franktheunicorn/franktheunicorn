@@ -128,6 +128,28 @@ class MockForgeClient(ForgeClient):
             return _load_json_fixture(fixture_path)
         return []
 
+    def list_pull_request_reviews(
+        self, owner: str, repo: str, pr_number: int
+    ) -> list[dict[str, Any]]:
+        """Load reviews from fixture or return none."""
+        fixture_path = self._fixtures_dir / f"{owner}_{repo}_pr{pr_number}_reviews.json"
+        if fixture_path.exists():
+            return _load_json_fixture(fixture_path)
+        return []
+
+    def get_commit_checks(self, owner: str, repo: str, sha: str) -> list[dict[str, Any]]:
+        """Load normalised checks from fixture or return a green demo check."""
+        fixture_path = self._fixtures_dir / f"{owner}_{repo}_checks_{sha}.json"
+        if fixture_path.exists():
+            return _load_json_fixture(fixture_path)
+        return [{"name": "build", "status": "completed", "conclusion": "success", "url": ""}]
+
+    def create_issue_comment(
+        self, owner: str, repo: str, issue_number: int, body: str
+    ) -> dict[str, Any]:
+        """Return a canned comment-create response; nothing is posted."""
+        return {"id": 1, "body": body, "html_url": ""}
+
     def delete_review_comment(self, owner: str, repo: str, pr_number: int, comment_id: int) -> None:
         """No-op in mock mode."""
 

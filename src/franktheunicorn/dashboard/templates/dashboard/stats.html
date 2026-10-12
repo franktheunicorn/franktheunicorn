@@ -1,4 +1,5 @@
 {% extends "dashboard/base.html" %}
+{% load score_filters %}
 {% block title %}Stats — franktheunicorn{% endblock %}
 {% block content %}
 <h2>History &amp; Stats</h2>
@@ -39,6 +40,21 @@
         <tr><td>Total Anti-Patterns</td><td>{{ ap_stats.total|default:0 }}</td></tr>
         <tr><td>Active</td><td>{{ ap_stats.active|default:0 }}</td></tr>
         <tr><td>Total Findings Suppressed</td><td>{{ ap_stats.total_triggers|default:0 }}</td></tr>
+    </tbody>
+</table>
+
+<h3 style="margin-top: 1.5rem;">Almost Ready to Merge</h3>
+<table>
+    <thead><tr><th>Metric</th><th>Value</th></tr></thead>
+    <tbody>
+        <tr><td>LGTM'd from the queue</td><td>{{ merge_verdicts.lgtm|default:0 }}</td></tr>
+        <tr><td>Merged from the queue</td><td>{{ merge_verdicts.merged|default:0 }}</td></tr>
+        <tr><td>Sent back as not ready</td><td>{{ merge_verdicts|get_item:"not-ready"|default:0 }}</td></tr>
+        <tr><td>Rebase requests posted</td><td>{{ merge_verdicts|get_item:"rebase-requested"|default:0 }}</td></tr>
+        <tr><td>CI checks learned as flaky</td><td>{{ flaky_checks_known }}</td></tr>
+        {% for row in merge_reasons %}
+        <tr><td>&nbsp;&nbsp;not ready: {{ row.reason_code }}</td><td>{{ row.count }}</td></tr>
+        {% endfor %}
     </tbody>
 </table>
 

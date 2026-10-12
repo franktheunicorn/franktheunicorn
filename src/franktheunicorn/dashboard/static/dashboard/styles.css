@@ -616,6 +616,58 @@ thead th { border-bottom: 2px solid var(--border); }
     max-height: 480px;
 }
 
+/* Almost Ready to Merge: one panel per candidate under its row (and on the
+   detail page). Tint by verdict on the left edge only — the badge says it in
+   words, and three fully-coloured panels in a row would read as alarms. */
+.mc-intro { margin-bottom: 0.75rem; font-size: 0.85rem; }
+.mc-intro p { margin: 0 0 0.4rem; }
+.mc-learned { font-size: 0.8rem; }
+.mc-learned summary { cursor: pointer; color: var(--accent); }
+.mc-learned ul { margin: 0.3rem 0 0; padding-left: 1.2rem; }
+.merge-candidate {
+    margin-top: 0.5rem;
+    padding: 0.5rem 0.65rem;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--muted);
+    border-radius: var(--radius, 4px);
+    font-size: 0.82rem;
+    background: var(--card);
+}
+.merge-candidate.mc-ready { border-left-color: var(--green); }
+.merge-candidate.mc-flaky-ci { border-left-color: var(--yellow); }
+.mc-head { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
+.mc-badge {
+    display: inline-block; padding: 0.1rem 0.45rem; border-radius: 3px;
+    font-size: 0.72rem; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase;
+}
+.mc-ready { background: var(--green-bg); color: var(--green); }
+.mc-flaky { background: var(--yellow-bg); color: var(--orange); }
+.mc-not, .mc-dismissed { background: var(--border); color: var(--muted); }
+.mc-score { color: var(--muted); }
+.mc-ci { font-weight: 600; }
+.mc-ci-green { color: var(--green); }
+.mc-ci-flaky { color: var(--orange); }
+.mc-ci-red { color: var(--red); }
+.mc-ci-pending, .mc-ci-unknown { color: var(--muted); }
+.mc-check {
+    display: inline-block; background: var(--yellow-bg); color: var(--orange);
+    padding: 0.05rem 0.35rem; border-radius: 3px; font-family: var(--font-mono); font-size: 0.75rem;
+}
+.mc-approvals { color: var(--green); }
+.mc-changes { color: var(--red); }
+.mc-reasons, .mc-blockers { margin: 0.35rem 0 0; padding-left: 1.1rem; }
+.mc-reasons li { color: var(--text); }
+.mc-blockers li { color: var(--red); }
+.mc-actions { display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; margin-top: 0.5rem; }
+.mc-actions .action-btn { margin-right: 0; text-decoration: none; }
+.mc-hint { color: var(--muted); font-size: 0.78rem; }
+.mc-dismiss summary { display: inline-block; list-style: none; }
+.mc-dismiss summary::-webkit-details-marker { display: none; }
+.mc-dismiss-form { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.4rem; }
+.mc-dismiss-form input[type="text"] { flex: 1 1 12rem; min-width: 0; font-size: 0.8rem; }
+.mc-result { margin-top: 0.3rem; }
+.mc-evaluated { font-size: 0.72rem; margin-top: 0.2rem; }
+
 @media (max-width: 600px) {
     body { padding: 0.5rem; }
     .tab-bar a { padding: 0.4rem 0.6rem; font-size: 0.75rem; }

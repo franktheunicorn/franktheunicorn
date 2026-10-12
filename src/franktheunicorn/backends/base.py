@@ -157,6 +157,44 @@ class ForgeClient(ABC):
     def close(self) -> None:
         pass
 
+    def list_pull_request_reviews(
+        self, owner: str, repo: str, pr_number: int
+    ) -> list[dict[str, Any]]:
+        """Return the PR's submitted reviews in GitHub's shape.
+
+        Each entry carries ``user.login``, ``state`` (``APPROVED``,
+        ``CHANGES_REQUESTED``, ``COMMENTED``, ``DISMISSED``), ``commit_id`` and
+        ``submitted_at``. Feeds the "Almost Ready to Merge" queue. The default
+        raises ``NotImplementedError``; the poller treats that as "this forge
+        has no review data" and the queue degrades to CI-and-size signals.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support list_pull_request_reviews()"
+        )
+
+    def get_commit_checks(self, owner: str, repo: str, sha: str) -> list[dict[str, Any]]:
+        """Return CI results for a commit, normalised to one shape.
+
+        Each entry is ``{"name", "status", "conclusion", "url"}`` where
+        ``status`` is ``completed`` / ``in_progress`` / ``queued`` and
+        ``conclusion`` is ``success`` / ``failure`` / ``timed_out`` /
+        ``cancelled`` / ``neutral`` / ``skipped`` / ``action_required`` or
+        ``""`` while running. Check runs and plain commit statuses both land
+        here. Same degradation as :meth:`list_pull_request_reviews`.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support get_commit_checks()")
+
+    def create_issue_comment(
+        self, owner: str, repo: str, issue_number: int, body: str
+    ) -> dict[str, Any]:
+        """Post a conversation comment (not a review) on a PR.
+
+        Used by the "ask the author to rebase" button. The default raises
+        ``NotImplementedError``; callers fall back to a body-only
+        ``create_review`` with ``event="COMMENT"``, which every forge supports.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support create_issue_comment()")
+
     def search_prs_involving(self, username: str, max_results: int = 100) -> list[dict[str, Any]]:
         """Search for open PRs where ``username`` is involved (mention/assign/review-request).
 

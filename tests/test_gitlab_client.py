@@ -330,3 +330,19 @@ class TestGitLabClient:
             status_code=204,
         )
         client.delete_review_comment("o", "r", 7, 123)
+
+
+class TestGitLabIssueComment:
+    def test_create_issue_comment_posts_a_note(self, httpx_mock: HTTPXMock) -> None:
+        client = GitLabClient(token="t", base_url="https://gitlab.test")
+        try:
+            httpx_mock.add_response(
+                url="https://gitlab.test/api/v4/projects/acme%2Fwidget/merge_requests/7/notes",
+                method="POST",
+                json={"id": 12, "body": "please rebase"},
+            )
+            result = client.create_issue_comment("acme", "widget", 7, "please rebase")
+        finally:
+            client.close()
+        assert result["id"] == 12
+        assert json.loads(httpx_mock.get_requests()[-1].content) == {"body": "please rebase"}

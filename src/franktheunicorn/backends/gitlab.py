@@ -242,6 +242,16 @@ class GitLabClient(ForgeClient):
         notes: list[dict[str, Any]] = response.json()
         return [_normalize_note(n) for n in notes if not n.get("position")]
 
+    def create_issue_comment(
+        self, owner: str, repo: str, issue_number: int, body: str
+    ) -> dict[str, Any]:
+        """Post a general MR note (GitLab's conversation comment)."""
+        url = f"/projects/{_project_id(owner, repo)}/merge_requests/{issue_number}/notes"
+        response = self._client.post(url, json={"body": body})
+        response.raise_for_status()
+        result: dict[str, Any] = response.json()
+        return result
+
     def delete_review_comment(self, owner: str, repo: str, pr_number: int, comment_id: int) -> None:
         url = f"/projects/{_project_id(owner, repo)}/merge_requests/{pr_number}/notes/{comment_id}"
         response = self._client.delete(url)

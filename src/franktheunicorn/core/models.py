@@ -158,6 +158,40 @@ class PullRequest(models.Model):
     merged_at = models.DateTimeField(null=True, blank=True)
     merged_by = models.CharField(max_length=255, blank=True, default="")
 
+    # Reviews and CI on the current head, refreshed by the poller, and the
+    # "Almost Ready to Merge" verdict built from them (scoring/merge_readiness.py).
+    #
+    # review_states: the latest non-comment review per reviewer —
+    # ``login -> {"state": "APPROVED"|"CHANGES_REQUESTED", "commit_id": sha,
+    # "submitted_at": iso}``. The PR author and ``[bot]`` accounts are left out,
+    # and a DISMISSED review removes the entry. approval_count above is derived
+    # from this; it existed before and nothing ever wrote it.
+    review_states = models.JSONField(default=dict, blank=True)
+    # ci_checks: ``[{"name", "status", "conclusion", "url"}]`` for ci_checks_sha —
+    # check runs and commit statuses normalised to one shape. The SHA is kept
+    # because the head can move between the detail fetch and the checks fetch,
+    # and learning "the rebase went green" needs to know which head it reads.
+    ci_checks = models.JSONField(default=list, blank=True)
+    ci_checks_sha = models.CharField(max_length=64, blank=True, default="")
+    # The readiness verdict: "ready", "flaky-ci" (ready but for a CI failure
+    # that is probably a flake), or "" (not ready). The score is 0-1 like
+    # interest_score; the detail JSON carries reasons, blockers and the CI
+    # assessment so the dashboard can say *why* without recomputing.
+    merge_readiness_score = models.FloatField(default=0.0)
+    merge_readiness_verdict = models.CharField(max_length=20, blank=True, default="")
+    merge_readiness_detail = models.JSONField(default=dict, blank=True)
+    # The head the operator said "not ready" on. The PR stays out of the queue
+    # until the author pushes again — the dismissal is about this code, not
+    # the PR forever. The reason goes to MergeReadinessFeedback for learning.
+    merge_readiness_dismissed_sha = models.CharField(max_length=64, blank=True, default="")
+    # "Ask the author to rebase" bookkeeping: the head it was asked on, when,
+    # and which checks were failing. When the head moves, the poller looks at
+    # those checks again — green now is a confirmed flake, still red is a real
+    # failure — and writes the answer to CICheckHistory.
+    rebase_requested_sha = models.CharField(max_length=64, blank=True, default="")
+    rebase_requested_at = models.DateTimeField(null=True, blank=True)
+    rebase_requested_checks = models.JSONField(default=list, blank=True)
+
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
     github_created_at = models.DateTimeField(null=True, blank=True)
@@ -433,6 +467,12 @@ class OperatorAction(models.Model):
         ("accept_shepherd", "Accept Shepherd Draft"),
         ("reject_shepherd", "Reject Shepherd Draft"),
         ("edit_shepherd", "Edit Shepherd Draft"),
+        # Almost-ready-to-merge queue actions. The reason behind a dismissal
+        # lives on MergeReadinessFeedback; this is the audit trail.
+        ("lgtm_pr", "LGTM (approved on the forge)"),
+        ("merge_pr", "Merged PR"),
+        ("dismiss_merge_candidate", "Not Ready to Merge"),
+        ("request_rebase", "Asked Author to Rebase"),
     ]
     action_type = models.CharField(max_length=50, choices=ACTION_CHOICES)
     review_draft = models.ForeignKey(
@@ -595,6 +635,90 @@ class LLMBackendFallback(models.Model):
     def __str__(self) -> str:
         base = f" ({self.base_url})" if self.base_url else ""
         return f"LLMBackendFallback: {self.provider}/{self.model}{base}"
+
+
+class MergeReadinessFeedback(models.Model):
+    """What the operator said about an "Almost Ready to Merge" candidate.
+
+    One row per button press: LGTM, merged, not ready (with a reason), or
+    "asked the author to rebase". This is the learning input for the queue —
+    the same role OperatorAction + AntiPattern play for findings. A dismissal
+    carries a reason code and free text, plus a snapshot of the PR's feature
+    tokens (author, labels, top-level paths, size bucket) so the scorer can
+    later say "you've sent back 3 of 4 PRs like this" without re-deriving
+    what the PR looked like at the time.
+    """
+
+    VERDICT_CHOICES = [
+        ("lgtm", "LGTM"),
+        ("merged", "Merged"),
+        ("not-ready", "Not Ready"),
+        ("rebase-requested", "Rebase Requested"),
+    ]
+
+    REASON_CHOICES = [
+        ("needs-tests", "Needs tests"),
+        ("needs-committer-review", "Needs a committer / domain review"),
+        ("not-a-flake", "The CI failure is real"),
+        ("wrong-base", "Wrong target branch / backport decision"),
+        ("incomplete", "Incomplete or WIP"),
+        ("design", "Design concerns"),
+        ("risky", "Too risky without more eyes"),
+        ("author-unresponsive", "Waiting on the author"),
+        ("other", "Other"),
+    ]
+
+    pull_request = models.ForeignKey(
+        PullRequest, on_delete=models.CASCADE, related_name="merge_feedback"
+    )
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="merge_feedback")
+    verdict = models.CharField(max_length=20, choices=VERDICT_CHOICES)
+    reason_code = models.CharField(max_length=40, choices=REASON_CHOICES, blank=True, default="")
+    reason_text = models.TextField(blank=True, default="")
+    head_sha = models.CharField(max_length=64, blank=True, default="")
+    # {"tokens": [...], "failing_checks": [...], "ci_status": str,
+    #  "approvers": [...], "readiness_score": float}
+    features = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["project", "verdict"])]
+
+    def __str__(self) -> str:
+        reason = f" ({self.reason_code})" if self.reason_code else ""
+        return f"{self.verdict}{reason} on {self.pull_request}"
+
+
+class CICheckHistory(models.Model):
+    """What the project has learned about one CI check's honesty.
+
+    ``flaky_count`` is evidence the check flakes: the author rebased after we
+    asked and it went green, or the operator marked it flaky. ``real_count``
+    is evidence a failure meant something: the operator dismissed a candidate
+    with "the CI failure is real", or the re-run still failed. The CI
+    classifier blends these (Laplace-smoothed) with its name-based prior, so
+    a check the project's config never mentioned can still earn "probably a
+    flake" — and a configured-flaky one can lose it.
+    """
+
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="ci_check_history")
+    check_name = models.CharField(max_length=255)
+    flaky_count = models.IntegerField(default=0)
+    real_count = models.IntegerField(default=0)
+    last_failed_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-flaky_count", "check_name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["project", "check_name"], name="unique_ci_check_history_per_project"
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.check_name}: flaky={self.flaky_count} real={self.real_count}"
 
 
 class SecurityReport(models.Model):

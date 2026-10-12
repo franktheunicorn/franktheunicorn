@@ -28,7 +28,27 @@ src/franktheunicorn/
     management/
       commands/      # Django management commands + CLI entry points
   scoring/           # Interest scoring, moderation flags, blame analysis,
-                     #   collaborator detection, custom scoring functions
+                     #   collaborator detection, custom scoring functions.
+                     #   merge_readiness.py is the "Almost Ready to Merge"
+                     #   queue: which open PRs probably deserve an LGTM or a
+                     #   merge right now. Not a PullRequest.queue value — it
+                     #   cuts across the moderation queues and is filtered on
+                     #   merge_readiness_verdict ("ready" / "flaky-ci" / "").
+                     #   The poller fetches reviews + check runs onto the row
+                     #   (review_states, ci_checks — approval_count and
+                     #   ci_status existed before and nothing ever wrote
+                     #   them); classify_ci splits a failing run into red vs.
+                     #   "probably a flake" per check (name prior blended with
+                     #   CICheckHistory); evaluate_merge_readiness is pure and
+                     #   lists blockers and reasons so the detail page can say
+                     #   why. Learning is transparent, not a model: every
+                     #   button press is a MergeReadinessFeedback row with the
+                     #   PR's feature tokens; a dismissal rate per token docks
+                     #   similar PRs, a reason code that recurs three times
+                     #   becomes a blocker, "the CI failure is real" counts
+                     #   against the check, and a rebase we asked for that
+                     #   went green confirms a flake. Candidates re-poll
+                     #   hourly (a check finishing never bumps updated_at).
   review/            # Multi-backend LLM review pipeline, finding generation,
                      #   tone guard, anti-pattern matching, deduplication
                      #   (auto_poster.py is present but not wired — see
@@ -278,6 +298,7 @@ The anti-pattern list is the primary feedback mechanism — not a side feature. 
 - **SQLite is first-class.** Don't use Postgres-specific features. Test against SQLite. The `DATABASE_URL` env var switches to Postgres but SQLite must always work.
 - **No Docker socket in web container.** Only the worker container accesses Docker for test execution and the security sandbox. The web container never spawns containers. `run_dual_tests` and `security_report_sandbox` both enqueue a `WorkerCommand` and return immediately — the worker-queue refactor that used to be described here as in flight has landed, and `views.py` no longer imports `threading` at all. Seven endpoints still do their work in-request rather than in the worker: `security_report_upload` (the whole zip import, one transaction — measured at 166ms end to end for a real 265-entry scanner archive, of which 43ms is the scan-archive expansion; bounded by the 8 MB upload cap), `security_archive_drop` (a bulk delete — 44ms for 143 rows), `security_report_cve_check` (a synchronous NVD call), `security_report_export_csv` (a streaming read — `StreamingHttpResponse` over a `.iterator()`, so it never materialises the file), `security_report_import_csv` (one transaction over at most a few thousand rows, bounded by the same 8 MB upload cap), `security_report_fix` / `security_recheck_fixed` (the Cursor cloud-agent launches — one POST each; the run lives on Cursor's infra, and for the recheck the waiting is the `poll_security_rechecks` worker command), and `security_report_fix_refresh` (one API GET plus a `git ls-remote`). None spawns a container, so none needs the Docker socket, but the zip upload and the NVD call would be better as `WorkerCommand`s.
 - **Blame: run fresh, don't cache.** Run `git blame` on the base branch for changed files each time. No blame cache.
+- **The almost-ready queue never merges or approves on its own.** `scoring/merge_readiness.py` ranks; every forge write (the LGTM review, the "please rebase" comment, the merge) is a button the operator presses, and the merge button only exists where `merge_queue.enabled` already is. The queue's job is to be wrong in a way that teaches it: "not ready" always asks why, and the answer changes the next ranking (`MergeReadinessFeedback`, `CICheckHistory`). Don't add a signal here without deciding how the operator's disagreement with it gets recorded.
 - **A skipped step logs why, at a level someone will see.** Almost every "X isn't working" report against this codebase has turned out to be a correctly-configured gate declining to run, invisibly: the review pipeline's drafts-exist skip returned an empty list silently, the agent-CLI runner logged "no checkout could be prepared" at DEBUG and its caller logged nothing at all, and `_check_backends` didn't mention stub/ollama backends. So: a gate that stops configured work logs at INFO with the setting that changes it; a configured tool that can't run logs at WARNING; zero findings is logged as explicitly as N findings, because "it ran and the PR is clean" and "it never ran" must not look the same. `_run_cycle` ends with one `Cycle summary:` line counting agent runs by outcome, and warns naming the dominant gate when nothing ran at all. Per-PR detail stays at DEBUG — INFO per PR is 900 lines a cycle on Spark.
 
 ## Running the Project
