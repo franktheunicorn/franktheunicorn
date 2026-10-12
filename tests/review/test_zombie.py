@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+from django.utils import timezone
 
 from franktheunicorn.config.models import JiraConfig, OperatorConfig, ProjectConfig
 from franktheunicorn.core.models import (
@@ -25,7 +27,13 @@ from franktheunicorn.review.zombie import (
     scan_project,
     zombie_gate_reason,
 )
-from tests.factories import CannedLLMBackend, ProjectFactory, PullRequestFactory
+from tests.factories import (
+    CannedLLMBackend,
+    ProjectFactory,
+    PullRequestFactory,
+    ZombieAssessmentFactory,
+    ZombieScanStateFactory,
+)
 
 
 def _pr_data(
@@ -93,6 +101,10 @@ class FakeForge:
         self.requests.append((sort, page))
         pages = self.pages.get(sort, [])
         return pages[page - 1] if page <= len(pages) else []
+
+    def get_pull_request(self, owner: str, repo: str, pr_number: int) -> dict[str, Any]:
+        """The retry pass's per-PR fetch: a closed, unmerged PR naming its ticket."""
+        return _pr_data(pr_number)
 
     def get_pull_request_diff(self, owner: str, repo: str, pr_number: int) -> str:
         return self.diff
@@ -309,9 +321,10 @@ class TestScanProject:
         )
 
     def test_backlog_gives_up_after_max_attempts(self, spark: Project) -> None:
-        pr = PullRequestFactory(project=spark, number=40, state="closed", queue=ZOMBIE_QUEUE)
-        ZombieAssessment.objects.create(
-            pull_request=pr, jira_ticket_id="SPARK-40", attempts=ZombieAssessment.MAX_ATTEMPTS
+        ZombieAssessmentFactory(
+            pull_request__project=spark,
+            pull_request__number=40,
+            attempts=ZombieAssessment.MAX_ATTEMPTS,
         )
         forge = FakeForge({"created": [[]]})
         backend = CannedLLMBackend(_ANSWER)
@@ -332,9 +345,8 @@ class TestScanProject:
         assert ZombieAssessment.objects.filter(pull_request__number=12).count() == 1
 
     def test_dismissed_zombies_are_not_reassessed_by_the_backlog(self, spark: Project) -> None:
-        pr = PullRequestFactory(project=spark, number=41, state="closed", queue=ZOMBIE_QUEUE)
-        ZombieAssessment.objects.create(
-            pull_request=pr, jira_ticket_id="SPARK-41", disposition="dismissed"
+        ZombieAssessmentFactory(
+            pull_request__project=spark, pull_request__number=41, disposition="dismissed"
         )
         backend = CannedLLMBackend(_ANSWER)
 
@@ -468,6 +480,98 @@ class TestScanProject:
 
 
 @pytest.mark.django_db
+class TestScanCursorGaps:
+    """The two ways a PR could fall between the passes, and that it doesn't."""
+
+    def test_watermark_is_the_start_of_the_run_not_the_end(self, spark: Project) -> None:
+        """A PR closed while the run was assessing has updated_at before the
+        finish time; a finish-time watermark would hide it from the next catch-up."""
+        forge = FakeForge({"created": [[_pr_data(1, merged=True)]]})
+        before = timezone.now()
+        _run(spark, forge, CannedLLMBackend(_ANSWER))
+        after = timezone.now()
+
+        state = ZombieScanState.objects.get(project=spark)
+        assert state.last_run_at is not None
+        assert before <= state.last_run_at <= after
+
+        # Simulate "closed during the run": updated_at just after the watermark.
+        late = _pr_data(2)
+        late["updated_at"] = (state.last_run_at + timedelta(seconds=1)).isoformat()
+        forge.pages["updated"] = [[late]]
+        run = _run(spark, forge, CannedLLMBackend(_ANSWER))
+        assert run.candidates == 1
+
+    def test_jira_outage_is_retried_next_run(
+        self, spark: Project, jira_statuses: dict[str, str]
+    ) -> None:
+        jira_statuses["SPARK-5"] = "boom"
+        forge = FakeForge({"created": [[_pr_data(5)]]})
+        run = _run(spark, forge, CannedLLMBackend(_ANSWER))
+        assert run.jira_error == 1
+        assert run.candidates == 0
+        state = ZombieScanState.objects.get(project=spark)
+        assert state.jira_retry == [5]
+        assert "retried next run" in run.summary()
+
+        # Still down: stays on the list, nothing duplicated.
+        run = _run(spark, forge, CannedLLMBackend(_ANSWER))
+        state.refresh_from_db()
+        assert state.jira_retry == [5]
+        assert run.jira_retried == 1
+
+        # Back up: the PR is a zombie after all, and the list is cleared.
+        del jira_statuses["SPARK-5"]
+        run = _run(spark, forge, CannedLLMBackend(_ANSWER))
+        assert run.candidates == 1
+        assert ZombieAssessment.objects.filter(pull_request__number=5).exists()
+        state.refresh_from_db()
+        assert state.jira_retry == []
+
+    def test_retry_skips_a_pr_that_was_reopened(self, spark: Project) -> None:
+        ZombieScanStateFactory(project=spark, jira_retry=[9], exhausted=True)
+        forge = FakeForge({})
+        forge.get_pull_request = lambda owner, repo, number: {**_pr_data(number), "state": "open"}  # type: ignore[attr-defined]
+
+        run = _run(spark, forge, CannedLLMBackend(_ANSWER))
+
+        assert run.examined == 0
+        assert ZombieScanState.objects.get(project=spark).jira_retry == []
+
+    def test_retry_fetch_failure_keeps_the_number(self, spark: Project) -> None:
+        ZombieScanStateFactory(project=spark, jira_retry=[9], exhausted=True)
+        forge = MagicMock()
+        forge.get_pull_request.side_effect = RuntimeError("502")
+        forge.list_pull_requests_page.return_value = []
+
+        _run(spark, forge, CannedLLMBackend(_ANSWER))
+
+        assert ZombieScanState.objects.get(project=spark).jira_retry == [9]
+
+    def test_retry_waits_when_the_budget_is_spent(self, spark: Project) -> None:
+        ZombieScanStateFactory(project=spark, jira_retry=[9, 8])
+        forge = FakeForge({"created": [[_pr_data(50, merged=True)]]})
+        forge.get_pull_request = lambda owner, repo, number: _pr_data(number, merged=True)  # type: ignore[attr-defined]
+
+        run = _run(spark, forge, CannedLLMBackend(_ANSWER), max_prs=1)
+
+        assert run.examined == 1
+        assert ZombieScanState.objects.get(project=spark).jira_retry == [8]
+
+    @pytest.mark.parametrize("answer", ["{}", '{"message": "unable to assess"}'])
+    def test_json_without_an_assessment_is_not_a_verdict(self, spark: Project, answer: str) -> None:
+        forge = FakeForge({"created": [[_pr_data(9)]]})
+
+        run = _run(spark, forge, CannedLLMBackend(answer))
+
+        assert run.assessment_failed == 1
+        zombie = ZombieAssessment.objects.get(pull_request__number=9)
+        assert zombie.verdict == "unassessed"
+        assert zombie.assessed_at is None
+        assert "without an assessment" in zombie.last_error
+
+
+@pytest.mark.django_db
 class TestAssessPr:
     def test_creates_the_row_and_moves_the_pr_into_the_queue(self, spark: Project) -> None:
         pr = PullRequestFactory(
@@ -489,20 +593,30 @@ class TestAssessPr:
         assert zombie.jira_url.endswith("/browse/SPARK-77")
         assert forge.closed is True
 
-    def test_resets_the_attempt_count(self, spark: Project) -> None:
-        pr = PullRequestFactory(project=spark, number=78, state="closed", queue=ZOMBIE_QUEUE)
-        ZombieAssessment.objects.create(pull_request=pr, jira_ticket_id="SPARK-78", attempts=3)
+    def test_a_failed_rerun_raises_and_keeps_the_old_verdict(self, spark: Project) -> None:
+        """Raises, so the worker command shows failed: a completed command with
+        the old verdict still on the page looked like a successful refresh."""
+        zombie = ZombieAssessmentFactory(
+            pull_request__project=spark,
+            pull_request__number=78,
+            verdict="revive",
+            summary="Earlier answer.",
+            attempts=3,
+        )
         with (
             patch(
                 "franktheunicorn.review.zombie.resolve_backend",
                 return_value=CannedLLMBackend("prose"),
             ),
             patch("franktheunicorn.review.zombie._forge_client", return_value=FakeForge({})),
+            pytest.raises(RuntimeError, match="assessment failed"),
         ):
-            note = assess_pr(pr, OperatorConfig())
+            assess_pr(zombie.pull_request, OperatorConfig())
 
-        assert note.startswith("assessment failed")
-        assert ZombieAssessment.objects.get(pull_request=pr).attempts == 1
+        zombie.refresh_from_db()
+        assert zombie.attempts == 1
+        assert zombie.verdict == "revive"
+        assert "without a JSON object" in zombie.last_error
 
     def test_no_backend_raises_with_the_setting_name(self, spark: Project) -> None:
         pr = PullRequestFactory(project=spark, number=79, state="closed")

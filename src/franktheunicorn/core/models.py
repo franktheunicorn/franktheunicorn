@@ -1837,6 +1837,10 @@ class ZombieScanState(models.Model):
     # Reached the end of the closed-PR list. A later run starts over from page 1
     # with the frontier intact, so it only examines PRs closed since.
     exhausted = models.BooleanField(default=False)
+    # PR numbers whose JIRA fetch failed, to re-examine next run. The frontier
+    # has already moved past them, so without this a JIRA outage mid-walk
+    # dropped every zombie in that stretch for good.
+    jira_retry = models.JSONField(default=list, blank=True)
     prs_examined = models.IntegerField(default=0)
     candidates_found = models.IntegerField(default=0)
     last_run_at = models.DateTimeField(null=True, blank=True)

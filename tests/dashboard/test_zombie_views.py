@@ -16,9 +16,13 @@ from franktheunicorn.core.models import (
     PullRequest,
     WorkerCommand,
     ZombieAssessment,
-    ZombieScanState,
 )
-from tests.factories import ProjectFactory, PullRequestFactory
+from tests.factories import (
+    ProjectFactory,
+    PullRequestFactory,
+    ZombieAssessmentFactory,
+    ZombieScanStateFactory,
+)
 
 
 def _zombie(project: Project, number: int, **kwargs: Any) -> ZombieAssessment:
@@ -30,13 +34,7 @@ def _zombie(project: Project, number: int, **kwargs: Any) -> ZombieAssessment:
         state="closed",
         queue=ZOMBIE_QUEUE,
     )
-    defaults: dict[str, Any] = {
-        "jira_ticket_id": f"SPARK-{number}",
-        "jira_status": "Open",
-        "jira_url": f"https://issues.apache.org/jira/browse/SPARK-{number}",
-    }
-    defaults.update(kwargs)
-    return ZombieAssessment.objects.create(pull_request=pr, **defaults)
+    return ZombieAssessmentFactory(pull_request=pr, **kwargs)
 
 
 @pytest.fixture
@@ -114,7 +112,7 @@ class TestZombieTab:
         assert "zombie-duck.svg" in body
 
     def test_scan_state_is_shown(self, client: Client, spark: Project, jira_projects: None) -> None:
-        ZombieScanState.objects.create(
+        ZombieScanStateFactory(
             project=spark, prs_examined=500, candidates_found=12, lowest_number_seen=51234
         )
         body = client.get("/?queue=zombie").content.decode()

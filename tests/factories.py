@@ -32,6 +32,8 @@ from franktheunicorn.core.models import (
     SecurityTriageFeedback,
     SecurityTriageGuidance,
     TestRun,
+    ZombieAssessment,
+    ZombieScanState,
 )
 from franktheunicorn.review.backends.stub_backend import StubBackend
 
@@ -361,6 +363,44 @@ class LLMBackendFallbackFactory(factory.django.DjangoModelFactory):  # type: ign
     base_url = ""
     token_param = "max_completion_tokens"
     supports_json_object = True
+
+
+class ZombieAssessmentFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
+    """Factory for ZombieAssessment: a closed-unmerged PR with an open JIRA.
+
+    The PR it hangs off is closed and in the zombie queue by default, which
+    is the only state the scan ever creates one in.
+    """
+
+    class Meta:
+        model = ZombieAssessment
+
+    pull_request = factory.SubFactory(PullRequestFactory, state="closed", queue="zombie")
+    jira_ticket_id = factory.LazyAttribute(lambda o: f"SPARK-{o.pull_request.number}")
+    jira_status = "Open"
+    jira_summary = ""
+    jira_url = factory.LazyAttribute(
+        lambda o: f"https://issues.apache.org/jira/browse/{o.jira_ticket_id}"
+    )
+    verdict = "unassessed"
+    needed_changes = factory.LazyFunction(list)
+    disposition = "pending"
+    attempts = 0
+
+
+class ZombieScanStateFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
+    """Factory for ZombieScanState (one project's closed-PR cursor)."""
+
+    class Meta:
+        model = ZombieScanState
+
+    project = factory.SubFactory(ProjectFactory)
+    lowest_number_seen = None
+    next_page = 1
+    exhausted = False
+    jira_retry = factory.LazyFunction(list)
+    prs_examined = 0
+    candidates_found = 0
 
 
 class CannedLLMBackend(StubBackend):

@@ -63,6 +63,11 @@ ACTION_TYPE = "zombie-assessment"
 VERDICTS = frozenset({"revive", "revive-with-changes", "rethink", "drop", "unclear"})
 
 _PAGE_SIZE = 100
+#: PR numbers remembered for a JIRA retry across runs.
+_MAX_JIRA_RETRY = 500
+#: Keys at least one of which a real assessment carries. ``{}`` and
+#: ``{"message": "unable to assess"}`` are JSON objects and not answers.
+_ANSWER_KEYS = ("verdict", "jira_makes_sense", "fix_makes_sense", "needed_changes", "summary")
 _BODY_CHARS = 3_000
 _COMMENT_CHARS = 600
 
@@ -119,6 +124,7 @@ class ZombieScanRun:
     no_jira: int = 0
     jira_closed: int = 0
     jira_error: int = 0
+    jira_retried: int = 0
     already_known: int = 0
     candidates: int = 0
     assessed: int = 0
@@ -129,6 +135,8 @@ class ZombieScanRun:
     skipped_reason: str = ""
     #: PRs this run added to the queue, for the CLI's listing.
     found: list[ZombieAssessment] = field(default_factory=list)
+    #: PR numbers whose JIRA could not be reached, for the next run to retry.
+    jira_retry: list[int] = field(default_factory=list)
 
     def summary(self) -> str:
         if self.skipped_reason:
@@ -148,7 +156,9 @@ class ZombieScanRun:
         if self.jira_closed:
             skipped.append(f"{self.jira_closed} JIRA closed")
         if self.jira_error:
-            skipped.append(f"{self.jira_error} JIRA unreachable")
+            skipped.append(f"{self.jira_error} JIRA unreachable (retried next run)")
+        if self.jira_retried:
+            skipped.append(f"{self.jira_retried} retried from an earlier JIRA failure")
         if self.already_known:
             skipped.append(f"{self.already_known} already in the queue")
         if skipped:
@@ -296,12 +306,18 @@ def scan_project(
         state.exhausted = False
         state.last_run_at = None
 
+    # The watermark the next run's catch-up reads from is when *this* run
+    # started listing, not when it finished: a PR closed during the minutes of
+    # assessment below has an updated_at older than the finish time, and a
+    # finish-time watermark would make the next catch-up stop before it.
+    started_at = timezone.now()
     own_client = forge_client is None
     client = forge_client or _forge_client(project_config, operator_config)
     try:
         with httpx.Client(timeout=30.0) as jira_http:
             jira = JiraFetcher(client=jira_http)
             walker = _Walker(run, state, project, project_config, cfg, client, jira, budget_prs)
+            walker.retry_jira_failures()
             walker.catch_up()
             walker.walk_history()
         if backend is None:
@@ -322,7 +338,11 @@ def scan_project(
 
     state.prs_examined += run.examined
     state.candidates_found += run.candidates
-    state.last_run_at = timezone.now()
+    state.last_run_at = started_at
+    # PRs whose JIRA could not be reached this run — including retries that
+    # failed again. Capped so an outage during a long walk cannot grow it
+    # without bound; the oldest are the ones dropped.
+    state.jira_retry = sorted(set(run.jira_retry))[-_MAX_JIRA_RETRY:]
     state.last_summary = run.summary()
     state.save()
     logger.info("Zombie scan: %s", run.summary())
@@ -405,6 +425,33 @@ class _Walker:
             self.closed_statuses,
             pr_data,
         )
+
+    def retry_jira_failures(self) -> None:
+        """Re-examine the PRs an earlier run could not check against JIRA.
+
+        The frontier moved past them when the fetch failed, so without this
+        a JIRA outage during a walk silently dropped every zombie in it. One
+        PR fetch each — the listing payload is gone — against the shared
+        examined budget. Whatever fails again is kept for the run after.
+        """
+        for number in list(self.state.jira_retry):
+            if self.run.examined >= self.budget_prs:
+                # Out of budget: carry the rest forward untouched.
+                self.run.jira_retry.append(number)
+                continue
+            try:
+                pr_data = self.client.get_pull_request(
+                    self.project.owner, self.project.repo, number
+                )
+            except Exception:
+                logger.debug("Zombie scan: retry fetch of PR #%d failed", number, exc_info=True)
+                self.run.jira_retry.append(number)
+                continue
+            if pr_data.get("state") != "closed":
+                # Reopened since: the poller's problem now, not a zombie.
+                continue
+            self.run.jira_retried += 1
+            self._examine(pr_data)
 
     def catch_up(self) -> None:
         since = self.state.last_run_at
@@ -507,6 +554,7 @@ def _examine(
         ticket = jira.fetch(project_config.jira.server, ticket_id)
     except Exception as exc:
         run.jira_error += 1
+        run.jira_retry.append(number)
         logger.debug("Zombie scan: JIRA %s for PR #%d failed: %s", ticket_id, number, exc)
         return
     if ticket.status.strip().lower() in closed_statuses:
@@ -665,8 +713,11 @@ def assess(
     from franktheunicorn.security.triage import _safe_json_parse
 
     data = _safe_json_parse(raw)
-    if data is None:
-        assessment.last_error = f"{backend.label} answered without a JSON object"[:500]
+    if data is None or not any(key in data for key in _ANSWER_KEYS):
+        # ``{}`` and ``{"message": "unable to assess"}`` parse fine and would
+        # otherwise be filed as a confident "unclear" and leave the backlog.
+        what = "a JSON object" if data is None else "an assessment in its JSON"
+        assessment.last_error = f"{backend.label} answered without {what}"[:500]
         assessment.save()
         logger.warning(
             "Zombie assessment of PR #%d: %s (attempt %d)",
@@ -760,8 +811,9 @@ def assess_pr(pr: PullRequest, operator_config: OperatorConfig) -> str:
     """Re-run (or first-run) the assessment on one PR. Returns a one-line outcome.
 
     The detail page's button. Raises when nothing can be done — no project
-    config, no backend — so the worker command fails with the reason in front
-    of the operator rather than completing with nothing to show.
+    config, no backend — and when the model's answer was unusable, so the
+    worker command fails with the reason in front of the operator rather
+    than completing with the old verdict still on the page as if refreshed.
     """
     from franktheunicorn.config.loader import get_project_config
 
@@ -800,5 +852,6 @@ def assess_pr(pr: PullRequest, operator_config: OperatorConfig) -> str:
     finally:
         client.close()
     if not ok:
-        return f"assessment failed: {assessment.last_error}"
+        msg = f"assessment failed: {assessment.last_error}"
+        raise RuntimeError(msg)
     return f"verdict={assessment.verdict}: {assessment.summary[:200]}"

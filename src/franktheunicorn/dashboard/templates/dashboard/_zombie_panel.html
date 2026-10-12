@@ -37,6 +37,7 @@
     {% endif %}
     <div class="faint" style="font-size: 0.75rem;">
         Assessed {% if zombie.assessed_at %}{{ zombie.assessed_at|timesince }} ago{% endif %}{% if zombie.backend_used %} by {{ zombie.backend_used }}{% endif %}.
+        {% if zombie.last_error %}<span class="error-note">A later re-assessment failed ({{ zombie.last_error }}); this is the previous verdict.</span>{% endif %}
     </div>
     {% else %}
     <p class="zombie-summary muted">
