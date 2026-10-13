@@ -888,10 +888,13 @@ def stats(request: HttpRequest) -> HttpResponse:
     suppressed_count = ReviewDraft.objects.filter(is_auto_suppressed=True).count()
     scored_count = ReviewDraft.objects.filter(rejection_probability__isnull=False).count()
 
+    projects = Project.objects.annotate(pr_count=Count("pull_requests")).order_by("owner", "repo")
+
     return render(
         request,
         "dashboard/stats.html",
         {
+            "projects": projects,
             "action_counts": action_counts,
             "total_cost": total_cost.get("total") or Decimal("0"),
             "total_tokens_in": total_cost.get("total_tokens_in") or 0,
@@ -1536,6 +1539,39 @@ def security_archive_drop(request: HttpRequest) -> HttpResponse:
         cancelled,
     )
     return _back_to_security_list(request)
+
+
+@require_POST
+def project_wipe_prs(request: HttpRequest, project_id: int) -> HttpResponse:
+    """Delete a project's PRs and everything hanging off them, for a clean re-review.
+
+    Security reports have no FK to a PR and stay. So do anti-patterns (the
+    learning, not the data) and cost/action history (SET_NULL). The next poll
+    refetches the open PRs and reviews them again, at full LLM cost. A poll
+    cycle mid-review can still re-save a PR; stop the worker for a clean wipe.
+    """
+    project = get_object_or_404(Project, pk=project_id)
+    target = reverse("dashboard:stats")
+    prs = PullRequest.objects.filter(project=project)
+    in_flight = WorkerCommand.objects.filter(
+        pull_request__project=project, status__in=("pending", "running")
+    ).count()
+    if in_flight:
+        # The worker holds those PRs; a save() after the delete re-inserts one.
+        messages.error(
+            request,
+            f"{in_flight} worker command(s) are queued or running on "
+            f"{project.owner}/{project.repo}; wait for them, then wipe.",
+        )
+    else:
+        with transaction.atomic():
+            total = prs.count()
+            prs.delete()
+        messages.success(request, f"Wiped {total} PR(s) from {project.owner}/{project.repo}.")
+        logger.info("Wiped %d PR(s) from %s/%s", total, project.owner, project.repo)
+    if request.headers.get("HX-Request") == "true":
+        return HttpResponse(status=204, headers={"HX-Redirect": target})
+    return redirect(target)
 
 
 def _back_to_security_list(request: HttpRequest) -> HttpResponse:

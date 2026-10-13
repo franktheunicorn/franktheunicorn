@@ -2007,3 +2007,48 @@ class TestAgentRunSummaryHelpers:
         draft_nothing.sources = []
         draft_nothing.backend_used = ""
         assert _draft_source_key(draft_nothing) == "unknown"
+
+
+@pytest.mark.django_db
+class TestProjectWipePRs:
+    def test_wipes_only_that_projects_pr_data(self, client: Client) -> None:
+        from franktheunicorn.core.models import SecurityReport
+        from tests.factories import ProjectFactory, PullRequestFactory, SecurityReportFactory
+
+        target = ProjectFactory(owner="apache", repo="spark")
+        other = ProjectFactory(owner="apache", repo="flink")
+        doomed = PullRequestFactory(project=target)
+        ReviewDraftFactory(pull_request=doomed)
+        kept = PullRequestFactory(project=other)
+        report = SecurityReportFactory(project=target)
+        ap = AntiPatternFactory(project=target)
+
+        response = client.post(f"/project/{target.pk}/wipe-prs/")
+
+        assert response.status_code == 302
+        assert not PullRequest.objects.filter(project=target).exists()
+        assert not ReviewDraft.objects.filter(pull_request_id=doomed.pk).exists()
+        assert PullRequest.objects.filter(pk=kept.pk).exists()
+        assert SecurityReport.objects.filter(pk=report.pk).exists()
+        assert AntiPattern.objects.filter(pk=ap.pk).exists()
+
+    def test_refused_while_the_worker_holds_a_pr(self, client: Client) -> None:
+        from tests.factories import ProjectFactory, PullRequestFactory
+
+        project = ProjectFactory()
+        pr = PullRequestFactory(project=project)
+        WorkerCommand.objects.create(command="run_agents", pull_request=pr, status="running")
+
+        client.post(f"/project/{project.pk}/wipe-prs/")
+
+        assert PullRequest.objects.filter(pk=pr.pk).exists()
+
+    def test_get_is_refused(self, client: Client) -> None:
+        from tests.factories import ProjectFactory
+
+        project = ProjectFactory()
+        assert client.get(f"/project/{project.pk}/wipe-prs/").status_code == 405
+
+    def test_stats_lists_the_button(self, client: Client, db_pr: PullRequest) -> None:
+        response = client.get("/stats/")
+        assert b"Wipe PR data" in response.content
