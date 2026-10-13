@@ -2938,6 +2938,10 @@ def _poll_security_emails(operator_config: OperatorConfig) -> None:
                     source="email",
                     email_message_id=msg.message_id,
                     email_received_at=msg.received_at,
+                    relay_kind=msg.relay_kind,
+                    reporter_credit=msg.reporter_credit,
+                    credit_kind=msg.credit_kind,
+                    attachments=msg.attachment_rows(),
                 )
                 record_injection_hits(report)
                 ingested += 1

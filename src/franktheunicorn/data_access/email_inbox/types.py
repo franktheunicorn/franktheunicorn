@@ -7,6 +7,26 @@ from datetime import datetime
 
 
 @dataclass(frozen=True)
+class AttachmentMeta:
+    """What an attachment is, never what it contains.
+
+    Recorded at intake as data (name, declared type, size, sha256) so a report
+    whose PoC is a zip is not read as a report with no PoC. The bytes are not
+    stored and nothing is extracted or executed; a PoC runs only through the
+    click-gated container sandbox, on text the operator pasted into it. This is
+    Apache Magpie's PoC handling policy (``docs/security/poc-handling-policy.md``
+    at apache/magpie commit dadb315caa8b881fc1d2195bef03223dac25915a): fetch
+    and display first, read statically, execute only in a container and only
+    when static reading cannot answer, never binaries.
+    """
+
+    filename: str
+    content_type: str
+    size_bytes: int
+    sha256: str
+
+
+@dataclass(frozen=True)
 class InboxMessage:
     """A single email message fetched from an IMAP inbox.
 
@@ -15,6 +35,11 @@ class InboxMessage:
     a reporter's message): the envelope sender is the forwarder, but the
     report is what we care about. ``matched_keywords`` records exactly which
     security terms tripped the filter, so the classification is inspectable.
+
+    ``relay_kind``/``reporter_credit``/``credit_kind`` are set when a known
+    relay (the ASF Security Team, a GitHub Security Advisory) forwarded the
+    report: the relay's credit line names the discoverer, and that name, not
+    the sender, is what an advisory should credit.
     """
 
     message_id: str = ""
@@ -28,6 +53,26 @@ class InboxMessage:
     matched_keywords: tuple[str, ...] = ()
     # The outer envelope sender (the forwarder), kept for the audit trail.
     envelope_from_email: str = ""
+    #: "asf-security", "ghsa", or "" when no known relay carried the report.
+    relay_kind: str = ""
+    #: The name the relay's credit line gives, verbatim; "" when it gave none.
+    reporter_credit: str = ""
+    #: "human", "tool" or "service" for a credited name; "" without one.
+    credit_kind: str = ""
+    #: Every MIME attachment, as metadata only. Empty for a pasted report.
+    attachments: tuple[AttachmentMeta, ...] = ()
+
+    def attachment_rows(self) -> list[dict[str, str | int]]:
+        """The manifest as plain rows, the shape ``SecurityReport.attachments`` stores."""
+        return [
+            {
+                "filename": a.filename,
+                "content_type": a.content_type,
+                "size_bytes": a.size_bytes,
+                "sha256": a.sha256,
+            }
+            for a in self.attachments
+        ]
 
 
 @dataclass

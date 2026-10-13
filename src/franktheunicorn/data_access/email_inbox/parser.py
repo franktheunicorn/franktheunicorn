@@ -12,13 +12,14 @@ from __future__ import annotations
 
 import email
 import email.utils
+import hashlib
 import logging
 import re
 from datetime import UTC, datetime
 from email.header import decode_header
 from email.message import Message
 
-from franktheunicorn.data_access.email_inbox.types import InboxMessage
+from franktheunicorn.data_access.email_inbox.types import AttachmentMeta, InboxMessage
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,56 @@ _SUBJECT_PREFIX_RE = re.compile(r"^\s*(?:(?:fwd?|re|aw|wg)\s*:\s*)+", re.IGNOREC
 # Mailing-list "Name via listname" sender decoration.
 _VIA_SUFFIX_RE = re.compile(r"\s+via\s+\S.*$", re.IGNORECASE)
 
+# Relays frank recognises. On an ASF project most reports arrive through the
+# Security Team's forwarding template, whose From: is the broker and whose
+# last line credits the discoverer. The ASF adapter below is Apache Magpie's
+# (``tools/forwarder-relay/README.md``, the ``asf-security`` entry, at
+# apache/magpie commit dadb315caa8b881fc1d2195bef03223dac25915a, Apache-2.0),
+# with two changes: the preamble decides on its own, because a pasted report
+# has no envelope to match the sender pattern against; and the credit regex
+# runs to the end of the line instead of stopping at the first period, because
+# Magpie's ``(?P<credit>.+?)\.`` turns "bugbunny.ai" into "bugbunny".
+
+
+def _wrap_tolerant(phrase: str) -> str:
+    """*phrase* as a regex that survives a mail client's line wrapping.
+
+    Word by word with ``\\s+`` between, not Magpie's literal spaces: clients
+    wrap the template at 72 columns wherever the line happens to end.
+    """
+    return r"\s+".join(re.escape(word) for word in phrase.split())
+
+
+_ASF_PREAMBLE_RE = re.compile(
+    _wrap_tolerant(
+        "Dear PMC, The security vulnerability report has been received by the Apache Security Team"
+    ),
+    re.IGNORECASE,
+)
+_ASF_CREDIT_RES: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        _wrap_tolerant("This vulnerability was discovered and reported by")
+        + r"\s+(?P<credit>[^\n]+?)\.?[ \t]*$",
+        re.IGNORECASE | re.MULTILINE,
+    ),
+    re.compile(r"^Credit:[ \t]+(?P<credit>[^\n]+?)\.?[ \t]*$", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"^Reported by:[ \t]+(?P<credit>[^\n]+?)\.?[ \t]*$", re.IGNORECASE | re.MULTILINE),
+)
+# Magpie's kind hints, in its order (tool before service); the default is human.
+# A tool is credited in a CVE 5 record as type "tool", not as a finder.
+_CREDIT_KIND_HINTS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("tool", re.compile(r"\.ai\b|bot\b|scanner\b", re.IGNORECASE)),
+    ("service", re.compile(r"security team\b|\bsoc\b", re.IGNORECASE)),
+)
+# A GitHub Security Advisory notification: GitHub's sender plus the advisory
+# id in the subject. Not Magpie's; its GHSA path reads the advisory via the
+# API, which frank does not do here.
+_GHSA_SENDER_RE = re.compile(r"@github\.com$", re.IGNORECASE)
+_GHSA_ID_RE = re.compile(r"\bGHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}\b", re.IGNORECASE)
+
+#: Enough attachments to describe any real report; past this it is a dump.
+_MAX_ATTACHMENTS = 50
+
 
 def parse_email_message(raw_bytes: bytes) -> InboxMessage:
     """Parse raw email bytes into an InboxMessage.
@@ -101,6 +152,9 @@ def parse_email_message(raw_bytes: bytes) -> InboxMessage:
         from_email = envelope_from_email
 
     is_security, matched = _classify_security(subject, body)
+    relay_kind, reporter_credit, credit_kind = _detect_relay(
+        envelope_from_email, envelope_subject, body
+    )
 
     return InboxMessage(
         message_id=message_id,
@@ -113,6 +167,10 @@ def parse_email_message(raw_bytes: bytes) -> InboxMessage:
         is_forwarded=is_forwarded,
         matched_keywords=matched,
         envelope_from_email=envelope_from_email,
+        relay_kind=relay_kind,
+        reporter_credit=reporter_credit,
+        credit_kind=credit_kind,
+        attachments=_attachments(msg),
     )
 
 
@@ -144,6 +202,8 @@ def parse_pasted_report(text: str) -> InboxMessage:
         from_email = ""
 
     is_security, matched = _classify_security(subject, body)
+    # No envelope, so only the preamble-detected relay can match here.
+    relay_kind, reporter_credit, credit_kind = _detect_relay("", subject, body)
 
     # Pasted reports carry no reliable received timestamp (any date lives
     # inside the forwarded block in client-specific formatting), so
@@ -156,6 +216,9 @@ def parse_pasted_report(text: str) -> InboxMessage:
         is_security_report=is_security,
         is_forwarded=is_forwarded,
         matched_keywords=matched,
+        relay_kind=relay_kind,
+        reporter_credit=reporter_credit,
+        credit_kind=credit_kind,
     )
 
 
@@ -195,6 +258,68 @@ def _unwrap_forwarded(body: str) -> dict[str, str] | None:
     if not any(k in headers for k in ("from", "subject")):
         return None
     return headers
+
+
+def _credit_kind(credit: str) -> str:
+    for kind, pattern in _CREDIT_KIND_HINTS:
+        if pattern.search(credit):
+            return kind
+    return "human"
+
+
+def _detect_relay(envelope_from_email: str, subject: str, body: str) -> tuple[str, str, str]:
+    """``(relay_kind, reporter_credit, credit_kind)``; all empty when not a relay.
+
+    The ASF relay is its preamble: the sender pattern Magpie also checks
+    would confirm it but cannot decide it, since a pasted report has no
+    envelope. The GHSA relay needs both GitHub's sender and the advisory id
+    in the subject; neither alone means anything.
+    """
+    if _ASF_PREAMBLE_RE.search(body):
+        for pattern in _ASF_CREDIT_RES:
+            m = pattern.search(body)
+            if m:
+                credit = m.group("credit").strip()[:255]
+                return "asf-security", credit, _credit_kind(credit)
+        return "asf-security", "", ""
+    if (
+        envelope_from_email
+        and _GHSA_SENDER_RE.search(envelope_from_email)
+        and _GHSA_ID_RE.search(subject)
+    ):
+        return "ghsa", "", ""
+    return "", "", ""
+
+
+def _attachments(msg: Message) -> tuple[AttachmentMeta, ...]:
+    """Name, declared type, size and sha256 of every attachment; bytes dropped.
+
+    An attachment is a part with a filename. The content type is what the
+    sender declared, which is data like the rest: a ``text/plain`` label on a
+    zip is a claim, and the sha256 is there so the operator can tell two
+    reports with the same ``poc.zip`` apart.
+    """
+    if not msg.is_multipart():
+        return ()
+    found: list[AttachmentMeta] = []
+    for part in msg.walk():
+        filename = part.get_filename()
+        if not filename:
+            continue
+        payload = part.get_payload(decode=True)
+        if not isinstance(payload, bytes):
+            continue
+        found.append(
+            AttachmentMeta(
+                filename=_decode_header_value(filename)[:255],
+                content_type=part.get_content_type(),
+                size_bytes=len(payload),
+                sha256=hashlib.sha256(payload).hexdigest(),
+            )
+        )
+        if len(found) >= _MAX_ATTACHMENTS:
+            break
+    return tuple(found)
 
 
 def _classify_security(subject: str, body: str) -> tuple[bool, tuple[str, ...]]:
@@ -265,15 +390,21 @@ def _safe_decode(data: bytes, charset: str | None) -> str:
 def _extract_body(msg: Message) -> str:
     """Extract the plain-text body from an email message."""
     if msg.is_multipart():
+        # A ``poc.txt`` attachment is text/plain too; without the disposition
+        # check it became the body of an HTML-only mail and the real text was
+        # dropped. It is in the attachment manifest instead.
         for part in msg.walk():
             content_type = part.get_content_type()
-            if content_type == "text/plain":
+            if content_type == "text/plain" and part.get_content_disposition() != "attachment":
                 payload = part.get_payload(decode=True)
                 if isinstance(payload, bytes):
                     return _safe_decode(payload, part.get_content_charset())
         # Fallback: try HTML
         for part in msg.walk():
-            if part.get_content_type() == "text/html":
+            if (
+                part.get_content_type() == "text/html"
+                and part.get_content_disposition() != "attachment"
+            ):
                 payload = part.get_payload(decode=True)
                 if isinstance(payload, bytes):
                     return _strip_html(_safe_decode(payload, part.get_content_charset()))

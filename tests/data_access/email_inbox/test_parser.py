@@ -245,3 +245,133 @@ class TestStripHtml:
 
     def test_handles_empty(self) -> None:
         assert _strip_html("") == ""
+
+
+_ASF_CREDIT_LINE = "\nThis vulnerability was discovered and reported by bugbunny.ai.\n"
+
+
+class TestRelayDetection:
+    """The relay's sender is the broker; its credit line names the discoverer."""
+
+    def test_asf_relay_by_preamble_with_a_tool_credit(self) -> None:
+        msg = email.mime.text.MIMEText(_APACHE_FORWARD + _ASF_CREDIT_LINE)
+        msg["Subject"] = "Fwd: [SECURITY] Path traversal"
+        msg["From"] = "Apache Security Team <security@apache.org>"
+
+        result = parse_email_message(msg.as_bytes())
+
+        assert result.relay_kind == "asf-security"
+        # Magpie's own regex stops at the first period and would say "bugbunny".
+        assert result.reporter_credit == "bugbunny.ai"
+        assert result.credit_kind == "tool"
+        # The unwrapped reporter is untouched; the credit is a separate fact.
+        assert result.from_name == "Ryan Hughes"
+
+    def test_asf_relay_without_a_credit_line(self) -> None:
+        msg = email.mime.text.MIMEText(_APACHE_FORWARD)
+        msg["From"] = "security@apache.org"
+        result = parse_email_message(msg.as_bytes())
+        assert result.relay_kind == "asf-security"
+        assert result.reporter_credit == ""
+        assert result.credit_kind == ""
+
+    def test_credit_and_reported_by_lines_and_their_kinds(self) -> None:
+        for line, name, kind in (
+            ("Credit: Jane Doe", "Jane Doe", "human"),
+            ("Reported by: Acme Security Team.", "Acme Security Team", "service"),
+            ("Reported by: nightly-scanner", "nightly-scanner", "tool"),
+        ):
+            result = parse_pasted_report(_APACHE_FORWARD + "\n" + line + "\n")
+            assert result.relay_kind == "asf-security"
+            assert result.reporter_credit == name, line
+            assert result.credit_kind == kind, line
+
+    def test_pasted_relay_is_detected_without_an_envelope(self) -> None:
+        result = parse_pasted_report(_APACHE_FORWARD + _ASF_CREDIT_LINE)
+        assert result.relay_kind == "asf-security"
+        assert result.reporter_credit == "bugbunny.ai"
+
+    def test_ghsa_needs_the_sender_and_the_advisory_id(self) -> None:
+        msg = email.mime.text.MIMEText("A vulnerability with an exploit was reported.")
+        msg["Subject"] = "[org/repo] Path traversal (GHSA-abcd-1234-wxyz)"
+        msg["From"] = "GitHub <notifications@github.com>"
+        assert parse_email_message(msg.as_bytes()).relay_kind == "ghsa"
+
+        no_id = email.mime.text.MIMEText("A vulnerability with an exploit was reported.")
+        no_id["Subject"] = "[org/repo] Path traversal"
+        no_id["From"] = "GitHub <notifications@github.com>"
+        assert parse_email_message(no_id.as_bytes()).relay_kind == ""
+
+        wrong_sender = email.mime.text.MIMEText("A vulnerability with an exploit was reported.")
+        wrong_sender["Subject"] = "Re: GHSA-abcd-1234-wxyz"
+        wrong_sender["From"] = "mallory@example.com"
+        assert parse_email_message(wrong_sender.as_bytes()).relay_kind == ""
+
+    def test_a_direct_report_is_not_a_relay(self) -> None:
+        msg = email.mime.text.MIMEText("There is a vulnerability; exploit attached.")
+        msg["From"] = "alice@example.com"
+        msg["Subject"] = "security issue"
+        result = parse_email_message(msg.as_bytes())
+        assert (result.relay_kind, result.reporter_credit, result.credit_kind) == ("", "", "")
+
+
+class TestAttachments:
+    """The manifest records what an attachment is, never what it contains."""
+
+    def _mail_with(self, body: str, parts: list[tuple[str, str, bytes]]) -> bytes:
+        from email.mime.application import MIMEApplication
+
+        msg = MIMEMultipart()
+        msg["Subject"] = "vulnerability with exploit"
+        msg["From"] = "alice@example.com"
+        msg.attach(email.mime.text.MIMEText(body))
+        for filename, subtype, payload in parts:
+            part = MIMEApplication(payload, _subtype=subtype)
+            part.add_header("Content-Disposition", "attachment", filename=filename)
+            msg.attach(part)
+        return msg.as_bytes()
+
+    def test_manifest_has_name_type_size_and_digest(self) -> None:
+        import hashlib
+
+        payload = b"PK\x03\x04not really a zip"
+        result = parse_email_message(self._mail_with("see the zip", [("poc.zip", "zip", payload)]))
+
+        assert result.body.strip() == "see the zip"
+        assert len(result.attachments) == 1
+        meta = result.attachments[0]
+        assert meta.filename == "poc.zip"
+        assert meta.content_type == "application/zip"
+        assert meta.size_bytes == len(payload)
+        assert meta.sha256 == hashlib.sha256(payload).hexdigest()
+        assert result.attachment_rows() == [
+            {
+                "filename": "poc.zip",
+                "content_type": "application/zip",
+                "size_bytes": len(payload),
+                "sha256": meta.sha256,
+            }
+        ]
+
+    def test_a_text_attachment_is_not_mistaken_for_the_body(self) -> None:
+        from email.mime.text import MIMEText
+
+        msg = MIMEMultipart()
+        msg["Subject"] = "vulnerability with exploit"
+        msg["From"] = "alice@example.com"
+        msg.attach(MIMEText("<p>the html body</p>", "html"))
+        poc = MIMEText("import os; os.system('id')")
+        poc.add_header("Content-Disposition", "attachment", filename="poc.py")
+        msg.attach(poc)
+
+        result = parse_email_message(msg.as_bytes())
+
+        assert "the html body" in result.body
+        assert "os.system" not in result.body
+        assert [a.filename for a in result.attachments] == ["poc.py"]
+
+    def test_a_single_part_mail_has_no_attachments(self) -> None:
+        msg = email.mime.text.MIMEText("plain")
+        msg["From"] = "alice@example.com"
+        assert parse_email_message(msg.as_bytes()).attachments == ()
+        assert parse_pasted_report("plain").attachments == ()

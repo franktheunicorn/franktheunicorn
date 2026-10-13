@@ -4107,3 +4107,60 @@ class TestInjectionScanAtThePasteDoor:
         assert report.injection_hits == []
         page = client.get(f"/security/{report.pk}/")
         assert b"trips prompt-injection patterns" not in page.content
+
+
+class TestRelayCreditOnThePastePath:
+    """A pasted ASF relay credits its discoverer; the page says who, and that
+    the mail's sender is the broker."""
+
+    def test_the_credit_line_is_stored_and_shown(self, client: Client, db: Any) -> None:
+        forwarded = (
+            "Dear PMC,\n\n"
+            "The security vulnerability report has been received by the Apache\n"
+            "Security Team and is being passed to you for action.\n\n"
+            "---------- Forwarded message ---------\n"
+            "From: Ryan Hughes via security <security@apache.org>\n"
+            "Subject: [SECURITY] Path traversal via core_model_path\n\n"
+            "Hello, I am reporting a path traversal vulnerability exploit.\n\n"
+            "This vulnerability was discovered and reported by bugbunny.ai.\n"
+        )
+        response = client.post("/security/new/", {"raw_text": forwarded})
+        assert response.status_code == 302
+
+        report = SecurityReport.objects.get()
+        assert report.relay_kind == "asf-security"
+        assert report.reporter_credit == "bugbunny.ai"
+        assert report.credit_kind == "tool"
+        assert report.reporter_name == "Ryan Hughes"
+
+        page = client.get(f"/security/{report.pk}/")
+        assert b"Relayed via:" in page.content
+        assert b"ASF Security Team" in page.content
+        assert b"Credited as:" in page.content
+        assert b"bugbunny.ai" in page.content
+
+
+class TestAttachmentManifestOnThePage:
+    def test_the_manifest_is_listed_with_the_static_first_rule(
+        self, client: Client, db: Any
+    ) -> None:
+        report = SecurityReportFactory(
+            attachments=[
+                {
+                    "filename": "poc.zip",
+                    "content_type": "application/zip",
+                    "size_bytes": 2048,
+                    "sha256": "ab" * 32,
+                }
+            ]
+        )
+        page = client.get(f"/security/{report.pk}/")
+        assert b"Attachments (1)" in page.content
+        assert b"poc.zip" in page.content
+        assert b"application/zip" in page.content
+        assert b"Nothing was\n        extracted or executed" in page.content
+
+    def test_no_attachments_no_section(self, client: Client, db: Any) -> None:
+        report = SecurityReportFactory()
+        page = client.get(f"/security/{report.pk}/")
+        assert b"Attachments (" not in page.content

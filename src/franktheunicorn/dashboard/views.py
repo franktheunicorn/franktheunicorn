@@ -2185,6 +2185,9 @@ def security_report_create(request: HttpRequest) -> HttpResponse:
             reporter_name=reporter_name or parsed.from_name,
             reporter_email=reporter_email or parsed.from_email,
             source="paste",
+            relay_kind=parsed.relay_kind,
+            reporter_credit=parsed.reporter_credit,
+            credit_kind=parsed.credit_kind,
         )
         record_injection_hits(report)
 

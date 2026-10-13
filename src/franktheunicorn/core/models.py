@@ -676,6 +676,10 @@ class SecurityReport(models.Model):
         ("email", "Email"),
         ("zip", "Zip import"),
     ]
+    RELAY_KIND_CHOICES = [
+        ("asf-security", "ASF Security Team"),
+        ("ghsa", "GitHub Security Advisory"),
+    ]
 
     SEVERITY_CHOICES = [
         ("critical", "Critical"),
@@ -1226,6 +1230,24 @@ class SecurityReport(models.Model):
     # Email metadata (populated when source=email)
     email_message_id = models.CharField(max_length=500, blank=True, default="")
     email_received_at = models.DateTimeField(null=True, blank=True)
+    #: How the report reached the inbox when a relay forwarded it: the ASF
+    #: Security Team's "Dear PMC" template, or a GitHub Security Advisory
+    #: notification. Blank when the reporter wrote directly or the parser could
+    #: not tell. The sender of a relayed mail is the broker, never the reporter,
+    #: which is what the next two fields are for.
+    relay_kind = models.CharField(max_length=20, blank=True, default="", choices=RELAY_KIND_CHOICES)
+    #: The name the relay's credit line gives, verbatim ("This vulnerability was
+    #: discovered and reported by ..."). What the CVE record's credits should
+    #: say; ``reporter_name`` is who the mail came from.
+    reporter_credit = models.CharField(max_length=255, blank=True, default="")
+    #: "human", "tool" or "service" for a credited name, from Magpie's kind
+    #: hints. A tool is credited in CVE 5 as type "tool", not as a finder.
+    credit_kind = models.CharField(max_length=10, blank=True, default="")
+    #: ``[{"filename", "content_type", "size_bytes", "sha256"}]`` for every MIME
+    #: attachment on an emailed report. Data about the attachment, never its
+    #: bytes: nothing is extracted or executed. The click-gated sandbox runs
+    #: text the operator pasted into it, and only that.
+    attachments = models.JSONField(default=list, blank=True)
 
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)

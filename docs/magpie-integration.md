@@ -313,7 +313,7 @@ effort. "Done" means it is on this branch with tests.
   (callout wording) and `AGENTS.md` (hidden-text list) at the pinned commit.
 - **Remote path.** Worker and web processes only.
 
-### 4.6 Forwarder relay detection in the email parser (next)
+### 4.6 Forwarder relay detection in the email parser (done)
 
 - **What.** Recognise the ASF Security Team relay (sender pattern, "Dear PMC,
   The security vulnerability report has been received..." preamble, the
@@ -324,11 +324,27 @@ effort. "Done" means it is on this branch with tests.
 - **Why.** On an ASF project most reports arrive this way; frank's parser
   only unwraps a generic "forwarded message" block and otherwise credits
   `security@apache.org` as the reporter.
+- **Where.** `data_access/email_inbox/parser.py` (`_detect_relay`, the
+  `asf-security` adapter's preamble, credit and kind-hint regexes ported
+  data for data; a `ghsa` relay of frank's own), `InboxMessage.relay_kind` /
+  `reporter_credit` / `credit_kind`, and the same three columns on
+  `SecurityReport` (migration 0061) written by all three doors. The detail
+  page shows "Relayed via" and "Credited as". `security/cve_advisory.py`
+  now emits CVE 5 `credits[]` from `reporter_credit` only, typed `tool` for
+  a credited scanner or AI account per Magpie's bot-credit policy, and never
+  from `reporter_name` (on a relayed report that is the broker).
+- **Two deviations, both upstream-worthy (section 7).** The preamble and the
+  credit phrase are matched word-by-word with `\s+` between, because mail
+  clients wrap the template at 72 columns and Magpie's literal-space regex
+  misses every wrapped copy; and the credit regex runs to the end of the
+  line, because Magpie's `(?P<credit>.+?)\.` stops at the first period and
+  turns "bugbunny.ai" (its own README example) into "bugbunny".
 - **Upstream source.** `tools/forwarder-relay/README.md` (the `asf-security`
-  adapter's regexes, present at 0.1.0) and `tools/gmail/asf-relay.md`.
+  adapter's regexes, present at 0.1.0), `tools/gmail/asf-relay.md`, and
+  `tools/cve-tool-vulnogram/bot-credits-policy.md`.
 - **Remote path.** Worker and web processes only.
 
-### 4.7 Attachment manifest and the static-first PoC policy (next)
+### 4.7 Attachment manifest and the static-first PoC policy (done)
 
 - **What.** Record each email attachment's name, type, size and sha256 at
   intake as data (never extracted, never executed), show them on the report
@@ -336,6 +352,13 @@ effort. "Done" means it is on this branch with tests.
   container sandbox as it is today. Both lenses scored it 4.
 - **Why.** Attachments are dropped silently today, so a report whose PoC is
   a zip reads as having no PoC.
+- **Where.** `AttachmentMeta` in `data_access/email_inbox/types.py`,
+  `_attachments` in the parser (name, declared type, size, sha256; at most
+  50; bytes dropped), `SecurityReport.attachments` (migration 0061), and an
+  "Attachments" section on the detail page carrying the rule text. Also fixed
+  on the way: a `text/plain` attachment such as `poc.py` was taken as the
+  body of an HTML-only mail; `_extract_body` now skips attachment-disposition
+  parts, so the PoC lands in the manifest and the real text is the body.
 - **Upstream source.** `docs/security/poc-handling-policy.md` at the pinned
   commit (written after 0.1.0).
 - **Remote path.** Worker and web processes only.

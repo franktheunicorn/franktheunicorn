@@ -154,3 +154,45 @@ class TestMergeExisting:
         report = SecurityReportFactory(title="New title", matched_cve_id="CVE-2026-12345")
         build_cve5_json(report, pmc="spark", existing=existing)
         assert existing["containers"]["cna"]["title"] == "Old title"
+
+
+@pytest.mark.django_db
+class TestCredits:
+    """Only a relay's credit line becomes a credit; the sender never does, and
+    a scanner is typed as a tool."""
+
+    def test_a_credited_tool_is_typed_tool(self) -> None:
+        report = SecurityReportFactory(
+            matched_cve_id="CVE-2026-12345",
+            reporter_name="Apache Security Team",
+            reporter_credit="bugbunny.ai",
+            credit_kind="tool",
+        )
+        cna = build_cve5_json(report, pmc="spark")["containers"]["cna"]
+        assert cna["credits"] == [{"lang": "en", "value": "bugbunny.ai", "type": "tool"}]
+
+    def test_a_credited_person_is_a_finder(self) -> None:
+        report = SecurityReportFactory(
+            matched_cve_id="CVE-2026-12345", reporter_credit="Jane Doe", credit_kind="human"
+        )
+        cna = build_cve5_json(report, pmc="spark")["containers"]["cna"]
+        assert cna["credits"] == [{"lang": "en", "value": "Jane Doe", "type": "finder"}]
+
+    def test_the_sender_is_never_credited(self) -> None:
+        report = SecurityReportFactory(
+            matched_cve_id="CVE-2026-12345", reporter_name="Ryan Hughes", reporter_credit=""
+        )
+        assert "credits" not in build_cve5_json(report, pmc="spark")["containers"]["cna"]
+
+    def test_existing_credits_survive_when_the_report_has_none(self) -> None:
+        existing = {
+            "dataType": "CVE_RECORD",
+            "dataVersion": "5.0",
+            "cveMetadata": {"cveId": "CVE-2026-12345", "serial": 3, "state": "PUBLISHED"},
+            "containers": {
+                "cna": {"title": "Old", "credits": [{"lang": "en", "value": "Someone"}]}
+            },
+        }
+        report = SecurityReportFactory(matched_cve_id="CVE-2026-12345", reporter_credit="")
+        cna = build_cve5_json(report, pmc="spark", existing=existing)["containers"]["cna"]
+        assert cna["credits"] == [{"lang": "en", "value": "Someone"}]

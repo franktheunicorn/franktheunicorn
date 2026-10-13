@@ -28,6 +28,13 @@
         {% if report.project %}<dt>Project:</dt><dd>{{ report.project.full_name }}</dd>{% endif %}
         {% if report.reporter_name %}<dt>Reporter:</dt><dd>{{ report.reporter_name }}</dd>{% endif %}
         {% if report.reporter_email %}<dt>Email:</dt><dd>{{ report.reporter_email }}</dd>{% endif %}
+        {# A relayed report's sender is the broker; the credit line names the #}
+        {# discoverer, and that name is what the CVE record's credits carry. #}
+        {% if report.relay_kind %}<dt>Relayed via:</dt><dd>{{ report.get_relay_kind_display }}</dd>{% endif %}
+        {% if report.reporter_credit %}
+        <dt>Credited as:</dt>
+        <dd>{{ report.reporter_credit }}{% if report.credit_kind %} <span class="muted">({{ report.credit_kind }})</span>{% endif %}</dd>
+        {% endif %}
         <dt>Created:</dt><dd>{{ report.created_at|timesince }} ago</dd>
     </dl>
 </div>
@@ -132,6 +139,33 @@
     <summary style="font-weight: 600; font-size: 0.9rem; cursor: pointer;">Raw Report</summary>
     <pre style="background: var(--card); border: 1px solid var(--border); border-radius: 4px; padding: 0.75rem; font-size: 0.8rem; white-space: pre-wrap; word-wrap: break-word; max-height: 400px; overflow-y: auto; margin-top: 0.5rem;">{{ report.raw_text }}</pre>
 </details>
+
+{% if report.attachments %}
+{# The manifest, not the files. Static reading first, execution only in the #}
+{# container sandbox and only on text the operator pastes, binaries never: #}
+{# Magpie's PoC handling policy, which is also frank's. #}
+<details open style="margin-bottom: 1rem;">
+    <summary style="font-weight: 600; font-size: 0.9rem; cursor: pointer;">Attachments ({{ report.attachments|length }})</summary>
+    <p class="muted" style="font-size: 0.8rem; margin: 0.4rem 0;">
+        Recorded as data: name, declared type, size and sha256. Nothing was
+        extracted or executed. Read a proof of concept before running it, run it
+        only in the sandbox below on text you paste there, and never run a binary.
+    </p>
+    <table class="attachment-table">
+        <thead><tr><th>File</th><th>Declared type</th><th>Size</th><th>sha256</th></tr></thead>
+        <tbody>
+        {% for a in report.attachments %}
+        <tr>
+            <td>{{ a.filename }}</td>
+            <td>{{ a.content_type }}</td>
+            <td>{{ a.size_bytes|filesizeformat }}</td>
+            <td><code>{{ a.sha256|slice:":16" }}…</code></td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</details>
+{% endif %}
 
 {# Proposed fix, when the archive shipped one for this finding. Open by default #}
 {# and NOT wrapped: a diff whose lines are re-flowed doesn't apply, and the #}

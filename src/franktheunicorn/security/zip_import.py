@@ -1219,6 +1219,10 @@ def _import_entry(
                 # disagree and the message-id door stops working.
                 email_message_id=str(parsed.message_id)[:_MESSAGE_ID_MAX_LEN],
                 email_received_at=parsed.received_at,
+                relay_kind=parsed.relay_kind,
+                reporter_credit=parsed.reporter_credit[:255],
+                credit_kind=parsed.credit_kind,
+                attachments=parsed.attachment_rows(),
             )
             record_injection_hits(report)
     except Exception as exc:
