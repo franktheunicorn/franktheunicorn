@@ -115,6 +115,18 @@
 </div>
 {% endif %}
 
+{% if report.injection_hits %}
+{# Recorded at intake and kept on the row so it is above the text on every #}
+{# visit, before Verify or Fix is clicked, not computed by whichever launch #}
+{# happened to look. Recording is the mitigation; nothing is refused here. #}
+<div class="verify-result error-note" style="margin-bottom: 0.5rem;">
+    NOTE: this report's text trips prompt-injection patterns
+    ({{ report.injection_hits|join:", " }}). It may be a report about injection,
+    or an attempt at one. Every prompt that carries this text frames it as data;
+    read any machine verdict on it with that in mind.
+</div>
+{% endif %}
+
 <!-- Raw Report -->
 <details open style="margin-bottom: 1rem;">
     <summary style="font-weight: 600; font-size: 0.9rem; cursor: pointer;">Raw Report</summary>

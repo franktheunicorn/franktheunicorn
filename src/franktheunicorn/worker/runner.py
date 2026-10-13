@@ -2918,6 +2918,8 @@ def _poll_security_emails(operator_config: OperatorConfig) -> None:
 
         fetch = fetch_security_emails(operator_config.security_triage.email, seen_ids)
 
+        from franktheunicorn.security.intake import record_injection_hits
+
         ingested = 0
         ingested_message_ids: list[str] = []
         for msg in fetch.examined:
@@ -2937,6 +2939,7 @@ def _poll_security_emails(operator_config: OperatorConfig) -> None:
                     email_message_id=msg.message_id,
                     email_received_at=msg.received_at,
                 )
+                record_injection_hits(report)
                 ingested += 1
                 if msg.message_id:
                     ingested_message_ids.append(msg.message_id)

@@ -873,6 +873,14 @@ class SecurityReport(models.Model):
     #: its disposition rests on, verbatim. Empty when it cited nothing, which
     #: is itself worth seeing: a confident class with no quoted rule is a guess.
     triage_model_quote = models.TextField(blank=True, default="")
+    #: Prompt-injection patterns in the report's text (title, raw text, parsed
+    #: POC), by name, written by ``security.intake.record_injection_hits`` the
+    #: moment the row exists and again once triage fills the POC. Empty is
+    #: clean. The verifier and fix agent keep their own per-launch copies
+    #: (``fix_injection_hits``); this one is the callout above the report
+    #: text, there before anyone clicks anything, and the thing to read when a
+    #: later verdict on this report looks steered.
+    injection_hits = models.JSONField(default=list, blank=True)
 
     # LLM-parsed structured fields (populated by triage pipeline)
     parsed_component = models.CharField(max_length=500, blank=True, default="")

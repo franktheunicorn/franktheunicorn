@@ -2174,6 +2174,7 @@ def security_report_create(request: HttpRequest) -> HttpResponse:
         # metadata is filled even with no LLM backend configured. Anything the
         # operator typed in the form wins; this only fills the blanks.
         from franktheunicorn.data_access.email_inbox.parser import parse_pasted_report
+        from franktheunicorn.security.intake import record_injection_hits
 
         parsed = parse_pasted_report(raw_text)
 
@@ -2185,6 +2186,7 @@ def security_report_create(request: HttpRequest) -> HttpResponse:
             reporter_email=reporter_email or parsed.from_email,
             source="paste",
         )
+        record_injection_hits(report)
 
         # Queue auto-triage if configured — runs in the worker, not inline.
         try:

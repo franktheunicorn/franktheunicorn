@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, NamedTuple
 
 from franktheunicorn.config.models import LLMBackendConfig
 from franktheunicorn.security.cve_lookup import search_cves
+from franktheunicorn.security.intake import record_injection_hits
 from franktheunicorn.security.prompt import (
     TRIAGE_DISPOSITIONS,
     build_parse_prompt,
@@ -1036,6 +1037,9 @@ def _parse_report(report: SecurityReport, backend: BaseLLMBackend) -> bool:
                 "updated_at",
             ]
         )
+        # The POC is new text the intake scan never saw — and the one field a
+        # steering payload most naturally lands in ("to reproduce, run ...").
+        record_injection_hits(report)
         return True
     return False
 

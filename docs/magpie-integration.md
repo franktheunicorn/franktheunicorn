@@ -290,17 +290,25 @@ effort. "Done" means it is on this branch with tests.
 - **Residual.** The full-file and imported-module context read from the PR
   head checkout is contributor-written and is not yet fenced.
 
-### 4.5 Injection scan at every intake door (next)
+### 4.5 Injection scan at every intake door (done)
 
 - **What.** Run the regex injection scanner frank already has
-  (`security/malicious_prompt.regex_scan`, used today only by the verifier
+  (`security/malicious_prompt.regex_scan`, used before only by the verifier
   and fix agent) when a report is created by email, paste or zip import, and
   again after triage parses the POC; persist the hits on the report and show
   a persistent callout above the report text. Both lenses scored it 4.
 - **Why.** Every later LLM call re-reads the stored report; Magpie persists
   the flag at import for exactly that reason ("so the marker persists for
-  every future skill invocation"). frank computes the hits twice, late, and
-  keeps them nowhere the operator sees before clicking Verify.
+  every future skill invocation"). frank computed the hits twice, late, and
+  kept them nowhere the operator saw before clicking Verify.
+- **Where.** `security/intake.py` (`record_injection_hits`, one function the
+  doors call), `SecurityReport.injection_hits` (migration 0060), called from
+  the email poll in `worker/runner.py`, the paste form in
+  `dashboard/views.py`, both create sites in `security/zip_import.py`, and
+  `triage._parse_report` after the POC is saved. The callout is in
+  `security_detail.html` above the raw text. Recording is the mitigation;
+  nothing is refused here, and the verifier keeps its own
+  `refuse_on_injection` gate.
 - **Upstream source.** `plugins/magpie-security/skills/issue-import/apply.md`
   (callout wording) and `AGENTS.md` (hidden-text list) at the pinned commit.
 - **Remote path.** Worker and web processes only.
