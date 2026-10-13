@@ -100,6 +100,33 @@ class TestClassifyBody:
         assert kind == INTENT_NONE
         assert match is None
 
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "Please do not merge once CI passes, I want another look.",
+            "I cannot merge after the tests pass, I'm travelling.",
+            "Don't merge when the build is green, wait for the release branch.",
+            "Can you merge when the build is green?",
+            "Should we land this once CI is happy?",
+            "Never merge if the tests pass only locally.",
+        ],
+    )
+    def test_negated_or_asked_gates_are_not_approvals(self, body: str) -> None:
+        kind, _ = classify_body(body)
+        assert kind == INTENT_NONE
+
+    def test_negation_in_an_earlier_sentence_does_not_count(self) -> None:
+        kind, _ = classify_body("I did not get to the tests yesterday. LGTM pending CI.")
+        assert kind == INTENT_CONDITIONAL
+
+    def test_negation_after_the_verdict_does_not_count(self) -> None:
+        kind, _ = classify_body("LGTM once CI passes, the nit is not blocking.")
+        assert kind == INTENT_CONDITIONAL
+
+    def test_question_then_affirmative_sentence(self) -> None:
+        kind, _ = classify_body("Can you rebase? Then LGTM pending CI.")
+        assert kind == INTENT_CONDITIONAL
+
     def test_quoted_approval_followed_by_own_verdict(self) -> None:
         kind, _ = classify_body("> Can you review?\n\nLGTM pending CI")
         assert kind == INTENT_CONDITIONAL

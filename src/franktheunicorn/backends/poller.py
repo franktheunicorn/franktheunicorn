@@ -24,6 +24,7 @@ from franktheunicorn.core.session_detector import detect_agent_session
 from franktheunicorn.scoring.scorer import score_pull_request_from_model
 from franktheunicorn.worker.merge_intent import (
     MERGE_INTENT_FIELDS,
+    MergeIntent,
     apply_merge_intent,
     count_approvals,
     detect_merge_intent,
@@ -351,6 +352,10 @@ def _refresh_pull_request(
         pr_obj.base_sha = base_sha
     if head_sha and pr_obj.head_sha != head_sha:
         pr_obj.head_sha = head_sha
+        # A push invalidates the stored CI verdict. Cleared here, not where
+        # the fresh one is read, so a failed read leaves "unknown" and never
+        # an old head's "pass" that the merge queue would act on.
+        pr_obj.ci_status = ""
     if head_branch and pr_obj.head_branch != head_branch:
         pr_obj.head_branch = head_branch
     if base_branch and pr_obj.base_branch != base_branch:
@@ -707,6 +712,10 @@ def _sync_merge_intent(
     """
     config = config or MergeIntentConfig()
     if not config.enabled:
+        # Off means off for rows classified before it was switched off too:
+        # routing reads the stored field, so leaving it would keep them in a
+        # queue nothing can clear them from.
+        apply_merge_intent(pr_obj, MergeIntent())
         return
     approvers = config.approvers_for(operator_username)
     if not approvers:
@@ -1127,8 +1136,12 @@ def ingest_single_pr(
     ):
         side_data = pr_data.get(side)
         if isinstance(side_data, dict):
-            if side_data.get("sha"):
-                setattr(pr_obj, sha_field, side_data["sha"])
+            new_sha = side_data.get("sha")
+            if new_sha and getattr(pr_obj, sha_field) != new_sha:
+                setattr(pr_obj, sha_field, new_sha)
+                if sha_field == "head_sha":
+                    # Same rule as the poll path: a new head, no CI verdict yet.
+                    pr_obj.ci_status = ""
             if side_data.get("ref"):
                 setattr(pr_obj, ref_field, side_data["ref"])
 

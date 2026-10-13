@@ -50,7 +50,7 @@ EXCERPT_MAX_CHARS = 300
 # gate it is waiting on. Matching both halves, in either order, is what keeps
 # "LGTM" + "CI is red, please fix" (a plain comment about CI) from counting.
 _VERDICT = (
-    r"(?:lgtm|looks\s+good(?:\s+to\s+me)?|good\s+to\s+go|ship\s+it|"
+    r"(?P<verdict>lgtm|looks\s+good(?:\s+to\s+me)?|good\s+to\s+go|ship\s+it|"
     r"\+1|(?:i(?:'ll|\s+will|\s+am\s+going\s+to|'m\s+going\s+to)?\s+)?"
     r"(?:merge|merging|land|landing))"
 )
@@ -81,6 +81,14 @@ _PLAIN_APPROVAL_PATTERNS: tuple[re.Pattern[str], ...] = (
         r"^\s*(?:>.*\n\s*)*(?:i(?:'ll|\s+will|\s+am\s+going\s+to|'m\s+going\s+to)\s+merge)\b"
     ),
 )
+
+# "Please do not merge once CI passes" and "I cannot merge after the tests
+# pass" have a verdict and a gate and mean the opposite. A negation in the
+# few words before the verdict, inside the same sentence, flips it.
+_NEGATION_BEFORE = re.compile(
+    r"(?:\bnot|n't|\bnever|\bcannot|\bwithout|\bdon't|\bwon't)\s+(?:\w+\s+){0,2}$"
+)
+_SENTENCE_END = re.compile(r"[.!?\n]")
 
 # Lines quoting someone else ("> LGTM pending CI") are not the approver's
 # words. Fenced code is not either.
@@ -171,14 +179,35 @@ def classify_body(body: str) -> tuple[str, re.Match[str] | None]:
     text = _strip_quotes(body or "")
     lowered = text.lower()
     for pattern in _CONDITIONAL_PATTERNS:
-        match = pattern.search(lowered)
-        if match is not None:
-            return INTENT_CONDITIONAL, match
+        for match in pattern.finditer(lowered):
+            if _is_affirmative(lowered, match):
+                return INTENT_CONDITIONAL, match
     for pattern in _PLAIN_APPROVAL_PATTERNS:
-        match = pattern.search(lowered)
-        if match is not None:
-            return INTENT_APPROVED, match
+        plain = pattern.search(lowered)
+        if plain is not None:
+            return INTENT_APPROVED, plain
     return INTENT_NONE, None
+
+
+def _is_affirmative(lowered: str, match: re.Match[str]) -> bool:
+    """False for a negated verdict or a question.
+
+    "Can you merge when the build is green?" asks; "please do not merge once
+    CI passes" forbids. Both carry the verdict/gate shape and neither is an
+    approval. The sentence is the unit: a "not" in the previous sentence, or
+    after the verdict ("LGTM, not blocking"), does not count.
+    """
+    verdict_start = match.start("verdict")
+    sentence_start = 0
+    for boundary in _SENTENCE_END.finditer(lowered, 0, verdict_start):
+        sentence_start = boundary.end()
+    end_match = _SENTENCE_END.search(lowered, match.end())
+    sentence_end = end_match.start() if end_match else len(lowered)
+    if end_match is not None and end_match.group() == "?":
+        return False
+    if lowered[sentence_start:sentence_end].rstrip().endswith("?"):
+        return False
+    return _NEGATION_BEFORE.search(lowered[sentence_start:verdict_start]) is None
 
 
 def _signals(

@@ -166,6 +166,46 @@ class TestPollMergeIntent:
         assert pr.merge_intent == "approved"
         assert pr.queue == "intending-to-merge"
 
+    def test_new_head_clears_ci_even_when_the_read_fails(self, tmp_path: Path) -> None:
+        """A stale "pass" from the old head must not survive a push."""
+        client = _ReviewsClient(tmp_path)
+        client.reviews[42] = [_approval()]
+        client.ci["1" * 40] = "pass"
+        poll_project(client, self._config(), operator_username="holdenk")
+        assert PullRequest.objects.get(number=42).ci_status == "pass"
+
+        detail = client.get_pull_request("apache", "spark", 42)
+        detail["head"]["sha"] = "2" * 40
+        PullRequest.objects.filter(number=42).update(last_polled_at=None)
+        with (
+            patch.object(client, "get_pull_request", return_value=detail),
+            patch.object(client, "get_commit_ci_status", side_effect=RuntimeError("503")),
+        ):
+            poll_project(client, self._config(), operator_username="holdenk")
+
+        pr = PullRequest.objects.get(number=42)
+        assert pr.head_sha == "2" * 40
+        assert pr.ci_status == ""
+        assert pr.moved_since_approval is True
+
+    def test_disabling_clears_stored_intent_and_reroutes(self, tmp_path: Path) -> None:
+        client = _ReviewsClient(tmp_path)
+        client.reviews[42] = [_approval()]
+        poll_project(client, self._config(), operator_username="holdenk")
+        assert PullRequest.objects.get(number=42).queue == "intending-to-merge"
+
+        PullRequest.objects.filter(number=42).update(last_polled_at=None)
+        poll_project(
+            client,
+            self._config(),
+            operator_username="holdenk",
+            merge_intent=MergeIntentConfig(enabled=False),
+        )
+
+        pr = PullRequest.objects.get(number=42)
+        assert pr.merge_intent == ""
+        assert pr.queue != "intending-to-merge"
+
     def test_disabled_config_reads_nothing(self, tmp_path: Path) -> None:
         client = _ReviewsClient(tmp_path)
         client.reviews[42] = [_approval()]

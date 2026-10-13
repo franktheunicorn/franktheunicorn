@@ -152,9 +152,50 @@ class TestGitHubCIStatus:
 
         assert client.get_commit_ci_status("a", "s", "abc") == "fail"
 
+    def test_too_many_check_runs_is_unknown_not_green(
+        self, httpx_mock: HTTPXMock, client: GitHubClient
+    ) -> None:
+        base = "https://api.github.test/repos/a/s/commits/abc"
+        for page in range(1, 11):
+            httpx_mock.add_response(
+                url=f"{base}/check-runs?per_page=100&page={page}",
+                json={"check_runs": [{"conclusion": "success"}] * 100},
+            )
+
+        assert client.get_commit_ci_status("a", "s", "abc") == ""
+
     def test_empty_sha_makes_no_request(self, httpx_mock: HTTPXMock, client: GitHubClient) -> None:
         assert client.get_commit_ci_status("a", "s", "") == ""
         assert httpx_mock.get_requests() == []
+
+
+class TestGitHubIssueComments:
+    @pytest.fixture
+    def client(self) -> GitHubClient:
+        c = GitHubClient(token="t", base_url="https://api.github.test")
+        yield c
+        c.close()
+
+    def test_paginates_past_a_full_page(self, httpx_mock: HTTPXMock, client: GitHubClient) -> None:
+        """The approver's latest word on a 150-comment PR is on page two."""
+        httpx_mock.add_response(json=[{"id": i, "body": "x"} for i in range(100)])
+        httpx_mock.add_response(json=[{"id": 100, "body": "LGTM pending CI"}])
+
+        comments = client.get_issue_comments("apache", "spark", 7)
+
+        assert len(comments) == 101
+        assert comments[-1]["body"] == "LGTM pending CI"
+        pages = [r.url.params["page"] for r in httpx_mock.get_requests()]
+        assert pages == ["1", "2"]
+
+    def test_since_is_passed_on_every_page(
+        self, httpx_mock: HTTPXMock, client: GitHubClient
+    ) -> None:
+        httpx_mock.add_response(json=[])
+        client.get_issue_comments("apache", "spark", 7, since="2026-10-01T00:00:00Z")
+        request = httpx_mock.get_requests()[0]
+        assert request.url.params["since"] == "2026-10-01T00:00:00Z"
+        assert request.url.params["per_page"] == "100"
 
 
 class TestGiteaReviews:
