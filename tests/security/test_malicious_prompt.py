@@ -202,7 +202,7 @@ class TestFileSecurityReport:
         from tests.factories import SecurityReportFactory
 
         migration = importlib.import_module(
-            "franktheunicorn.core.migrations.0057_securityreport_source_agent"
+            "franktheunicorn.core.migrations.0058_securityreport_source_agent"
         )
         filed = SecurityReportFactory(
             reporter_name="franktheunicorn (auto pre-filter)",

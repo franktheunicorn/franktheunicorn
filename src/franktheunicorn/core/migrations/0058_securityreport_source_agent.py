@@ -25,7 +25,7 @@ def _label_prefilter_reports(apps: Any, schema_editor: Any) -> None:
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("core", "0056_pullrequest_base_branch"),
+        ("core", "0057_pullrequest_merge_intent"),
     ]
 
     operations = [
