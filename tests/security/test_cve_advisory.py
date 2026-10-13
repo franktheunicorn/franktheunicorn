@@ -68,7 +68,7 @@ class TestBuildFresh:
 
 @pytest.mark.django_db
 class TestReferences:
-    def test_fix_branch_and_thread_links(self) -> None:
+    def test_fix_branch_links_but_never_the_private_thread(self) -> None:
         report = SecurityReportFactory(
             matched_cve_id="CVE-2026-12345",
             fixed_in_branch="master",
@@ -81,7 +81,19 @@ class TestReferences:
         urls = [r["url"] for r in refs]
         assert "https://github.com/apache/spark/tree/fix-bug-42" in urls
         assert "https://github.com/apache/spark/tree/master" in urls
-        assert "https://lists.apache.org/thread/abc123" in urls
+        # The security@ thread is access-gated: it must never reach the public
+        # record, however the message id was stored.
+        assert not any("lists.apache.org" in u for u in urls)
+        assert not any("abc123" in u for u in urls)
+
+    def test_an_emailed_report_with_no_branch_has_no_references(self) -> None:
+        report = SecurityReportFactory(
+            matched_cve_id="CVE-2026-12345",
+            source="email",
+            email_message_id="<reporter-private-thread@example.org>",
+        )
+        cna = build_cve5_json(report, pmc="spark")["containers"]["cna"]
+        assert "references" not in cna
 
     def test_free_text_fixed_in_branch_is_not_urlified(self) -> None:
         report = SecurityReportFactory(

@@ -26,7 +26,57 @@
 
 ## 1. Summary and Positioning
 
-_To be filled from the verified mapping._
+Apache Magpie is the ASF's framework for agent-assisted maintainership. It
+graduated to a Top-Level Project on 17 June 2026 and grew out of the
+`apache/airflow-steward` security-report tooling. It ships as a library of
+markdown skills that a maintainer invokes inside a coding agent (Claude Code,
+Codex, Cursor, Gemini CLI, Copilot) plus small stdlib Python tools, organised
+into families: security, pr-management, issue, mentoring, contributor-growth,
+release-management, repo-health, pairing, setup and utilities. Its mission
+document names five modes (Agentic Triage, Mentoring, Drafting, Pairing,
+Autonomous); only Triage and Drafting are stable, and Autonomous is off by
+design. Its state lives in the forge: a private tracker repository's issues,
+labels and a status rollup comment. Its safety posture is the part frank should
+take most seriously: external content is data and never an instruction; outputs
+are probabilistic and gates are deterministic; every agent-authored output is a
+proposal a human signs; no telemetry; a committed lock plus gitignored snapshot
+instead of vendored copies.
+
+frank is a different shape of tool for an overlapping job. It is an always-on
+worker with its own SQLite state and a dashboard, it scores and routes PRs by
+the operator's interest, it drafts findings in the operator's voice, and it
+learns from corrections through the anti-pattern list. Magpie has none of that:
+no daemon, no scoring, no voice, no learning loop. frank has none of Magpie's
+release management, mentoring or contributor-growth work, and does not want it.
+
+Where the two overlap, Magpie is usually ahead on **rules** and frank on
+**plumbing**:
+
+| Area | Magpie has | frank has |
+|------|------------|-----------|
+| Security reports | six triage dispositions, CVE 5 record builders with CWE, credits and reference tags, reporter-facing canned wording, PoC and confidentiality policies, a deterministic security-language guard for fix branches | SQLite backlog, LLM triage staged for the operator, NVD lookup, backlog dedup, per-branch agent verification, git-only fix-landed proofs, CSV sheet sync, a thin ASF CVE service client |
+| PR review | review criteria files, deterministic scans (undisclosed security fix, AI authorship, licence headers, compiled artifacts), CODEOWNERS grounding, posting discipline (no live @-mentions, anchor validation, head-sha guard) | interest scoring, blame, anti-patterns, tone guard, prior-comment dedup, multi-reviewer dedup, copypasta detection |
+| Agent confinement | per-CLI read-only argv, credential-stripped env, PreToolUse guard, sandbox settings | containers for tests and PoC runs, `--mode ask` for cursor-agent, nonce-framed prompts in the verifier and fix agent |
+| Intake | ASF relay and GHSA forwarder detection, IMAP thread reconstruction, PII redactor | IMAP fetcher, regex injection scanner, scanner-archive import |
+
+So the strategy is: take Magpie's rules and text as pinned prompt material or
+small deterministic ports, pin the two or three stdlib tools worth calling by
+commit sha, never run Magpie's interactive skills headless inside the worker
+(they assume `gh`, a tracker repository and a maintainer at the keyboard), and
+contribute upstream where frank is ahead. Everything frank takes is tied to one
+upstream commit (section 2) and placed against the remote execution model
+(section 3).
+
+Principles frank already follows and should name: human in the loop (draft-only
+posting), deterministic gates around probabilistic output (the review queue),
+no telemetry (local-first), audit of every posted action (operator actions and
+the 24h recall window). Principles frank does not follow and should adopt:
+external content is data in every prompt that carries contributor or reporter
+text (today only the verifier and the fix agent frame it), and tracker
+identifiers are public-safe but contents are not (the CVE record must never
+cite a private thread). One principle frank cannot adopt as written:
+contributor sentiment gating mode graduation needs a community measuring it,
+and frank is a single operator's tool.
 
 ---
 
