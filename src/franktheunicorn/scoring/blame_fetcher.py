@@ -167,13 +167,14 @@ def _get_changed_lines_for_file(
 ) -> set[int] | None:
     """Get the set of line numbers changed in a file between two refs.
 
-    If head_ref is provided, diffs base_ref..head_ref (two explicit commits).
+    If head_ref is provided, diffs from their merge-base to head_ref, so base
+    commits made after the PR branched don't count as its changes.
     Otherwise, diffs base_ref against the working tree (less reliable).
 
     Returns None if diff fails (e.g. new file with no base).
     """
     try:
-        diff_spec = f"{base_ref}..{head_ref}" if head_ref else base_ref
+        diff_spec = f"{base_ref}...{head_ref}" if head_ref else base_ref
         result = subprocess.run(
             ["git", "diff", "-U0", diff_spec, "--", file_path],
             capture_output=True,

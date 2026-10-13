@@ -478,9 +478,12 @@ class TestRemoteCloneUsesProjectForgeUrl:
         tmp_path: Path,
     ) -> None:
         fixture = (Path(__file__).parent.parent / "fixtures" / "coderabbit_output.txt").read_text()
-        mock_run.return_value = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=fixture, stderr=""
-        )
+
+        def fake_run(argv: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+            out = "c" * 40 if any("merge-base" in a for a in argv) else fixture
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout=out, stderr="")
+
+        mock_run.side_effect = fake_run
 
         db_pr.head_sha = "deadbeef" * 5
         db_pr.save()
@@ -510,9 +513,12 @@ class TestRemoteCloneUsesProjectForgeUrl:
     ) -> None:
         """Remote mode must never set pr.mergeable=False — that's only for local conflicts."""
         fixture = (Path(__file__).parent.parent / "fixtures" / "coderabbit_output.txt").read_text()
-        mock_run.return_value = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=fixture, stderr=""
-        )
+
+        def fake_run(argv: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+            out = "c" * 40 if any("merge-base" in a for a in argv) else fixture
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout=out, stderr="")
+
+        mock_run.side_effect = fake_run
 
         db_pr.head_sha = "deadbeef" * 5
         db_pr.mergeable = True
@@ -536,9 +542,12 @@ class TestRemoteCloneUsesProjectForgeUrl:
     ) -> None:
         """_resolve_cwd_for_tool should return _REMOTE as temp_branch for remote execution."""
         fixture = (Path(__file__).parent.parent / "fixtures" / "coderabbit_output.txt").read_text()
-        mock_run.return_value = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=fixture, stderr=""
-        )
+
+        def fake_run(argv: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+            out = "c" * 40 if any("merge-base" in a for a in argv) else fixture
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout=out, stderr="")
+
+        mock_run.side_effect = fake_run
 
         db_pr.head_sha = "deadbeef" * 5
         db_pr.save()
@@ -659,3 +668,55 @@ class TestLocalCheckoutHonoursTheLane:
         assert "force-run" in laned[0]
         # And the merge/checkout ran in the laned tree, not the shared one.
         assert merge.call_args_list[-1].args[1] == laned[0]
+
+
+def _git(cwd: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+@pytest.mark.django_db
+def test_remote_diff_is_against_the_fork_point_not_base_sha(
+    db_pr: PullRequest, tmp_path: Path
+) -> None:
+    """base.sha is the base tip; master commits after the fork must not show up
+    in the PR's diff (they arrived as reversed hunks on files it never touched)."""
+    from franktheunicorn.review.tool_executor import LocalExecutor, RemoteSSHExecutor
+
+    repo = tmp_path / "spark"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "master")
+    (repo / "shared.txt").write_text("v1\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "base")
+    _git(repo, "checkout", "-qb", "pr")
+    (repo / "pr_file.txt").write_text("pr\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "pr")
+    db_pr.head_sha = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-q", "master")
+    (repo / "unrelated.txt").write_text("master moved on\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "later master")
+    db_pr.base_sha = _git(repo, "rev-parse", "HEAD")
+    db_pr.save()
+
+    local = LocalExecutor()
+    executor = MagicMock(spec=RemoteSSHExecutor)
+    executor.prepare_repo.return_value = str(repo)
+    executor.run.side_effect = lambda cmd, cwd, timeout: (
+        ExecResult(0, "", "") if cmd[:2] == ["git", "fetch"] else local.run(cmd, cwd=cwd)
+    )
+    remote = RemoteExecutionConfig(mode="ssh", host="h", remote_workspace_dir="/x")
+    with patch("franktheunicorn.review.tool_executor.make_executor", return_value=executor):
+        resolved = _resolve_cwd_for_tool(db_pr, remote, None, "codex", clone_url="u")
+
+    assert resolved is not None
+    cwd, base_ref, _ = resolved
+    changed = _git(Path(cwd), "diff", "--name-only", base_ref, "HEAD")
+    assert changed.splitlines() == ["pr_file.txt"]

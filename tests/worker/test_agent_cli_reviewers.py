@@ -285,7 +285,7 @@ class TestNoCheckoutIsLoud:
             patch.object(
                 RemoteSSHExecutor,
                 "run",
-                return_value=ExecResult(returncode=0, stdout="", stderr=""),
+                return_value=ExecResult(returncode=0, stdout="b" * 40, stderr=""),
             ),
             patch(
                 "franktheunicorn.review.agent_cli.run_agent_cli_review",
@@ -332,7 +332,7 @@ class TestSecurityFocusWiring:
             patch.object(
                 RemoteSSHExecutor,
                 "run",
-                return_value=ExecResult(returncode=0, stdout="", stderr=""),
+                return_value=ExecResult(returncode=0, stdout="b" * 40, stderr=""),
             ),
             # Imported lazily inside _run_agent_cli_for_pr, so patching the
             # module attribute intercepts it.
@@ -395,7 +395,7 @@ class TestStartupProbe:
             patch.object(
                 RemoteSSHExecutor,
                 "run",
-                return_value=ExecResult(returncode=0, stdout="", stderr=""),
+                return_value=ExecResult(returncode=0, stdout="b" * 40, stderr=""),
             ),
             caplog.at_level(logging.INFO),
         ):

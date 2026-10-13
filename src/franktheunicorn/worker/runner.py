@@ -2388,32 +2388,51 @@ def _resolve_cwd_for_tool(
         return None
     # Remote: checkout head but don't attempt merge (no conflict tracking).
     head_sha = (pr.head_sha or "").strip()
-    if head_sha:
-        fetch = executor.run(
-            ["git", "fetch", "--quiet", "origin", head_sha], cwd=remote_cwd, timeout=300
+    if not head_sha:
+        # HEAD would be whatever the last PR left checked out.
+        logger.warning("PR #%d has no head SHA recorded; skipping %s.", pr.number, tool_name)
+        return None
+    fetch = executor.run(
+        ["git", "fetch", "--quiet", "origin", head_sha], cwd=remote_cwd, timeout=300
+    )
+    if fetch is None or not fetch.ok:
+        logger.warning(
+            "Failed to fetch PR #%d head in remote %s; skipping %s.",
+            pr.number,
+            remote_cwd,
+            tool_name,
         )
-        if fetch is None or not fetch.ok:
-            logger.warning(
-                "Failed to fetch PR #%d head in remote %s; skipping %s.",
-                pr.number,
-                remote_cwd,
-                tool_name,
-            )
-            return None
-        checkout = executor.run(
-            ["git", "checkout", "--quiet", "--detach", head_sha],
-            cwd=remote_cwd,
-            timeout=_GIT_QUERY_TIMEOUT_SECONDS,
+        return None
+    checkout = executor.run(
+        ["git", "checkout", "--quiet", "--detach", head_sha],
+        cwd=remote_cwd,
+        timeout=_GIT_QUERY_TIMEOUT_SECONDS,
+    )
+    if checkout is None or not checkout.ok:
+        logger.warning(
+            "Failed to checkout PR #%d head in remote %s; skipping %s.",
+            pr.number,
+            remote_cwd,
+            tool_name,
         )
-        if checkout is None or not checkout.ok:
-            logger.warning(
-                "Failed to checkout PR #%d head in remote %s; skipping %s.",
-                pr.number,
-                remote_cwd,
-                tool_name,
-            )
-            return None
-    return remote_cwd, base_ref, _REMOTE
+        return None
+    # GitHub's base.sha is the base-branch tip, not the fork point. Diffing the
+    # unmerged head against it adds every base commit since the PR branched,
+    # reversed, as if the PR had made them.
+    merge_base = executor.run(
+        ["git", "merge-base", base_ref, "HEAD"], cwd=remote_cwd, timeout=_GIT_QUERY_TIMEOUT_SECONDS
+    )
+    fork_point = (merge_base.stdout or "").strip() if merge_base is not None else ""
+    if merge_base is None or not merge_base.ok or not _looks_like_sha(fork_point):
+        logger.warning(
+            "No merge-base between %s and PR #%d's head in %s; skipping %s.",
+            base_ref,
+            pr.number,
+            remote_cwd,
+            tool_name,
+        )
+        return None
+    return remote_cwd, fork_point, _REMOTE
 
 
 def _handle_merge_conflict(
