@@ -221,3 +221,93 @@ class TestCommand:
             call_command(
                 "magpie_sync", sync=True, pin_file=str(pin_path), vendored_dir=str(tmp_path)
             )
+
+
+class TestSnapshotProvenance:
+    """A lock names one commit; the bytes it hashes must be that commit's.
+
+    ``--check`` compares the tree with the lock and never with upstream, so a
+    sync from the wrong snapshot would produce a lock that passes it while
+    claiming a provenance it does not have.
+    """
+
+    def test_a_snapshot_at_another_commit_is_refused(
+        self, upstream: FakeUpstream, tmp_path: Path
+    ) -> None:
+        snap = fetch_snapshot(_pin(upstream), tmp_path / "snap")
+        with pytest.raises(MagpieSyncError, match=f"not the pinned {upstream.second[:12]}"):
+            sync_vendored(_pin(upstream, upstream.second), snap, tmp_path / "v")
+        assert not (tmp_path / "v").exists()
+
+    def test_a_directory_that_is_not_a_checkout_is_refused(
+        self, upstream: FakeUpstream, tmp_path: Path
+    ) -> None:
+        plain = tmp_path / "plain"
+        (plain / TESTING).parent.mkdir(parents=True)
+        (plain / TESTING).write_text("anything", encoding="utf-8")
+        with pytest.raises(MagpieSyncError, match="not a git checkout"):
+            sync_vendored(_pin(upstream), plain, tmp_path / "v")
+
+    def test_a_local_edit_to_a_source_is_refused(
+        self, upstream: FakeUpstream, tmp_path: Path
+    ) -> None:
+        snap = fetch_snapshot(_pin(upstream), tmp_path / "snap")
+        (snap / TESTING).write_text("edited locally", encoding="utf-8")
+        with pytest.raises(MagpieSyncError, match="local changes"):
+            sync_vendored(_pin(upstream), snap, tmp_path / "v")
+
+    @pytest.mark.django_db
+    def test_bump_from_a_stale_snapshot_dir_writes_nothing(
+        self, upstream: FakeUpstream, tmp_path: Path
+    ) -> None:
+        pin_path = tmp_path / "pin.yaml"
+        write_pin(_pin(upstream), pin_path)
+        stale = fetch_snapshot(_pin(upstream), tmp_path / "snap")
+        with pytest.raises(CommandError, match="not the pinned"):
+            call_command(
+                "magpie_sync",
+                bump=upstream.second,
+                snapshot_dir=str(stale),
+                pin_file=str(pin_path),
+                vendored_dir=str(tmp_path / "v"),
+            )
+        assert load_pin(pin_path).commit == upstream.first
+
+
+class TestDroppedEntries:
+    def test_sync_removes_a_file_it_generated_once_the_lock_drops_it(
+        self, upstream: FakeUpstream, tmp_path: Path
+    ) -> None:
+        pin = _pin(upstream)
+        snap = fetch_snapshot(pin, tmp_path / "snap")
+        vendored = tmp_path / "v"
+        full = sync_vendored(pin, snap, vendored)
+        smaller = full.model_copy(update={"vendored": full.vendored[:1]})
+
+        # Before the re-sync, --check names the leftover and says --sync fixes it...
+        assert verify_vendored(smaller, vendored) == [
+            "dispositions.md: present in vendored/ but not in the lock "
+            "(left by an earlier sync; --sync removes it)"
+        ]
+        # ...and it does.
+        locked = sync_vendored(smaller, snap, vendored)
+        assert not (vendored / "dispositions.md").exists()
+        assert verify_vendored(locked, vendored) == []
+
+    def test_a_hand_placed_markdown_file_is_left_and_named(
+        self, upstream: FakeUpstream, tmp_path: Path
+    ) -> None:
+        pin = _pin(upstream)
+        snap = fetch_snapshot(pin, tmp_path / "snap")
+        vendored = tmp_path / "v"
+        vendored.mkdir()
+        (vendored / "notes.md").write_text("mine", encoding="utf-8")
+
+        locked = sync_vendored(pin, snap, vendored)
+
+        assert (vendored / "notes.md").read_text(encoding="utf-8") == "mine"
+        problems = verify_vendored(locked, vendored)
+        assert problems == [
+            "notes.md: present in vendored/ but not in the lock (no provenance header, so not "
+            "generated; delete it or add a lock entry)"
+        ]

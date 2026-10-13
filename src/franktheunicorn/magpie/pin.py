@@ -271,5 +271,13 @@ def verify_vendored(pin: MagpiePin, vendored_dir: Path = VENDORED_DIR) -> list[s
     if vendored_dir.is_dir():
         for entry in sorted(vendored_dir.iterdir()):
             if entry.is_file() and entry.name not in expected and entry.suffix == ".md":
-                problems.append(f"{entry.name}: present in vendored/ but not in the lock")
+                generated = bool(split_provenance(entry.read_text(encoding="utf-8"))[0])
+                problems.append(
+                    f"{entry.name}: present in vendored/ but not in the lock"
+                    + (
+                        " (left by an earlier sync; --sync removes it)"
+                        if generated
+                        else " (no provenance header, so not generated; delete it or add a lock entry)"
+                    )
+                )
     return problems

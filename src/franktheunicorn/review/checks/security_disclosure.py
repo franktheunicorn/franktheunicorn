@@ -77,6 +77,8 @@ DISCLOSURE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 
 _ASF_POLICY_URL = "https://www.apache.org/security/committers.html"
 
+_LEAD = "The PR title or description contains language that reads as a security vulnerability fix:"
+
 
 @dataclass(frozen=True)
 class DisclosureMatch:
@@ -172,11 +174,7 @@ class SecurityDisclosureCheck(BaseCheck):
         ]
 
     def _body(self, matches: list[DisclosureMatch]) -> str:
-        lines = [
-            "The PR title or description contains language that reads as a security "
-            "vulnerability fix:",
-            "",
-        ]
+        lines = [_LEAD, ""]
         for m in matches:
             lines.append(f"- {m.location}: `{m.matched_text}` — “{m.context}”")
         lines.append("")
