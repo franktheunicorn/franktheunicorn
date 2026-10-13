@@ -560,3 +560,25 @@ class TestDraftReviewMultiBackendAttribution:
             sources_seen.update(d.sources)
         assert "claude" in sources_seen
         assert "coderabbit" in sources_seen
+
+    def test_each_provider_records_its_own_run(self, db_pr, spark_project_config) -> None:
+        """A provider whose every backend failed records failed, not the
+        pipeline's ok — otherwise a dead key reads like a clean review."""
+        from franktheunicorn.config.models import LLMBackendConfig
+        from franktheunicorn.review.backends.base import ReviewResult
+
+        operator_config = OperatorConfig(
+            llm_backends=[LLMBackendConfig(provider="stub") for _ in range(3)],
+        )
+        call_results = [
+            ("openai", ReviewResult(), True),
+            ("openai", ReviewResult(), True),
+            ("claude", ReviewResult(), False),
+        ]
+
+        with patch("franktheunicorn.review.drafter._run_single_backend", side_effect=call_results):
+            draft_review(db_pr, spark_project_config, operator_config)
+
+        db_pr.refresh_from_db()
+        assert db_pr.agent_runs["llm:openai"]["status"] == "failed"
+        assert db_pr.agent_runs["llm:claude"]["status"] == "ok"

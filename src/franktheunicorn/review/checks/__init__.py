@@ -95,6 +95,7 @@ def run_enabled_checks(
     """
     from franktheunicorn.config.models import LLMBackendConfig
     from franktheunicorn.config.models import OperatorConfig as DefaultOperatorConfig
+    from franktheunicorn.worker.runner import record_agent_run
 
     if operator_config is None:
         operator_config = DefaultOperatorConfig()
@@ -130,17 +131,20 @@ def run_enabled_checks(
             logger.warning("Unknown LLM check '%s'; skipping.", check_name)
             continue
 
+        source = f"check:{check_name}"
         check = _instantiate_check(check_cls, check_name, project_config, repo_path, forge_client)
         try:
             findings = _run_check_dispatch(check, pr, diff, pr_context, backend_config)
         except Exception:
             logger.exception("LLM check '%s' failed.", check_name)
+            record_agent_run(pr, source, status="failed")
             continue
 
+        # Recorded even at zero findings, or a clean check reads as "not run".
+        record_agent_run(pr, source, status="ok", findings=len(findings))
         if not findings:
             continue
 
-        source = f"check:{check_name}"
         drafts = create_drafts_from_findings(
             pr,
             findings,

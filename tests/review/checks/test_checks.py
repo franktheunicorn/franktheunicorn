@@ -73,6 +73,25 @@ class TestRunEnabledChecks:
         )
         assert drafts == []
 
+    def test_each_check_records_its_run(self, db_pr: PullRequest) -> None:
+        """A clean check and a crashed one both leave a record, so neither
+        reads as "not run" on the dashboard."""
+        config = ProjectConfig(owner="apache", repo="spark", llm_checks=["coverage", "security"])
+        op_config = OperatorConfig(llm_backends=[LLMBackendConfig(provider="stub")])
+
+        def fake(check: object, *args: object) -> list[ReviewFinding]:
+            if check.__class__.__name__.lower().startswith("security"):
+                raise RuntimeError("boom")
+            return []
+
+        with patch("franktheunicorn.review.checks._run_single_check", side_effect=fake):
+            run_enabled_checks(db_pr, "diff", project_config=config, operator_config=op_config)
+
+        db_pr.refresh_from_db()
+        assert db_pr.agent_runs["check:coverage"]["status"] == "ok"
+        assert db_pr.agent_runs["check:coverage"]["findings"] == 0
+        assert db_pr.agent_runs["check:security"]["status"] == "failed"
+
     def test_coverage_check_produces_drafts_with_stub(
         self,
         db_pr: PullRequest,

@@ -1788,6 +1788,48 @@ class TestAgentRunSummary:
         assert claude_entry["rejected"] == 1
         assert len(claude_entry["findings"]) == 2
 
+    def test_llm_backends_read_the_llm_run_record(self, db_pr: PullRequest) -> None:
+        """Rows are keyed by provider; the pipeline records under llm:<provider>.
+        Reading the bare provider key showed every backend as "not run" once
+        any CLI reviewer had recorded a run. Same-provider backends share a row."""
+        from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig
+        from franktheunicorn.dashboard.views import build_agent_run_summary
+
+        db_pr.agent_runs = {
+            "llm": {"status": "ok"},
+            "llm:openai": {"status": "failed", "findings": 0},
+            "codex": {"status": "ok"},
+        }
+        db_pr.save(update_fields=["agent_runs"])
+        op_cfg = OperatorConfig(
+            llm_backends=[
+                LLMBackendConfig(provider="openai", model="qwen"),
+                LLMBackendConfig(provider="openai", model="sonnet"),
+                LLMBackendConfig(provider="openai", model="sonnet"),
+            ]
+        )
+
+        result = build_agent_run_summary(db_pr, op_cfg, None)
+
+        openai_rows = [e for e in result if e["source"] == "openai"]
+        assert len(openai_rows) == 1
+        assert openai_rows[0]["display_name"] == "Openai (qwen, sonnet)"
+        assert openai_rows[0]["did_run"] is True
+        assert openai_rows[0]["run_status"] == "failed"
+
+    def test_drafts_prove_a_run_without_a_record(self, db_pr: PullRequest) -> None:
+        from franktheunicorn.config.models import ProjectConfig
+        from franktheunicorn.dashboard.views import build_agent_run_summary
+
+        db_pr.agent_runs = {"codex": {"status": "ok"}}
+        db_pr.save(update_fields=["agent_runs"])
+        ReviewDraftFactory(pull_request=db_pr, sources=["check:security"])
+        pc = ProjectConfig(owner="apache", repo="spark", llm_checks=["security"])
+
+        result = build_agent_run_summary(db_pr, self._cli_op_config(), pc)
+
+        assert next(e for e in result if e["source"] == "check:security")["did_run"] is True
+
     @staticmethod
     def _cli_op_config() -> Any:
         """An operator config with one active ssh-mode CLI reviewer.

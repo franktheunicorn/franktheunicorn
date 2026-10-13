@@ -314,18 +314,27 @@ def build_agent_run_summary(
     # Build the ordered list of configured (expected) agents.
     configured: list[tuple[str, str]] = []  # (source_key, display_name)
 
-    # 1. LLM backends from operator config.
-    backends = list(operator_config.llm_backends)
-    if not backends:
+    from franktheunicorn.worker.runner import llm_run_key, resolve_agent_cli_reviewers
+
+    # 1. LLM backends from operator config. Drafts are tagged by provider, so
+    # three openai backends are one row, not three copies of the same drafts.
+    # The pipeline records each provider's turn under llm_run_key.
+    models_by_source: dict[str, list[str]] = {}
+    for backend in operator_config.llm_backends:
+        source_key = "agent" if backend.provider == "stub" else backend.provider
+        models = models_by_source.setdefault(source_key, [])
+        if backend.model and backend.model not in models:
+            models.append(backend.model)
+    if not models_by_source:
         # Stub fallback — used when no backends are configured.
-        configured.append(("agent", "Stub Agent"))
-    else:
-        for backend in backends:
-            source_key = "agent" if backend.provider == "stub" else backend.provider
-            display = backend.provider.title()
-            if backend.model:
-                display += f" ({backend.model})"
-            configured.append((source_key, display))
+        models_by_source["agent"] = []
+    run_keys: dict[str, str] = {}
+    for source_key, models in models_by_source.items():
+        display = "Stub Agent" if source_key == "agent" else source_key.title()
+        if models:
+            display += f" ({', '.join(models)})"
+        configured.append((source_key, display))
+        run_keys[source_key] = llm_run_key(source_key)
 
     # 2. CodeRabbit (when enabled).
     if operator_config.coderabbit.enabled:
@@ -338,8 +347,6 @@ def build_agent_run_summary(
     # pr.agent_runs — "failed", "no-checkout" — had no row to render in, and a
     # CLI reviewer skipped on an ssh failure read exactly like one that was
     # never configured.
-    from franktheunicorn.worker.runner import resolve_agent_cli_reviewers
-
     claimed = {key for key, _ in configured}
     for rc in resolve_agent_cli_reviewers(operator_config):
         if rc.name in claimed:
@@ -383,10 +390,11 @@ def build_agent_run_summary(
     summary = []
     for source_key, display_name in configured:
         drafts = source_drafts.get(source_key, [])
-        run = runs.get(source_key)
-        # Falls back to the draft inference for rows that predate the records, so
-        # an existing install's history does not all read as "not run".
-        did_run = run is not None if runs else bool(drafts)
+        # Falling back to the bare key keeps a same-named CLI reviewer's record.
+        run = runs.get(run_keys.get(source_key, source_key)) or runs.get(source_key)
+        # Drafts prove a run even where no record does (history from before
+        # the records, or a source that never wrote one).
+        did_run = run is not None or bool(drafts)
         run_status = str(run.get("status", "")) if isinstance(run, dict) else ""
 
         status_counts: dict[str, int] = dict.fromkeys(_status_keys, 0)

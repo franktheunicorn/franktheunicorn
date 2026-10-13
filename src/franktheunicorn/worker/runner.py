@@ -860,6 +860,11 @@ class ReviewSkip:
 LLM_REVIEW_SOURCE = "llm"
 
 
+def llm_run_key(provider_source: str) -> str:
+    """Where one provider's turn in the LLM pipeline is recorded in agent_runs."""
+    return f"{LLM_REVIEW_SOURCE}:{provider_source}"
+
+
 def expected_review_sources(operator_config: OperatorConfig | None) -> set[str]:
     """Every reviewer that should get a turn on a PR, by source key.
 
@@ -1288,7 +1293,18 @@ def process_pr(
             )
             _log(f"Snowflake review: {outcome}")
 
-        if pc.llm_checks:
+        if (
+            pc.llm_checks
+            and disabled_backends
+            and effective_config
+            and not effective_config.llm_backends
+        ):
+            # Without this the checks fall back to the stub and file canned drafts.
+            logger.warning(
+                "PR #%d: llm_checks skipped — every llm_backends entry failed preflight.",
+                pr.number,
+            )
+        elif pc.llm_checks:
             try:
                 from franktheunicorn.data_access.github.diff_fetcher import DiffFetcher
                 from franktheunicorn.review.checks import run_enabled_checks
@@ -1303,7 +1319,9 @@ def process_pr(
                     pr,
                     check_diff,
                     project_config=pc,
-                    operator_config=operator_config,
+                    # Not operator_config: checks use llm_backends[0], and that
+                    # must not be a backend preflight already disabled.
+                    operator_config=effective_config,
                     repo_path=repo_path,
                     forge_client=forge_client,
                     prior_comments=prior_comments,
