@@ -234,6 +234,9 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
     )
 
     disabled_backends = _check_backends(operator_config)
+    from franktheunicorn.review.backends.preflight import record_disabled_at_boot
+
+    record_disabled_at_boot(disabled_backends)
     # Seed triage's own backend health so a backend the boot preflight 86'd
     # is skipped by triage too — without this, triage read llm_backends directly
     # and tried a backend _check_backends had already disabled. Probes the

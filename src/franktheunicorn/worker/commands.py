@@ -677,6 +677,7 @@ def _run_agents(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
         raise ValueError(msg)
 
     from franktheunicorn.config.loader import get_project_config
+    from franktheunicorn.review.backends.preflight import disabled_at_boot
     from franktheunicorn.worker.runner import process_pr
 
     pr = cmd.pull_request
@@ -708,6 +709,8 @@ def _run_agents(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
         force=True,
         log_lines=log_lines,
         forge_client=forge_client,
+        # Without it a force-run calls every backend preflight already disabled.
+        disabled_backends=disabled_at_boot(),
     )
     summary = f"Generated {len(drafts)} finding(s)"
     if log_lines:
