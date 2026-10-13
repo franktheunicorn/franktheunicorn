@@ -1572,3 +1572,26 @@ class TestMergeReadinessInPoller:
             for r in CICheckHistory.objects.filter(project=project)
         }
         assert rows == {"build": (1, 0), "slow": (0, 1)}
+
+
+@pytest.mark.django_db
+class TestMergeReadinessDisabledClearsVerdicts:
+    def test_disabling_the_feature_clears_a_stored_verdict(self, tmp_path: Path) -> None:
+        client = _CountingMockClient(tmp_path, [_listed_pr()])
+        enabled = ProjectConfig(owner="apache", repo="spark", poll_refresh_hours=0)
+        poll_project(client, enabled, operator_username="somebody-else")
+        PullRequest.objects.filter(number=99).update(
+            merge_readiness_verdict="ready", merge_readiness_score=0.9
+        )
+
+        disabled = ProjectConfig(
+            owner="apache",
+            repo="spark",
+            poll_refresh_hours=0,
+            merge_readiness={"enabled": False},
+        )
+        poll_project(client, disabled, operator_username="somebody-else")
+        pr = PullRequest.objects.get(number=99)
+        assert pr.merge_readiness_verdict == ""
+        assert pr.merge_readiness_score == 0.0
+        assert pr.merge_readiness_detail == {}

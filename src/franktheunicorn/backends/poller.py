@@ -24,6 +24,7 @@ from franktheunicorn.core.session_detector import detect_agent_session
 from franktheunicorn.scoring.merge_readiness import (
     LISTED_VERDICTS,
     READINESS_UPDATE_FIELDS,
+    clear_merge_readiness,
     refresh_merge_readiness,
     refresh_review_and_ci_state,
 )
@@ -489,6 +490,8 @@ def _refresh_pull_request(
     # "your review found nothing serious" is one of the signals.
     if project_config.merge_readiness.enabled:
         refresh_merge_readiness(pr_obj, project_config, operator_username, save=False)
+    else:
+        clear_merge_readiness(pr_obj)
 
     pr_obj.save(
         update_fields=[
@@ -1089,6 +1092,8 @@ def ingest_single_pr(
         refresh_merge_readiness(
             pr_obj, project_config, operator_config.github_username or "", save=False
         )
+    elif project_config:
+        clear_merge_readiness(pr_obj)
 
     pr_obj.save(
         update_fields=[

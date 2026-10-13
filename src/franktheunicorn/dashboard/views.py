@@ -142,9 +142,12 @@ def index(request: HttpRequest) -> HttpResponse:
     project = request.GET.get("project", "")
     workspace_projects = _get_workspace_projects(request)
 
+    # Projects that turned merge readiness off keep no place in that tab,
+    # whatever their rows still say (the poller clears those within the hour).
+    readiness_off = _merge_readiness_disabled_q()
     prs = (
         PullRequest.objects.select_related("project")
-        .filter(_queue_q(queue), state="open", project__enabled=True)
+        .filter(_queue_q(queue, readiness_off), state="open", project__enabled=True)
         .filter(Project.configured_q(lookup="project"))
         .annotate(last_local_action_at=Max("actions__created_at"))
         .order_by(*_queue_ordering(queue))
@@ -221,7 +224,8 @@ def index(request: HttpRequest) -> HttpResponse:
     if parsed_project is not None:
         base_qs = base_qs.filter(project__owner=parsed_project[0], project__repo=parsed_project[1])
     queue_counts: dict[str, int] = {
-        tab["key"]: base_qs.filter(_queue_q(tab["key"])).count() for tab in QUEUE_TABS
+        tab["key"]: base_qs.filter(_queue_q(tab["key"], readiness_off)).count()
+        for tab in QUEUE_TABS
     }
     queue_tabs_with_counts = [
         {**tab, "count": queue_counts.get(tab["key"], 0)} for tab in QUEUE_TABS
@@ -260,11 +264,34 @@ def index(request: HttpRequest) -> HttpResponse:
     )
 
 
-def _queue_q(queue: str) -> Q:
-    """The filter behind one tab: a routing queue, or the readiness verdict."""
+def _queue_q(queue: str, readiness_off: Q | None = None) -> Q:
+    """The filter behind one tab: a routing queue, or the readiness verdict.
+
+    ``readiness_off`` names the projects whose config disables merge
+    readiness; their rows are left out of the almost-ready tab even when a
+    stored verdict says otherwise.
+    """
     if queue == ALMOST_READY_QUEUE:
-        return Q(merge_readiness_verdict__in=LISTED_VERDICTS)
+        q = Q(merge_readiness_verdict__in=LISTED_VERDICTS)
+        if readiness_off is not None:
+            q &= ~readiness_off
+        return q
     return Q(queue=queue)
+
+
+def _merge_readiness_disabled_q() -> Q | None:
+    """A Q matching PRs of projects with ``merge_readiness.enabled: false``, or None."""
+    disabled = [
+        (c.owner, c.repo)
+        for c in _project_configs_by_name().values()
+        if not c.merge_readiness.enabled
+    ]
+    if not disabled:
+        return None
+    q = Q()
+    for owner, repo in disabled:
+        q |= Q(project__owner__iexact=owner, project__repo__iexact=repo)
+    return q
 
 
 def _queue_ordering(queue: str) -> tuple[str, ...]:

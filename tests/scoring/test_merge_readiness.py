@@ -566,7 +566,9 @@ class TestRefreshReviewAndCIState:
         assert pr.ci_status == "pass"
 
     def test_checks_failure_keeps_previous(self, project_config: ProjectConfig) -> None:
-        pr = PullRequestFactory(head_sha="h1", ci_status="pass", ci_checks=[_check("old")])
+        pr = PullRequestFactory(
+            head_sha="h1", ci_checks_sha="h1", ci_status="pass", ci_checks=[_check("old")]
+        )
         client = MagicMock()
         client.list_pull_request_reviews.return_value = []
         client.get_commit_checks.side_effect = RuntimeError("boom")
@@ -649,6 +651,7 @@ class TestRefreshMergeReadiness:
             project=project,
             author="alice",
             head_sha="h1",
+            ci_checks_sha="h1",
             mergeable=True,
             additions=10,
             deletions=2,
@@ -672,6 +675,7 @@ class TestRefreshMergeReadiness:
     def test_open_serious_findings_block(self, project_config: ProjectConfig) -> None:
         pr = PullRequestFactory(
             head_sha="h1",
+            ci_checks_sha="h1",
             mergeable=True,
             ci_checks=[_check("build")],
             review_states={"bob": {"state": "APPROVED", "commit_id": "h1"}},
@@ -691,6 +695,7 @@ class TestRefreshMergeReadiness:
             project=project,
             author="alice",
             head_sha="h1",
+            ci_checks_sha="h1",
             mergeable=True,
             ci_checks=[_check("build"), _check("core", "failure")],
             review_states={"bob": {"state": "APPROVED", "commit_id": "h1"}},
@@ -882,3 +887,108 @@ class TestMergeReadinessConfig:
 def test_datetime_import_used() -> None:
     # Keeps the UTC/datetime imports honest for the Django half above.
     assert datetime.now(tz=UTC).tzinfo is UTC
+
+
+class TestInconclusiveConclusions:
+    """A ``stale`` (or unknown) completed conclusion is not a pass."""
+
+    def test_stale_only_is_not_green(self) -> None:
+        result = classify_ci([_check("build", "stale")])
+        assert result.status == CI_PENDING
+        assert result.pending == ["build"]
+        assert any("inconclusive" in r and "stale" in r for r in result.reasons)
+
+    def test_unknown_conclusion_is_not_green(self) -> None:
+        result = classify_ci([_check("a"), _check("b", "something_new")])
+        assert result.status == CI_PENDING
+        assert "b" in result.pending
+
+    def test_failure_still_wins(self) -> None:
+        result = classify_ci([_check("a", "stale"), _check("lint", "failure")])
+        assert result.status == CI_RED
+
+    def test_summarize_ci_status_treats_stale_as_pending(self) -> None:
+        assert summarize_ci_status([CICheck("a", conclusion="stale")]) == "pending"
+        assert CICheck("a", conclusion="stale").inconclusive
+        assert not CICheck("a", conclusion="success").inconclusive
+        assert not CICheck("a", status="queued").inconclusive
+
+
+@pytest.mark.django_db
+class TestChecksForAnotherHead:
+    """CI fetched for the previous commit must not vouch for a new one."""
+
+    def test_current_checks_requires_matching_sha(self) -> None:
+        pr = PullRequestFactory(head_sha="new", ci_checks_sha="old", ci_checks=[_check("build")])
+        assert mr.current_checks(pr) == []
+        pr.ci_checks_sha = "new"
+        assert [c["name"] for c in mr.current_checks(pr)] == ["build"]
+
+    def test_readiness_treats_mismatched_checks_as_unknown(
+        self, project_config: ProjectConfig
+    ) -> None:
+        project = ProjectFactory(owner="apache", repo="spark", contributors_cache=["alice"])
+        pr = PullRequestFactory(
+            project=project,
+            author="alice",
+            head_sha="new",
+            ci_checks_sha="old",
+            ci_checks=[_check("build")],
+            mergeable=True,
+            review_states={"bob": {"state": "APPROVED", "commit_id": "new"}},
+            github_updated_at=timezone.now(),
+            changed_files=["x/FooSuite.scala"],
+        )
+        result = refresh_merge_readiness(pr, project_config, "holdenk")
+        assert result.ci.status == CI_UNKNOWN
+        assert result.verdict == VERDICT_NOT_READY
+        assert "no CI results for this commit" in result.blockers
+        assert any("older commit" in r for r in result.ci.reasons)
+
+    def test_failed_fetch_after_a_push_clears_ci_status(
+        self, project_config: ProjectConfig, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        pr = PullRequestFactory(
+            head_sha="new", ci_checks_sha="old", ci_status="pass", ci_checks=[_check("build")]
+        )
+        client = MagicMock()
+        client.list_pull_request_reviews.return_value = []
+        client.get_commit_checks.side_effect = RuntimeError("rate limited")
+        with caplog.at_level(logging.WARNING):
+            refresh_review_and_ci_state(client, pr, project_config)
+        assert pr.ci_status == ""
+        assert pr.ci_checks_sha == "old"  # kept, labelled, just not trusted for this head
+        assert pr.ci_checks[0]["name"] == "build"
+        assert "older commit" in caplog.text
+
+    def test_failed_fetch_on_the_same_head_keeps_status(
+        self, project_config: ProjectConfig
+    ) -> None:
+        pr = PullRequestFactory(head_sha="h1", ci_checks_sha="h1", ci_status="pass")
+        client = MagicMock()
+        client.list_pull_request_reviews.return_value = []
+        client.get_commit_checks.side_effect = RuntimeError("boom")
+        refresh_review_and_ci_state(client, pr, project_config)
+        assert pr.ci_status == "pass"
+
+
+@pytest.mark.django_db
+class TestClearMergeReadiness:
+    def test_clears_a_stored_verdict(self, caplog: pytest.LogCaptureFixture) -> None:
+        pr = PullRequestFactory(
+            merge_readiness_verdict=VERDICT_READY,
+            merge_readiness_score=0.8,
+            merge_readiness_detail={"reasons": ["CI green"]},
+        )
+        with caplog.at_level(logging.INFO, logger="franktheunicorn.scoring.merge_readiness"):
+            mr.clear_merge_readiness(pr)
+        assert pr.merge_readiness_verdict == VERDICT_NOT_READY
+        assert pr.merge_readiness_score == 0.0
+        assert pr.merge_readiness_detail == {}
+        assert "cleared its verdict" in caplog.text
+
+    def test_nothing_to_clear_is_quiet(self, caplog: pytest.LogCaptureFixture) -> None:
+        pr = PullRequestFactory()
+        with caplog.at_level(logging.INFO, logger="franktheunicorn.scoring.merge_readiness"):
+            mr.clear_merge_readiness(pr)
+        assert "cleared" not in caplog.text

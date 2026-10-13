@@ -167,6 +167,20 @@ class CICheck:
     def running(self) -> bool:
         return self.status != "completed"
 
+    @property
+    def inconclusive(self) -> bool:
+        """Completed with a conclusion that is neither a pass nor a failure.
+
+        GitHub reports ``stale`` when a newer run superseded this one before
+        it finished, and new conclusions appear over time. None of them is a
+        pass, so none may count as green.
+        """
+        return (
+            self.status == "completed"
+            and self.conclusion not in PASSED_CONCLUSIONS
+            and self.conclusion not in FAILED_CONCLUSIONS
+        )
+
 
 @dataclass
 class CIAssessment:
@@ -235,7 +249,7 @@ def summarize_ci_status(checks: Sequence[CICheck]) -> str:
         return ""
     if any(c.failed for c in checks):
         return "fail"
-    if any(c.running for c in checks):
+    if any(c.running or c.inconclusive for c in checks):
         return "pending"
     return "pass"
 
@@ -310,13 +324,25 @@ def classify_ci(
 
     failing = [c for c in checks if c.failed]
     pending = [c for c in checks if c.running]
+    # A ``stale`` (or otherwise unrecognised) completed conclusion is not a
+    # pass. It is reported with the pending ones: the commit has no verdict
+    # yet, and a re-run is what resolves it.
+    inconclusive = [c for c in checks if c.inconclusive]
     assessment.failing = [c.name for c in failing]
-    assessment.pending = [c.name for c in pending]
+    assessment.pending = [c.name for c in pending + inconclusive]
 
     if not failing:
-        if pending:
+        if pending or inconclusive:
             assessment.status = CI_PENDING
-            assessment.reasons.append(f"{len(pending)} check(s) still running")
+            if pending:
+                assessment.reasons.append(f"{len(pending)} check(s) still running")
+            if inconclusive:
+                assessment.reasons.append(
+                    f"{len(inconclusive)} check(s) inconclusive: "
+                    + ", ".join(
+                        f"{c.name} ({c.conclusion or 'no conclusion'})" for c in inconclusive
+                    )
+                )
         else:
             assessment.status = CI_GREEN
             assessment.reasons.append(f"all {len(checks)} check(s) passed")
@@ -792,12 +818,25 @@ def refresh_review_and_ci_state(
     except NotImplementedError:
         return
     except Exception:
-        logger.warning(
-            "Could not fetch CI checks for %s/%s#%d; keeping the last known state",
-            owner,
-            repo,
-            pr.number,
-        )
+        if pr.ci_checks_sha != pr.head_sha:
+            # The stored checks belong to an earlier commit. They stay on the
+            # row (labelled by ci_checks_sha) but must not vouch for this head:
+            # the merge queue reads ci_status without a SHA to compare.
+            pr.ci_status = ""
+            logger.warning(
+                "Could not fetch CI checks for %s/%s#%d; the stored results are for an "
+                "older commit, so CI is unknown until the next refresh",
+                owner,
+                repo,
+                pr.number,
+            )
+        else:
+            logger.warning(
+                "Could not fetch CI checks for %s/%s#%d; keeping the last known state",
+                owner,
+                repo,
+                pr.number,
+            )
         return
     checks = parse_checks(raw_checks)
     pr.ci_checks = [
@@ -962,6 +1001,19 @@ def _latest_test_verdict(pr: PullRequest) -> str | None:
     return str(verdict) if verdict else None
 
 
+def current_checks(pr: PullRequest) -> list[dict[str, Any]]:
+    """``pr.ci_checks`` only when they were fetched for the current head.
+
+    A push moves ``head_sha`` on the detail fetch; if the checks fetch then
+    fails, the row keeps the previous commit's results under the previous
+    ``ci_checks_sha``. Those are not evidence about this code — the previous
+    head's green run must not list the new one as ready.
+    """
+    if pr.ci_checks_sha != pr.head_sha:
+        return []
+    return [c for c in (pr.ci_checks or []) if isinstance(c, dict)]
+
+
 def build_readiness_input(
     pr: PullRequest,
     project_config: ProjectConfig,
@@ -975,11 +1027,13 @@ def build_readiness_input(
     if history is None:
         history = check_history_for(pr.project)
     ci = classify_ci(
-        pr.ci_checks or [],
+        current_checks(pr),
         flaky_patterns=cfg.flaky_checks,
         deterministic_patterns=cfg.deterministic_checks,
         history=history,
     )
+    if pr.ci_checks and not current_checks(pr):
+        ci.reasons.append("the CI results on file are for an older commit")
     open_findings, review_ran = _open_findings(pr)
     days: float | None = None
     if pr.github_updated_at is not None:
@@ -1051,6 +1105,26 @@ def refresh_merge_readiness(
             round(readiness.score * 100),
         )
     return readiness
+
+
+def clear_merge_readiness(pr: PullRequest) -> None:
+    """Drop a stored verdict for a project that turned the feature off.
+
+    The dashboard tab reads persisted verdicts, so a project switched to
+    ``merge_readiness.enabled: false`` would otherwise keep showing the
+    candidates (and their buttons) it had at the moment of the switch.
+    Candidates re-poll hourly, so the stragglers clear within the hour.
+    """
+    if not pr.merge_readiness_verdict and not pr.merge_readiness_detail:
+        return
+    pr.merge_readiness_verdict = VERDICT_NOT_READY
+    pr.merge_readiness_score = 0.0
+    pr.merge_readiness_detail = {}
+    logger.info(
+        "PR #%d (%s): merge readiness disabled for the project; cleared its verdict",
+        pr.number,
+        pr.project.full_name,
+    )
 
 
 # --------------------------------------------------------------------------

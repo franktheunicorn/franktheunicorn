@@ -34,6 +34,7 @@ def _candidate(project: Project, **kwargs: Any) -> PullRequest:
         "project": project,
         "author": "alice",
         "head_sha": "h1",
+        "ci_checks_sha": "h1",
         "mergeable": True,
         "additions": 12,
         "deletions": 3,
@@ -487,3 +488,29 @@ class TestCandidateContextDefaults:
         assert ctx["can_lgtm"] is True
         assert ctx["failing_checks"] == []
         assert ctx["reason_choices"] == MergeReadinessFeedback.REASON_CHOICES
+
+
+@pytest.mark.django_db
+class TestDisabledProjectsLeaveTheTab:
+    def test_rows_of_a_disabled_project_are_excluded(
+        self, client: Client, project: Project
+    ) -> None:
+        other = ProjectFactory(owner="other", repo="repo")
+        kept = _candidate(project)
+        _candidate(other)
+        off = ProjectConfig(owner="other", repo="repo", merge_readiness={"enabled": False})
+        on = ProjectConfig(owner="apache", repo="spark")
+        with patch(
+            f"{_VIEWS}._project_configs_by_name",
+            return_value={"other/repo": off, "apache/spark": on},
+        ):
+            response = client.get("/?queue=almost-ready")
+        assert [pr.pk for pr in response.context["pull_requests"]] == [kept.pk]
+        tab = next(t for t in response.context["queue_tabs"] if t["key"] == "almost-ready")
+        assert tab["count"] == 1
+
+    def test_no_disabled_projects_means_no_filter(self) -> None:
+        from franktheunicorn.dashboard.views import _merge_readiness_disabled_q
+
+        with patch(f"{_VIEWS}._project_configs_by_name", return_value={}):
+            assert _merge_readiness_disabled_q() is None
