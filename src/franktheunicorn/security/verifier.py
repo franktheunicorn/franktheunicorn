@@ -368,12 +368,13 @@ def _version_sort_key(name: str) -> tuple[int, tuple[int, ...], str]:
     return (1 if numbers else 0, numbers, name.lower())
 
 
-#: Reports one bulk Confirm / Re-verify press sends to the coding agent. Same
-#: number as the import's auto-verify cap and for the same reason: each one is
-#: (max_branches + 1) agent runs of up to half an hour. Unlike the import, the
-#: button truncates rather than refusing — :func:`reverify_candidates` orders
-#: least-recently-sent first, so the next press carries on where this one stopped
-#: instead of re-spending the cap on the same rows.
+#: Verifications the bulk Confirm / Re-verify button keeps queued or running at
+#: once. Same number as the import's auto-verify cap and for the same reason: each
+#: one is (max_branches + 1) agent runs of up to half an hour. Counted against
+#: what is outstanding, not per press, or pressing again (as the flash invites)
+#: stacked another batch on the first. Unlike the import, the button truncates
+#: rather than refusing — :func:`reverify_candidates` orders least-recently-sent
+#: first, so a later press carries on where this one stopped.
 MAX_BULK_VERIFY = 25
 
 

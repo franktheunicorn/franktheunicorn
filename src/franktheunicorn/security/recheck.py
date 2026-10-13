@@ -138,7 +138,12 @@ def build_recheck_prompt(
 
 
 def launch_recheck(
-    project: Project, reports: list[SecurityReport], operator_config: OperatorConfig
+    project: Project,
+    reports: list[SecurityReport],
+    operator_config: OperatorConfig,
+    *,
+    agent_scope: str = agent_source.SCOPE_ALL,
+    chunk_start: int = 0,
 ) -> list[SecurityRecheckRun]:
     """Create the cloud agent(s) for one project's backlog and record the runs.
 
@@ -148,6 +153,10 @@ def launch_recheck(
     (project, kind, chunk) is what makes that worth doing: two concurrent
     presses race on the row, the loser raises here, and only one of them ever
     spends an agent run. A POST that then fails releases the slot again.
+
+    *agent_scope* is recorded on each run, and *chunk_start* numbers its chunks
+    after a run already live for the project, so a press over reports that run
+    doesn't cover still gets a slot the constraint can arbitrate.
     """
     lookback_days = operator_config.security_triage.fix_agent.recheck_lookback_days
     return _launch(
@@ -157,6 +166,8 @@ def launch_recheck(
         kind=SecurityRecheckRun.KIND_RECHECK,
         name=f"recheck {project.full_name}",
         prompt_for=lambda chunk: build_recheck_prompt(project, chunk, lookback_days=lookback_days),
+        agent_scope=agent_scope,
+        chunk_start=chunk_start,
     )
 
 
@@ -168,6 +179,8 @@ def _launch(
     kind: str,
     name: str,
     prompt_for: Callable[[list[SecurityReport]], str],
+    agent_scope: str = agent_source.SCOPE_ALL,
+    chunk_start: int = 0,
 ) -> list[SecurityRecheckRun]:
     """The shared launch body for both recheck kinds."""
     config = operator_config.security_triage.fix_agent
@@ -178,7 +191,7 @@ def _launch(
     runs = []
     for start in range(0, len(reports), _MAX_REPORTS_PER_RUN):
         chunk = reports[start : start + _MAX_REPORTS_PER_RUN]
-        chunk_index = start // _MAX_REPORTS_PER_RUN
+        chunk_index = chunk_start + start // _MAX_REPORTS_PER_RUN
         try:
             with transaction.atomic():
                 run = SecurityRecheckRun.objects.create(
@@ -187,6 +200,7 @@ def _launch(
                     status="launched",
                     report_count=len(chunk),
                     chunk_index=chunk_index,
+                    agent_scope=agent_scope,
                 )
         except IntegrityError as exc:
             msg = (
@@ -374,7 +388,12 @@ def build_fix_landed_prompt(project: Project, reports: list[SecurityReport]) -> 
 
 
 def launch_fix_landed_recheck(
-    project: Project, reports: list[SecurityReport], operator_config: OperatorConfig
+    project: Project,
+    reports: list[SecurityReport],
+    operator_config: OperatorConfig,
+    *,
+    agent_scope: str = agent_source.SCOPE_ALL,
+    chunk_start: int = 0,
 ) -> list[SecurityRecheckRun]:
     """Create the cloud agent(s) for one project's indeterminate fix-landed set.
 
@@ -390,6 +409,8 @@ def launch_fix_landed_recheck(
         kind=SecurityRecheckRun.KIND_FIX_LANDED,
         name=f"fix-landed check {project.full_name}",
         prompt_for=lambda chunk: build_fix_landed_prompt(project, chunk),
+        agent_scope=agent_scope,
+        chunk_start=chunk_start,
     )
 
 

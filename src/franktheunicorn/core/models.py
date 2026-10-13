@@ -1316,6 +1316,12 @@ class SecurityRecheckRun(models.Model):
     #: project alone — that identifies a run within a batch, and it is what makes
     #: the uniqueness constraint below expressible.
     chunk_index = models.IntegerField(default=0)
+    #: The security list's source scope the run was launched under ("all", "none",
+    #: "any" or an agent name — see ``security.agent_source``). Recorded because a
+    #: scoped press covers only part of a project: without it, a run over one
+    #: agent's reports made every later press for that project read as "already
+    #: running", and the reports outside that agent were in no agent's prompt.
+    agent_scope = models.CharField(max_length=100, default="all")
     #: Where it landed: verdict counts on success, the failure reason otherwise.
     detail = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(default=timezone.now)

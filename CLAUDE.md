@@ -178,20 +178,26 @@ src/franktheunicorn/
                      #   SecurityReport.source_agent is blank for a person and a
                      #   normalised name ([a-z0-9._-], so "Claude Code" ==
                      #   "claude-code") for another agent's output, set at import
-                     #   (upload box, --agent, paste form) or per archive after.
+                     #   (upload box, --agent, paste form) or after, per archive
+                     #   or per report (detail page; admin normalises too). The
+                     #   malicious-prompt pre-filter stamps its own reports
+                     #   franktheunicorn-prefilter.
                      #   A scope is all / none / any / <name>; the three keywords
                      #   are reserved as names. It filters the list, its tab counts
                      #   and the CSV export, and every bulk button posts it in a
                      #   hidden field — including the four git sweeps, whose worker
                      #   commands carry kwargs["agent_scope"] and dedup on "an
-                     #   in-flight sweep already covers this scope". Narrowing is
+                     #   in-flight sweep already covers this scope" — and the cloud
+                     #   rechecks record SecurityRecheckRun.agent_scope so a wider
+                     #   press launches only what no live run covers. Narrowing is
                      #   safe and widening isn't: a scope that doesn't parse is
                      #   refused by every button, the export and the worker, never
                      #   read as "all". The ✓ Confirm / Re-verify button
                      #   (security_reverify) queues the git version map for every
                      #   open report in scope, and with depth=agent the deep
-                     #   verifier for MAX_BULK_VERIFY of them, least recently
-                     #   attempted first (verifier.reverify_candidates).
+                     #   verifier, least recently attempted first
+                     #   (verifier.reverify_candidates), keeping at most
+                     #   MAX_BULK_VERIFY verifications queued or running.
                      #   cve_api.py is the ASF CVE process service client
                      #   (cveprocess.apache.org, from security-vulnogram PR #252):
                      #   allocate an id, read the CVE 5 record, push the advisory.

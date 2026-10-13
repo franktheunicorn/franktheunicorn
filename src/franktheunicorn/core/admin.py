@@ -1,5 +1,6 @@
 """Django admin configuration for franktheunicorn core models."""
 
+from django import forms
 from django.contrib import admin
 
 from franktheunicorn.core.models import (
@@ -170,12 +171,34 @@ class LLMBackendFallbackAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
     readonly_fields = ("created_at", "updated_at")
 
 
+class SecurityReportAdminForm(forms.ModelForm):  # type: ignore[type-arg]
+    """Runs the agent label through the same normaliser as every dashboard door.
+
+    The scope filter matches the stored spelling exactly, so "Claude Code" typed
+    here would be a label no Source chip, export or scoped button could ever
+    select; and "none" / "all" / "any" would collide with the scope keywords.
+    """
+
+    class Meta:
+        model = SecurityReport
+        fields = "__all__"
+
+    def clean_source_agent(self) -> str:
+        from franktheunicorn.security.agent_source import clean_agent_name
+
+        try:
+            return clean_agent_name(str(self.cleaned_data.get("source_agent") or ""))
+        except ValueError as exc:
+            raise forms.ValidationError(str(exc)) from exc
+
+
 @admin.register(SecurityReport)
 class SecurityReportAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
     """Admin for triaged security reports."""
 
-    list_display = ("title", "status", "assessed_severity", "source", "created_at")
-    list_filter = ("status", "assessed_severity", "source")
+    form = SecurityReportAdminForm
+    list_display = ("title", "status", "assessed_severity", "source", "source_agent", "created_at")
+    list_filter = ("status", "assessed_severity", "source", "source_agent")
     search_fields = ("title", "reporter_name", "reporter_email", "parsed_component")
     readonly_fields = ("created_at", "updated_at")
 

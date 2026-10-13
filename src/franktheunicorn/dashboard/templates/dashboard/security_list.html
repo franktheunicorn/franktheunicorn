@@ -54,8 +54,8 @@
     {# of another agent's output before anyone spends time on it, and worth asking #}
     {# again after the code moves. "git" maps cited files and whether the proposed #}
     {# patch applies on every active branch — no agent, no cap. "+ coding agent" #}
-    {# also puts a coding agent in a checkout per report per branch: capped per #}
-    {# press, least-recently-verified first, so repeated presses walk the backlog. #}
+    {# also puts a coding agent in a checkout per report per branch: capped at N #}
+    {# outstanding, least-recently-verified first, so later presses walk the backlog. #}
     <form method="post" action="{% url 'dashboard:security_reverify' %}" style="display: inline-flex; gap: 0.3rem; align-items: center;">
         {% csrf_token %}
         <input type="hidden" name="agent" value="{{ agent_scope }}">
@@ -66,7 +66,7 @@
         <button type="submit" class="action-btn post"
                 style="font-size: 0.85rem; padding: 0.4rem 0.8rem;"
                 hx-post="{% url 'dashboard:security_reverify' %}"
-                hx-confirm="Confirm / re-verify open reports against the code? The git check maps cited files and whether each proposed patch applies on every active release branch — no agent. With the coding agent it is also a full agent run per report per active branch, at most {{ reverify_cap }} reports a press, least recently verified first. Reports ruled invalid, expected or duplicate are skipped. Acting on: {{ agent_scope_label }}.">
+                hx-confirm="Confirm / re-verify open reports against the code? The git check maps cited files and whether each proposed patch applies on every active release branch — no agent. With the coding agent it is also a full agent run per report per active branch, at most {{ reverify_cap }} verifications queued or running at once, least recently verified first. Reports ruled invalid, expected or duplicate are skipped. Acting on: {{ agent_scope_label }}.">
             ✓ Confirm / Re-verify
         </button>
     </form>
@@ -426,7 +426,7 @@
     {% if cve_filter %}
     <span class="muted">— showing reports whose assigned CVE or NVD matches name
         <code>{{ cve_filter }}</code>.</span>
-    <a href="{% url 'dashboard:security_list' %}?sort={{ active_sort }}{{ agent_query }}">clear</a>
+    <a href="{% url 'dashboard:security_list' %}?sort={{ active_sort }}">clear</a>
     {% endif %}
 </form>
 

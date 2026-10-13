@@ -19,7 +19,12 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import Client
 
 from franktheunicorn.core.models import SecurityRecheckRun, SecurityReport, WorkerCommand
-from tests.factories import ProjectFactory, SecurityReportFactory, make_operator_config
+from tests.factories import (
+    ProjectFactory,
+    SecurityReportFactory,
+    WorkerCommandFactory,
+    make_operator_config,
+)
 
 REPORT_TEXT = (
     "There is a path traversal vulnerability in the archive extractor.\n"
@@ -363,7 +368,7 @@ class TestScopedBulkButtons:
         agents = SecurityReportFactory(source_agent="xbow")
         persons = SecurityReportFactory(source_agent="")
         for report in (agents, persons):
-            WorkerCommand.objects.create(
+            WorkerCommandFactory(
                 command="run_security_triage", security_report=report, status="failed"
             )
 
@@ -416,7 +421,7 @@ class TestScopedBulkButtons:
 
     def test_a_running_sweep_over_everything_covers_a_scoped_press(self, client: Client) -> None:
         SecurityReportFactory(source_agent="xbow")
-        WorkerCommand.objects.create(command="match_security_branches", status="running")
+        WorkerCommandFactory(command="match_security_branches", status="running")
 
         response = _post(client, "/security/match-branches/", _verifier_operator(), agent="xbow")
 
@@ -559,3 +564,334 @@ class TestConfirmReverify:
 
         assert not WorkerCommand.objects.exists()
         assert any("Nothing to verify" in message for message in _messages(response))
+
+
+@pytest.mark.django_db
+class TestScopedCloudRechecks:
+    """A live run covers its own scope, not the whole project."""
+
+    def _press(self, client: Client, path: str, agent: str) -> Any:
+        with (
+            patch.dict("os.environ", {"CURSOR_API_KEY": "key"}),
+            patch(
+                "franktheunicorn.security.recheck.create_cursor_agent",
+                return_value=("bc-x", "run-x"),
+            ),
+        ):
+            return _post(client, path, make_operator_config(), agent=agent)
+
+    def test_an_all_press_after_a_scoped_one_launches_the_rest(self, client: Client) -> None:
+        agents = SecurityReportFactory(status="new", source_agent="xbow")
+        person = SecurityReportFactory(status="new", source_agent="", project=agents.project)
+
+        self._press(client, "/security/recheck-fixed/", "xbow")
+        response = self._press(client, "/security/recheck-fixed/", "all")
+
+        runs = list(SecurityRecheckRun.objects.order_by("chunk_index"))
+        assert [(run.agent_scope, run.chunk_index, run.report_count) for run in runs] == [
+            ("xbow", 0, 1),
+            ("all", 1, 1),
+        ]
+        assert any("covering 1 report(s)" in message for message in _messages(response))
+        del person
+
+    def test_a_press_the_live_run_already_covers_launches_nothing(self, client: Client) -> None:
+        SecurityReportFactory(status="new", source_agent="xbow")
+
+        self._press(client, "/security/recheck-fixed/", "all")
+        response = self._press(client, "/security/recheck-fixed/", "xbow")
+
+        assert SecurityRecheckRun.objects.count() == 1
+        assert any(
+            "a run over all reports is already running and covers these reports" in message
+            for message in _messages(response)
+        )
+
+    def test_a_press_whose_reports_the_live_runs_all_cover_launches_nothing(
+        self, client: Client
+    ) -> None:
+        SecurityReportFactory(status="new", source_agent="xbow")
+
+        self._press(client, "/security/recheck-fixed/", "xbow")
+        response = self._press(client, "/security/recheck-fixed/", "any")
+
+        assert SecurityRecheckRun.objects.count() == 1
+        assert any("cover every report here" in message for message in _messages(response))
+
+    def test_the_fix_landed_fallback_launches_the_rest_too(self, client: Client) -> None:
+        agents = SecurityReportFactory(fix_landed_status="indeterminate", source_agent="xbow")
+        SecurityReportFactory(
+            fix_landed_status="indeterminate", source_agent="", project=agents.project
+        )
+
+        self._press(client, "/security/fix-landed-recheck/", "xbow")
+        self._press(client, "/security/fix-landed-recheck/", "none")
+
+        runs = SecurityRecheckRun.objects.filter(kind=SecurityRecheckRun.KIND_FIX_LANDED)
+        assert sorted(runs.values_list("agent_scope", "chunk_index")) == [
+            ("none", 1),
+            ("xbow", 0),
+        ]
+
+
+@pytest.mark.django_db
+class TestPerReportLabel:
+    def test_the_detail_page_sets_normalises_and_clears(self, client: Client) -> None:
+        report = SecurityReportFactory(source="paste", source_agent="")
+
+        client.post(f"/security/{report.pk}/agent/", {"source_agent": "Claude Code"})
+        report.refresh_from_db()
+        assert report.source_agent == "claude-code"
+
+        response = client.post(f"/security/{report.pk}/agent/", {"source_agent": ""}, follow=True)
+        report.refresh_from_db()
+        assert report.source_agent == ""
+        assert any("person-sent" in message for message in _messages(response))
+
+    def test_a_reserved_name_changes_nothing(self, client: Client) -> None:
+        report = SecurityReportFactory(source_agent="xbow")
+
+        response = client.post(
+            f"/security/{report.pk}/agent/", {"source_agent": "none"}, follow=True
+        )
+
+        report.refresh_from_db()
+        assert report.source_agent == "xbow"
+        assert any("reserved" in message for message in _messages(response))
+
+    def test_the_detail_page_offers_the_field_even_for_a_person_sent_report(
+        self, client: Client
+    ) -> None:
+        report = SecurityReportFactory(source_agent="")
+
+        body = client.get(f"/security/{report.pk}/").content.decode()
+
+        assert f'action="/security/{report.pk}/agent/"' in body
+        assert "none — a person sent it" in body
+
+    def test_admin_normalises_and_refuses_like_every_other_door(self) -> None:
+        from franktheunicorn.core.admin import SecurityReportAdminForm
+
+        report = SecurityReportFactory()
+        base = {
+            field: getattr(report, field)
+            for field in ("raw_text", "source", "status", "assessed_severity", "priority")
+        }
+
+        good = SecurityReportAdminForm(data={**base, "source_agent": "Claude Code"})
+        good.is_valid()
+        assert good.cleaned_data.get("source_agent") == "claude-code"
+
+        reserved = SecurityReportAdminForm(data={**base, "source_agent": "any"})
+        assert not reserved.is_valid()
+        assert "source_agent" in reserved.errors
+
+
+@pytest.mark.django_db
+class TestBoundedEcho:
+    """A refused field is whatever the client sent; it must not size the session."""
+
+    def test_an_unusable_agent_name_is_quoted_back_truncated(self) -> None:
+        from franktheunicorn.security.agent_source import clean_agent_name
+
+        with pytest.raises(ValueError) as caught:
+            clean_agent_name("!" * 100_000)
+
+        assert len(str(caught.value)) < 200
+
+    def test_a_bulk_buttons_unreadable_scope_is_quoted_back_truncated(self, client: Client) -> None:
+        response = client.post("/security/rerun-procedural/", {"agent": "&" * 50_000}, follow=True)
+
+        (message,) = [m for m in _messages(response) if "isn't an agent scope" in m]
+        assert len(message) < 250
+
+    def test_an_archive_name_is_capped_at_the_column_width(self, client: Client) -> None:
+        response = client.post(
+            "/security/archive-agent/", {"archive": "a" * 50_000, "source_agent": "x"}, follow=True
+        )
+
+        (message,) = [m for m in _messages(response) if "No reports left" in m]
+        assert len(message) < 300
+
+
+@pytest.mark.django_db
+class TestReuploadLabel:
+    def _zip(self) -> SimpleUploadedFile:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("one.txt", REPORT_TEXT)
+        return SimpleUploadedFile("scan.zip", buf.getvalue(), content_type="application/zip")
+
+    def test_a_reupload_with_an_agent_says_the_label_did_not_land(self, client: Client) -> None:
+        client.post("/security/upload/", {"zip_file": self._zip()})
+
+        response = client.post(
+            "/security/upload/", {"zip_file": self._zip(), "source_agent": "xbow"}, follow=True
+        )
+
+        assert SecurityReport.objects.get().source_agent == ""
+        assert any(
+            "kept their existing agent label" in message and "Imported archives" in message
+            for message in _messages(response)
+        )
+
+    def test_a_reupload_under_the_same_label_says_nothing_extra(self, client: Client) -> None:
+        client.post("/security/upload/", {"zip_file": self._zip(), "source_agent": "xbow"})
+
+        response = client.post(
+            "/security/upload/", {"zip_file": self._zip(), "source_agent": "xbow"}, follow=True
+        )
+
+        assert not any("kept their existing" in message for message in _messages(response))
+
+
+@pytest.mark.django_db
+class TestScopeHonestMessages:
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/security/match-branches/",
+            "/security/scan-fixed/",
+            "/security/fixes-landed/",
+            "/security/cve-fixes-landed/",
+        ],
+    )
+    def test_a_sweep_with_nothing_in_scope_names_the_scope(self, client: Client, path: str) -> None:
+        """A project-less agent archive next to a person's report with a project:
+        "no open report is attached to a project" is false for the backlog."""
+        SecurityReportFactory(source_agent="xbow", project=None)
+        SecurityReportFactory(source_agent="")
+
+        response = _post(client, path, _verifier_operator(), agent="xbow")
+
+        assert not WorkerCommand.objects.exists()
+        assert any("(reports from agent xbow)" in message for message in _messages(response))
+
+    @pytest.mark.parametrize(
+        ("path", "command", "needs"),
+        [
+            ("/security/scan-fixed/", "scan_security_fixed", "patch"),
+            ("/security/fixes-landed/", "check_fixes_landed", "branch"),
+            ("/security/cve-fixes-landed/", "check_cve_fixes_landed", "cve"),
+        ],
+    )
+    def test_the_scoped_count_gates_the_sweep(
+        self, client: Client, path: str, command: str, needs: str
+    ) -> None:
+        """The thing the sweep needs exists — on a report outside the scope."""
+        fields = {
+            "patch": {"proposed_patch": "--- a/x\n+++ b/x\n"},
+            "branch": {"fix_branch_sha": "abc123"},
+            "cve": {"matched_cve_id": "CVE-2026-11111"},
+        }[needs]
+        SecurityReportFactory(source_agent="", **fields)
+        SecurityReportFactory(source_agent="xbow")
+
+        response = _post(client, path, _verifier_operator(), agent="xbow")
+
+        assert not WorkerCommand.objects.filter(command=command).exists()
+        assert any("(reports from agent xbow)" in message for message in _messages(response))
+
+    @pytest.mark.parametrize(
+        ("path", "command"),
+        [
+            ("/security/scan-fixed/", "scan_security_fixed"),
+            ("/security/fixes-landed/", "check_fixes_landed"),
+            ("/security/cve-fixes-landed/", "check_cve_fixes_landed"),
+        ],
+    )
+    def test_a_covering_sweep_in_flight_is_said_not_requeued(
+        self, client: Client, path: str, command: str
+    ) -> None:
+        SecurityReportFactory(
+            source_agent="xbow",
+            matched_cve_id="CVE-2026-11111",
+            fix_branch_sha="abc123",
+            proposed_patch="--- a/x\n+++ b/x\n",
+        )
+        WorkerCommandFactory(command=command, status="running")
+
+        response = _post(client, path, _verifier_operator(), agent="xbow")
+
+        assert WorkerCommand.objects.filter(command=command).count() == 1
+        assert any("already queued or running" in message for message in _messages(response))
+
+    def test_a_cve_lookup_finds_a_report_in_another_source(self, client: Client) -> None:
+        """Global on purpose: a hit filed under another agent must not read as
+        "No local report names CVE-…"."""
+        hit = SecurityReportFactory(source_agent="claude-code", matched_cve_id="CVE-2026-2222")
+
+        response = client.get("/security/?agent=xbow&cve=CVE-2026-2222")
+
+        assert response.status_code == 302
+        assert response["Location"] == f"/security/{hit.pk}/"
+
+    def test_a_cve_list_reports_itself_unscoped(self, client: Client) -> None:
+        SecurityReportFactory(source_agent="claude-code", matched_cve_id="CVE-2026-2222")
+        SecurityReportFactory(source_agent="xbow", matched_cve_id="CVE-2026-2222")
+
+        response = client.get("/security/?agent=xbow&cve=CVE-2026-2222")
+
+        assert response.context["agent_scope"] == "all"
+        assert len(response.context["reports"]) == 2
+
+    def test_the_source_chips_link_to_their_scope_keeping_status_and_sort(
+        self, client: Client
+    ) -> None:
+        SecurityReportFactory(source_agent="xbow")
+        SecurityReportFactory(source_agent="")
+
+        response = client.get("/security/?status=new&sort=newest")
+
+        queries = {option["key"]: option["query"] for option in response.context["scope_options"]}
+        assert queries["all"] == "?sort=newest&status=new"
+        assert queries["none"] == "?sort=newest&status=new&agent=none"
+        assert queries["xbow"] == "?sort=newest&status=new&agent=xbow"
+        assert 'href="/security/?sort=newest&amp;status=new&amp;agent=xbow"' in (
+            response.content.decode()
+        )
+
+
+@pytest.mark.django_db
+class TestReverifyCap:
+    def test_presses_cannot_stack_past_the_cap(self, client: Client) -> None:
+        """A per-press cap moved each batch to the back of the order, so the next
+        press found a fresh batch with nothing in flight."""
+        for _ in range(6):
+            SecurityReportFactory()
+
+        with patch("franktheunicorn.security.verifier.MAX_BULK_VERIFY", 2):
+            _post(client, "/security/reverify/", _verifier_operator(), depth="agent")
+            _post(client, "/security/reverify/", _verifier_operator(), depth="agent")
+            response = _post(client, "/security/reverify/", _verifier_operator(), depth="agent")
+
+        assert WorkerCommand.objects.filter(command="verify_security_report").count() == 2
+        messages = _messages(response)
+        assert any("0 sent to the coding agent" in m for m in messages)
+        assert any("had 2 queued or running — 4 more not sent" in m for m in messages)
+
+    def test_any_outstanding_verification_counts(self, client: Client) -> None:
+        """The detail page's Verify button spends from the same queue."""
+        busy = SecurityReportFactory()
+        WorkerCommandFactory(
+            command="verify_security_report", security_report=busy, status="running"
+        )
+        SecurityReportFactory()
+        SecurityReportFactory()
+
+        with patch("franktheunicorn.security.verifier.MAX_BULK_VERIFY", 2):
+            _post(client, "/security/reverify/", _verifier_operator(), depth="agent")
+
+        pending = WorkerCommand.objects.filter(command="verify_security_report", status="pending")
+        assert pending.count() == 1
+
+    def test_it_queues_in_the_bulk_lane(self, client: Client) -> None:
+        """Many commands from one press must not park the interactive lane."""
+        from franktheunicorn.security.queue import PRIORITY_BULK
+
+        SecurityReportFactory()
+
+        _post(client, "/security/reverify/", _verifier_operator(), depth="agent")
+
+        priorities = set(WorkerCommand.objects.values_list("priority", flat=True))
+        assert priorities == {PRIORITY_BULK}

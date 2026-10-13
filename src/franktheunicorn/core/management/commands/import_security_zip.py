@@ -129,6 +129,14 @@ class Command(BaseCommand):
             raise CommandError(result.error)
 
         self.stdout.write(self.style.SUCCESS(summary))
+        if result.agent_label_kept:
+            self.stdout.write(
+                self.style.WARNING(
+                    f"  {result.agent_label_kept} already-present report(s) kept their "
+                    "existing agent label — re-importing doesn't relabel. Use Set beside "
+                    "the archive in the dashboard's Imported archives table."
+                )
+            )
         # Named separately from triage's: an operator who passed --verify and got
         # nothing needs the reason, and "verifier.enabled is false" is a setting
         # they may never have seen.

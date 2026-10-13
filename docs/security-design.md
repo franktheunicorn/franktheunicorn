@@ -584,14 +584,16 @@ table, which invites being trusted more than it has earned.
 
 **What happens:** `SecurityReport.source_agent` names the automated agent that produced a
 report — blank for one a person sent. The operator sets it at import (the Agent box beside the
-zip upload, `import_security_zip --agent`, the paste form) or afterwards per archive (the
-relabel field in the Imported archives table). `security/agent_source.py` turns it into a
+zip upload, `import_security_zip --agent`, the paste form) or afterwards — per archive (the
+relabel field in the Imported archives table) or per report (the Agent field on its detail
+page; admin runs the same normaliser). frank's own malicious-prompt pre-filter files its
+reports as `franktheunicorn-prefilter`, so they don't count as person-sent either. `security/agent_source.py` turns it into a
 *scope* — one agent, `any` agent, `none` (people only) or `all` — which filters the list, its
 tab counts and the CSV export, and rides into every bulk button as a hidden field. Triage is
 told when a report is machine-written (a `## Provenance` block in the analysis prompt). The
 **✓ Confirm / Re-verify** button re-checks open reports in the scope against the code: the git
-version map for all of them, plus — when asked — the deep verifier (§4.10) for at most 25 a
-press, least recently verified first.
+version map for all of them, plus — when asked — the deep verifier (§4.10), keeping at most 25
+verifications queued or running at once, least recently verified first.
 
 **Risk:** another agent's output is volume. A scanner archive is a hundred findings nobody has
 read, which is the opposite of the reviewed intake §4.10's mitigations lean on. Some of those
@@ -603,7 +605,11 @@ agent with tool access.
 **Current mitigations:**
 
 - **A press, per scope, capped.** Nothing re-verifies on its own; the agent depth is opt-in at
-  the button, and 25 reports a press bounds a mistake at 25 × (branches + 1) agent runs.
+  the button, and the cap counts verifications already queued or running, so however many
+  times it is pressed a mistake is bounded at 25 × (branches + 1) agent runs outstanding.
+- **Scoped cloud-agent runs record their scope.** A live recheck blocks only presses its scope
+  covers; a wider press launches just the reports no live run was asked about, so nothing is
+  paid for twice and nothing is silently left out.
 - **A scope that doesn't parse is refused, never widened.** Every bulk view, the worker's sweep
   handlers and the export refuse rather than fall back to `all`, so a typo cannot turn a press
   on one agent's twenty findings into one on the whole backlog — or a sheet of one agent's
@@ -626,9 +632,9 @@ agent with tool access.
   injection hits is the obvious next step and has not been taken, because the false-positive
   case (a report *about* prompt injection quoting its payload) is at least as common in
   scanner output.
-- **Scoped duplicate re-checks only compare within the scope.** A scoped press can't clear a
-  link into the rest of the backlog, which is safe, but it also can't find an agent's finding
-  that duplicates a person's report — that takes a press on All.
+- **Scoped duplicate re-checks only compare within the scope.** A scoped press neither clears
+  nor repoints a link into the rest of the backlog, which is safe, but it also can't find an
+  agent's finding that duplicates a person's report — that takes a press on All.
 
 ---
 

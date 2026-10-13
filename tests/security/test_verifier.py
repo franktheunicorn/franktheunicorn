@@ -1534,21 +1534,21 @@ class TestReverifyCandidates:
 
         from django.utils import timezone
 
-        from franktheunicorn.core.models import WorkerCommand
         from franktheunicorn.security.verifier import reverify_candidates
+        from tests.factories import WorkerCommandFactory
 
         recent = SecurityReportFactory(priority=90.0)
         older = SecurityReportFactory(priority=10.0)
         never_low = SecurityReportFactory(priority=1.0)
         never_high = SecurityReportFactory(priority=50.0)
         now = timezone.now()
-        WorkerCommand.objects.create(
+        WorkerCommandFactory(
             command="verify_security_report",
             security_report=recent,
             status="completed",
             created_at=now,
         )
-        WorkerCommand.objects.create(
+        WorkerCommandFactory(
             command="verify_security_report",
             security_report=older,
             status="completed",

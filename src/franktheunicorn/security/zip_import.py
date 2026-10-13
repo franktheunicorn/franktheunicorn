@@ -203,6 +203,12 @@ class ZipImportResult:
     #: import stopped"; the CLI turns it into a non-zero exit, so a cap that was
     #: reached after doing the work belongs here instead.
     warnings: list[str] = field(default_factory=list)
+    #: Already-present reports whose agent label differs from the one this import
+    #: was given. A duplicate keeps its label — it may have been relabelled by hand
+    #: since — so re-uploading an archive with the Agent box filled labels nothing
+    #: that was already there, and the caller has to say so rather than flash a
+    #: green "already imported".
+    agent_label_kept: int = 0
     #: The archive had more entries than the caller allowed. A flag, not a
     #: substring of ``error``: the dashboard used ``"over the" in result.error`` to
     #: decide whether to suggest the CLI, which breaks the moment anyone rewords
@@ -248,6 +254,10 @@ class ZipImportResult:
             parts.append(f"{self.queued_version_maps} queued for version mapping")
         if self.queued_introduction_scans:
             parts.append(f"{self.queued_introduction_scans} queued for introduction dating")
+        if self.agent_label_kept:
+            parts.append(
+                f"{self.agent_label_kept} already-present report(s) kept their existing agent label"
+            )
         parts.extend(self.warnings)
         if self.error:
             # A cap tripped mid-walk after rows were already committed. Saying
@@ -729,6 +739,19 @@ def _stamp_agent(result: ZipImportResult, source_agent: str) -> None:
     ids = [entry.report_id for entry in result.entries if entry.outcome == "imported"]
     if ids:
         SecurityReport.objects.filter(pk__in=ids).update(source_agent=source_agent)
+    # Duplicates keep their label; count the ones that disagree so the caller can
+    # say the label it was given didn't reach them.
+    duplicate_ids = {
+        entry.report_id
+        for entry in result.entries
+        if entry.outcome == "duplicate" and entry.report_id is not None
+    }
+    if duplicate_ids:
+        result.agent_label_kept = (
+            SecurityReport.objects.filter(pk__in=duplicate_ids)
+            .exclude(source_agent=source_agent)
+            .count()
+        )
 
 
 class _BudgetedReader:

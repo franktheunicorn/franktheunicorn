@@ -22,7 +22,23 @@
         {% if report.source_archive %}<dt>Archive:</dt><dd>{{ report.source_archive }}</dd>{% endif %}
         {# Another agent's output, said where the provenance is read. Links to the #}
         {# list scoped to that agent: the rest of its findings are the context. #}
-        {% if report.source_agent %}<dt>Agent:</dt><dd><a class="agent-badge" href="{% url 'dashboard:security_list' %}?agent={{ report.source_agent|urlencode }}" title="Produced by an automated agent, not a person — show its other reports">🤖 {{ report.source_agent }}</a></dd>{% endif %}
+        {# Always shown, blank included: a pasted or emailed report has no archive #}
+        {# for the bulk relabel to reach, so this is where its label gets set. #}
+        <dt>Agent:</dt>
+        <dd>
+            {% if report.source_agent %}<a class="agent-badge" href="{% url 'dashboard:security_list' %}?agent={{ report.source_agent|urlencode }}" title="Produced by an automated agent, not a person — show its other reports">🤖 {{ report.source_agent }}</a>{% else %}<span class="muted">none — a person sent it</span>{% endif %}
+            <form method="post" action="{% url 'dashboard:security_set_agent' report.pk %}" class="agent-relabel">
+                {% csrf_token %}
+                <input type="text" name="source_agent" value="{{ report.source_agent }}"
+                       list="known-agents" placeholder="agent name, or blank"
+                       autocapitalize="none" spellcheck="false"
+                       aria-label="Agent that produced this report">
+                <datalist id="known-agents">
+                    {% for agent in known_agents %}<option value="{{ agent }}">{% endfor %}
+                </datalist>
+                <button type="submit" class="action-btn">Set</button>
+            </form>
+        </dd>
         {% if report.finding_id %}<dt>Finding:</dt><dd>{{ report.finding_id }}</dd>{% endif %}
         {% if report.priority %}
         <dt>Priority:</dt>

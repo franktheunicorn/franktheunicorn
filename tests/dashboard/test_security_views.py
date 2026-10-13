@@ -578,6 +578,22 @@ class TestSecurityReportCreate:
         response = client.post("/security/new/", {"raw_text": ""})
         assert response.status_code == 400
 
+    def test_create_refuses_a_non_numeric_project_rather_than_500ing(
+        self, client: Client, db: Any
+    ) -> None:
+        response = client.post("/security/new/", {"raw_text": "report", "project_id": "abc"})
+
+        assert response.status_code == 400
+        assert not SecurityReport.objects.exists()
+
+    def test_create_refuses_a_stale_project_rather_than_filing_against_none(
+        self, client: Client, db: Any
+    ) -> None:
+        response = client.post("/security/new/", {"raw_text": "report", "project_id": "999999"})
+
+        assert response.status_code == 400
+        assert not SecurityReport.objects.exists()
+
     def test_paste_forwarded_report_autofills_metadata(self, client: Client, db: Any) -> None:
         """Pasting a forwarded Apache report with blank fields recovers the
         reporter/title from the forwarded block — no LLM backend required."""
@@ -1800,6 +1816,49 @@ class TestSecurityCsvRoundTrip:
     def test_a_genuine_duplicate_still_says_dup_of(self, client: Client) -> None:
         SecurityReportFactory(status="duplicate", matched_cve_id="CVE-2026-1234")
         assert "Dup of" in client.get("/security/").content.decode()
+
+    def test_a_refused_cve_is_shown_in_the_panel_htmx_swaps(self, client: Client) -> None:
+        """htmx 1.9 swaps only 2xx/3xx, so a bare 400 meant nothing on screen
+        changed and the ruling looked saved. htmx gets the panel back with the error
+        and what the operator typed; nothing is persisted."""
+        report = SecurityReportFactory(status="new", operator_notes="")
+
+        response = client.post(
+            f"/security/{report.pk}/verdict/",
+            {
+                "status": "valid",
+                "operator_notes": "real bug",
+                "matched_cve_id": "2026-1234",
+                "fixed_in_branch": "branch-3.5",
+            },
+            HTTP_HX_REQUEST="true",
+        )
+
+        assert response.status_code == 200
+        body = response.content.decode()
+        assert "doesn&#x27;t look like a CVE id" in body
+        assert "nothing was saved" in body
+        assert 'value="2026-1234"' in body
+        assert 'value="branch-3.5"' in body
+        assert "real bug" in body
+        report.refresh_from_db()
+        assert (report.status, report.operator_notes, report.matched_cve_id) == ("new", "", "")
+        assert report.fixed_in_branch == ""
+
+    def test_a_refused_status_is_shown_in_the_panel_too(self, client: Client) -> None:
+        report = SecurityReportFactory(status="new")
+
+        response = client.post(
+            f"/security/{report.pk}/verdict/",
+            {"status": "not-a-real-status", "operator_notes": "keep me"},
+            HTTP_HX_REQUEST="true",
+        )
+
+        assert response.status_code == 200
+        assert "Unknown status" in response.content.decode()
+        assert "keep me" in response.content.decode()
+        report.refresh_from_db()
+        assert report.operator_notes == ""
 
     def test_the_verdict_form_rejects_an_overlong_cve(self, client: Client) -> None:
         """SQLite doesn't enforce max_length, so a 309-character "CVE" persisted here
@@ -4034,3 +4093,31 @@ class TestTheCapCountsAttemptsNotSuccesses:
         assert mock_create.call_count == MAX_VALID_CHECK_LAUNCHES
         # And the flashes are collapsed, not one per failed report.
         assert response.content.count(b"Valid-check not launched") == 1
+
+
+@pytest.mark.django_db
+class TestFixLandedPanel:
+    def test_a_released_verdict_counts_its_tags(self, client: Client) -> None:
+        """`tag_count|default:tags|length` applied |length to the int, so every
+        git-released verdict read "in 0 release tag(s)" beside a list of three."""
+        report = SecurityReportFactory(
+            fix_branch_sha="abc123",
+            fix_landed_status="released",
+            fix_landed_detail={"tags": ["v1.0", "v1.1", "v1.2"], "tag_count": 3, "note": ""},
+        )
+
+        body = " ".join(client.get(f"/security/{report.pk}/").content.decode().split())
+
+        assert "in 3 release tag(s)" in body
+        assert "in 0 release" not in body
+
+    def test_a_legacy_detail_without_a_count_falls_back_to_the_list(self, client: Client) -> None:
+        report = SecurityReportFactory(
+            fix_branch_sha="abc123",
+            fix_landed_status="released",
+            fix_landed_detail={"tags": ["v1.0", "v1.1"], "note": ""},
+        )
+
+        body = " ".join(client.get(f"/security/{report.pk}/").content.decode().split())
+
+        assert "in 2 release tag(s)" in body

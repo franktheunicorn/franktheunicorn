@@ -63,6 +63,25 @@ def normalize_agent_name(raw: str) -> str:
     return name[:MAX_AGENT_NAME_LEN].rstrip("-.")
 
 
+#: How much of an unusable value an error message quotes back.
+_ECHO_CHARS = 60
+
+
+def echo(raw: str, limit: int = _ECHO_CHARS) -> str:
+    """*raw* quoted for a flash message, cut to *limit* characters.
+
+    Every caller is echoing a form field it just refused, and a refused field is
+    whatever the client sent: a flash message too big for the cookie goes into the
+    session row, so an unbounded echo is a write anyone who can reach the form
+    gets to make. Same reason ``zip_import`` caps entry names before they reach a
+    message.
+    """
+    value = raw.strip()
+    if len(value) > limit:
+        value = value[:limit] + "…"
+    return repr(value)
+
+
 def clean_agent_name(raw: str) -> str:
     """The name to store for *raw*, or "" for a human-sent report.
 
@@ -75,7 +94,7 @@ def clean_agent_name(raw: str) -> str:
     name = normalize_agent_name(raw)
     if not name:
         msg = (
-            f"{raw.strip()!r} isn't usable as an agent name. Use letters, digits, dots "
+            f"{echo(raw)} isn't usable as an agent name. Use letters, digits, dots "
             "or hyphens, like 'claude-code'."
         )
         raise ValueError(msg)
@@ -111,6 +130,30 @@ def scope_q(scope: str) -> Q:
         # the index. Same reasoning as SecurityReport.cve_without_branch_q.
         return Q(source_agent__gt="")
     return Q(source_agent=scope)
+
+
+def matches(scope: str, source_agent: str) -> bool:
+    """:func:`scope_q`, for one report's ``source_agent`` already in hand."""
+    if scope == SCOPE_ALL:
+        return True
+    if scope == SCOPE_HUMAN:
+        return source_agent == ""
+    if scope == SCOPE_ANY_AGENT:
+        return source_agent != ""
+    return source_agent == scope
+
+
+def scope_covers(running: str, wanted: str) -> bool:
+    """Whether work already running over *running* answers a press for *wanted*.
+
+    Everything covers anything; every agent covers one agent; otherwise only the
+    same scope does. "Not covered" is not "disjoint" — a run over everything
+    started by somebody else still covers a press for one agent — so callers that
+    launch the remainder filter report by report with :func:`matches`.
+    """
+    if running in (SCOPE_ALL, wanted):
+        return True
+    return running == SCOPE_ANY_AGENT and wanted not in RESERVED_SCOPES
 
 
 def scope_label(scope: str) -> str:

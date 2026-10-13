@@ -20,7 +20,9 @@
     <p>
         <span class="badge">released</span>
         The fix commit is in
-        {{ report.fix_landed_detail.tag_count|default:report.fix_landed_detail.tags|length }}
+        {# firstof, not default|length: the filter applied to default's output, #}
+        {# so an int tag_count went through |length and rendered "0 release tag(s)". #}
+        {% firstof report.fix_landed_detail.tag_count report.fix_landed_detail.tags|length %}
         release tag(s){% if report.fix_landed_detail.tags %}:
         {{ report.fix_landed_detail.tags|join:", " }}{% endif %}.
         <span class="pr-meta">{{ report.fix_landed_detail.note }}</span>

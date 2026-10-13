@@ -16,6 +16,7 @@ from tests.factories import (
     ProjectFactory,
     PullRequestFactory,
     SecurityReportFactory,
+    WorkerCommandFactory,
     make_operator_config,
 )
 
@@ -908,7 +909,7 @@ class TestGitSweepHandlers:
         agents, persons = ProjectFactory(), ProjectFactory()
         SecurityReportFactory(project=agents, source_agent="xbow")
         SecurityReportFactory(project=persons, source_agent="")
-        cmd = WorkerCommand.objects.create(
+        cmd = WorkerCommandFactory(
             command="match_security_branches", status="running", kwargs={"agent_scope": "xbow"}
         )
 
@@ -924,12 +925,43 @@ class TestGitSweepHandlers:
         assert persons.full_name not in cmd.log
 
     @pytest.mark.django_db
+    @pytest.mark.parametrize(
+        ("command", "target"),
+        [
+            ("scan_security_fixed", "franktheunicorn.security.branch_scan.scan_already_fixed"),
+            ("check_fixes_landed", "franktheunicorn.security.fix_landed.check_project_fixes"),
+            ("check_cve_fixes_landed", "franktheunicorn.security.fix_landed.check_cve_fixes"),
+        ],
+    )
+    def test_every_sweep_hands_its_scope_to_the_per_project_function(
+        self, command: str, target: str
+    ) -> None:
+        """Not just the branch match: a handler that dropped the kwarg would sweep
+        the whole project while the flash said one agent's reports."""
+        from franktheunicorn.security.branch_scan import BranchMatchRun
+        from tests.factories import SecurityReportFactory
+
+        SecurityReportFactory(source_agent="xbow")
+        cmd = WorkerCommandFactory(
+            command=command, status="running", kwargs={"agent_scope": "xbow"}
+        )
+
+        with patch(
+            target,
+            side_effect=lambda p, _c, **_kw: BranchMatchRun(project=p.full_name),
+        ) as sweep:
+            _dispatch(cmd, make_operator_config())
+
+        assert sweep.call_count == 1
+        assert sweep.call_args.kwargs == {"agent_scope": "xbow"}
+
+    @pytest.mark.django_db
     def test_a_scope_that_does_not_parse_sweeps_nothing(self) -> None:
         """Refused, never widened to every report."""
         from tests.factories import SecurityReportFactory
 
         SecurityReportFactory()
-        cmd = WorkerCommand.objects.create(
+        cmd = WorkerCommandFactory(
             command="scan_security_fixed", status="running", kwargs={"agent_scope": "&&&"}
         )
 
@@ -944,7 +976,7 @@ class TestGitSweepHandlers:
         from tests.factories import SecurityReportFactory
 
         SecurityReportFactory(source_agent="")
-        cmd = WorkerCommand.objects.create(
+        cmd = WorkerCommandFactory(
             command="check_fixes_landed", status="running", kwargs={"agent_scope": "xbow"}
         )
 

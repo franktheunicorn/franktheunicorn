@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 from django.db import IntegrityError, transaction
 
 from franktheunicorn.core.models import WorkerCommand
-from franktheunicorn.security.agent_source import RESERVED_SCOPES, SCOPE_ALL, SCOPE_ANY_AGENT
+from franktheunicorn.security.agent_source import SCOPE_ALL, scope_covers
 
 if TYPE_CHECKING:
     from franktheunicorn.config.models import OperatorConfig
@@ -210,7 +210,7 @@ def queue_targetless(
         in_flight = in_flight.exclude(pk=exclude_pk)
     for kwargs in in_flight.values_list("kwargs", flat=True):
         running = (kwargs or {}).get("agent_scope", SCOPE_ALL)
-        if _scope_covers(running, agent_scope):
+        if scope_covers(running, agent_scope):
             logger.info("%s already in flight (agent scope %s)", command, running)
             return False
     WorkerCommand.objects.create(
@@ -222,13 +222,6 @@ def queue_targetless(
     )
     logger.info("Queued %s (priority %d, agent scope %s)", command, priority, agent_scope)
     return True
-
-
-def _scope_covers(running: str, wanted: str) -> bool:
-    """Whether a sweep already running over *running* answers a press for *wanted*."""
-    if running in (SCOPE_ALL, wanted):
-        return True
-    return running == SCOPE_ANY_AGENT and wanted not in RESERVED_SCOPES
 
 
 def queue_recheck_poll(*, priority: int = PRIORITY_BULK, exclude_pk: int | None = None) -> bool:

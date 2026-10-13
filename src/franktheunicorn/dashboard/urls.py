@@ -170,6 +170,13 @@ urlpatterns = [
         views.security_report_detail,
         name="security_detail",
     ),
+    # One report's agent label: the relabel for pasted/emailed reports, which
+    # have no archive for the bulk relabel to reach.
+    path(
+        "security/<int:report_id>/agent/",
+        views.security_report_set_agent,
+        name="security_set_agent",
+    ),
     path(
         "security/<int:report_id>/triage/",
         views.security_report_triage,

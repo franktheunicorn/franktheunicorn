@@ -6,6 +6,12 @@
           hx-swap="innerHTML">
         {% csrf_token %}
 
+        {# A refused submission. Rendered here, in the panel htmx swaps, because #}
+        {# a bare 4xx never reaches the screen and the ruling looked saved. #}
+        {% if verdict_error %}
+        <p role="alert" style="color: var(--red); background: var(--red-bg); font-size: 0.85rem; padding: 0.35rem 0.5rem; border-radius: 4px; margin-bottom: 0.5rem;">{{ verdict_error }}</p>
+        {% endif %}
+
         <div class="form-row" style="margin-bottom: 0.5rem;">
             <label style="min-width: 5rem; font-size: 0.85rem; font-weight: 600;">Status</label>
             <select name="status" style="font-size: 0.85rem;">
