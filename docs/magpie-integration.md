@@ -273,17 +273,64 @@ effort. "Done" means it is on this branch with tests.
   `git ls-remote` against the fork). Commit-message scanning would need the
   worker's clone and is a follow-up in `branch_scan`.
 
-### 4.4 Untrusted-content framing in every prompt (in progress)
+### 4.4 Untrusted-content framing in every prompt (done)
 
 - **What.** One rule and one fence for all prompts that carry stranger-written
-  text: the PR description, prior comments and diff in both review paths, the
+  text: the PR description, prior comments and diff in both review paths
+  (and so every `checks/` sub-check that reuses the user-message builder), the
   report text in parse and triage. `core/untrusted.py` holds the rule
   (adapted from Magpie's `AGENTS.md`) and a nonce-marked fence with
   defusing, generalised from the fix agent's.
 - **Why.** The verifier, fix agent and recheck agent already framed their
   input; the review and triage prompts did not, and `docs/security-design.md`
-  carried that as an open risk.
+  carried that as open risk H4. Both lenses scored this 4 and 5.
+- **Files.** `core/untrusted.py`, `review/prompt.py`, `review/agent_cli.py`,
+  `security/prompt.py`; H4 in `docs/security-design.md` records the closure.
 - **Remote path.** Prompt text only.
+- **Residual.** The full-file and imported-module context read from the PR
+  head checkout is contributor-written and is not yet fenced.
+
+### 4.5 Injection scan at every intake door (next)
+
+- **What.** Run the regex injection scanner frank already has
+  (`security/malicious_prompt.regex_scan`, used today only by the verifier
+  and fix agent) when a report is created by email, paste or zip import, and
+  again after triage parses the POC; persist the hits on the report and show
+  a persistent callout above the report text. Both lenses scored it 4.
+- **Why.** Every later LLM call re-reads the stored report; Magpie persists
+  the flag at import for exactly that reason ("so the marker persists for
+  every future skill invocation"). frank computes the hits twice, late, and
+  keeps them nowhere the operator sees before clicking Verify.
+- **Upstream source.** `plugins/magpie-security/skills/issue-import/apply.md`
+  (callout wording) and `AGENTS.md` (hidden-text list) at the pinned commit.
+- **Remote path.** Worker and web processes only.
+
+### 4.6 Forwarder relay detection in the email parser (next)
+
+- **What.** Recognise the ASF Security Team relay (sender pattern, "Dear PMC,
+  The security vulnerability report has been received..." preamble, the
+  "discovered and reported by" credit line) and GitHub Security Advisory
+  relays (`notifications@github.com` with a `(GHSA-xxxx-xxxx-xxxx)` subject),
+  and record relay kind and the credited reporter instead of the forwarder's
+  address. Both lenses scored it 4.
+- **Why.** On an ASF project most reports arrive this way; frank's parser
+  only unwraps a generic "forwarded message" block and otherwise credits
+  `security@apache.org` as the reporter.
+- **Upstream source.** `tools/forwarder-relay/README.md` (the `asf-security`
+  adapter's regexes, present at 0.1.0) and `tools/gmail/asf-relay.md`.
+- **Remote path.** Worker and web processes only.
+
+### 4.7 Attachment manifest and the static-first PoC policy (next)
+
+- **What.** Record each email attachment's name, type, size and sha256 at
+  intake as data (never extracted, never executed), show them on the report
+  page with Magpie's rule text, and keep execution click-gated in the
+  container sandbox as it is today. Both lenses scored it 4.
+- **Why.** Attachments are dropped silently today, so a report whose PoC is
+  a zip reads as having no PoC.
+- **Upstream source.** `docs/security/poc-handling-policy.md` at the pinned
+  commit (written after 0.1.0).
+- **Remote path.** Worker and web processes only.
 
 ---
 

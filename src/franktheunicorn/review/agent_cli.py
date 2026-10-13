@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from franktheunicorn.core.models import ReviewDraft
+from franktheunicorn.core.untrusted import UNTRUSTED_CONTENT_RULE, fence, fence_note, fresh_nonce
 from franktheunicorn.review.antipattern import (
     check_against_anti_patterns,
     record_anti_pattern_matches,
@@ -65,6 +66,8 @@ design and semantics first, then dead code or odd structure this change added.
 Skip formatting, naming, and import order.
 
 {reviewing_guidance}
+
+{untrusted_rule}
 {review_guidance_section}{review_areas_section}{prior_comments_section}For EACH issue, emit a block in EXACTLY this format, separated by lines of
 five or more equals signs:
 
@@ -85,6 +88,8 @@ in the diff. Line numbers must refer to the new file.
 
 If there are no substantive issues, output exactly: Review completed
 Do not include any other text outside the blocks.
+
+{fence_note}
 
 Diff:
 {diff}
@@ -113,6 +118,8 @@ finding. Behavior the security model declares trusted is not a finding.
 
 {comment_voice}
 
+{untrusted_rule}
+
 {security_model_section}
 {review_guidance_section}{review_areas_section}{prior_comments_section}For EACH security issue, emit a block in EXACTLY this format, separated by
 lines of five or more equals signs:
@@ -135,6 +142,8 @@ in the diff. Line numbers must refer to the new file.
 
 If there are no security issues, output exactly: Review completed
 Do not include any other text outside the blocks.
+
+{fence_note}
 
 Diff:
 {diff}
@@ -176,8 +185,12 @@ def build_review_prompt(
     review_guidance: str = "",
     review_areas_of_interest: list[str] | None = None,
     prior_comments: str = "",
+    nonce: str = "",
 ) -> str:
     """Pick and fill the prompt template for the reviewer's ``review_focus``.
+
+    The diff and the prior comments are contributor text and go inside
+    nonce-marked fences (``core.untrusted``); ``nonce`` is for tests.
 
     ``security_model`` only reaches the security template; a general reviewer
     has no use for it and a security reviewer without one gets an explicit
@@ -203,8 +216,10 @@ def build_review_prompt(
         if areas
         else ""
     )
+    nonce = nonce or fresh_nonce()
     prior = (prior_comments or "").strip()
-    prior_comments_section = f"\n{prior}\n" if prior else ""
+    prior_comments_section = f"\n{fence('prior comments', prior, nonce)}\n" if prior else ""
+    fenced_diff = fence("diff", diff, nonce)
     if config.review_focus == "security":
         section = (
             _SECURITY_MODEL_KNOWN_SECTION.format(security_model=security_model.strip())
@@ -213,18 +228,22 @@ def build_review_prompt(
         )
         return _SECURITY_PROMPT_TEMPLATE.format(
             comment_voice=COMMENT_VOICE,
+            untrusted_rule=UNTRUSTED_CONTENT_RULE,
             security_model_section=section,
             review_guidance_section=guidance_section,
             review_areas_section=areas_section,
             prior_comments_section=prior_comments_section,
-            diff=diff,
+            fence_note=fence_note(nonce),
+            diff=fenced_diff,
         )
     return _PROMPT_TEMPLATE.format(
         reviewing_guidance=REVIEWING_GUIDANCE,
+        untrusted_rule=UNTRUSTED_CONTENT_RULE,
         review_guidance_section=guidance_section,
         review_areas_section=areas_section,
         prior_comments_section=prior_comments_section,
-        diff=diff,
+        fence_note=fence_note(nonce),
+        diff=fenced_diff,
     )
 
 
