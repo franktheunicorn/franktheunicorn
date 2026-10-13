@@ -1506,3 +1506,98 @@ class TestBackendFallthrough:
         backends = _get_triage_backends(config)
 
         assert [backend.label for backend in backends] == ["stub/strong", "stub/cheap"]
+
+
+class TestDispositions:
+    """Magpie's six classes ride on top of the older plausible/expected split."""
+
+    def test_disposition_decides_the_suggested_status(self, db: Any) -> None:
+        from franktheunicorn.security.triage import _suggested_status
+        from tests.factories import SecurityReportFactory
+
+        cases = {
+            "VALID": "valid",
+            "DEFENSE-IN-DEPTH": "defense-in-depth",
+            "INFO-ONLY": "info-only",
+            "INVALID": "invalid",
+            "PROBABLE-DUP": "duplicate",
+        }
+        for disposition, status in cases.items():
+            report = SecurityReportFactory(auto_triage_disposition=disposition, poc_plausible=True)
+            assert _suggested_status(report) == status, disposition
+
+    def test_fix_already_public_and_uncertain_fall_through_to_the_old_derivation(
+        self, db: Any
+    ) -> None:
+        from franktheunicorn.security.triage import _suggested_status
+        from tests.factories import SecurityReportFactory
+
+        # A next step, not a verdict: nothing to Agree to.
+        report = SecurityReportFactory(auto_triage_disposition="FIX-ALREADY-PUBLIC")
+        assert _suggested_status(report) == ""
+        # Uncertain: whatever the plausibility fields say.
+        report = SecurityReportFactory(auto_triage_disposition="UNCERTAIN", poc_plausible=False)
+        assert _suggested_status(report) == "invalid"
+
+    def test_analyze_stores_the_disposition_and_the_quoted_rule(self, db: Any) -> None:
+        import json
+
+        from franktheunicorn.security.triage import _analyze_report
+        from tests.factories import SecurityReportFactory
+
+        analyze_response = json.dumps(
+            {
+                "poc_plausible": True,
+                "poc_assessment": "Race on the temp file is real.",
+                "is_expected_behavior": False,
+                "expected_behavior_explanation": "",
+                "assessed_severity": "low",
+                "disposition": "defense-in-depth",
+                "model_quote": "Worker hosts are operated by the deployment owner.",
+                "triage_summary": "Real, but a local user on the worker is trusted.",
+            }
+        )
+        backend = _MockLLMBackend(responses=[analyze_response])
+        report = SecurityReportFactory(
+            parsed_component="worker.py",
+            parsed_poc="symlink the temp path",
+            parsed_impact="local file overwrite",
+            status="triaging",
+        )
+        _analyze_report(report, backend, "")
+        report.refresh_from_db()
+        assert report.auto_triage_disposition == "DEFENSE-IN-DEPTH"
+        assert report.triage_model_quote.startswith("Worker hosts")
+        # Plausible POC alone would have said "valid"; the class says otherwise.
+        assert report.auto_triage_status == "defense-in-depth"
+        assert report.status == "new"
+
+    def test_an_unknown_disposition_is_not_stored(self, db: Any) -> None:
+        import json
+
+        from franktheunicorn.security.triage import _analyze_report
+        from tests.factories import SecurityReportFactory
+
+        analyze_response = json.dumps(
+            {
+                "poc_plausible": False,
+                "poc_assessment": "x",
+                "is_expected_behavior": False,
+                "expected_behavior_explanation": "",
+                "assessed_severity": "low",
+                "disposition": "MEH",
+                "triage_summary": "x",
+            }
+        )
+        backend = _MockLLMBackend(responses=[analyze_response])
+        report = SecurityReportFactory(parsed_poc="p", status="triaging")
+        _analyze_report(report, backend, "")
+        report.refresh_from_db()
+        assert report.auto_triage_disposition == ""
+        assert report.auto_triage_status == "invalid"
+
+    def test_info_only_owes_no_fix(self) -> None:
+        from franktheunicorn.core.models import SecurityReport
+
+        assert "info-only" in SecurityReport.NO_FIX_OWED_STATUSES
+        assert "defense-in-depth" not in SecurityReport.NO_FIX_OWED_STATUSES

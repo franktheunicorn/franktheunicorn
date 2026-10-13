@@ -3923,6 +3923,53 @@ class TestSecurityCVEAdvisory:
         report.refresh_from_db()
         assert report.cve_record_state == "PUBLISHED"
 
+    @patch("franktheunicorn.security.cve_api.fetch_record")
+    @patch("franktheunicorn.security.cve_api.update_record")
+    def test_push_refuses_to_walk_a_published_record_back(
+        self, mock_update: MagicMock, mock_fetch: MagicMock, client: Client, db: Any
+    ) -> None:
+        from franktheunicorn.security.cve_api import CVERecord
+        from tests.factories import CVEAPITokenFactory
+
+        CVEAPITokenFactory(pmc="spark", op="write")
+        mock_fetch.return_value = CVERecord(
+            cve_id="CVE-2026-12345",
+            found=True,
+            state="PUBLISHED",
+            raw={
+                "cveMetadata": {"cveId": "CVE-2026-12345", "state": "PUBLISHED"},
+                "CNA_private": {"state": "PUBLIC"},
+                "containers": {
+                    "cna": {"references": [{"url": "https://ann", "tags": ["vendor-advisory"]}]}
+                },
+            },
+        )
+        report = self._report()
+        record = {
+            "cveMetadata": {"cveId": "CVE-2026-12345", "state": "PUBLISHED"},
+            "CNA_private": {"state": "RESERVED"},
+            "containers": {"cna": {"title": "Widget overflow"}},
+        }
+        response = client.post(
+            f"/security/{report.pk}/cve-advisory/push/", {"record_json": json.dumps(record)}
+        )
+        assert response.status_code == 200
+        assert b"Not pushed" in response.content
+        assert b"downgrade" in response.content
+        mock_update.assert_not_called()
+
+        # The override ticked: pushed, and the service's advisory reference
+        # survives the regenerated draft that did not carry it.
+        response = client.post(
+            f"/security/{report.pk}/cve-advisory/push/",
+            {"record_json": json.dumps(record), "allow_state_downgrade": "1"},
+        )
+        assert b"Pushed" in response.content
+        pushed = mock_update.call_args.args[1]
+        assert pushed["containers"]["cna"]["references"] == [
+            {"url": "https://ann", "tags": ["vendor-advisory"]}
+        ]
+
     def test_push_rejects_invalid_json(self, client: Client, db: Any) -> None:
         from tests.factories import CVEAPITokenFactory
 

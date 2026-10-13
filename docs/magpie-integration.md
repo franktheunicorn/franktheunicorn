@@ -201,7 +201,89 @@ _Per-piece table to be filled from the verified mapping._
 
 ## 4. Tier 1: Adopt Now
 
-_To be filled._
+Each entry survived two independent adversarial reads (fit and value; pinning
+and remote execution) with a mean score of 4 or better and small or medium
+effort. "Done" means it is on this branch with tests.
+
+### 4.1 Six triage dispositions (done)
+
+- **What.** The triage prompt asks for a `disposition` (VALID,
+  DEFENSE-IN-DEPTH, INFO-ONLY, INVALID, PROBABLE-DUP, FIX-ALREADY-PUBLIC,
+  UNCERTAIN) and a `model_quote`, the verbatim line of the security model the
+  call rests on. The class is staged on `SecurityReport.auto_triage_disposition`
+  and the suggested status follows it; `defense-in-depth` and `info-only` are
+  new operator statuses. Info-only owes no fix; defense-in-depth owes an
+  ordinary one with no CVE.
+- **Why.** frank's three-way split (plausible, expected behaviour, invalid)
+  had no name for the most common shape in a real backlog: the code does what
+  the report says, and the attack sits outside the security model. Magpie's
+  taxonomy was built on exactly that backlog.
+- **Files.** `security/prompt.py` (rubric, adapted with attribution),
+  `security/triage.py`, `core/models.py` (migration 0059),
+  `security/learning.py`, the verdict and triage-result templates.
+- **Upstream source.** `plugins/magpie-security/skills/issue-triage/classification.md`
+  at the pinned commit. Only the class criteria are taken; the actor/effect
+  cheat-sheet next to them is Airflow-specific and was deliberately not
+  copied.
+- **Remote path.** Prompt text only. Works with every backend, including the
+  agent-cli backend over SSH, with nothing on the remote.
+- **Risks.** A backend that ignores the new keys falls back to the old
+  derivation; an unknown class is stored as blank, never as an error.
+
+### 4.2 CVE record merge guards (done)
+
+- **What.** The advisory push reads the record the service holds and refuses
+  three regressions before the upsert: walking a PUBLIC record back to a
+  draft, dropping references somebody added by hand on the service (they are
+  unioned in by URL), and renaming the affected product. Each has an override
+  checkbox on the push form. Setting PUBLIC without a reference tagged
+  `vendor-advisory` is refused with no override, which is the ASF rule that a
+  record goes public after the announcement ships.
+- **Files.** `security/cve_merge.py` (port with attribution),
+  `dashboard/views.py` (`security_cve_advisory_push`), the advisory template.
+- **Upstream source.** `tools/cve-tool-vulnogram/oauth-api/src/vulnogram_api/merge_mode.py`
+  at the pinned commit (present at 0.1.0, 13 commits since). Ported rather than
+  installed: the package's client overlaps `cve_api.py`, and the guards are
+  120 lines of stdlib.
+- **Remote path.** Web host only; one extra GET per push.
+- **Risks.** frank's own `affected[]` carries no `packageName`, so the product
+  guard compares `(package, product)` with an empty package on frank's side;
+  a record first populated by Vulnogram with a Package URL will differ and
+  need the override once. The refusal message says so.
+
+### 4.3 Disclosure scan on fix branches (done)
+
+- **What.** After a fix-agent refresh, every branch on the fork that names the
+  finding is scanned for a CVE id, Magpie's security phrases ("sql injection",
+  "privilege escalation", ...) plus a few of frank's ("advisory", "vuln"), and
+  the report's own CVE id and reporter name. Hits land on
+  `SecurityReport.fix_language_hits`, a red badge on the report page, and a
+  WARNING. Never a block: frank does not open the PR.
+- **Why.** The fix prompt asks the agent in prose to name the branch
+  innocuously; the branch list of a public fork is readable before the
+  advisory is. Prose is a request, this is the check.
+- **Files.** `security/fix_language.py`, `security/fix_agent.py`
+  (`refresh_fix_status`), `core/models.py` (migration 0058), the fix-status
+  template.
+- **Upstream source.** `plugins/magpie-security/skills/issue-fix/guards/security_language.py`
+  at the pinned commit. The phrase list is ported; the guard itself is a
+  Claude Code hook that needs Magpie's `ctx` shim and `gh`, and so is not
+  reusable as code.
+- **Remote path.** Web host only (the branch names come from the existing
+  `git ls-remote` against the fork). Commit-message scanning would need the
+  worker's clone and is a follow-up in `branch_scan`.
+
+### 4.4 Untrusted-content framing in every prompt (in progress)
+
+- **What.** One rule and one fence for all prompts that carry stranger-written
+  text: the PR description, prior comments and diff in both review paths, the
+  report text in parse and triage. `core/untrusted.py` holds the rule
+  (adapted from Magpie's `AGENTS.md`) and a nonce-marked fence with
+  defusing, generalised from the fix agent's.
+- **Why.** The verifier, fix agent and recheck agent already framed their
+  input; the review and triage prompts did not, and `docs/security-design.md`
+  carried that as an open risk.
+- **Remote path.** Prompt text only.
 
 ---
 
@@ -225,7 +307,23 @@ _To be filled._
 
 ## 8. Considered and Rejected
 
-_To be filled._
+Every candidate a verification lens rejected, with the reason, so nobody
+re-evaluates it. (Rows are added as areas finish verifying.)
+
+| Candidate | Reason |
+|-----------|--------|
+| Run Magpie's triage rubric as an agent-CLI addendum | frank's agent-cli backend has no addendum wiring, and the rubric's cheat-sheet is Airflow's worked example, not a generic rule. The class criteria were taken instead (4.1). |
+| Follow Magpie's SECURITY.md to threat-model chain | frank already auto-discovers `THREAT_MODEL.md`, Magpie's default filename; the chain adds nothing for frank's projects. |
+| Read and write a Magpie adopter's private tracker repo | Large; frank's GitHub client has no issue read or write methods; depends on statuses that did not exist yet. Revisit only if an adopter asks. |
+| OSV alias lookup (CVE to GHSA) | Nothing in frank's intake produces GHSA ids today; Magpie's own client is "not yet wired". |
+| Stop citing the private `security@` thread in the CVE record | Already fixed on this branch (`a57191e`) before the lens ran. |
+| Draft reporter acknowledgements into the IMAP Drafts folder | A send-shaped feature with no draft queue behind it; Magpie's version is built on claude.ai mail plumbing frank does not have. |
+| Hash-prefixed PII redaction before LLM and CSV egress | frank has no redaction anywhere and the port is large; the distribution names (`redactor`, `checker`) are unsafe to pin as pip deps; a `~/.config` JSON mapping store breaks SQLite-first. Recorded as Tier 2 design input only. |
+| PonyMail and Hyperkitty URL recipes | frank's mailing-list fetcher already builds the lists.apache.org URLs correctly; the candidate misread it. |
+| Pip-install Magpie's `redactor` and `checker` packages | Generic distribution names that resolve to unrelated PyPI projects if the git spec is ever lost; state in the home directory. The sha-pinned recipes work and are recorded in section 2 for the record. |
+| Magpie's mail-source contract, Gmail OAuth tool, PonyMail MCP, mail-patch | One mail backend needs no backend contract; the Gmail tool adds a non-stdlib dependency to solve a claude.ai problem; the PonyMail MCP is unpinnable by its own documentation. |
+| `tools/typed-decision` | Depends on a uv-workspace-only `checker` package (a bare pip install would resolve an unrelated PyPI project) and a third-party inference vendor. |
+| Security tracker stats dashboard tool | Everything but its date arithmetic assumes `gh` and a tracker repo. |
 
 ---
 

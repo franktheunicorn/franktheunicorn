@@ -3896,13 +3896,31 @@ def security_cve_advisory_push(request: HttpRequest, report_id: int) -> HttpResp
             else:
                 try:
                     from franktheunicorn.config.loader import get_operator_config
+                    from franktheunicorn.security.cve_merge import (
+                        CVEMergeRefusedError,
+                        apply_merge_guards,
+                    )
 
                     base_url = get_operator_config().security_triage.cve_api.base_url
+                    # The push is an upsert, so read what the service holds first
+                    # and refuse the regressions a regenerated draft makes by
+                    # accident (published state walked back, hand-added references
+                    # dropped, the product renamed). One extra GET per push.
+                    current = fetch_record(report.matched_cve_id, token=token, base_url=base_url)
+                    record = apply_merge_guards(
+                        current.raw if current.found else None,
+                        record,
+                        allow_state_downgrade=bool(request.POST.get("allow_state_downgrade")),
+                        replace_references=bool(request.POST.get("replace_references")),
+                        allow_product_change=bool(request.POST.get("allow_product_change")),
+                    )
                     update_record(report.matched_cve_id, record, token=token, base_url=base_url)
                     refreshed = fetch_record(report.matched_cve_id, token=token, base_url=base_url)
                 except CVETokenExpiredError:
                     drop_token(pmc, "write")
                     blocked = "The service rejected the write token (they live for hours). Deleted; paste a fresh one."
+                except CVEMergeRefusedError as exc:
+                    blocked = f"Not pushed. {exc}"
                 except CVEAPIError as exc:
                     blocked = str(exc)
                 else:

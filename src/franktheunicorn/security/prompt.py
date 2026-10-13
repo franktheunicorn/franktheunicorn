@@ -53,6 +53,52 @@ def build_parse_prompt(raw_text: str) -> tuple[str, str]:
     return system_prompt, user_message
 
 
+#: The six triage dispositions, plus the honest "not sure".
+#:
+#: Adapted from Apache Magpie's ``security-issue-triage`` skill
+#: (``plugins/magpie-security/skills/issue-triage/classification.md`` at
+#: apache/magpie commit dadb315caa8b881fc1d2195bef03223dac25915a, Apache-2.0).
+#: Magpie's point, and the reason frank takes the taxonomy rather than its
+#: three-way plausible/expected/invalid split: "fact-correct but outside the
+#: security model" (DEFENSE-IN-DEPTH, INFO-ONLY) is the most common shape in a
+#: real backlog and it is neither valid nor invalid. The class is a proposal; the
+#: operator's status is the verdict. The actor/effect cheat-sheet Magpie ships
+#: next to this is Airflow-specific and is deliberately not copied.
+TRIAGE_DISPOSITIONS: tuple[str, ...] = (
+    "VALID",
+    "DEFENSE-IN-DEPTH",
+    "INFO-ONLY",
+    "INVALID",
+    "PROBABLE-DUP",
+    "FIX-ALREADY-PUBLIC",
+    "UNCERTAIN",
+)
+
+TRIAGE_DISPOSITION_RUBRIC = (
+    "Classify the report with ONE disposition, and quote the line of the security "
+    "model or project context the call rests on:\n"
+    "- VALID: the behaviour violates a documented rule of the security model, the "
+    "vector is reachable by someone WITHOUT an authoritative role (operator, host "
+    "admin, a trusted code/job submitter), and the premise checks out.\n"
+    "- DEFENSE-IN-DEPTH: the code does what the report says, but the attack model "
+    "falls outside the security model's boundary (a local user on a trusted host, "
+    "a multi-tenant setup the project does not support); a hardening change is "
+    "still welcome as an ordinary fix, with no CVE.\n"
+    "- INFO-ONLY: fact-correct, violates no documented rule, and needs only an "
+    "explanation, not a change.\n"
+    "- INVALID: the premise is wrong (the code does not do that), the framing is "
+    "circular, or the behaviour is documented as by design.\n"
+    "- PROBABLE-DUP: the same root cause as a candidate CVE or a known advisory, "
+    "or a sibling vector with the same fix shape.\n"
+    "- FIX-ALREADY-PUBLIC: a public fix already exists for exactly this, so the "
+    "next step is confirming it covers the report rather than triaging it.\n"
+    "- UNCERTAIN: the input is too ambiguous to pick one; say what would settle "
+    "it. Never dress an uncertain call up as a confident one.\n"
+    "A severity is a guess for context, never a score; the reporter's own "
+    "severity claim is informational and frequently inflated.\n\n"
+)
+
+
 def build_triage_prompt(
     parsed_component: str,
     parsed_poc: str,
@@ -112,7 +158,8 @@ def build_triage_prompt(
         "If candidate CVE matches are provided, judge their relevance and note "
         "in the summary whether the report appears to duplicate a known or "
         "already-fixed issue.\n\n"
-        "Return a JSON object with exactly these keys:\n"
+        + TRIAGE_DISPOSITION_RUBRIC
+        + "Return a JSON object with exactly these keys:\n"
         '  "poc_plausible": boolean — does the POC demonstrate a real vulnerability?,\n'
         '  "poc_assessment": string — detailed assessment of the POC,\n'
         '  "is_expected_behavior": boolean — is the reported behavior documented/expected '
@@ -120,6 +167,10 @@ def build_triage_prompt(
         '  "expected_behavior_explanation": string — explain why (empty if not expected),\n'
         '  "assessed_severity": one of "critical", "high", "medium", "low", '
         '"informational",\n'
+        '  "disposition": one of "VALID", "DEFENSE-IN-DEPTH", "INFO-ONLY", "INVALID", '
+        '"PROBABLE-DUP", "FIX-ALREADY-PUBLIC", "UNCERTAIN" — see the rubric above,\n'
+        '  "model_quote": string — the one line of the project security model or context, '
+        "verbatim, that the disposition rests on; empty when no line applies,\n"
         '  "triage_summary": string — concise triage summary for the maintainer, noting any '
         "likely duplicate CVE.\n"
         "Return ONLY the JSON object, no markdown fences or extra text."

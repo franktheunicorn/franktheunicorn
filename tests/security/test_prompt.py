@@ -221,3 +221,16 @@ class TestParsePromptTruncation:
 
         assert out.startswith("x" * 100)
         assert "truncated" in out
+
+
+class TestTriageDispositionRubric:
+    def test_system_prompt_asks_for_a_disposition_and_a_quoted_rule(self) -> None:
+        from franktheunicorn.security.prompt import TRIAGE_DISPOSITIONS
+
+        system, _ = build_triage_prompt("c", "poc", "impact", "ctx")
+        for disposition in TRIAGE_DISPOSITIONS:
+            assert disposition in system
+        assert '"disposition"' in system
+        assert '"model_quote"' in system
+        # The reporter's own severity is context, never the decision.
+        assert "informational and frequently inflated" in system
