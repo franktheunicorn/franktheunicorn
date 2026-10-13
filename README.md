@@ -81,6 +81,7 @@ For project configuration and workspaces, see the **[Install Guide](docs/install
 - **Learns from your corrections** via an anti-pattern list that improves with every rejection and edit
 - **Runs differential tests** to verify new tests actually fail without the PR's changes — see [Dual Run Tests](#dual-run-tests) below and [docs/test-runner.md](docs/test-runner.md) to enable per project
 - **Routes PRs to queues** — AI-generated, new contributors, low-context drive-bys, consider-closing
+- **Remembers what you meant to merge** — PRs you approved, or said "LGTM pending CI" on, sit in an Intending to Merge queue (oldest approval first, with CI status) until they land
 - **Respects project cultures** — ASF governance norms are different from your Django side project
 - **Works on your phone** — responsive dashboard over Tailscale for conference triage
 

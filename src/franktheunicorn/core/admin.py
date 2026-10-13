@@ -44,6 +44,7 @@ class PullRequestAdmin(admin.ModelAdmin):  # type: ignore[type-arg]
     )
     list_filter = (
         "state",
+        "merge_intent",
         "is_draft",
         "likely_ai_generated",
         "ai_agent_source",

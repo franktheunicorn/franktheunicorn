@@ -77,6 +77,7 @@ class PullRequest(models.Model):
 
     QUEUE_CHOICES = [
         ("review", "Review"),
+        ("intending-to-merge", "Intending to Merge"),
         ("ai-generated", "AI-Generated"),
         ("new-contributor", "New Contributor"),
         ("consider-closing", "Consider Closing"),
@@ -158,6 +159,27 @@ class PullRequest(models.Model):
     merged_at = models.DateTimeField(null=True, blank=True)
     merged_by = models.CharField(max_length=255, blank=True, default="")
 
+    # Intending to merge: the operator (or a configured approver) has already
+    # said yes to this PR — a formal approval, or "LGTM pending CI" in a
+    # comment — so it is waiting on their *merge*, not their review. Detected
+    # by worker/merge_intent.py from the reviews and comments the poller
+    # fetches; the approver's latest word wins, and CHANGES_REQUESTED clears
+    # it. ``merge_intent_commit_sha`` is the head the approval was given
+    # against, so a push since then can be shown rather than guessed.
+    MERGE_INTENT_CHOICES = [
+        ("", "None"),
+        ("approved", "Approved"),
+        ("conditional", "Conditional (pending CI)"),
+    ]
+    merge_intent = models.CharField(
+        max_length=20, choices=MERGE_INTENT_CHOICES, blank=True, default=""
+    )
+    merge_intent_at = models.DateTimeField(null=True, blank=True)
+    merge_intent_source = models.CharField(max_length=20, blank=True, default="")
+    merge_intent_by = models.CharField(max_length=255, blank=True, default="")
+    merge_intent_excerpt = models.CharField(max_length=500, blank=True, default="")
+    merge_intent_commit_sha = models.CharField(max_length=64, blank=True, default="")
+
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
     github_created_at = models.DateTimeField(null=True, blank=True)
@@ -194,6 +216,21 @@ class PullRequest(models.Model):
 
     def __str__(self) -> str:
         return f"#{self.number} {self.title}"
+
+    @property
+    def moved_since_approval(self) -> bool:
+        """New commits since the approval the merge intent records.
+
+        Only meaningful when both SHAs are known: a row that predates the
+        per-PR detail fetch has no head_sha, and "unknown" must not render as
+        "pushed since you approved".
+        """
+        return bool(
+            self.merge_intent
+            and self.head_sha
+            and self.merge_intent_commit_sha
+            and self.head_sha != self.merge_intent_commit_sha
+        )
 
 
 class ReviewDraft(models.Model):

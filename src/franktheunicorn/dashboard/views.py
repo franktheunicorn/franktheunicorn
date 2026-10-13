@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 from django.contrib import messages
 from django.db import transaction
-from django.db.models import Count, Max, Min, Q, Sum
+from django.db.models import Count, F, Max, Min, Q, Sum
 from django.http import HttpRequest, HttpResponse, StreamingHttpResponse
 
 # StreamingHttpResponse is not an HttpResponse — both descend from
@@ -55,6 +55,7 @@ logger = logging.getLogger(__name__)
 # Queue definitions for the tab bar.
 QUEUE_TABS: list[dict[str, str]] = [
     {"key": "review", "label": "Review"},
+    {"key": "intending-to-merge", "label": "Intending to Merge"},
     {"key": "your-prs", "label": "Your PRs"},
     {"key": "mentioned", "label": "Mentioned"},
     {"key": "ai-generated", "label": "AI-Generated"},
@@ -134,6 +135,10 @@ def index(request: HttpRequest) -> HttpResponse:
         .annotate(last_local_action_at=Max("actions__created_at"))
         .order_by("-interest_score", "-github_updated_at")
     )
+    if queue == "intending-to-merge":
+        # A follow-up list, not a triage list: the approval that has waited
+        # longest is the one to act on first, whatever it scored.
+        prs = prs.order_by(F("merge_intent_at").asc(nulls_last=True), "-github_updated_at")
 
     if workspace_projects is not None:
         prs = prs.filter(_build_workspace_q(workspace_projects))
@@ -896,14 +901,20 @@ def stats(request: HttpRequest) -> HttpResponse:
 
 
 def merge_queue_view(request: HttpRequest) -> HttpResponse:
-    """Show PRs eligible for merging."""
+    """Show PRs eligible for merging.
+
+    The operator's own PRs, plus every PR they (or a configured approver)
+    have already approved — those are the ones the merge script is about to
+    be run on, so the readiness checklist belongs next to them too.
+    """
     from django.conf import settings
 
     from franktheunicorn.config.loader import load_project_configs
     from franktheunicorn.worker.merge_queue import evaluate_merge_eligibility
 
     eligible_prs = (
-        PullRequest.objects.filter(state="open", is_operator_pr=True)
+        PullRequest.objects.filter(state="open")
+        .filter(Q(is_operator_pr=True) | ~Q(merge_intent=""))
         .select_related("project")
         .order_by("-interest_score")[:50]
     )

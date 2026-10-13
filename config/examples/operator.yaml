@@ -33,6 +33,16 @@ github_token: "${FRANK_GITHUB_TOKEN}"
 # Your GitHub username — used for "operator is author" scoring and review attribution
 github_username: "holdenk"
 
+# Intending to merge: PRs you (or the approvers below) have already approved,
+# or conditionally approved ("LGTM pending CI", "will merge once the tests
+# pass"), land in the dashboard's "Intending to Merge" queue, oldest approval
+# first, so the follow-up happens. On by default — it costs one reviews read
+# per refreshed PR and shows nothing until somebody approves something.
+# merge_intent:
+#   enabled: true
+#   approvers: []        # forge logins; empty means github_username alone
+#   track_ci: true       # read CI for queued PRs so "pending CI" has an answer
+
 # Default review style/tone for draft comments
 review_style: "direct but kind"
 

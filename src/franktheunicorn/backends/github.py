@@ -249,10 +249,81 @@ class GitHubClient(ForgeClient):
         params: dict[str, str | int] = {"per_page": 100}
         if since:
             params["since"] = since
-        response = self._get(url, params=params)
-        response.raise_for_status()
-        result: list[dict[str, Any]] = response.json()
-        return result
+        # Paginated: a long-lived PR on a busy repo passes 100 comments, and
+        # the one that decides the intending-to-merge queue is the latest.
+        found: list[dict[str, Any]] = []
+        for page in range(1, 6):
+            response = self._get(url, params={**params, "page": page})
+            response.raise_for_status()
+            data: list[dict[str, Any]] = response.json()
+            found.extend(data)
+            if len(data) < 100:
+                break
+        return found
+
+    def list_pull_request_reviews(
+        self, owner: str, repo: str, pr_number: int
+    ) -> list[dict[str, Any]]:
+        """Every submitted review on the PR, paginated.
+
+        GitHub's default page is 30 and a long-lived PR on a busy repo has
+        more reviews than that; the one that matters for the
+        intending-to-merge queue is usually the latest, i.e. the one a
+        single page would drop.
+        """
+        url = f"/repos/{owner}/{repo}/pulls/{pr_number}/reviews"
+        found: list[dict[str, Any]] = []
+        for page in range(1, 6):
+            response = self._get(url, params={"per_page": 100, "page": page})
+            response.raise_for_status()
+            data: list[dict[str, Any]] = response.json()
+            found.extend(data)
+            if len(data) < 100:
+                break
+        return found
+
+    def get_commit_ci_status(self, owner: str, repo: str, sha: str) -> str:
+        """Combine check runs and commit statuses for *sha* into one word.
+
+        Both endpoints, because a repo may use either: GitHub Actions and
+        most apps report check runs, Jenkins-style integrations (Spark's
+        among them) still post commit statuses.
+        """
+        from franktheunicorn.worker.merge_intent import classify_ci
+
+        if not sha:
+            return ""
+        # A large Actions matrix (Spark's is one) can pass 100 check runs on a
+        # single commit, and a failure on page two is still a failure. Read to
+        # the end; a commit with more than the cap is reported unknown rather
+        # than green on the part that was read.
+        check_runs: list[dict[str, Any]] = []
+        max_pages = 10
+        for page in range(1, max_pages + 1):
+            checks_resp = self._get(
+                f"/repos/{owner}/{repo}/commits/{sha}/check-runs",
+                params={"per_page": 100, "page": page},
+            )
+            checks_resp.raise_for_status()
+            page_runs = checks_resp.json().get("check_runs") or []
+            check_runs.extend(page_runs)
+            if len(page_runs) < 100:
+                break
+        else:
+            logger.warning(
+                "%s/%s@%s has more than %d check runs; CI status left unknown",
+                owner,
+                repo,
+                sha[:12],
+                max_pages * 100,
+            )
+            return ""
+        status_resp = self._get(
+            f"/repos/{owner}/{repo}/commits/{sha}/status", params={"per_page": 100}
+        )
+        status_resp.raise_for_status()
+        statuses = status_resp.json().get("statuses") or []
+        return classify_ci(check_runs, statuses)
 
     def list_pull_review_comments(
         self, owner: str, repo: str, pr_number: int
