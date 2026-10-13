@@ -58,6 +58,7 @@ def _get_registry() -> dict[str, type[BaseCheck]]:
     from franktheunicorn.review.checks.pr_description import PRDescriptionCheck
     from franktheunicorn.review.checks.security import SecurityCheck
     from franktheunicorn.review.checks.security_context import SecurityContextCheck
+    from franktheunicorn.review.checks.security_disclosure import SecurityDisclosureCheck
 
     return {
         "api-misuse": APIMisuseCheck,
@@ -68,6 +69,7 @@ def _get_registry() -> dict[str, type[BaseCheck]]:
         "pr-description": PRDescriptionCheck,
         "security": SecurityCheck,
         "security-context": SecurityContextCheck,
+        "security-disclosure": SecurityDisclosureCheck,
     }
 
 
@@ -184,6 +186,10 @@ def _instantiate_check(
             config=project_config.backport,
             forge_client=forge_client,
         )
+    if check_name == "security-disclosure":
+        from franktheunicorn.review.checks.security_disclosure import SecurityDisclosureCheck
+
+        return SecurityDisclosureCheck(governance=project_config.governance)
     return check_cls()
 
 

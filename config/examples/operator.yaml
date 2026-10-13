@@ -46,6 +46,12 @@ github_username: "holdenk"
 # Default review style/tone for draft comments
 review_style: "direct but kind"
 
+# Handles allowed to stay a live @-mention in a posted review. Every other
+# @handle in a finding (a model's, or one quoted from the PR) is backtick-
+# quoted before posting so it notifies nobody: the review already notifies
+# the author and every subscriber. Same key as Apache Magpie's.
+# mention_allowlist: ["holdenk"]
+
 # Reviewer personality — controls the voice of internal content
 # (dashboard summaries, digest emails, agent feedback).
 # GitHub-posted comments remain professional regardless of personality.

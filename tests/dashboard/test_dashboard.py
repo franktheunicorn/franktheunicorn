@@ -2052,3 +2052,57 @@ class TestProjectWipePRs:
     def test_stats_lists_the_button(self, client: Client, db_pr: PullRequest) -> None:
         response = client.get("/stats/")
         assert b"Wipe PR data" in response.content
+
+
+@pytest.mark.django_db
+class TestPostReviewMovedHead:
+    """The refusal renders the two overrides; the override is passed through."""
+
+    def test_refusal_offers_post_anyway_and_body_only(
+        self, client: Client, db_pr: PullRequest
+    ) -> None:
+        from unittest.mock import MagicMock, patch
+
+        from franktheunicorn.backends.poster import StaleHeadError
+
+        ReviewDraftFactory(pull_request=db_pr, status="accepted", comment_body="x")
+        mock_poster = MagicMock()
+        mock_poster.post_review.side_effect = StaleHeadError("aaaa1111aaaa", "bbbb2222bbbb")
+
+        with (
+            patch("franktheunicorn.backends.github.GitHubClient"),
+            patch("franktheunicorn.backends.poster.GitHubPoster", return_value=mock_poster),
+            patch("django.conf.settings.FRANK_GITHUB_TOKEN", "test-token", create=True),
+        ):
+            response = client.post(f"/pr/{db_pr.pk}/post/")
+
+        assert response.status_code == 200
+        assert b"Not posted" in response.content
+        assert b"aaaa1111" in response.content and b"bbbb2222" in response.content
+        assert b'"stale_head": "post"' in response.content
+        assert b'"stale_head": "body-only"' in response.content
+
+    def test_the_override_reaches_the_poster_and_the_note_counts_folds(
+        self, client: Client, db_pr: PullRequest
+    ) -> None:
+        from unittest.mock import MagicMock, patch
+
+        ReviewDraftFactory(pull_request=db_pr, status="accepted", comment_body="cc @alice")
+        mock_poster = MagicMock()
+        mock_poster.post_review.return_value = {
+            "id": 1,
+            "mentions_escaped": ["alice"],
+            "folded_into_body": 1,
+        }
+
+        with (
+            patch("franktheunicorn.backends.github.GitHubClient"),
+            patch("franktheunicorn.backends.poster.GitHubPoster", return_value=mock_poster),
+            patch("django.conf.settings.FRANK_GITHUB_TOKEN", "test-token", create=True),
+        ):
+            response = client.post(f"/pr/{db_pr.pk}/post/", {"stale_head": "body-only"})
+
+        assert response.status_code == 200
+        assert mock_poster.post_review.call_args.kwargs["on_stale_head"] == "body-only"
+        assert b"1 @-mention(s) backtick-quoted: alice" in response.content
+        assert b"1 inline comment(s) folded into the review body" in response.content

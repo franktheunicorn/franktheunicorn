@@ -29,6 +29,7 @@ from django.http.response import HttpResponseBase
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
+from django.utils.html import escape
 from django.views.decorators.http import require_POST
 
 from franktheunicorn.core.models import (
@@ -702,8 +703,13 @@ def post_review(request: HttpRequest, pr_id: int) -> HttpResponse:
     if not approved:
         return HttpResponse('<div class="post-result">No approved findings to post.</div>')
 
+    # The moved-head guard's override, sent by the buttons the refusal renders.
+    on_stale_head = request.POST.get("stale_head", "refuse")
+    if on_stale_head not in ("refuse", "post", "body-only"):
+        on_stale_head = "refuse"
+
     try:
-        from franktheunicorn.backends.poster import GitHubPoster
+        from franktheunicorn.backends.poster import GitHubPoster, StaleHeadError
 
         client = _make_posting_client(pr)
         if client is None:
@@ -713,17 +719,51 @@ def post_review(request: HttpRequest, pr_id: int) -> HttpResponse:
             )
 
         try:
-            poster = GitHubPoster(client)  # type: ignore[arg-type]
-            poster.post_review(pr, approved)
+            poster = GitHubPoster(client, mention_allowlist=_mention_allowlist())  # type: ignore[arg-type]
+            result = poster.post_review(pr, approved, on_stale_head=on_stale_head)
+        except StaleHeadError as exc:
+            url = reverse("dashboard:post_review", args=[pr.pk])
+            return HttpResponse(
+                '<div class="post-result error-note">'
+                f"Not posted: PR #{pr.number} has new commits since these drafts were made "
+                f"({exc.stored[:8]} \u2192 {exc.live[:8]}), so inline line numbers may no "
+                "longer match the diff. Re-poll the PR to redraft, or: "
+                f'<button class="action-btn" hx-post="{url}" hx-vals=\'{{"stale_head": "post"}}\' '
+                'hx-target="#post-result" hx-swap="innerHTML">Post anyway</button> '
+                f'<button class="action-btn" hx-post="{url}" hx-vals=\'{{"stale_head": "body-only"}}\' '
+                'hx-target="#post-result" hx-swap="innerHTML">Post as review body only</button>'
+                "</div>"
+            )
         finally:
             client.close()  # type: ignore[attr-defined]
 
-        return HttpResponse(
-            f'<div class="post-result ok-note">Posted {len(approved)} findings to GitHub.</div>'
-        )
+        note = f"Posted {len(approved)} findings to GitHub."
+        if isinstance(result, dict):
+            escaped = result.get("mentions_escaped") or []
+            if escaped:
+                note += f" {len(escaped)} @-mention(s) backtick-quoted: {', '.join(escaped)}."
+            folded = result.get("folded_into_body") or 0
+            if folded:
+                note += (
+                    f" {folded} inline comment(s) folded into the review body "
+                    "(their lines are not in the current diff)."
+                )
+        return HttpResponse(f'<div class="post-result ok-note">{escape(note)}</div>')
     except Exception:
         logger.exception("Failed to post review for PR #%d", pr.number)
         return HttpResponse('<div class="post-result error-note">Failed to post review.</div>')
+
+
+def _mention_allowlist() -> list[str]:
+    """Handles the operator lets stay live in a posted review; [] when unconfigured."""
+    try:
+        from django.conf import settings
+
+        from franktheunicorn.config.loader import load_operator_config
+
+        return list(load_operator_config(settings.FRANK_OPERATOR_CONFIG).mention_allowlist)
+    except Exception:
+        return []
 
 
 def _is_agent_feedback_enabled() -> bool:

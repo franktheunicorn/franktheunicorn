@@ -1812,6 +1812,13 @@ class OperatorConfig(BaseModel):
     github_username: str = ""
     review_style: str = "direct but kind"
     personality: str = "frank"
+    #: Handles that may stay a live ``@``-mention in a posted review. Everything
+    #: else frank posts is backtick-quoted first (``backends/mentions.py``), so a
+    #: model's or a quoted contributor's ``@handle`` notifies nobody. The key
+    #: name matches Apache Magpie's ``mention_allowlist`` so a project running
+    #: both tools keeps one list. Empty by default: the review itself already
+    #: notifies the author and every subscriber.
+    mention_allowlist: list[str] = Field(default_factory=list)
     auto_post: bool = False
     poll_interval_seconds: int | None = None
     log_level: str = "INFO"
@@ -2310,6 +2317,7 @@ class ProjectConfig(BaseModel):
             "pr-description",
             "security",
             "security-context",
+            "security-disclosure",
         }
         for name in v:
             if name not in known:

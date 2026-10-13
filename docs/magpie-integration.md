@@ -363,6 +363,81 @@ effort. "Done" means it is on this branch with tests.
   commit (written after 0.1.0).
 - **Remote path.** Worker and web processes only.
 
+### 4.8 Security-disclosure scan on public PR text (done)
+
+- **What.** A deterministic `llm_checks` entry, `security-disclosure`, that
+  reads a PR's title and description for a CVE id or a phrase that says
+  "this is a security fix" and files one `important` draft listing every
+  match with the clause it sits in. Both lenses scored it 4. Enabled per
+  project like any check; the ASF policy sentence and link go in the body
+  when `governance: asf`, a generic rule otherwise.
+- **Why.** frank's `security` check reads the code for holes the change
+  introduces; nothing read the prose for the opposite leak, a public PR
+  announcing a fix before the advisory. ASF policy is explicit that commit
+  messages must not reference the security nature of a commit.
+- **Where.** `review/checks/security_disclosure.py`, registered in
+  `review/checks/__init__.py` and the known-checks list in `config/models.py`.
+  The phrase list reuses `security.fix_language.MAGPIE_SECURITY_KEYWORDS`
+  plus pr-management's additions; `_context` and the "exploitable over
+  exploit" prune are Magpie's. No model call, so a prompt-injected
+  description cannot talk it out of a match (Magpie's own test, mirrored).
+  Commit messages are not read: the worker clone tracks the default branch
+  and the forge clients have no commits fetcher; a gap for later.
+- **Upstream source.** `tools/pr-management/src/pr_management/triage/signals.py`
+  (`SECURITY_PATTERNS`), `code_review/scans.py` (`security_disclosure`,
+  `_context`), `plugins/magpie-pr-management/skills/code-review/classifications/security-disclosure.md`
+  (the warning text) at the pinned commit.
+- **Remote path.** Worker host only; a regex over two strings.
+
+### 4.9 No live @-mentions in anything frank posts (done)
+
+- **What.** Every `@handle` outside code in a draft body is backtick-quoted
+  at post time, so it reads as a handle and notifies nobody; an operator
+  allowlist (`mention_allowlist`, Magpie's key name) keeps named handles
+  live. The post result says which handles were quoted. Scored 3/4.
+- **Why.** A review already notifies the author and every subscriber. A
+  handle a model wrote, or quoted from the PR into a finding, summons a
+  person nobody decided to summon.
+- **Where.** `backends/mentions.py` (`escape_handles`, `mention_scan`),
+  applied in `backends/poster._format_comment_body`; `OperatorConfig.mention_allowlist`
+  read by the post-review view. One deviation from Magpie: a bare `@word`
+  alone on a line is treated as a mention, not a decorator (Magpie's
+  `_DECORATOR` let `@bob` on its own line go out live); a decorator here
+  needs a dot or a parenthesis.
+- **Upstream source.** `tools/pr-management/src/pr_management/code_review/body.py`
+  (`escape_handles`, `mention_scan`) and
+  `plugins/magpie-pr-management/skills/code-review/posting.md` at the
+  pinned commit. The posting rule is three days old upstream (not at
+  0.1.0), hence pinned by sha.
+- **Remote path.** Web process only, at post time.
+
+### 4.10 Moved-head guard and inline-anchor fold at post time (done)
+
+- **What.** Before posting, the poster reads the PR's live head and refuses
+  when it differs from the head the drafts were made against, with two
+  overrides rendered on the refusal: post anyway, or post with every inline
+  comment folded into the review body. In every mode each inline comment is
+  then checked against the current diff and folded when its line is not in
+  it. Both lenses scored it 4.
+- **Why.** GitHub refuses an inline comment whose line is outside a hunk
+  with a 422 for the whole batch, which frank reported as "Failed to post
+  review" with nothing posted; and after a push, drafts anchored to the old
+  diff land on the wrong lines.
+- **Where.** `backends/poster.py` (`StaleHeadError`, `on_stale_head`,
+  `_is_anchored` over frank's own `diff_position.translate_line_to_position`,
+  `_folded`), the `post_review` view and its override buttons. The head
+  the drafts were made against is `PullRequest.head_sha` (set at poll; a
+  push marks reviewer runs stale), so no migration. An unreadable head or
+  diff posts as before and logs why.
+- **Upstream source.** `tools/pr-management/src/pr_management/code_review/cli.py`
+  (`_guard`: "new commits since the draft", refresh / post-anyway /
+  body-only-now), `diff.py` (`anchor`), `body.py` (`inline_comments`
+  folding unanchorable findings) at the pinned commit; the guard exists at
+  0.1.0 (`review-flow.md`, "Heads up: PR #N has new commits since I drafted
+  this review").
+- **Remote path.** Web process only: one PR fetch and one diff fetch at
+  post time.
+
 ---
 
 ## 5. Tier 2: Adopt Later

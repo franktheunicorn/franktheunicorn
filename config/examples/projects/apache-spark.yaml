@@ -277,6 +277,7 @@ llm_checks:
   - pr-description    # nudges incomplete or vague PR descriptions
   - issue-link        # flags PRs missing a SPARK-xxxxx reference
   - api-misuse        # deprecated/complex API calls (needs network; see below)
+  - security-disclosure  # title/description naming a security fix before the advisory (ASF policy)
 
 # api-misuse look-up config.  Only active when "api-misuse" is in llm_checks.
 # Issues requests to Maven Central (and optionally hosted Javadoc).
