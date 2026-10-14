@@ -254,9 +254,6 @@ def git_subcommand(argv: list[str]) -> str | None:
     return None
 
 
-_RANK = {"none": 0, "commit": 1, "push": 2}
-
-
 def gate_for(command: str, _depth: int = 0) -> str:
     """``push`` if any simple command is a git push, else ``commit`` if any is a
     git commit, else ``none``. Command lines nested in ``sh -c``, ``eval`` or a
