@@ -250,6 +250,12 @@ review_areas_of_interest:
 # used — set it when the PMC and the repo name differ.
 cve_process_pmc: "spark"
 
+# How release tags are named when they are not [v]X.Y.Z. Only a final release
+# tag marks a fix "released" (release candidates and previews do not); set the
+# part before the version for prefixed or namespaced tags, e.g. "release-" for
+# release-1.18.0 or "rel/" for rel/1.2.3. Spark's v3.5.0 needs nothing.
+# release_tag_prefix: ""
+
 security_model: |
   Spark treats anyone who can submit code, SQL, UDFs, jobs, or ML
   models/pipelines to a cluster as fully trusted: those inputs run arbitrary

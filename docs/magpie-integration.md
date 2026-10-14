@@ -34,13 +34,14 @@ Codex, Cursor, Gemini CLI, Copilot) plus small stdlib Python tools, organised
 into families: security, pr-management, issue, mentoring, contributor-growth,
 release-management, repo-health, pairing, setup and utilities. Its mission
 document names five modes (Agentic Triage, Mentoring, Drafting, Pairing,
-Autonomous); only Triage and Drafting are stable, and Autonomous is off by
-design. Its state lives in the forge: a private tracker repository's issues,
+Autonomous). Its `docs/modes.md` marks Triage and Drafting stable for security
+work only and experimental elsewhere, Mentoring and Pairing experimental, its
+framework machinery stable, and Autonomous off by design. Its state lives in the forge: a private tracker repository's issues,
 labels and a status rollup comment. Its safety posture is the part frank should
 take most seriously: external content is data and never an instruction; outputs
 are probabilistic and gates are deterministic; every agent-authored output is a
-proposal a human signs; no telemetry; a committed lock plus gitignored snapshot
-instead of vendored copies.
+proposal a human signs; no telemetry by default (opt-in per project); a
+committed lock plus gitignored snapshot instead of vendored copies.
 
 frank is a different shape of tool for an overlapping job. It is an always-on
 worker with its own SQLite state and a dashboard, it scores and routes PRs by
@@ -102,15 +103,19 @@ So the pin is a commit, not a tag, and it is recorded once:
   URL, one full 40-hex commit, the tag that points at it when one does, the
   commit date, the list of pinned Python tools, and one entry per vendored file
   with the sha256 of the upstream bytes.
-- **Vendored text** lives in `src/franktheunicorn/magpie/vendored/`. Each file
-  opens with a provenance header naming the upstream path and commit and keeps
-  Magpie's own SPDX line in its body. `vendored_text()` in
+- **Vendored text** would live in `src/franktheunicorn/magpie/vendored/`. The
+  lock lists none today: every piece adopted so far was ported into frank's
+  own modules with the upstream path and commit cited (section 4), because
+  none needed Magpie's words verbatim. A vendored file opens with a
+  provenance header naming the upstream path and commit and keeps Magpie's
+  own SPDX line in its body. `vendored_text()` in
   `src/franktheunicorn/magpie/pin.py` returns the body without the header, so
-  prompts never carry the comment.
+  prompts never carry the comment, and `--check` guards the first entry.
 - **Worker-side Python tools** are installed by `pip` from the git URL at the
   pinned sha plus `#subdirectory=tools/<name>`. `PinnedTool.requirement()`
-  renders the exact string. They live in an optional dependency group so a
-  default install pulls nothing from GitHub.
+  renders the exact string. They would live in an optional dependency group
+  so a default install pulls nothing from GitHub. None is pinned yet; 5.5 is
+  the first candidate.
 - **Agent-host tools** are run with `uvx --from git+<url>@<sha>#subdirectory=...`
   built by `PinnedTool.uvx_argv()`. That is one argv with no pre-install step,
   which is what the remote executor can carry (section 3).
@@ -743,7 +748,7 @@ re-evaluates it. (Rows are added as areas finish verifying.)
 | Follow Magpie's SECURITY.md to threat-model chain | frank already auto-discovers `THREAT_MODEL.md`, Magpie's default filename; the chain adds nothing for frank's projects. |
 | Read and write a Magpie adopter's private tracker repo | Large; frank's GitHub client has no issue read or write methods; depends on statuses that did not exist yet. Revisit only if an adopter asks. |
 | OSV alias lookup (CVE to GHSA) | Nothing in frank's intake produces GHSA ids today; Magpie's own client is "not yet wired". |
-| Stop citing the private `security@` thread in the CVE record | Already fixed on this branch (`a57191e`) before the lens ran. |
+| Stop citing the private `security@` thread in the CVE record | Already fixed on this branch (`f59d704`) before the lens ran. |
 | Draft reporter acknowledgements into the IMAP Drafts folder | A send-shaped feature with no draft queue behind it; Magpie's version is built on claude.ai mail plumbing frank does not have. |
 | Hash-prefixed PII redaction before LLM and CSV egress | frank has no redaction anywhere and the port is large; the distribution names (`redactor`, `checker`) are unsafe to pin as pip deps; a `~/.config` JSON mapping store breaks SQLite-first. Recorded as Tier 2 design input only. |
 | PonyMail and Hyperkitty URL recipes | frank's mailing-list fetcher already builds the lists.apache.org URLs correctly; the candidate misread it. |

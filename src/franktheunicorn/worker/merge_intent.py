@@ -18,9 +18,15 @@ list, oldest approval first.
 Detection is a pure function over the PR's reviews and conversation comments
 (GitHub-shaped dicts, which is what every forge client normalises to), so it
 runs on whatever the poller already fetched. Signals are read in time order
-and the approver's latest one wins: an approval followed by CHANGES_REQUESTED
-clears the intent; an approval followed by an unrelated nit does not, because
-"LGTM, one typo" is still an approval.
+and the approver's latest one wins: an approval followed by CHANGES_REQUESTED,
+by a dismissal of that review, or by the approver taking it back in a comment
+("-1", "retracting my LGTM", "please hold off merging") clears the intent; an
+approval followed by an unrelated nit does not, because "LGTM, one typo" is
+still an approval. The withdrawal rules follow Apache Magpie's vote-tally,
+where one person's latest vote is the one that counts, a "-1" is a no and a
+retraction is not a vote at all (``plugins/magpie-release-management/skills/
+vote-tally/SKILL.md``, Step 1 and "One person, one vote", apache/magpie commit
+dadb315caa8b881fc1d2195bef03223dac25915a, Apache-2.0).
 
 The forge's own idea of approval (``approval_count``) is computed alongside,
 across *all* reviewers, because the merge queue's eligibility check reads it
@@ -42,6 +48,9 @@ if TYPE_CHECKING:
 INTENT_NONE = ""
 INTENT_APPROVED = "approved"
 INTENT_CONDITIONAL = "conditional"
+#: What :func:`classify_body` returns for an approver taking an approval back.
+#: Never stored: it clears the intent, like CHANGES_REQUESTED.
+INTENT_WITHDRAWN = "withdrawn"
 
 #: How much of the matched comment the dashboard keeps.
 EXCERPT_MAX_CHARS = 300
@@ -79,6 +88,35 @@ _PLAIN_APPROVAL_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^\s*(?:>.*\n\s*)*\+1\b"),
     re.compile(
         r"^\s*(?:>.*\n\s*)*(?:i(?:'ll|\s+will|\s+am\s+going\s+to|'m\s+going\s+to)\s+merge)\b"
+    ),
+)
+
+# An approver taking it back. Checked after the approval patterns, so "LGTM,
+# but don't merge until the release is cut" stays an approval. A retraction
+# has to be the speaker's own ("my LGTM"): a review discussing a feature that
+# revokes approvals is not one. Each carries a ``verdict`` group for
+# ``_is_affirmative``, so "should I retract my +1?" and "I won't hold off
+# merging" do not count.
+_WITHDRAWAL_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # "-1, this breaks the shuffle path", leading the comment like "+1" does.
+    re.compile(r"^\s*(?:>.*\n\s*)*(?P<verdict>-1)(?![\d.])"),
+    # "retracting my LGTM", "I take back my +1", "withdrawing my approval".
+    re.compile(
+        r"(?P<verdict>\b(?:retract|withdraw|revok|rescind|take\s+back|taking\s+back)\w*)"
+        r"\s+(?:\w+\s+){0,2}?my\s+(?:\w+\s+){0,2}?(?:lgtm|\+1|approval)"
+    ),
+    # "Please hold off merging", "Do not merge yet", "let's hold off on
+    # merging": imperative, so sentence-initial or after a softener. "If we
+    # don't merge this before the freeze" is not a hold.
+    re.compile(
+        r"(?:^|[.!?\n,;:]\s*|\b(?:please|pls|let'?s|let\s+us|we\s+should|i'd)\s+)"
+        r"(?P<verdict>hold\s+off(?:\s+on)?\s+merg\w*|do\s+not\s+merge\b|don'?t\s+merge\b)"
+    ),
+    # "This is not ready to merge", "it's not ready to be merged": about this
+    # PR, not "the other PR is not ready to merge".
+    re.compile(
+        r"(?P<verdict>\b(?:this(?:\s+pr)?|it)(?:\s+is|'s)?\s+not\s+(?:yet\s+)?ready\s+to\s+"
+        r"(?:be\s+)?merged?\b)"
     ),
 )
 
@@ -170,11 +208,13 @@ def _excerpt(body: str, match: re.Match[str] | None) -> str:
 
 
 def classify_body(body: str) -> tuple[str, re.Match[str] | None]:
-    """Classify free text as ``conditional``, ``approved`` or nothing.
+    """Classify free text as ``conditional``, ``approved``, ``withdrawn`` or
+    nothing.
 
     Conditional is checked first: "LGTM pending CI" also matches the plain
     "LGTM" pattern, and the gated reading is the one that changes what the
-    operator does next.
+    operator does next. Withdrawal is checked last, so a comment that both
+    approves and says "don't merge yet" keeps the approval it would have had.
     """
     text = _strip_quotes(body or "")
     lowered = text.lower()
@@ -186,6 +226,10 @@ def classify_body(body: str) -> tuple[str, re.Match[str] | None]:
         plain = pattern.search(lowered)
         if plain is not None:
             return INTENT_APPROVED, plain
+    for pattern in _WITHDRAWAL_PATTERNS:
+        for match in pattern.finditer(lowered):
+            if _is_affirmative(lowered, match):
+                return INTENT_WITHDRAWN, match
     return INTENT_NONE, None
 
 
@@ -263,8 +307,10 @@ def detect_merge_intent(
 
     ``approvers`` are forge logins, compared case-insensitively. The latest
     signal from any of them decides: APPROVED (or an approving comment) sets
-    the intent, CHANGES_REQUESTED clears it, and anything else leaves the
-    previous answer standing.
+    the intent; CHANGES_REQUESTED, a DISMISSED review or a withdrawing comment
+    clears it; anything else leaves the previous answer standing. A dismissed
+    review is one the forge no longer counts, by a maintainer or by a "dismiss
+    stale approvals" rule on push, so its "LGTM" body must not count either.
     """
     wanted = {a.lower() for a in approvers if a}
     if not wanted:
@@ -275,13 +321,16 @@ def detect_merge_intent(
         if signal.by.lower() not in wanted:
             continue
         kind, match = classify_body(signal.body)
-        if signal.state == "CHANGES_REQUESTED":
+        if signal.state in ("CHANGES_REQUESTED", "DISMISSED"):
             intent = MergeIntent()
             continue
         if signal.state == "APPROVED":
             # The button is the verdict; the body only decides whether it was
             # a gated one.
             kind = INTENT_CONDITIONAL if kind == INTENT_CONDITIONAL else INTENT_APPROVED
+        if kind == INTENT_WITHDRAWN:
+            intent = MergeIntent()
+            continue
         if kind == INTENT_NONE:
             continue
         intent = MergeIntent(

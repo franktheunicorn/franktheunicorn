@@ -2348,6 +2348,13 @@ class ProjectConfig(BaseModel):
     #: to the repo name for ``apache/*`` projects (apache/spark → "spark"),
     #: logged when used; set it when the PMC and the repo name differ.
     cve_process_pmc: str = ""
+    #: How this project names its release tags when that is not ``[v]X.Y.Z``:
+    #: the part before the version, stripped before the final-release test
+    #: (``release-`` for Flink's ``release-1.18.0``, ``rel/`` for a namespaced
+    #: ``rel/1.2.3``). Without it, a tag containing ``/`` is not a release of
+    #: this project, and a release candidate never is either way. Read by
+    #: ``security.release_tags``.
+    release_tag_prefix: str = ""
     new_contributor_addendum: str = ""
     enabled: bool = True
     # Default review-gating policy (token saver). Controls which PRs the
