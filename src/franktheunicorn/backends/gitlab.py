@@ -248,8 +248,10 @@ class GitLabClient(ForgeClient):
         """GitLab approvals as GitHub-shaped APPROVED reviews.
 
         GitLab has no review object: approval is a toggle per user, with no
-        body and no timestamp. The detector sorts undated signals first, so a
-        later "changes requested"-style comment can still override one.
+        body. Its ``approved_at`` is kept as the review time, so a withdrawal
+        comment and an approval sort in the order they happened. An instance
+        too old to send it gives an undated approval, which the detector sorts
+        first, so any later comment can still override it.
         """
         url = f"/projects/{_project_id(owner, repo)}/merge_requests/{pr_number}/approvals"
         response = self._client.get(url)
@@ -265,7 +267,7 @@ class GitLabClient(ForgeClient):
                     "user": {"login": user.get("username", "") or ""},
                     "state": "APPROVED",
                     "body": "",
-                    "submitted_at": "",
+                    "submitted_at": str(entry.get("approved_at") or ""),
                     "commit_id": "",
                 }
             )

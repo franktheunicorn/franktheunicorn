@@ -30,7 +30,12 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from franktheunicorn.security.release_tags import is_final_release_tag, release_tag_prefix_for
+from franktheunicorn.security.release_tags import (
+    DEFAULT_RULE,
+    FINAL,
+    ReleaseTagRule,
+    release_tag_rule_for,
+)
 from franktheunicorn.security.verifier import (
     _checkout,
     _default_branch,
@@ -229,7 +234,7 @@ def find_introduction(report: SecurityReport, operator_config: OperatorConfig) -
     _summarise(run)
     if run.commit:
         tags = _releases_containing(
-            executor, cwd, run.commit, release_tag_prefix_for(project.full_name)
+            executor, cwd, run.commit, release_tag_rule_for(project.full_name)
         )
         run.release_count = len(tags)
         run.releases = tags[:MAX_RELEASES]
@@ -328,7 +333,7 @@ def _origin_sort_key(pair: tuple[datetime | None, PathOrigin]) -> datetime:
 
 
 def _releases_containing(
-    executor: ToolExecutor, cwd: str, commit: str, tag_prefix: str = ""
+    executor: ToolExecutor, cwd: str, commit: str, tag_rule: ReleaseTagRule = DEFAULT_RULE
 ) -> list[str]:
     """Release tags containing *commit*, oldest version first.
 
@@ -346,11 +351,7 @@ def _releases_containing(
         detail = "no result" if result is None else (result.stderr or "").strip()[:200]
         logger.info("Could not list tags containing %s: %s", commit[:12], detail)
         return []
-    return [
-        tag.strip()
-        for tag in result.stdout.splitlines()
-        if is_final_release_tag(tag.strip(), tag_prefix)
-    ]
+    return [tag.strip() for tag in result.stdout.splitlines() if tag_rule.classify(tag) == FINAL]
 
 
 def persist_introduction(report: SecurityReport, run: IntroductionRun) -> None:

@@ -2365,6 +2365,11 @@ class ProjectConfig(BaseModel):
     #: this project, and a release candidate never is either way. Read by
     #: ``security.release_tags``.
     release_tag_prefix: str = ""
+    #: For a scheme no prefix expresses (``STRUTS_7_4_0``, ``REL_5_2_5``): a
+    #: regex a final release tag must match in full, case-insensitively. Takes
+    #: the place of the version test when set; ``release_tag_prefix`` still
+    #: decides which other tags are pre-releases.
+    release_tag_pattern: str = ""
     new_contributor_addendum: str = ""
     enabled: bool = True
     # Default review-gating policy (token saver). Controls which PRs the
@@ -2462,6 +2467,17 @@ class ProjectConfig(BaseModel):
 
     # Differential test runner (§9). Disabled by default; see docs/test-runner.md.
     tests: TestExecutionConfig = Field(default_factory=TestExecutionConfig)
+
+    @field_validator("release_tag_pattern")
+    @classmethod
+    def release_tag_pattern_compiles(cls, v: str) -> str:
+        if v:
+            try:
+                re.compile(v)
+            except re.error as exc:
+                msg = f"release_tag_pattern is not a valid regex: {exc}"
+                raise ValueError(msg) from exc
+        return v
 
     @field_validator("llm_checks")
     @classmethod

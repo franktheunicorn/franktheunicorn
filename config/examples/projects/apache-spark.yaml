@@ -253,7 +253,9 @@ cve_process_pmc: "spark"
 # How release tags are named when they are not [v]X.Y.Z. Only a final release
 # tag marks a fix "released" (release candidates and previews do not); set the
 # part before the version for prefixed or namespaced tags, e.g. "release-" for
-# release-1.18.0 or "rel/" for rel/1.2.3. Spark's v3.5.0 needs nothing.
+# release-1.18.0 or "rel/" for rel/1.2.3. Spark's v3.5.0 needs nothing. For a
+# scheme no prefix expresses, a regex final tags must match in full:
+# release_tag_pattern: 'STRUTS_\d+(_\d+)+'
 # release_tag_prefix: ""
 
 security_model: |

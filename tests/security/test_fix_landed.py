@@ -22,6 +22,7 @@ from franktheunicorn.security.fix_landed import (
     check_fix_landed,
     check_project_fixes,
 )
+from franktheunicorn.security.release_tags import ReleaseTagRule
 from tests.factories import ProjectFactory, SecurityReportFactory
 
 _LISTING = ExecResult(
@@ -491,15 +492,51 @@ class TestOnlyFinalReleasesAreReleased:
 
         _run_with(executor, check_project_fixes, project)
         report.refresh_from_db()
-        assert report.fix_landed_status == "not-merged"
+        # Any tag on origin proves the commit is published: merged, never
+        # not-merged, whatever the rule thinks of the tag's name.
+        assert report.fix_landed_status == "merged"
         assert "release_tag_prefix" in report.fix_landed_detail["note"]
 
         with patch(
-            "franktheunicorn.security.fix_landed.release_tag_prefix_for", return_value="release-"
+            "franktheunicorn.security.fix_landed.release_tag_rule_for",
+            return_value=ReleaseTagRule(prefix="release-"),
         ):
             _run_with(executor, check_project_fixes, project)
         report.refresh_from_db()
         assert report.fix_landed_status == "released"
+
+    @pytest.mark.parametrize(
+        ("tag", "rule"),
+        [
+            ("STRUTS_7_4_0", ReleaseTagRule(pattern=r"STRUTS_\d+(_\d+)+")),
+            ("v0.9.0-incubating", ReleaseTagRule()),
+        ],
+    )
+    def test_schemes_no_prefix_expresses_can_still_be_released(
+        self, tag: str, rule: ReleaseTagRule
+    ) -> None:
+        project = ProjectFactory()
+        report = SecurityReportFactory(project=project, fix_branch_sha="abc123")
+        executor = _Executor(shas=("abc123",), tags={"abc123": [tag]})
+
+        with patch("franktheunicorn.security.fix_landed.release_tag_rule_for", return_value=rule):
+            _run_with(executor, check_project_fixes, project)
+
+        report.refresh_from_db()
+        assert report.fix_landed_status == "released"
+
+    def test_the_note_names_candidates_and_unrecognised_tags_together(self) -> None:
+        project = ProjectFactory()
+        report = SecurityReportFactory(project=project, fix_branch_sha="abc123")
+        executor = _Executor(shas=("abc123",), tags={"abc123": ["rel/2.0.0", "v2.0.0-rc1"]})
+
+        _run_with(executor, check_project_fixes, project)
+
+        report.refresh_from_db()
+        note = report.fix_landed_detail["note"]
+        assert "pre-release tag(s) v2.0.0-rc1" in note
+        assert "rel/2.0.0" in note
+        assert "no final release yet" not in note
 
     def test_the_per_report_check_reads_the_prefix_too(self) -> None:
         project = ProjectFactory()
@@ -507,7 +544,8 @@ class TestOnlyFinalReleasesAreReleased:
         executor = _Executor(shas=("abc123",), tags={"abc123": ["rel/2.0.0"]})
 
         with patch(
-            "franktheunicorn.security.fix_landed.release_tag_prefix_for", return_value="rel/"
+            "franktheunicorn.security.fix_landed.release_tag_rule_for",
+            return_value=ReleaseTagRule(prefix="rel/"),
         ):
             answer = _run_with(executor, check_fix_landed, report)
 

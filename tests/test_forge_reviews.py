@@ -267,6 +267,32 @@ class TestGitLabReviews:
             }
         ]
 
+    def test_approved_at_is_the_review_time(
+        self, httpx_mock: HTTPXMock, client: GitLabClient
+    ) -> None:
+        """Found in review: dropped, it sorted every approval before any
+        comment, so one old "please hold off merging" beat a current approval
+        for good."""
+        httpx_mock.add_response(
+            json={
+                "approved_by": [
+                    {"user": {"username": "holdenk"}, "approved_at": "2026-10-03T10:00:00.000Z"}
+                ]
+            }
+        )
+
+        reviews = client.list_pull_request_reviews("grp", "proj", 9)
+
+        assert reviews[0]["submitted_at"] == "2026-10-03T10:00:00.000Z"
+        from franktheunicorn.worker.merge_intent import detect_merge_intent
+
+        hold = {
+            "user": {"login": "holdenk"},
+            "body": "Please hold off merging.",
+            "created_at": "2026-10-02T10:00:00Z",
+        }
+        assert detect_merge_intent(reviews, [hold], ["holdenk"]).kind == "approved"
+
     def test_no_approvals(self, httpx_mock: HTTPXMock, client: GitLabClient) -> None:
         httpx_mock.add_response(json={})
         assert client.list_pull_request_reviews("grp", "proj", 9) == []

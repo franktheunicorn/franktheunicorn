@@ -97,20 +97,35 @@ _PLAIN_APPROVAL_PATTERNS: tuple[re.Pattern[str], ...] = (
 # revokes approvals is not one. Each carries a ``verdict`` group for
 # ``_is_affirmative``, so "should I retract my +1?" and "I won't hold off
 # merging" do not count.
+# "retracting my LGTM", "I take back my +1", "withdrawing my approval".
+# Checked before the approvals: "I take back my LGTM if the tests don't pass"
+# carries an approval-and-gate shape and must not read as a fresh conditional
+# approval.
+_RETRACTION_PATTERN = re.compile(
+    r"(?P<verdict>\b(?:retract|withdraw|revok|rescind|take\s+back|taking\s+back)\w*)"
+    r"\s+(?:\w+\s+){0,2}?my\s+(?:\w+\s+){0,2}?(?:lgtm|\+1|approval)"
+)
+
+# What may follow "do not merge" / "hold off merging" for it to be about this
+# PR: nothing, or "this", "it", "yet", "until ...". "Don't merge these two
+# maps" and "hold off merging the follow-up" are about something else.
+_HOLD_TAIL = (
+    r"(?=\s+(?:this|it|this\s+pr|yet|for\s+now|until|before|just\s+yet|for\s+a\s+bit)\b"
+    r"|\s*(?:[.!,;:)\-]|$))"
+)
+
+# Checked after the approvals, so "LGTM, but don't merge until the release is
+# cut" stays an approval.
 _WITHDRAWAL_PATTERNS: tuple[re.Pattern[str], ...] = (
     # "-1, this breaks the shuffle path", leading the comment like "+1" does.
-    re.compile(r"^\s*(?:>.*\n\s*)*(?P<verdict>-1)(?![\d.])"),
-    # "retracting my LGTM", "I take back my +1", "withdrawing my approval".
-    re.compile(
-        r"(?P<verdict>\b(?:retract|withdraw|revok|rescind|take\s+back|taking\s+back)\w*)"
-        r"\s+(?:\w+\s+){0,2}?my\s+(?:\w+\s+){0,2}?(?:lgtm|\+1|approval)"
-    ),
+    # "-1." counts; "-1.5" does not.
+    re.compile(r"^\s*(?:>.*\n\s*)*(?P<verdict>-1)(?!\.?\d)"),
     # "Please hold off merging", "Do not merge yet", "let's hold off on
     # merging": imperative, so sentence-initial or after a softener. "If we
     # don't merge this before the freeze" is not a hold.
     re.compile(
         r"(?:^|[.!?\n,;:]\s*|\b(?:please|pls|let'?s|let\s+us|we\s+should|i'd)\s+)"
-        r"(?P<verdict>hold\s+off(?:\s+on)?\s+merg\w*|do\s+not\s+merge\b|don'?t\s+merge\b)"
+        r"(?P<verdict>hold\s+off(?:\s+on)?\s+merg\w*|do\s+not\s+merge|don'?t\s+merge)" + _HOLD_TAIL
     ),
     # "This is not ready to merge", "it's not ready to be merged": about this
     # PR, not "the other PR is not ready to merge".
@@ -119,6 +134,12 @@ _WITHDRAWAL_PATTERNS: tuple[re.Pattern[str], ...] = (
         r"(?:be\s+)?merged?\b)"
     ),
 )
+
+# A "-1" the same comment answers with a yes ("-1 on the naming, +1 overall")
+# is a scoped objection, not a veto.
+_LATER_YES = re.compile(r"(?<!\w)\+1\b|\blgtm\b|\blooks\s+good\b")
+# Another PR or issue named in the same sentence: the hold is about that.
+_OTHER_ITEM = re.compile(r"#\d+|\b[a-z]{2,}-\d{2,}\b")
 
 # "Please do not merge once CI passes" and "I cannot merge after the tests
 # pass" have a verdict and a gate and mean the opposite. A negation in the
@@ -218,6 +239,9 @@ def classify_body(body: str) -> tuple[str, re.Match[str] | None]:
     """
     text = _strip_quotes(body or "")
     lowered = text.lower()
+    for match in _RETRACTION_PATTERN.finditer(lowered):
+        if _is_affirmative(lowered, match):
+            return INTENT_WITHDRAWN, match
     for pattern in _CONDITIONAL_PATTERNS:
         for match in pattern.finditer(lowered):
             if _is_affirmative(lowered, match):
@@ -228,9 +252,23 @@ def classify_body(body: str) -> tuple[str, re.Match[str] | None]:
             return INTENT_APPROVED, plain
     for pattern in _WITHDRAWAL_PATTERNS:
         for match in pattern.finditer(lowered):
-            if _is_affirmative(lowered, match):
-                return INTENT_WITHDRAWN, match
+            if not _is_affirmative(lowered, match):
+                continue
+            if match.group("verdict") == "-1":
+                if _LATER_YES.search(lowered, match.end()):
+                    continue
+            elif _OTHER_ITEM.search(_sentence_of(lowered, match)):
+                continue
+            return INTENT_WITHDRAWN, match
     return INTENT_NONE, None
+
+
+def _sentence_of(lowered: str, match: re.Match[str]) -> str:
+    start = 0
+    for boundary in _SENTENCE_END.finditer(lowered, 0, match.start("verdict")):
+        start = boundary.end()
+    end_match = _SENTENCE_END.search(lowered, match.end())
+    return lowered[start : end_match.start() if end_match else len(lowered)]
 
 
 def _is_affirmative(lowered: str, match: re.Match[str]) -> bool:
@@ -307,10 +345,12 @@ def detect_merge_intent(
 
     ``approvers`` are forge logins, compared case-insensitively. The latest
     signal from any of them decides: APPROVED (or an approving comment) sets
-    the intent; CHANGES_REQUESTED, a DISMISSED review or a withdrawing comment
-    clears it; anything else leaves the previous answer standing. A dismissed
-    review is one the forge no longer counts, by a maintainer or by a "dismiss
-    stale approvals" rule on push, so its "LGTM" body must not count either.
+    the intent; CHANGES_REQUESTED or a withdrawing comment clears it; anything
+    else leaves the previous answer standing. A DISMISSED review says nothing
+    at all: the forge no longer counts it, so its "LGTM" body must not set the
+    intent, and GitHub does not say whether it was an approval or a request
+    for changes, so it must not clear one either (dismissing a changes request
+    is how a maintainer unblocks a PR).
     """
     wanted = {a.lower() for a in approvers if a}
     if not wanted:
@@ -320,8 +360,10 @@ def detect_merge_intent(
     for signal in _signals(reviews, comments):
         if signal.by.lower() not in wanted:
             continue
+        if signal.state == "DISMISSED":
+            continue
         kind, match = classify_body(signal.body)
-        if signal.state in ("CHANGES_REQUESTED", "DISMISSED"):
+        if signal.state == "CHANGES_REQUESTED":
             intent = MergeIntent()
             continue
         if signal.state == "APPROVED":

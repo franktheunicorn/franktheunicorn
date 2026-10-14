@@ -132,6 +132,9 @@ class TestClassifyBody:
             "Let's hold off on merging until 4.0 is cut.",
             "This is not ready to merge.",
             "It's not ready to be merged yet",
+            "-1.",
+            "Please don't merge this until the release is cut.",
+            "I take back my LGTM if the tests don't pass.",
         ],
     )
     def test_withdrawal_phrases(self, body: str) -> None:
@@ -150,6 +153,12 @@ class TestClassifyBody:
             "The other PR is not ready to merge, so this one goes first.",
             "I won't hold off merging for the docs.",
             "> -1\n\nThe quoted vote is someone else's.",
+            "-1.5 is the default",
+            "-1 on the naming, +1 overall",
+            "Don't merge these two maps, keep them separate.",
+            "Let's hold off merging the follow-up until this lands.",
+            "Please hold off merging #123 until this lands.",
+            "It's not ready to merge SPARK-12345 yet, so this goes first.",
         ],
     )
     def test_not_withdrawals(self, body: str) -> None:
@@ -258,12 +267,39 @@ class TestDetectMergeIntent:
         )
         assert not intent.is_set
 
-    def test_a_dismissed_approval_does_not_count(self) -> None:
-        """GitHub keeps a dismissed review with state DISMISSED and its body;
-        an "LGTM" there is an approval the forge no longer counts."""
+    def test_a_dismissed_review_sets_nothing(self) -> None:
+        """GitHub keeps a dismissed review with state DISMISSED and its body; an
+        "LGTM" there is an approval the forge no longer counts."""
         intent = detect_merge_intent(
             [_review("holdenk", "DISMISSED", "LGTM", at="2026-10-01T10:00:00Z")],
-            [_comment("holdenk", "LGTM", "2026-09-30T10:00:00Z")],
+            [],
+            ["holdenk"],
+        )
+        assert not intent.is_set
+
+    def test_a_dismissed_changes_request_does_not_clear_an_approval(self) -> None:
+        """Found in review: DISMISSED does not say what was dismissed, and
+        dismissing a changes request is how a maintainer unblocks a PR."""
+        intent = detect_merge_intent(
+            [
+                _review("holdenk", "APPROVED", at="2026-10-01T10:00:00Z"),
+                _review("cloud-fan", "DISMISSED", "Needs a test", at="2026-10-02T10:00:00Z"),
+            ],
+            [],
+            ["holdenk", "cloud-fan"],
+        )
+        assert intent.kind == INTENT_APPROVED
+
+    def test_a_gated_retraction_is_not_a_fresh_approval(self) -> None:
+        intent = detect_merge_intent(
+            [_review("holdenk", "APPROVED", at="2026-10-01T10:00:00Z")],
+            [
+                _comment(
+                    "holdenk",
+                    "I take back my LGTM if the tests don't pass on 3.5.",
+                    "2026-10-02T10:00:00Z",
+                )
+            ],
             ["holdenk"],
         )
         assert not intent.is_set

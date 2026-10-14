@@ -47,10 +47,11 @@ from django.utils import timezone
 from franktheunicorn.core.models import SecurityReport
 from franktheunicorn.security.branch_scan import _prepare
 from franktheunicorn.security.release_tags import (
+    DEFAULT_RULE,
     FINAL,
     PRERELEASE,
-    classify_tag,
-    release_tag_prefix_for,
+    ReleaseTagRule,
+    release_tag_rule_for,
 )
 from franktheunicorn.security.verifier import select_branches
 
@@ -161,7 +162,7 @@ def check_project_fixes(project: Project, operator_config: OperatorConfig) -> Fi
     verifier = operator_config.security_triage.verifier
     branches = select_branches(checkout.executor, checkout.cwd, verifier)
     release_branches = [b for b in branches if b != checkout.default_branch]
-    tag_prefix = release_tag_prefix_for(project.full_name)
+    tag_rule = release_tag_rule_for(project.full_name)
 
     logger.info(
         "Checking whether fixes landed for %d report(s) of %s (default=%s, %d release branch(es)).",
@@ -180,7 +181,7 @@ def check_project_fixes(project: Project, operator_config: OperatorConfig) -> Fi
             report,
             operator_config,
             now,
-            tag_prefix=tag_prefix,
+            tag_rule=tag_rule,
         )
         if verdict == RELEASED:
             run.released += 1
@@ -255,7 +256,7 @@ def check_fix_landed(report: SecurityReport, operator_config: OperatorConfig) ->
         report,
         operator_config,
         timezone.now(),
-        tag_prefix=release_tag_prefix_for(report.project.full_name),
+        tag_rule=release_tag_rule_for(report.project.full_name),
     )
     report.refresh_from_db()
     return f"{verdict}: {report.fix_landed_detail.get('note', '')}"
@@ -270,7 +271,7 @@ def _check_one(
     operator_config: OperatorConfig,
     now: datetime,
     *,
-    tag_prefix: str = "",
+    tag_rule: ReleaseTagRule = DEFAULT_RULE,
 ) -> str:
     """Resolve the report's fix ref and test it. Returns the verdict written."""
     mainline = {default_branch, *release_branches}
@@ -284,7 +285,7 @@ def _check_one(
             f"the fix agent's branch tip {report.fix_branch_sha[:12]}",
             default_branch,
             release_branches,
-            tag_prefix=tag_prefix,
+            tag_rule=tag_rule,
         )
         _write(report, verdict, detail, now)
         return verdict
@@ -301,7 +302,7 @@ def _check_one(
                 f"origin/{report.fix_branch} ({sha[:12]})",
                 default_branch,
                 release_branches,
-                tag_prefix=tag_prefix,
+                tag_rule=tag_rule,
             )
             _write(report, verdict, detail, now)
             return verdict
@@ -312,7 +313,7 @@ def _check_one(
             cwd,
             default_branch,
             release_branches,
-            tag_prefix=tag_prefix,
+            tag_rule=tag_rule,
         )
         _write(report, verdict, detail, now)
         return verdict
@@ -342,7 +343,7 @@ def _check_one(
             f"origin/{token} ({sha[:12]})",
             default_branch,
             release_branches,
-            tag_prefix=tag_prefix,
+            tag_rule=tag_rule,
         )
         if best is None or _rank(verdict) > _rank(best[0]):
             best = (verdict, detail)
@@ -379,26 +380,27 @@ def _test_ref(
     default_branch: str,
     release_branches: list[str],
     *,
-    tag_prefix: str = "",
+    tag_rule: ReleaseTagRule = DEFAULT_RULE,
 ) -> tuple[str, dict[str, Any]]:
     """Ancestry-check one ref, naming it in the note — unless the answer is
     indeterminate, whose own note (which git call failed) is the useful one."""
     verdict, detail = _ancestry_verdict(
-        executor, cwd, sha, default_branch, release_branches, tag_prefix=tag_prefix
+        executor, cwd, sha, default_branch, release_branches, tag_rule=tag_rule
     )
     if verdict != INDETERMINATE:
         note = f"tested {label}"
-        if detail.get("prerelease_tags"):
+        prereleases = detail.get("prerelease_tags") or []
+        others = detail.get("other_tags") or []
+        if prereleases:
+            note += f"; in pre-release tag(s) {', '.join(prereleases[:3])}"
+        if others:
             note += (
-                f"; in pre-release tag(s) {', '.join(detail['prerelease_tags'][:3])} but "
-                "no final release yet"
+                f"; in tag(s) {', '.join(others[:3])} that are not final releases under "
+                f"{tag_rule.describe()} (set release_tag_prefix or release_tag_pattern in "
+                "the project YAML if they are)"
             )
-        elif detail.get("other_tags") and verdict != RELEASED:
-            note += (
-                f"; in tag(s) {', '.join(detail['other_tags'][:3])} that are not final "
-                "releases under release_tag_prefix "
-                f"{tag_prefix!r} (set it in the project YAML if they are)"
-            )
+        elif prereleases:
+            note += "; no final release yet"
         detail["note"] = note
     return verdict, detail
 
@@ -410,13 +412,15 @@ def _ancestry_verdict(
     default_branch: str,
     release_branches: list[str],
     *,
-    tag_prefix: str = "",
+    tag_rule: ReleaseTagRule = DEFAULT_RULE,
 ) -> tuple[str, dict[str, Any]]:
     """Tag and ancestry checks for a commit known to exist locally.
 
-    Only a final release tag answers ``released``, which is terminal. A
-    commit in a release candidate alone is at least merged (a candidate is
-    cut from a release line) and stays open to the next sweep.
+    Only a final release tag answers ``released``, which is terminal. Any
+    other tag containing the commit (a candidate, or one the project's rule
+    does not recognise) still proves it is in published history, so it is at
+    least ``merged`` and stays open to the next sweep: ``not-merged`` there
+    would be git "proof" of the opposite of what the tag shows.
     """
     detail: dict[str, Any] = {"checked_ref": sha, "branches": [], "tags": []}
 
@@ -425,7 +429,7 @@ def _ancestry_verdict(
         return INDETERMINATE, {
             "note": f"git tag --contains {sha[:12]} failed (timeout or executor)"
         }
-    kinds = {tag: classify_tag(tag, tag_prefix) for tag in tags}
+    kinds = {tag: tag_rule.classify(tag) for tag in tags}
     finals = [tag for tag in tags if kinds[tag] == FINAL]
     if finals:
         detail["tags"] = finals[:_MAX_TAGS_KEPT]
@@ -448,7 +452,7 @@ def _ancestry_verdict(
         if answer:
             branches.append(branch)
     detail["branches"] = branches
-    if branches or prereleases:
+    if branches or prereleases or others:
         return MERGED, detail
     return NOT_MERGED, detail
 
@@ -461,7 +465,7 @@ def _pr_verdict(
     default_branch: str,
     release_branches: list[str],
     *,
-    tag_prefix: str = "",
+    tag_rule: ReleaseTagRule = DEFAULT_RULE,
 ) -> tuple[str, dict[str, Any]]:
     """The fork branch's upstream PR: merged gives a merge sha to test."""
     from franktheunicorn.security.fix_agent import fork_full_name
@@ -503,7 +507,7 @@ def _pr_verdict(
             f"the PR merge commit {merge_sha[:12]}",
             default_branch,
             release_branches,
-            tag_prefix=tag_prefix,
+            tag_rule=tag_rule,
         )
         ancestry.update(detail)
         return verdict, ancestry
