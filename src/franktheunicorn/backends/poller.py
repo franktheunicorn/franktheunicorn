@@ -380,9 +380,11 @@ def _refresh_pull_request(
         pr_obj.base_branch = base_branch
 
     # Reviews and CI for the almost-ready-to-merge queue: three more read
-    # calls, each degrading on its own (scoring/merge_readiness.py).
-    if project_config.merge_readiness.enabled:
-        refresh_review_and_ci_state(client, pr_obj, project_config)
+    # calls, each degrading on its own (scoring/merge_readiness.py). The
+    # merge-intent sync below reuses the reviews and, with checks read, skips
+    # its own CI call.
+    readiness_on = project_config.merge_readiness.enabled
+    reviews = refresh_review_and_ci_state(client, pr_obj, project_config) if readiness_on else None
 
     # Fetch blame data if repo clone is available (v1.25).
     blame_data: list[dict[str, object]] | None = None
@@ -481,6 +483,8 @@ def _refresh_pull_request(
         operator_username,
         merge_intent,
         comments=fetched_comments,
+        reviews=reviews,
+        read_ci=not readiness_on,
     )
 
     # Populate JIRA cache before scoring so JIRA-derived ranking signals are
@@ -522,7 +526,7 @@ def _refresh_pull_request(
     # Merge readiness reads the routing flags and the fresh review/CI state,
     # so it goes last. The review pipeline re-evaluates after it runs, since
     # "your review found nothing serious" is one of the signals.
-    if project_config.merge_readiness.enabled:
+    if readiness_on:
         refresh_merge_readiness(pr_obj, project_config, operator_username, save=False)
     else:
         clear_merge_readiness(pr_obj)
@@ -775,12 +779,16 @@ def _sync_merge_intent(
     config: MergeIntentConfig | None,
     *,
     comments: list[dict[str, Any]] | None = None,
+    reviews: list[dict[str, Any]] | None = None,
+    read_ci: bool = True,
 ) -> None:
     """Refresh the PR's merge intent, approval count and (when queued) CI status.
 
-    One reviews read per PR; *comments* are passed in when the caller already
-    fetched them. A failed read leaves the stored answer standing rather than
-    clearing it — a rate-limit window must not empty the queue. The CI read is
+    One reviews read per PR; *comments* and *reviews* are passed in when the
+    caller already fetched them, and ``read_ci=False`` when the merge-readiness
+    checks read already set ``ci_status``. A failed read leaves the stored
+    answer standing rather than clearing it — a rate-limit window must not
+    empty the queue. The CI read is
     spent only on PRs that need it (queued, or the operator's own, which the
     merge queue reads), since it is two more calls per PR.
     """
@@ -796,11 +804,12 @@ def _sync_merge_intent(
         logger.debug("Merge intent skipped for PR #%d: no approvers configured", pr_obj.number)
         return
 
-    try:
-        reviews = client.list_pull_request_reviews(owner, repo, pr_obj.number)
-    except Exception:
-        logger.debug("Could not fetch reviews for PR #%d", pr_obj.number, exc_info=True)
-        return
+    if reviews is None:
+        try:
+            reviews = client.list_pull_request_reviews(owner, repo, pr_obj.number)
+        except Exception:
+            logger.debug("Could not fetch reviews for PR #%d", pr_obj.number, exc_info=True)
+            return
     if comments is None:
         try:
             comments = client.get_issue_comments(owner, repo, pr_obj.number)
@@ -824,7 +833,7 @@ def _sync_merge_intent(
 
     # By author rather than is_operator_pr, which routing sets after this runs.
     is_own = bool(operator_username) and pr_obj.author.lower() == operator_username.lower()
-    if config.track_ci and (intent.is_set or is_own) and pr_obj.head_sha:
+    if read_ci and config.track_ci and (intent.is_set or is_own) and pr_obj.head_sha:
         try:
             pr_obj.ci_status = client.get_commit_ci_status(owner, repo, pr_obj.head_sha)
         except Exception:
@@ -1243,6 +1252,8 @@ def ingest_single_pr(
     except Exception:
         logger.debug("Could not fetch comments for PR #%d during on-demand ingest", pr_number)
 
+    readiness_on = bool(project_config and project_config.merge_readiness.enabled)
+    reviews: list[dict[str, Any]] | None = None
     if project_config:
         try:
             from franktheunicorn.data_access.context_orchestrator import fetch_jira_context
@@ -1265,8 +1276,8 @@ def ingest_single_pr(
         )
         pr_obj.interest_score = score
         pr_obj.score_breakdown = breakdown
-        if project_config.merge_readiness.enabled:
-            refresh_review_and_ci_state(client, pr_obj, project_config)
+        if readiness_on:
+            reviews = refresh_review_and_ci_state(client, pr_obj, project_config)
 
     # Hydrate contributors_cache if missing so new-contributor detection isn't
     # limited to DB-only PR authors (which are sparse on first/force ingest).
@@ -1285,6 +1296,8 @@ def ingest_single_pr(
         operator_config.github_username or "",
         operator_config.merge_intent,
         comments=fetched_comments,
+        reviews=reviews,
+        read_ci=not readiness_on,
     )
 
     _route_pr_to_queue(
@@ -1294,7 +1307,7 @@ def ingest_single_pr(
         _has_contributor_evidence(project),
         project_config if isinstance(project_config, ProjectConfig) else None,
     )
-    if project_config and project_config.merge_readiness.enabled:
+    if project_config and readiness_on:
         refresh_merge_readiness(
             pr_obj, project_config, operator_config.github_username or "", save=False
         )

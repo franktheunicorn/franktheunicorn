@@ -775,8 +775,11 @@ _warned_unsupported: set[str] = set()
 
 def refresh_review_and_ci_state(
     client: ForgeClient, pr: PullRequest, project_config: ProjectConfig
-) -> None:
+) -> list[dict[str, Any]] | None:
     """Pull reviews and checks for ``pr``'s head onto the row (not saved).
+
+    Returns the raw reviews, or ``None`` when they could not be read, so the
+    poller's merge-intent sync does not read them a second time.
 
     Three read calls. Each failure is caught on its own and keeps the
     previous value: a rate-limit window must not turn every approval into
@@ -786,6 +789,7 @@ def refresh_review_and_ci_state(
     """
     owner, repo = pr.project.owner, pr.project.repo
     forge_name = type(client).__name__
+    raw_reviews: list[dict[str, Any]] | None = None
     try:
         raw_reviews = client.list_pull_request_reviews(owner, repo, pr.number)
         pr.review_states = normalize_reviews(raw_reviews, author=pr.author)
@@ -802,8 +806,9 @@ def refresh_review_and_ci_state(
                 owner,
                 repo,
             )
-        return
+        return None
     except Exception:
+        raw_reviews = None
         logger.warning(
             "Could not fetch reviews for %s/%s#%d; keeping the last known state",
             owner,
@@ -812,11 +817,11 @@ def refresh_review_and_ci_state(
         )
 
     if not pr.head_sha:
-        return
+        return raw_reviews
     try:
         raw_checks = client.get_commit_checks(owner, repo, pr.head_sha)
     except NotImplementedError:
-        return
+        return raw_reviews
     except Exception:
         if pr.ci_checks_sha != pr.head_sha:
             # The stored checks belong to an earlier commit. They stay on the
@@ -837,7 +842,7 @@ def refresh_review_and_ci_state(
                 repo,
                 pr.number,
             )
-        return
+        return raw_reviews
     checks = parse_checks(raw_checks)
     pr.ci_checks = [
         {"name": c.name, "status": c.status, "conclusion": c.conclusion, "url": c.url}
@@ -846,6 +851,7 @@ def refresh_review_and_ci_state(
     pr.ci_checks_sha = pr.head_sha
     pr.ci_status = summarize_ci_status(checks)
     note_rebase_outcome(pr, checks)
+    return raw_reviews
 
 
 def note_rebase_outcome(pr: PullRequest, checks: Sequence[CICheck]) -> None:

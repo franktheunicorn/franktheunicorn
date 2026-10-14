@@ -373,11 +373,14 @@ class GitHubClient(ForgeClient):
         write check runs, older integrations (and anything using the Status
         API, e.g. Jenkins) write commit statuses. ``filter=latest`` is the
         check-runs default, so a re-run replaces its earlier attempt rather
-        than appearing beside it.
+        than appearing beside it. Past the same 1000-run cap as
+        :meth:`get_commit_ci_status` it raises: a failure on an unread page
+        is still a failure, so a partial list must not summarise as green.
         """
         checks: list[dict[str, Any]] = []
         runs_url = f"/repos/{owner}/{repo}/commits/{sha}/check-runs"
-        for page in range(1, 4):
+        max_pages = 10
+        for page in range(1, max_pages + 1):
             response = self._get(runs_url, params={"per_page": 100, "page": page})
             response.raise_for_status()
             payload = response.json()
@@ -395,6 +398,9 @@ class GitHubClient(ForgeClient):
                 )
             if len(runs) < 100:
                 break
+        else:
+            msg = f"{owner}/{repo}@{sha[:12]} has more than {max_pages * 100} check runs"
+            raise RuntimeError(msg)
 
         status_resp = self._get(f"/repos/{owner}/{repo}/commits/{sha}/status")
         status_resp.raise_for_status()

@@ -784,6 +784,22 @@ class TestMergeReadinessEndpoints:
         assert len(checks) == 101
         assert checks[-1]["name"] == "last"
 
+    def test_get_commit_checks_past_the_cap_raises(
+        self, httpx_mock: HTTPXMock, client: GitHubClient
+    ) -> None:
+        """A failure on an unread page is still a failure: no partial green."""
+        base = "https://api.github.test/repos/org/repo/commits/abc/check-runs"
+        full_page = {
+            "check_runs": [
+                {"name": f"c{i}", "status": "completed", "conclusion": "success"}
+                for i in range(100)
+            ]
+        }
+        for page in range(1, 11):
+            httpx_mock.add_response(url=f"{base}?per_page=100&page={page}", json=full_page)
+        with pytest.raises(RuntimeError, match="more than 1000 check runs"):
+            client.get_commit_checks("org", "repo", "abc")
+
     def test_create_issue_comment(self, httpx_mock: HTTPXMock, client: GitHubClient) -> None:
         httpx_mock.add_response(
             url="https://api.github.test/repos/org/repo/issues/7/comments",
