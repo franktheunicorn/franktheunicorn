@@ -281,6 +281,13 @@ digest_enabled: false
 # Note it is a SEPARATE field from `extra_args` on purpose: overriding an entry
 # replaces the seed rather than merging into it, so folding trust into
 # `extra_args` would mean anyone customizing `--mode` silently lost it.
+#
+# READ-ONLY. A reviewer reads a stranger's PR; it needs Read/Grep, not a shell.
+# `readonly_args` is seeded for claude (no MCP servers; Bash, Edit, Write,
+# NotebookEdit, WebFetch, WebSearch and Task denied) and codex (`-s read-only`,
+# no MCP servers); cursor-agent gets the same from `--mode ask`. Like
+# `trust_args`, it is its own field so an `extra_args` override keeps it. Set
+# `readonly_args: []` to opt out; the worker warns at startup when you do.
 # agent_cli_reviewers:
 #   - name: "claude"
 #     enabled: "auto"                # "auto" (default) | true | false
@@ -290,6 +297,7 @@ digest_enabled: false
 #     prompt_mode: "flag"            # claude/pi are flag-style: <cli> -p <prompt>
 #     prompt_arg: "-p"
 #     trust_args: []                 # claude needs none; see WORKSPACE TRUST above
+#     # readonly_args: seeded; see READ-ONLY above. [] opts out.
 #     extra_args: []
 #     timeout_seconds: 300
 #     max_diff_chars: 60000          # diffs above this are truncated

@@ -329,6 +329,19 @@ class AgentCLIReviewerConfig(BaseModel):
     #: directory absent from ``~/.claude.json``'s project map — exit 0, and no
     #: entry added.
     trust_args: list[str] = Field(default_factory=list)
+    #: Flags that keep this CLI from editing files, running shell commands or
+    #: reaching the operator's MCP servers while it reads someone else's PR. A
+    #: reviewer needs to read and search; anything more is what a prompt
+    #: injected into the diff would use. Seeded for ``claude`` and ``codex``
+    #: (``CLAUDE_READONLY_ARGS`` / ``CODEX_READONLY_ARGS``); ``cursor-agent`` gets
+    #: the same property from ``--mode ask`` in its ``extra_args``.
+    #:
+    #: Its own field for the reason ``trust_args`` is: registry merging is field
+    #: by field, so an operator overriding ``extra_args`` keeps these. Setting
+    #: ``readonly_args: []`` explicitly is the opt-out, and the worker says so at
+    #: startup. The security verifier and the ``agent-cli`` LLM backend borrow a
+    #: reviewer entry through ``build_invocation``, so they inherit the flags too.
+    readonly_args: list[str] = Field(default_factory=list)
     #: A headless agent reviewing a real diff reads files, greps, and thinks; five
     #: minutes was optimistic and the symptom was indistinguishable from a broken
     #: ssh_command, because a timeout and an unreachable host both come back as
@@ -382,14 +395,38 @@ class AgentCLIReviewerConfig(BaseModel):
         argument; for ``flag`` mode the prompt follows ``prompt_arg`` (e.g.
         ``-p``).
 
-        ``trust_args`` goes ahead of ``extra_args`` so an operator's own flags win
-        a conflict, and after the subcommand in ``subcommand`` mode — a flag before
-        ``exec`` is a flag to the wrong parser.
+        ``trust_args`` and ``readonly_args`` go ahead of ``extra_args`` so an
+        operator's own flags win a conflict, and after the subcommand in
+        ``subcommand`` mode — a flag before ``exec`` is a flag to the wrong parser.
         """
         model_part = [self.model_flag, self.model] if self.model else []
+        fixed = [*self.trust_args, *self.readonly_args, *self.extra_args]
         if self.prompt_mode == "subcommand":
-            return [self.prompt_arg, *model_part, *self.trust_args, *self.extra_args, prompt]
-        return [*model_part, *self.trust_args, *self.extra_args, self.prompt_arg, prompt]
+            return [self.prompt_arg, *model_part, *fixed, prompt]
+        return [*model_part, *fixed, self.prompt_arg, prompt]
+
+
+#: ``claude`` with no MCP servers and no tool that writes, executes or fetches:
+#: Read, Grep and Glob remain, which is what a review needs. ``--strict-mcp-config``
+#: with no ``--mcp-config`` loads no servers; without it the reviewer inherits the
+#: operator's (mail, chat, forge writes), reachable from an instruction in the
+#: diff. The tool list is Apache Magpie's (``CLAUDE_DENIED_TOOLS`` in
+#: ``tools/adversarial-review/src/adversarial_review/backends.py`` at
+#: apache/magpie commit dadb315caa8b881fc1d2195bef03223dac25915a, Apache-2.0);
+#: both flags are in ``claude --help``. ``--disallowedTools`` takes a variadic
+#: list, which ends at the next ``-``-flag (``-p`` in the seed's argv).
+CLAUDE_READONLY_ARGS: tuple[str, ...] = (
+    "--strict-mcp-config",
+    "--disallowedTools",
+    "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch,Task",
+)
+
+#: ``codex exec`` in its read-only sandbox with an empty MCP server table, the
+#: two containment flags from the same Magpie adapter (``_codex``). Magpie also
+#: passes ``--ephemeral`` and ``--skip-git-repo-check``; neither contains
+#: anything and frank always runs codex in a git checkout, so they are left out
+#: rather than shipped unverified against an installed codex.
+CODEX_READONLY_ARGS: tuple[str, ...] = ("-s", "read-only", "-c", "mcp_servers={}")
 
 
 def _default_agent_cli_reviewers() -> list[AgentCLIReviewerConfig]:
@@ -402,13 +439,21 @@ def _default_agent_cli_reviewers() -> list[AgentCLIReviewerConfig]:
     return [
         # model comes from default_claude_model, not from here.
         AgentCLIReviewerConfig(
-            name="claude", cli_path="claude", prompt_mode="flag", prompt_arg="-p"
+            name="claude",
+            cli_path="claude",
+            prompt_mode="flag",
+            prompt_arg="-p",
+            readonly_args=list(CLAUDE_READONLY_ARGS),
         ),
         # ``codex exec`` accepts ``-m, --model <MODEL>`` (verified via
         # ``codex exec --help``), so the default ``model_flag="--model"`` works
         # for codex; no override needed.
         AgentCLIReviewerConfig(
-            name="codex", cli_path="codex", prompt_mode="subcommand", prompt_arg="exec"
+            name="codex",
+            cli_path="codex",
+            prompt_mode="subcommand",
+            prompt_arg="exec",
+            readonly_args=list(CODEX_READONLY_ARGS),
         ),
         AgentCLIReviewerConfig(name="pi", cli_path="pi", prompt_mode="flag", prompt_arg="-p"),
         # Cursor's headless agent. The binary is ``cursor-agent``, not ``cursor``.
@@ -1944,6 +1989,7 @@ class OperatorConfig(BaseModel):
                 model=legacy.model,
                 prompt_mode="flag",
                 prompt_arg="-p",
+                readonly_args=list(CLAUDE_READONLY_ARGS),
                 extra_args=list(legacy.extra_args),
                 timeout_seconds=legacy.timeout_seconds,
                 max_diff_chars=legacy.max_diff_chars,

@@ -864,6 +864,22 @@ class TestRemoteCommandDelivery:
         assert result.stdout.strip() == "hello-from-remote"
 
     @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_the_read_only_flags_reach_the_remote_shell_intact(self, mock_run: Any) -> None:
+        """``mcp_servers={}`` and the comma-joined tool list are the two argv
+        elements a quoting slip would mangle. Staged over stdin and run by a
+        real shell, they must come out as the same argv elements."""
+        from franktheunicorn.config.models import CLAUDE_READONLY_ARGS, CODEX_READONLY_ARGS
+
+        mock_run.side_effect = self._fake_sf
+        executor = RemoteSSHExecutor(config=self._wrapper_config())
+        flags = [*CLAUDE_READONLY_ARGS, *CODEX_READONLY_ARGS]
+
+        result = executor.run(["printf", "%s\\n", *flags], cwd="/tmp")
+
+        assert result is not None and result.ok
+        assert result.stdout.splitlines()[-len(flags) :] == flags
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
     def test_the_wrappers_banner_is_stripped_from_the_output(self, mock_run: Any) -> None:
         """A caller parsing `git diff` must not get "Last login:" prepended."""
         mock_run.side_effect = self._fake_sf

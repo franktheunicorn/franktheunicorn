@@ -599,15 +599,33 @@ def _check_agent_cli_reviewers(operator_config: OperatorConfig) -> None:
             logger.info("Agent CLI %r: SKIPPED (%s) — %s", rc.name, where, reason)
             continue
         logger.info(
-            "Agent CLI %r: ENABLED (%s) — %s%s",
+            "Agent CLI %r: ENABLED (%s) — %s%s%s",
             rc.name,
             where,
             " ".join(rc.cli_argv),
             f", model {rc.model!r} via {rc.model_flag}" if rc.model else "",
+            f", read-only via {' '.join(rc.readonly_args)}" if rc.readonly_args else "",
         )
+        binary = Path(rc.cli_argv[0]).name if rc.cli_argv else ""
+        if binary in _READONLY_SEEDED_BINARIES and not rc.readonly_args:
+            # The seed's read-only flags were overridden away. Not an error (an
+            # operator may want an agent that edits), but a reviewer that can run
+            # shell commands in a checkout of a stranger's PR should be a choice
+            # someone can see, not an accident of an override.
+            logger.warning(
+                "Agent CLI %r: %s runs without read-only flags (readonly_args is empty), "
+                "so it can edit files and run commands in the checkout of the PR it "
+                "reviews. Remove the readonly_args override to restore the defaults.",
+                rc.name,
+                binary,
+            )
         if rc.remote.mode == "ssh":
             _probe_remote_agent_cli(rc)
 
+
+#: Binaries frank ships read-only flags for; an entry for one of them with empty
+#: ``readonly_args`` has had them overridden away, which the startup check names.
+_READONLY_SEEDED_BINARIES = frozenset({"claude", "codex"})
 
 #: Echoed through the remote command path to prove a command actually ran there.
 _REMOTE_PROBE_SENTINEL = "frank-remote-ok"

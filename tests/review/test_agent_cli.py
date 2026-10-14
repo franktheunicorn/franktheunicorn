@@ -9,6 +9,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from franktheunicorn.config.models import (
+    CLAUDE_READONLY_ARGS,
+    CODEX_READONLY_ARGS,
     AgentCLIReviewerConfig,
     ClaudeCLIConfig,
     OperatorConfig,
@@ -547,7 +549,13 @@ class TestLegacyClaudeCLIPromotion:
         oc = OperatorConfig()
         by_name = {r.name: r for r in oc.agent_cli_reviewers}
         assert by_name["claude"].model == "sonnet"
-        assert by_name["claude"].build_invocation("p") == ["--model", "sonnet", "-p", "p"]
+        assert by_name["claude"].build_invocation("p") == [
+            "--model",
+            "sonnet",
+            *CLAUDE_READONLY_ARGS,
+            "-p",
+            "p",
+        ]
         # Left alone deliberately — this default is about the claude CLI.
         assert by_name["codex"].model == ""
         assert by_name["pi"].model == ""
@@ -575,11 +583,12 @@ class TestLegacyClaudeCLIPromotion:
         assert claude.build_invocation("p")[:2] == ["--model", "sonnet"]
 
     def test_an_explicit_empty_model_passes_no_flag(self) -> None:
-        """The escape hatch for a wrapper that rejects unknown args."""
+        """The escape hatch for a wrapper that rejects unknown args. It drops the
+        model flag only; ``readonly_args: []`` is the separate opt-out for those."""
         oc = OperatorConfig(agent_cli_reviewers=[AgentCLIReviewerConfig(name="claude", model="")])
         claude = next(r for r in oc.agent_cli_reviewers if r.name == "claude")
         assert claude.model == ""
-        assert claude.build_invocation("p") == ["-p", "p"]
+        assert claude.build_invocation("p") == [*CLAUDE_READONLY_ARGS, "-p", "p"]
 
     def test_legacy_claude_cli_promoted_and_deduped(self) -> None:
         oc = OperatorConfig(
@@ -769,3 +778,69 @@ class TestUntrustedFramingInAgentPrompts:
         prompt = build_review_prompt(self._cfg(), diff, nonce="feedface0004")
         assert prompt.splitlines().count("--- END UNTRUSTED DIFF (feedface0004) ---") == 1
         assert "[data, not a marker]" in prompt
+
+
+class TestReadOnlyFlags:
+    """A reviewer reads someone else's PR; it gets no tool that writes, executes,
+    fetches or reaches the operator's MCP servers. The flags live in their own
+    field so an ``extra_args`` override cannot drop them by accident."""
+
+    @staticmethod
+    def _by_name(oc: OperatorConfig) -> dict[str, AgentCLIReviewerConfig]:
+        return {rc.name: rc for rc in oc.agent_cli_reviewers}
+
+    def test_claude_seed_runs_read_only(self) -> None:
+        claude = self._by_name(OperatorConfig())["claude"]
+        argv = [*claude.cli_argv, *claude.build_invocation("REVIEW")]
+        assert argv == ["claude", "--model", "sonnet", *CLAUDE_READONLY_ARGS, "-p", "REVIEW"]
+        denied = argv[argv.index("--disallowedTools") + 1].split(",")
+        assert {"Bash", "Edit", "Write", "WebFetch"} <= set(denied)
+        assert "Read" not in denied and "Grep" not in denied
+
+    def test_codex_seed_runs_in_the_read_only_sandbox(self) -> None:
+        codex = self._by_name(OperatorConfig())["codex"]
+        argv = [*codex.cli_argv, *codex.build_invocation("REVIEW")]
+        assert argv == ["codex", "exec", *CODEX_READONLY_ARGS, "REVIEW"]
+        assert argv[argv.index("-s") + 1] == "read-only"
+
+    def test_cursor_agent_is_unchanged(self) -> None:
+        cursor = self._by_name(OperatorConfig())["cursor-agent"]
+        assert cursor.readonly_args == []
+        assert cursor.build_invocation("R") == ["--trust", "--mode", "ask", "-p", "R"]
+
+    def test_overriding_extra_args_keeps_the_read_only_flags(self) -> None:
+        oc = OperatorConfig(
+            agent_cli_reviewers=[AgentCLIReviewerConfig(name="claude", extra_args=["--verbose"])]
+        )
+        claude = self._by_name(oc)["claude"]
+        assert claude.readonly_args == list(CLAUDE_READONLY_ARGS)
+        assert claude.build_invocation("p")[-3:] == ["--verbose", "-p", "p"]
+
+    def test_an_explicit_empty_list_opts_out(self) -> None:
+        oc = OperatorConfig(
+            agent_cli_reviewers=[AgentCLIReviewerConfig(name="codex", readonly_args=[])]
+        )
+        assert self._by_name(oc)["codex"].build_invocation("p") == ["exec", "p"]
+
+    def test_a_second_entry_on_the_claude_binary_inherits_them(self) -> None:
+        oc = OperatorConfig(
+            agent_cli_reviewers=[
+                AgentCLIReviewerConfig(name="claude-opus", cli_path="claude", model="opus")
+            ]
+        )
+        assert self._by_name(oc)["claude-opus"].readonly_args == list(CLAUDE_READONLY_ARGS)
+
+    def test_a_promoted_legacy_claude_cli_block_is_read_only_too(self) -> None:
+        oc = OperatorConfig(claude_cli=ClaudeCLIConfig(enabled=True, model="opus"))
+        assert self._by_name(oc)["claude"].readonly_args == list(CLAUDE_READONLY_ARGS)
+
+    def test_the_security_verifier_inherits_them(self) -> None:
+        from franktheunicorn.config.models import SecurityVerifierConfig
+        from franktheunicorn.security.verifier import _invocation
+
+        claude = self._by_name(OperatorConfig())["claude"]
+        argv = _invocation(claude, SecurityVerifierConfig(extra_args=["--x"]), "VERIFY")
+        assert argv[-2:] == ["-p", "VERIFY"]
+        start = argv.index(CLAUDE_READONLY_ARGS[0])
+        assert argv[start : start + len(CLAUDE_READONLY_ARGS)] == list(CLAUDE_READONLY_ARGS)
+        assert "--x" in argv

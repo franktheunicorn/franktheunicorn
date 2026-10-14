@@ -822,3 +822,26 @@ class TestTwoModelsOnOneCommand:
         resolved = {rc.name: rc for rc in resolve_agent_cli_reviewers(oc)}
         assert resolved["cursor-agent"].model == "glm-5.2"
         assert resolved["cursor-agent-k3-max"].model == "kimi-k3-max"
+
+
+class TestReadOnlyStartupLine:
+    """The startup check names the read-only flags in use, and says so loudly
+    when an override has taken them away from a binary that had them."""
+
+    @staticmethod
+    def _local(**fields: Any) -> AgentCLIReviewerConfig:
+        return AgentCLIReviewerConfig(name="claude", enabled=True, cli_path="claude", **fields)
+
+    def test_the_enabled_line_names_the_flags(self, caplog: Any) -> None:
+        oc = OperatorConfig(agent_cli_reviewers=[self._local()])
+        with caplog.at_level(logging.INFO):
+            _check_agent_cli_reviewers(oc)
+        assert "read-only via --strict-mcp-config --disallowedTools" in caplog.text
+        assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+
+    def test_an_override_to_nothing_warns(self, caplog: Any) -> None:
+        oc = OperatorConfig(agent_cli_reviewers=[self._local(readonly_args=[])])
+        with caplog.at_level(logging.INFO):
+            _check_agent_cli_reviewers(oc)
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("without read-only flags" in r.getMessage() for r in warnings)

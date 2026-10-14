@@ -438,6 +438,48 @@ effort. "Done" means it is on this branch with tests.
 - **Remote path.** Web process only: one PR fetch and one diff fetch at
   post time.
 
+### 4.11 Read-only flags for the claude and codex reviewers (done)
+
+- **What.** A `readonly_args` field on `AgentCLIReviewerConfig`, seeded so the
+  `claude` reviewer runs with `--strict-mcp-config` and Bash, Edit, Write,
+  NotebookEdit, WebFetch, WebSearch and Task denied, and `codex exec` runs
+  with `-s read-only -c mcp_servers={}`. Read, Grep and Glob stay. Both lenses
+  scored it 4 or 5.
+- **Why.** These reviewers run inside a checkout of someone else's PR. With
+  a shell, an editor and the operator's MCP servers, an instruction planted
+  in the diff has somewhere to go. `cursor-agent` already ran `--mode ask`;
+  claude and codex ran with everything.
+- **Where.** `config/models.py` (`CLAUDE_READONLY_ARGS`, `CODEX_READONLY_ARGS`,
+  the field, `build_invocation`, the seeds and the legacy `claude_cli`
+  promotion), `worker/runner.py` (the startup line names the flags and warns
+  when an override emptied them). Its own field, like `trust_args`, so an
+  `extra_args` override keeps it; `readonly_args: []` is the opt-out. The
+  verifier and the `agent-cli` LLM backend borrow reviewer entries through
+  `build_invocation`, so they inherit it. Magpie's `--ephemeral` and
+  `--skip-git-repo-check` for codex are left out: neither contains anything,
+  and neither could be checked against an installed codex here.
+- **Upstream source.** `tools/adversarial-review/src/adversarial_review/backends.py`
+  (`CLAUDE_DENIED_TOOLS`, `_codex`, `_claude`) at the pinned commit; not at
+  0.1.0.
+- **Remote path.** Plain argv; nothing to install on the agent host. A test
+  stages the flags through `RemoteSSHExecutor`'s stdin delivery into a real
+  shell and checks they come out as the same argv elements.
+
+### 4.12 The pre-push hook gates every spelling of `git push` (done)
+
+- **What.** `.claude/hooks/git_gate.py` decides whether a Bash command is a
+  push, a commit or neither by splitting it into simple commands the way a
+  shell does, dropping keywords and `NAME=value` prefixes, normalising
+  `/usr/bin/git` to `git`, and skipping git's global options before reading
+  the subcommand. Heredoc bodies are dropped first, and an untokenisable
+  command falls back to a text search that fails closed.
+- **Why.** The hook matched `^\s*git\s+push`, so `cd repo && git push`,
+  `git -C repo push` and a push inside a retry loop skipped the test run.
+  That is how a failing test reached CI on this PR.
+- **Upstream source.** `tools/agent-guard/src/agent_guard/__init__.py`
+  (`split_segments`, `Segment`, `git_subcommand_index`) at the pinned commit.
+- **Remote path.** Developer tooling only; not part of the worker.
+
 ---
 
 ## 5. Tier 2: Adopt Later
