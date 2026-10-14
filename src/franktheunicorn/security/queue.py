@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 from django.db import IntegrityError, transaction
 
 from franktheunicorn.core.models import WorkerCommand
+from franktheunicorn.security.agent_source import SCOPE_ALL, scope_covers
 
 if TYPE_CHECKING:
     from franktheunicorn.config.models import OperatorConfig
@@ -173,7 +174,11 @@ def queue_version_follow_on(
 
 
 def queue_targetless(
-    command: str, *, priority: int = PRIORITY_BULK, exclude_pk: int | None = None
+    command: str,
+    *,
+    priority: int = PRIORITY_BULK,
+    exclude_pk: int | None = None,
+    agent_scope: str = SCOPE_ALL,
 ) -> bool:
     """Queue a whole-backlog *command* unless one is already waiting or running.
 
@@ -190,15 +195,32 @@ def queue_targetless(
     *exclude_pk* is a handler re-queueing itself: its own row is still ``running``
     at that moment and would otherwise count as the in-flight one, so every poll
     after the first would decline and the recheck runs would go unread.
+
+    *agent_scope* narrows the sweep to one source's reports (see
+    :mod:`agent_source`) and rides in ``kwargs`` for the handler. "Already in
+    flight" then means "a queued run already covers this one": a sweep over
+    everything covers any scoped press, and one over every agent covers any one
+    agent — but a sweep of agent X's reports says nothing about agent Y's, so
+    that press queues. The comparison is in Python because there are at most a
+    handful of in-flight rows and SQLite's JSON lookups aren't a dependency this
+    codebase takes on (see the CVE filter in the list view).
     """
     in_flight = WorkerCommand.objects.filter(command=command, status__in=_IN_FLIGHT_STATUSES)
     if exclude_pk is not None:
         in_flight = in_flight.exclude(pk=exclude_pk)
-    if in_flight.exists():
-        logger.info("%s already in flight", command)
-        return False
-    WorkerCommand.objects.create(command=command, priority=priority)
-    logger.info("Queued %s (priority %d)", command, priority)
+    for kwargs in in_flight.values_list("kwargs", flat=True):
+        running = (kwargs or {}).get("agent_scope", SCOPE_ALL)
+        if scope_covers(running, agent_scope):
+            logger.info("%s already in flight (agent scope %s)", command, running)
+            return False
+    WorkerCommand.objects.create(
+        command=command,
+        priority=priority,
+        # Nothing stored for the default, so a sweep queued without a scope is the
+        # same row it always was.
+        kwargs={} if agent_scope == SCOPE_ALL else {"agent_scope": agent_scope},
+    )
+    logger.info("Queued %s (priority %d, agent scope %s)", command, priority, agent_scope)
     return True
 
 
@@ -218,7 +240,9 @@ _SWEEP_COMMANDS = (
 )
 
 
-def queue_branch_sweep(command: str, *, priority: int = PRIORITY_BULK) -> bool:
+def queue_branch_sweep(
+    command: str, *, priority: int = PRIORITY_BULK, agent_scope: str = SCOPE_ALL
+) -> bool:
     """Queue one of the git-only sweeps unless the same one is already in flight.
 
     They are minutes-to-tens-of-minutes of git per project — a fetch, two
@@ -230,7 +254,7 @@ def queue_branch_sweep(command: str, *, priority: int = PRIORITY_BULK) -> bool:
     if command not in _SWEEP_COMMANDS:
         msg = f"queue_branch_sweep only queues {_SWEEP_COMMANDS}, got {command!r}"
         raise ValueError(msg)
-    return queue_targetless(command, priority=priority)
+    return queue_targetless(command, priority=priority, agent_scope=agent_scope)
 
 
 def queue_zombie_scan(*, priority: int = PRIORITY_BULK) -> bool:

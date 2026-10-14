@@ -24,6 +24,15 @@ class Command(BaseCommand):
             help="Attach every imported report to this project (owner/repo)",
         )
         parser.add_argument(
+            "--agent",
+            default="",
+            help=(
+                "Name the automated agent that produced these reports (e.g. "
+                "claude-code). Lets the dashboard filter to them and scope its bulk "
+                "buttons to them. Leave it off for reports people sent."
+            ),
+        )
+        parser.add_argument(
             "--triage",
             action="store_true",
             help=(
@@ -95,6 +104,7 @@ class Command(BaseCommand):
             auto_verify_versions=bool(options.get("verify_versions")),
             auto_find_introduction=bool(options.get("find_introduction")),
             require_security_content=not options.get("no_filter"),
+            source_agent=str(options.get("agent") or ""),
         )
 
         # Report before deciding the exit status. Raising on result.error first
@@ -119,6 +129,14 @@ class Command(BaseCommand):
             raise CommandError(result.error)
 
         self.stdout.write(self.style.SUCCESS(summary))
+        if result.agent_label_kept:
+            self.stdout.write(
+                self.style.WARNING(
+                    f"  {result.agent_label_kept} already-present report(s) kept their "
+                    "existing agent label — re-importing doesn't relabel. Use Set beside "
+                    "the archive in the dashboard's Imported archives table."
+                )
+            )
         # Named separately from triage's: an operator who passed --verify and got
         # nothing needs the reason, and "verifier.enabled is false" is a setting
         # they may never have seen.

@@ -136,3 +136,21 @@ class TestImportSecurityZipCommand:
 
         with pytest.raises(CommandError, match="not a valid zip archive"):
             call_command("import_security_zip", str(bogus))
+
+
+@pytest.mark.django_db
+class TestImportSecurityZipAgent:
+    def test_agent_labels_every_imported_report(self, archive: Path, triage_on: Any) -> None:
+        call_command(
+            "import_security_zip", str(archive), "--agent", "Claude Code", stdout=io.StringIO()
+        )
+
+        assert set(SecurityReport.objects.values_list("source_agent", flat=True)) == {"claude-code"}
+
+    def test_a_reserved_agent_name_is_an_error(self, archive: Path, triage_on: Any) -> None:
+        with pytest.raises(CommandError, match="reserved"):
+            call_command(
+                "import_security_zip", str(archive), "--agent", "none", stdout=io.StringIO()
+            )
+
+        assert not SecurityReport.objects.exists()

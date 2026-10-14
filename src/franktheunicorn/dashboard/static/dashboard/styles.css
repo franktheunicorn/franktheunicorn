@@ -93,7 +93,9 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px
 header { border-bottom: 2px solid var(--border); padding-bottom: 0.5rem; margin-bottom: 1rem; }
 header h1 { font-size: 1.4rem; display: inline; }
 header h1 a { color: var(--text); text-decoration: none; }
-nav { display: flex; gap: 1rem; align-items: center; margin-top: 0.5rem; font-size: 0.85rem; }
+/* Wraps so the PR lookup drops to its own line on a phone instead of pushing
+   every page ~100px wider than the screen. */
+nav { display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; margin-top: 0.5rem; font-size: 0.85rem; }
 nav a { color: var(--muted); text-decoration: none; }
 nav a:hover, nav a.active { color: var(--accent); font-weight: 600; }
 .workspace-select { margin-left: auto; }
@@ -621,6 +623,53 @@ thead th { border-bottom: 2px solid var(--border); }
 }
 
 .security-sort { font-size: 0.8rem; color: var(--muted); margin: 0.5rem 0; }
+
+/* The security page's bulk buttons. Wraps: a dozen buttons in a row that
+   didn't was a sideways scroll on a laptop and unusable on a phone. */
+.security-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: center;
+    margin-bottom: 1rem;
+}
+.security-actions select { font-size: 0.8rem; }
+
+/* Which source the page — rows, tab counts, Export and every bulk button — is
+   scoped to. Chips rather than a <select> so it works with no JS at all. */
+.source-scope {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    align-items: center;
+    font-size: 0.8rem;
+    margin: 0 0 0.5rem;
+}
+.source-scope a {
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0.1rem 0.55rem;
+    color: var(--muted);
+    text-decoration: none;
+    white-space: nowrap;
+}
+.source-scope a.active { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.source-scope-note { font-size: 0.8rem; color: var(--muted); margin: 0 0 0.5rem; }
+
+/* Marks another agent's output in the list and on the report, so a scanner
+   finding never reads as a person's report at a glance. */
+.agent-badge {
+    display: inline-block;
+    border: 1px solid var(--purple);
+    color: var(--purple);
+    padding: 0 0.35rem;
+    border-radius: 3px;
+    white-space: nowrap;
+}
+.zip-archives input[type="text"] { width: 9rem; font-size: 0.8rem; }
+.agent-relabel { display: inline-flex; gap: 0.3rem; align-items: center; margin-left: 0.4rem; }
+.agent-relabel input[type="text"] { width: 9rem; font-size: 0.8rem; }
+.agent-relabel .action-btn { font-size: 0.75rem; padding: 0.1rem 0.5rem; }
 
 /* The archive's own ranking, as read at import. */
 .priority-badge {
