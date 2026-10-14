@@ -925,7 +925,12 @@ def _verify_one_branch(
 
     prompt = _build_prompt(report, branch, verifier)
     argv = [*reviewer.cli_argv, *_invocation(reviewer, verifier, prompt)]
-    from franktheunicorn.review.tool_executor import guard_agent_argv, guard_notes
+    from franktheunicorn.review.tool_executor import (
+        agent_stderr,
+        guard_agent_argv,
+        guard_notes,
+        guard_refusal,
+    )
 
     # The release branches are the project's own, but anything merged there,
     # including a hooks file, is someone's; the agent runs without them.
@@ -933,6 +938,15 @@ def _verify_one_branch(
     duration = time.monotonic() - started
     for note in guard_notes(result.stderr if result is not None else ""):
         logger.warning("Verifying report #%s on %s: %s", report.pk, branch, note)
+    if result is not None and (refused := guard_refusal(result.returncode, result.stderr)):
+        return BranchResult(
+            branch=branch,
+            commit=commit,
+            verdict="error",
+            agent=agent,
+            summary=f"The {reviewer.name} CLI did not run: {refused}.",
+            duration_seconds=duration,
+        )
 
     if result is None:
         return BranchResult(
@@ -961,9 +975,10 @@ def _verify_one_branch(
             workspace_trust_advice,
         )
 
-        detail = (result.stderr or result.stdout).strip()[:500]
+        stderr = agent_stderr(result.stderr)
+        detail = (stderr or result.stdout).strip()[:500]
         summary = f"The {reviewer.name} CLI exited {result.returncode}: {detail}"
-        if looks_like_auth_failure(result.stderr):
+        if looks_like_auth_failure(stderr):
             advice = auth_failure_advice(
                 reviewer.name, reviewer.cli_argv[0], remote=reviewer.remote.mode == "ssh"
             )
@@ -974,7 +989,7 @@ def _verify_one_branch(
                 branch,
                 advice,
             )
-        if looks_like_workspace_trust_refusal(result.stderr, result.stdout):
+        if looks_like_workspace_trust_refusal(stderr, result.stdout):
             advice = workspace_trust_advice(reviewer.name)
             summary = f"{summary}\n\n{advice}"
             logger.warning(

@@ -301,6 +301,8 @@ def score_pull_request_from_model(
         committers = project_config.committers
 
     config_dict: dict[str, object] = {
+        # Scopes the awaiting-maintainer signal's team mentions to this org.
+        "owner": project_config.owner,
         "watched_paths": project_config.watched_paths,
         "frequent_contributors": project_config.frequent_contributors,
         "watch_keywords": project_config.watch_keywords,

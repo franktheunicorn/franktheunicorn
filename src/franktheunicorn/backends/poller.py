@@ -442,24 +442,9 @@ def _refresh_pull_request(
         fetched_comments = all_comments
         comment_bodies = [str(c.get("body", "")) for c in all_comments if c.get("body")]
         comment_events = _comment_events(all_comments)
-
-        latest_posted_at = (
-            ReviewDraft.objects.filter(
-                pull_request=pr_obj, status="posted", posted_at__isnull=False
-            )
-            .order_by("-posted_at")
-            .values_list("posted_at", flat=True)
-            .first()
+        operator_review_posted_at, author_replies = _replies_since_posted_review(
+            pr_obj, all_comments
         )
-        if latest_posted_at is not None:
-            operator_review_posted_at = latest_posted_at.isoformat()
-            pr_author = pr_obj.author.lower()
-            author_replies = [
-                c["created_at"]
-                for c in all_comments
-                if c.get("user", {}).get("login", "").lower() == pr_author
-                and c.get("created_at", "") >= operator_review_posted_at
-            ]
     except Exception:
         logger.debug("Could not fetch comments for PR #%d", pr_number)
 
@@ -702,6 +687,30 @@ def _mark_reviews_stale(pr_obj: PullRequest) -> None:
     pr_obj.agent_runs = updated
     if pr_obj.pk:
         PullRequest.objects.filter(pk=pr_obj.pk).update(agent_runs=updated)
+
+
+def _replies_since_posted_review(
+    pr_obj: PullRequest, comments: list[dict[str, Any]]
+) -> tuple[str | None, list[str] | None]:
+    """When the operator's latest review on *pr_obj* was posted, and when the
+    author commented since: the pending-response signal's two inputs. Both
+    ``None`` while nothing has been posted."""
+    latest_posted_at = (
+        ReviewDraft.objects.filter(pull_request=pr_obj, status="posted", posted_at__isnull=False)
+        .order_by("-posted_at")
+        .values_list("posted_at", flat=True)
+        .first()
+    )
+    if latest_posted_at is None:
+        return None, None
+    posted_at = latest_posted_at.isoformat()
+    pr_author = pr_obj.author.lower()
+    return posted_at, [
+        c["created_at"]
+        for c in comments
+        if c.get("user", {}).get("login", "").lower() == pr_author
+        and c.get("created_at", "") >= posted_at
+    ]
 
 
 def _comment_events(comments: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -1179,16 +1188,21 @@ def ingest_single_pr(
                 setattr(pr_obj, ref_field, side_data["ref"])
 
     # One comments read for scoring and the merge-intent sync below. Scoring
-    # without them wrote over the poll's mention bonus and "ball in our court"
-    # bump on every own-PR scan, which is every cycle for exactly the PRs the
-    # operator is engaged in.
+    # without them wrote over the poll's mention bonus, "ball in our court" and
+    # pending-response bumps on every own-PR scan, which is every cycle for
+    # exactly the PRs the operator is engaged in.
     fetched_comments: list[dict[str, Any]] | None = None
     comment_bodies: list[str] | None = None
     comment_events: list[dict[str, str]] | None = None
+    operator_review_posted_at: str | None = None
+    author_replies: list[str] | None = None
     try:
         fetched_comments = client.get_issue_comments(owner, repo, pr_number)
         comment_bodies = [str(c.get("body", "")) for c in fetched_comments if c.get("body")]
         comment_events = _comment_events(fetched_comments)
+        operator_review_posted_at, author_replies = _replies_since_posted_review(
+            pr_obj, fetched_comments
+        )
     except Exception:
         logger.debug("Could not fetch comments for PR #%d during on-demand ingest", pr_number)
 
@@ -1207,6 +1221,8 @@ def ingest_single_pr(
             pr=pr_obj,
             project_config=project_config,
             operator_username=operator_config.github_username or "",
+            operator_review_posted_at=operator_review_posted_at,
+            author_replies_after_review=author_replies,
             comment_bodies=comment_bodies,
             comment_events=comment_events,
         )

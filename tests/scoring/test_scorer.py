@@ -72,6 +72,23 @@ class TestScoringFromModel:
         assert "jira_linked" in bd
         assert "jira_priority_author_created" in bd
 
+    def test_team_mentions_count_for_the_projects_own_org_only(
+        self, make_pr: Any, spark_project_config: ProjectConfig
+    ) -> None:
+        """The org comes from the project config, so ``@types/node`` in a
+        dependency bump on apache/spark is an npm scope, not a team."""
+        pr = make_pr(author="alice")
+
+        def ask(body: str) -> dict[str, float]:
+            events = [{"author": "alice", "body": body, "created_at": "2026-01-01T00:00:00Z"}]
+            _, bd = score_pull_request_from_model(
+                pr, spark_project_config, "holdenk", comment_events=events
+            )
+            return bd
+
+        assert "author_awaiting_maintainer" not in ask("Bumped @types/node, anyone?")
+        assert "author_awaiting_maintainer" in ask("@apache/spark-committers could you look?")
+
     def test_score_normalized(self, make_pr: Any, spark_project_config: ProjectConfig) -> None:
         pr = make_pr()
         score, _ = score_pull_request_from_model(pr, spark_project_config, "holdenk")

@@ -1261,6 +1261,38 @@ class TestLoggedOutCLI:
 
 
 @pytest.mark.django_db
+class TestGuardRefusalInVerdict:
+    def test_the_summary_says_the_agent_did_not_run(self) -> None:
+        report = SecurityReportFactory(
+            project=ProjectFactory(owner="apache", repo="spark"), title="t", raw_text="b"
+        )
+        config = _operator(_verifier(reviewer="cursor-agent"))
+        config.agent_cli_reviewers = [
+            AgentCLIReviewerConfig(name="cursor-agent", cli_path="cursor-agent")
+        ]
+        note = "frank: cursor-agent: command not found; not running the agent\n"
+        executor = _FakeExecutor(
+            {
+                "symbolic-ref": ExecResult(returncode=0, stdout="origin/master\n", stderr=""),
+                "for-each-ref": _BRANCH_LISTING,
+                "checkout": ExecResult(returncode=0, stdout="", stderr=""),
+                "rev-parse HEAD": ExecResult(returncode=0, stdout="abc123\n", stderr=""),
+                "cursor-agent": ExecResult(returncode=127, stdout="", stderr=note),
+            }
+        )
+        with patch("franktheunicorn.review.tool_executor.make_executor", return_value=executor):
+            verify_report(report, config)
+
+        row = report.verifications.first()
+        assert row is not None
+        assert row.verdict == "error"
+        assert row.summary == (
+            "The cursor-agent CLI did not run: cursor-agent: command not found; "
+            "not running the agent."
+        )
+
+
+@pytest.mark.django_db
 class TestUpstreamRefresh:
     """The checkout is refreshed from upstream before anything is decided.
 

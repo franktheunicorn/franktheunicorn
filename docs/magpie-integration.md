@@ -790,8 +790,11 @@ effort. "Done" means it is on this branch with tests.
   cycle, re-scored without comments. That wiped this bump, and the mention
   bonus, on exactly the PRs the operator is engaged in. It now fetches the
   comments once and shares them with the merge-intent sync, which already
-  took them. Also, `@types/node` in a dependency bump read as a team mention.
-  A team now counts only under the project's own org.
+  took them. The same pass now also feeds it `pending_response`'s inputs,
+  which it had been dropping since before this work. Also, `@types/node` in a
+  dependency bump read as a team mention. A team now counts only under the
+  project's own org; a later check found the poll never passed the owner to
+  the scorer, so the rule was dead until that was fixed too.
 - **Differences from Magpie.** frank's maintainers are the operator plus
   `committers`, so an unknown mentioned login does not count; and it reads
   issue comments only, so a maintainer who answered with a formal review is
@@ -887,8 +890,24 @@ effort. "Done" means it is on this branch with tests.
   first is alive. The worker's lanes already prevent that, but if two ever
   met, the second's recovery would hand the first agent its hooks back. A
   lock whose pid is gone is taken over.
+- **Found when rebasing onto main.** Main added a check that reads exit-0
+  output for a CLI refusal ("cannot use this model", "--trust"). Three
+  interactions with the guard and the untrusted-content rule:
+  - The guard's own `frank:` lines came first on stderr and could push a
+    real refusal out of the check's 300-character window. Everything that
+    reads stderr for meaning now reads `agent_stderr`, without them.
+  - A guard refusal (97, or 127 for a missing binary) was logged as the CLI
+    exiting 97. `guard_refusal` needs both the status and the guard's note,
+    and the log and the verifier's summary now say the agent did not run,
+    with a PATH hint for 127.
+  - The untrusted-content rule asks the model to name an injection attempt
+    in a sentence. A PR telling the reviewer to rerun with `--trust` got
+    quoted at the head of a clean review and read as a refusal. Output
+    ending in the templates' "Review completed" line is a review, whatever
+    precedes it.
 - **Where.** `review/tool_executor.py` (`AGENT_CONFIG_ENTRIES`,
-  `guard_agent_argv`, `unwrap_guarded`, `guard_notes`, the TERM grace),
+  `guard_agent_argv`, `unwrap_guarded`, `guard_notes`, `agent_stderr`,
+  `guard_refusal`, the TERM grace),
   `review/agent_cli.py` and `security/verifier.py` (the two agent call
   sites). The `agent-cli` LLM backend is not wrapped: it runs in an empty
   scratch directory, not a checkout.

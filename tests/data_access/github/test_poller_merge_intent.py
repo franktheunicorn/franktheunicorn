@@ -318,6 +318,26 @@ class TestIngestSinglePRMergeIntent:
 
         assert pr.score_breakdown.get("author_awaiting_maintainer") == 20
 
+    def test_single_ingest_scores_a_reply_to_the_posted_review(self, tmp_path: Path) -> None:
+        """Same for pending-response: the author answered the operator's review."""
+        from datetime import UTC, datetime
+
+        from tests.factories import ReviewDraftFactory
+
+        ProjectFactory(owner="apache", repo="spark")
+        client = _ReviewsClient(tmp_path)
+        first = self._run(client, OperatorConfig(github_username="holdenk"))
+        ReviewDraftFactory(
+            pull_request=first,
+            status="posted",
+            posted_at=datetime(2026, 10, 1, tzinfo=UTC),
+        )
+        client.comments[42] = [_comment(first.author, "Done, thanks.", "2026-10-02T00:00:00Z")]
+
+        pr = self._run(client, OperatorConfig(github_username="holdenk"))
+
+        assert "pending_response" in pr.score_breakdown
+
     def test_single_ingest_respects_disabled(self, tmp_path: Path) -> None:
         ProjectFactory(owner="apache", repo="spark")
         client = _ReviewsClient(tmp_path)

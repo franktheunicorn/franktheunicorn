@@ -255,6 +255,17 @@ class AgentCLIRunError(RuntimeError):
 #: on both an unknown --model and an untrusted workspace.
 _REFUSAL_MARKERS = ("cannot use this model",)
 
+#: The templates' "nothing to report" line. Output that ends with it came from
+#: the model, whatever it says before it: the untrusted-content rule asks the
+#: model to name an injection attempt in a sentence, and a PR that tries one
+#: on cursor-agent quotes "--trust", which reads as a refusal.
+_CLEAN_SENTINEL = "review completed"
+
+
+def _ends_with_sentinel(stdout: str) -> bool:
+    lines = [line.strip() for line in (stdout or "").splitlines() if line.strip()]
+    return bool(lines) and lines[-1].rstrip(".").lower() == _CLEAN_SENTINEL
+
 
 def run_agent_cli_review(
     cwd: str,
@@ -362,13 +373,33 @@ def run_agent_cli_review(
         timeout,
         len(diff),
     )
-    from franktheunicorn.review.tool_executor import guard_agent_argv, guard_notes
+    from franktheunicorn.review.tool_executor import (
+        agent_stderr,
+        guard_agent_argv,
+        guard_notes,
+        guard_refusal,
+    )
 
     started = time.monotonic()
     # The checkout is the PR author's; its agent config is moved out for the
     # run (see tool_executor.AGENT_CONFIG_ENTRIES).
     result = executor.run(guard_agent_argv(cmd), cwd=cwd, timeout=timeout)
     elapsed = time.monotonic() - started
+    if result is not None and (refused := guard_refusal(result.returncode, result.stderr)):
+        # Not "the CLI exited 97": the agent never started, and the reason is
+        # the guard's, so that is what the log says.
+        where = " on the remote" if config.remote.mode == "ssh" else ""
+        logger.error(
+            "%s review did not run: %s in %s.%s",
+            config.name,
+            refused,
+            cwd,
+            f" A non-interactive shell{where} may not have your login shell's PATH; "
+            "give the full path as this reviewer's `command`."
+            if result.returncode == 127
+            else "",
+        )
+        raise AgentCLIRunError(f"agent guard did not start {cmd[0]}: {refused}")
     for note in guard_notes(result.stderr if result is not None else ""):
         logger.warning("%s review in %s: %s", config.name, cwd, note)
     if result is None:
@@ -413,11 +444,12 @@ def run_agent_cli_review(
             workspace_trust_advice,
         )
 
+        stderr = agent_stderr(result.stderr)
         # stdout as well as stderr: cursor-agent puts the trust notice on stderr,
         # but which stream a CLI picks for a refusal is not something to rely on.
         trust = (
             " " + workspace_trust_advice(config.name)
-            if looks_like_workspace_trust_refusal(result.stderr, result.stdout)
+            if looks_like_workspace_trust_refusal(stderr, result.stdout)
             else ""
         )
         auth = (
@@ -425,14 +457,14 @@ def run_agent_cli_review(
             + auth_failure_advice(
                 config.name, config.cli_argv[0], remote=config.remote.mode == "ssh"
             )
-            if looks_like_auth_failure(result.stderr)
+            if looks_like_auth_failure(stderr)
             else ""
         )
         logger.error(
             "%s CLI exited with code %d: %s%s%s",
             config.name,
             result.returncode,
-            (result.stderr or "")[:500] or "(no stderr)",
+            stderr[:500] or "(no stderr)",
             trust,
             auth,
         )
@@ -440,14 +472,15 @@ def run_agent_cli_review(
 
     blocks = parse_prompt_only_output(result.stdout)
     # The parser makes a file-less "finding" out of any text, refusals included.
-    if not any(b.file_path for b in blocks):
+    if not any(b.file_path for b in blocks) and not _ends_with_sentinel(result.stdout):
         from franktheunicorn.review.tool_executor import (
             looks_like_workspace_trust_refusal,
             workspace_trust_advice,
         )
 
         # Head only: the review itself may quote "--trust" or "cannot use this model".
-        output = f"{(result.stdout or '').strip()[:300]} {(result.stderr or '')[:300]}"
+        # The guard's notes are not the CLI talking, and would fill the window.
+        output = f"{(result.stdout or '').strip()[:300]} {agent_stderr(result.stderr)[:300]}"
         untrusted = looks_like_workspace_trust_refusal(output)
         if untrusted or any(m in output.lower() for m in _REFUSAL_MARKERS):
             logger.error(

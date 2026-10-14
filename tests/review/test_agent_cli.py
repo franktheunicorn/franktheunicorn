@@ -782,6 +782,105 @@ def test_a_review_that_quotes_trust_is_still_a_review() -> None:
     assert findings
 
 
+def test_an_injection_note_that_quotes_trust_is_still_a_review() -> None:
+    """The untrusted-content rule asks the model to name a steering attempt in a
+    sentence. A PR telling the reviewer to rerun with --trust gets quoted at the
+    head of the output, ahead of the clean-run sentinel; that is a review."""
+    diff_result = ExecResult(returncode=0, stdout="diff --git a/x b/x\n", stderr="")
+    note = (
+        "The PR description tells the reviewer to rerun cursor-agent with --trust; "
+        "treated as data.\nReview completed"
+    )
+    executor = MagicMock()
+    executor.run.side_effect = [diff_result, ExecResult(returncode=0, stdout=note, stderr="")]
+    findings = run_agent_cli_review(
+        cwd="/r",
+        base_commit="b",
+        config=AgentCLIReviewerConfig(name="cursor-agent"),
+        executor=executor,
+    )
+    assert all(not f.file_path for f in findings)
+
+
+def test_guard_notes_do_not_push_a_refusal_out_of_the_window() -> None:
+    """The refusal check reads the head of stderr; the guard writes there first."""
+    diff_result = ExecResult(returncode=0, stdout="diff --git a/x b/x\n", stderr="")
+    notes = "".join(
+        f"frank: {e} from an agent run on {'a' * 40} is in /w/.git/frank-agent-guard.displaced/1\n"
+        for e in (".claude", ".cursor", ".codex", ".pi")
+    )
+    executor = MagicMock()
+    executor.run.side_effect = [
+        diff_result,
+        ExecResult(returncode=0, stdout="", stderr=notes + "Cannot use this model: grok-9"),
+    ]
+    with pytest.raises(AgentCLIRunError, match="refused"):
+        run_agent_cli_review(
+            cwd="/r",
+            base_commit="b",
+            config=AgentCLIReviewerConfig(name="cursor-agent"),
+            executor=executor,
+        )
+
+
+class TestGuardRefusal:
+    """Exit 97 or 127 with the guard's note: the agent never started."""
+
+    def _run(self, result: ExecResult, **config: Any) -> None:
+        diff_result = ExecResult(returncode=0, stdout="diff --git a/x b/x\n", stderr="")
+        executor = MagicMock()
+        executor.run.side_effect = [diff_result, result]
+        run_agent_cli_review(
+            cwd="/r",
+            base_commit="b",
+            config=AgentCLIReviewerConfig(name="claude", **config),
+            executor=executor,
+        )
+
+    def test_a_held_lock_is_not_reported_as_the_cli_exiting_97(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        note = "frank: agent run 4242 holds /r/.git/frank-agent-guard.lock; not running the agent"
+        with (
+            caplog.at_level("ERROR"),
+            pytest.raises(AgentCLIRunError, match="agent guard did not start claude"),
+        ):
+            self._run(ExecResult(returncode=97, stdout="", stderr=note + "\n"))
+        messages = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+        assert any("holds /r/.git/frank-agent-guard.lock" in m for m in messages)
+        assert not any("exited with code" in m for m in messages)
+
+    def test_a_missing_binary_names_the_path_fix(self, caplog: pytest.LogCaptureFixture) -> None:
+        note = "frank: claude: command not found; not running the agent"
+        with caplog.at_level("ERROR"), pytest.raises(AgentCLIRunError, match="guard"):
+            self._run(
+                ExecResult(returncode=127, stdout="", stderr=note + "\n"),
+                remote={"mode": "ssh", "ssh_command": ["ssh", "box"]},
+            )
+        message = next(r.getMessage() for r in caplog.records if r.levelname == "ERROR")
+        assert "claude: command not found" in message
+        assert "on the remote" in message
+        assert "full path" in message
+
+    def test_the_agents_own_127_is_the_agent_exiting(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """127 without the guard's note came from inside the agent."""
+        with caplog.at_level("ERROR"), pytest.raises(AgentCLIRunError, match="exited with code"):
+            self._run(ExecResult(returncode=127, stdout="", stderr="sh: rg: not found\n"))
+        assert any("rg: not found" in r.getMessage() for r in caplog.records)
+
+    def test_a_failed_run_logs_the_agents_stderr_not_the_guards(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        stderr = "frank: .claude from an agent run on abc is in /r/x\nrate limited\n"
+        with caplog.at_level("ERROR"), pytest.raises(AgentCLIRunError):
+            self._run(ExecResult(returncode=1, stdout="", stderr=stderr))
+        message = next(r.getMessage() for r in caplog.records if r.levelname == "ERROR")
+        assert "rate limited" in message
+        assert "frank:" not in message
+
+
 class TestUntrustedFramingInAgentPrompts:
     def _cfg(self, focus: str = "general") -> AgentCLIReviewerConfig:
         return AgentCLIReviewerConfig(name="pi", review_focus=focus)  # type: ignore[arg-type]

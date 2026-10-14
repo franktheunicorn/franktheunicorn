@@ -432,7 +432,8 @@ def guard_agent_argv(argv: list[str]) -> list[str]:
     and a grace period before its SIGKILL for exactly this. An agent killed
     outright leaves the entries in the stash, and the next guarded run puts
     them back first. Lines it writes to stderr start with ``frank:``
-    (``guard_notes``).
+    (``guard_notes``, ``agent_stderr``); ``guard_refusal`` tells a run it
+    declined from the agent exiting 97 or 127 itself.
 
     One argv, no stdin, so it goes through ``RemoteSSHExecutor`` in either
     delivery shape and needs only a POSIX ``sh``, ``mv`` and ``git`` on the
@@ -455,6 +456,33 @@ def guard_notes(stderr: str) -> list[str]:
     entry it found the tree had again. The latter comes from a run that
     succeeded, so nothing else would surface it."""
     return [line for line in (stderr or "").splitlines() if line.startswith("frank: ")]
+
+
+def agent_stderr(stderr: str) -> str:
+    """*stderr* without the guard's own lines: what the agent itself said.
+
+    Anything that reads a CLI's stderr for meaning (a refusal, a login failure)
+    reads this, so a guard note can't stand in for the agent or push the
+    agent's first line out of a head-of-output window."""
+    return "\n".join(line for line in (stderr or "").splitlines() if not line.startswith("frank: "))
+
+
+def guard_refusal(returncode: int, stderr: str) -> str:
+    """The guard's reason for not starting the agent, or ``""`` if it started it.
+
+    Both the exit status and the note are required: 127 is also what a shell
+    inside the agent returns for a missing command, and a run that started
+    can still have left a displacement note."""
+    if returncode not in (GUARD_REFUSED_EXIT, 127):
+        return ""
+    return next(
+        (
+            note[len("frank: ") :]
+            for note in guard_notes(stderr)
+            if "; not running the agent" in note
+        ),
+        "",
+    )
 
 
 #: How long a timed-out command gets between TERM and KILL. The agent guard
