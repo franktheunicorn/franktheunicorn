@@ -925,8 +925,14 @@ def _verify_one_branch(
 
     prompt = _build_prompt(report, branch, verifier)
     argv = [*reviewer.cli_argv, *_invocation(reviewer, verifier, prompt)]
-    result = executor.run(argv, cwd=cwd, timeout=verifier.timeout_seconds)
+    from franktheunicorn.review.tool_executor import guard_agent_argv, guard_notes
+
+    # The release branches are the project's own, but anything merged there,
+    # including a hooks file, is someone's; the agent runs without them.
+    result = executor.run(guard_agent_argv(argv), cwd=cwd, timeout=verifier.timeout_seconds)
     duration = time.monotonic() - started
+    for note in guard_notes(result.stderr if result is not None else ""):
+        logger.warning("Verifying report #%s on %s: %s", report.pk, branch, note)
 
     if result is None:
         return BranchResult(

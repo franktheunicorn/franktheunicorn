@@ -333,9 +333,12 @@ class AgentCLIReviewerConfig(BaseModel):
     #: Flags that keep this CLI from editing files, running shell commands or
     #: reaching the operator's MCP servers while it reads someone else's PR. A
     #: reviewer needs to read and search; anything more is what a prompt
-    #: injected into the diff would use. Seeded for ``claude`` and ``codex``
-    #: (``CLAUDE_READONLY_ARGS`` / ``CODEX_READONLY_ARGS``); ``cursor-agent`` gets
-    #: the same property from ``--mode ask`` in its ``extra_args``.
+    #: injected into the diff would use. Seeded for every built-in reviewer
+    #: (``CLAUDE_READONLY_ARGS``, ``CODEX_READONLY_ARGS``,
+    #: ``CURSOR_READONLY_ARGS``, ``PI_READONLY_ARGS``). The checkout's own agent
+    #: config is a separate door and the agent guard
+    #: (``tool_executor.guard_agent_argv``) closes it for every reviewer,
+    #: seeded or not.
     #:
     #: Its own field for the reason ``trust_args`` is: registry merging is field
     #: by field, so an operator overriding ``extra_args`` keeps these. Setting
@@ -461,6 +464,16 @@ CURSOR_READONLY_ARGS: tuple[str, ...] = ("--mode", "ask")
 #: Project hooks need persisted trust in codex, which frank never grants.
 CODEX_READONLY_ARGS: tuple[str, ...] = ("-s", "read-only", "--ignore-user-config")
 
+#: ``pi`` with its four read-only tools. Its default set is read, bash, edit and
+#: write, and the seed used to pass nothing, so a reviewer pointed at a
+#: stranger's PR had a shell. ``--tools`` is an allowlist that also filters
+#: tools an extension registers (``agent-session.js`` ``isAllowedTool`` in
+#: pi-coding-agent 0.73.1). Not ``--no-extensions``: the operator's own
+#: extensions may be what supplies their model provider, and the checkout's
+#: ``.pi/`` (extensions *and* packages, which ``--no-extensions`` would not
+#: stop) is kept away by the agent guard instead.
+PI_READONLY_ARGS: tuple[str, ...] = ("--tools", "read,grep,find,ls")
+
 
 def _default_agent_cli_reviewers() -> list[AgentCLIReviewerConfig]:
     """Seed the registry with the auto-detected agent reviewers.
@@ -488,7 +501,13 @@ def _default_agent_cli_reviewers() -> list[AgentCLIReviewerConfig]:
             prompt_arg="exec",
             readonly_args=list(CODEX_READONLY_ARGS),
         ),
-        AgentCLIReviewerConfig(name="pi", cli_path="pi", prompt_mode="flag", prompt_arg="-p"),
+        AgentCLIReviewerConfig(
+            name="pi",
+            cli_path="pi",
+            prompt_mode="flag",
+            prompt_arg="-p",
+            readonly_args=list(PI_READONLY_ARGS),
+        ),
         # Cursor's headless agent. The binary is ``cursor-agent``, not ``cursor``.
         #
         # ``--mode ask`` is not a preference, it is the safety property: ``-p`` on

@@ -262,9 +262,185 @@ def auth_failure_advice(reviewer_name: str, binary: str, *, remote: bool) -> str
     )
 
 
-def _kill_group(pgid: int) -> None:
+#: Top-level entries of a checkout that an agent CLI reads as its *own*
+#: configuration, through which whoever wrote the checkout can make it run
+#: code. The reviewer runs in a checkout of a stranger's PR, so none of these
+#: may be there while it runs. Found in review, each against the build named:
+#:
+#: - ``claude -p`` loads ``.claude/settings.json``, whose hooks are shell
+#:   commands outside the tool system (claude 2.1.299; ``--setting-sources
+#:   user`` now stops it too).
+#: - cursor-agent's hook loader reads ``.cursor/hooks.json`` *and* the
+#:   Claude-format ``.claude/settings.json`` / ``settings.local.json``, with
+#:   project hooks on by default and ``--trust`` clearing the workspace gate
+#:   (build 2026.10.12-d47ca18). No flag turns project hooks off.
+#: - pi executes ``.pi/extensions/*.ts`` at startup, logged in or not, and
+#:   installs every package ``.pi/settings.json`` lists (``git clone``, or
+#:   ``npm install`` with its lifecycle scripts) even under
+#:   ``--no-extensions`` (0.73.1, both run here). There is no trust gate.
+#: - codex reads ``.codex/config.toml`` and project hooks only for a project
+#:   its config marks trusted, which frank never does; listed so an operator's
+#:   own trust entry can't turn that on behind frank's back.
+#:
+#: Whole directories rather than the files known today: each CLI has added a
+#: project-config file in the last year (``.cursor/cli.json`` permissions,
+#: codex hooks), and the guard should not need a release to keep up. The
+#: ``.gemini``/``.opencode`` entries cover the two agents operators most often
+#: add by hand. The MCP files are here because a server a PR adds is a command
+#: the agent would spawn.
+AGENT_CONFIG_ENTRIES: tuple[str, ...] = (
+    ".claude",
+    ".cursor",
+    ".codex",
+    ".pi",
+    ".gemini",
+    ".opencode",
+    ".mcp.json",
+    "opencode.json",
+    "opencode.jsonc",
+)
+
+#: Exit status of the guard when it could not clear the checkout; the agent did
+#: not run.
+GUARD_REFUSED_EXIT = 97
+#: Where the guard parks the entries, inside the checkout's git dir: git never
+#: tracks it, a linked worktree gets its own, and it sits on the same
+#: filesystem as the tree so the moves are renames.
+GUARD_STASH = "frank-agent-guard"
+_GUARD_NAME = "frank-guard"
+
+# Find the git dir, take the checkout's lock, put back what a killed run left
+# in the stash, move the entries out, run the agent, move them back, release.
+#
+# The lock is defence in depth: the worker's lanes already keep two runs out
+# of one tree, and if two ever met, the second's recovery would hand the
+# first's agent its hooks back. A lock whose pid is gone is stale and taken
+# over; an empty one is held (its owner is between mkdir and writing it).
+#
+# On a killed run's leftovers: an entry the tree no longer has goes straight
+# back. One the tree has again (the next PR's checkout wrote it) wins, and the
+# stashed copy moves beside the stash rather than being deleted, because it
+# may hold the operator's own untracked file. A killed run never blocks that
+# checkout: git treats a missing tracked file as up to date when it switches
+# commits. Each loop has its own variable because sh functions share them.
+_GUARD_SCRIPT = r"""
+have() { [ -e "$1" ] || [ -L "$1" ]; }
+if ! g=$(git rev-parse --absolute-git-dir); then
+  echo "frank: $PWD is not a git checkout; not running the agent" >&2; exit @REFUSED@
+fi
+s="$g/@STASH@"
+l="$s.lock"
+if ! mkdir "$l" 2>/dev/null; then
+  o=$(cat "$l/pid" 2>/dev/null)
+  if [ -z "$o" ] || kill -0 "$o" 2>/dev/null; then
+    echo "frank: agent run ${o:-?} holds $l; not running the agent (remove it if that run is gone)" >&2
+    exit @REFUSED@
+  fi
+fi
+echo "$$" > "$l/pid" || { echo "frank: cannot write $l; not running the agent" >&2; exit @REFUSED@; }
+refuse() { echo "frank: $1; not running the agent" >&2; rm -rf -- "$l"; exit "${2:-@REFUSED@}"; }
+for r in @ENTRIES@; do
+  have "$s/$r" || continue
+  if have "$r"; then
+    k="$s.displaced/$(date +%Y%m%d%H%M%S)-$$"
+    { mkdir -p "$k" && mv -- "$s/$r" "$k/"; } || refuse "cannot clear $s/$r"
+    echo "frank: $r from an interrupted agent run is in $k" >&2
+  else
+    mv -- "$s/$r" "./$r" || refuse "cannot put back $s/$r"
+  fi
+done
+command -v "$1" >/dev/null 2>&1 || refuse "$1: command not found" 127
+mkdir -p "$s" || refuse "cannot create $s"
+restore() {
+  for e in @ENTRIES@; do
+    have "$s/$e" || continue
+    have "$e" && rm -rf -- "./$e"
+    mv -- "$s/$e" "./$e"
+  done
+  rm -rf -- "$l"
+}
+p=
+stop() { [ -n "$p" ] && kill -TERM "$p" 2>/dev/null && wait "$p"; restore; exit "$1"; }
+trap 'stop 129' HUP
+trap 'stop 130' INT
+trap 'stop 143' TERM
+for f in @ENTRIES@; do
+  have "$f" || continue
+  if ! mv -- "./$f" "$s/$f" || have "$f"; then
+    echo "frank: could not move $f out of the checkout; not running the agent" >&2
+    restore; exit @REFUSED@
+  fi
+done
+"$@" &
+p=$!
+wait "$p"
+rc=$?
+restore
+exit "$rc"
+"""
+
+
+def _guard_script() -> str:
+    entries = " ".join(shlex.quote(e) for e in AGENT_CONFIG_ENTRIES)
+    script = _GUARD_SCRIPT
+    for placeholder, value in (
+        ("@ENTRIES@", entries),
+        ("@REFUSED@", str(GUARD_REFUSED_EXIT)),
+        ("@STASH@", GUARD_STASH),
+    ):
+        script = script.replace(placeholder, value)
+    return script.strip() + "\n"
+
+
+def guard_agent_argv(argv: list[str]) -> list[str]:
+    """*argv* wrapped so ``AGENT_CONFIG_ENTRIES`` are absent while it runs.
+
+    One ``sh -c`` call that moves the entries into the checkout's git dir, runs
+    the agent, and moves them back, so the tree afterwards is exactly what it
+    was before: tracked files, the PR's edits to them, and anything untracked
+    the operator keeps there. The agent never starts with an entry in place;
+    if one cannot be moved the status is ``GUARD_REFUSED_EXIT`` and nothing
+    ran. A missing agent binary is 127, checked before anything moves.
+
+    Put back only once the agent has exited. A trapped HUP/INT/TERM forwards
+    TERM to the agent, waits for it, then restores; ``_run_local`` sends TERM
+    and a grace period before its SIGKILL for exactly this. An agent killed
+    outright leaves the entries in the stash, and the next guarded run puts
+    them back first. Lines it writes to stderr start with ``frank:``
+    (``guard_notes``).
+
+    One argv, no stdin, so it goes through ``RemoteSSHExecutor`` in either
+    delivery shape and needs only a POSIX ``sh``, ``mv`` and ``git`` on the
+    agent host, which the executor already assumes. The agent's stdin is
+    ``/dev/null``: none of these CLIs is given a prompt on stdin, and on the
+    remote the shell's stdin is the delivery stream.
+    """
+    return ["sh", "-c", _guard_script(), _GUARD_NAME, *argv]
+
+
+def unwrap_guarded(argv: list[str]) -> list[str]:
+    """The agent argv inside a ``guard_agent_argv`` wrapper; *argv* otherwise."""
+    if len(argv) >= 4 and argv[:2] == ["sh", "-c"] and argv[3] == _GUARD_NAME:
+        return argv[4:]
+    return argv
+
+
+def guard_notes(stderr: str) -> list[str]:
+    """What the guard said on *stderr*: refusals, and where it moved a stashed
+    entry it found the tree had again. The latter comes from a run that
+    succeeded, so nothing else would surface it."""
+    return [line for line in (stderr or "").splitlines() if line.startswith("frank: ")]
+
+
+#: How long a timed-out command gets between TERM and KILL. The agent guard
+#: needs it: its TERM trap waits for the agent to exit and then puts the
+#: checkout's config entries back, which a straight SIGKILL would skip.
+_TERM_GRACE_SECONDS = 10
+
+
+def _kill_group(pgid: int, sig: signal.Signals = signal.SIGKILL) -> None:
     with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.killpg(pgid, signal.SIGKILL)
+        os.killpg(pgid, sig)
 
 
 def _run_local(
@@ -283,7 +459,8 @@ def _run_local(
     still billing. Apache Magpie's adversarial-review runner learned both the
     hard way (``runner.py``, ``_execute``, at the pinned commit) and this is
     its shape. Process stdin is a file too: empty when there is no *stdin*,
-    rather than whatever the worker's own stdin happens to be.
+    rather than whatever the worker's own stdin happens to be. Past *timeout*
+    the group gets TERM and ``_TERM_GRACE_SECONDS`` to act on it first.
 
     Where ``os.killpg`` does not exist (not POSIX), falls back to plain
     ``subprocess.run``.
@@ -305,6 +482,11 @@ def _run_local(
             )
             try:
                 proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                _kill_group(proc.pid, signal.SIGTERM)
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    proc.wait(timeout=_TERM_GRACE_SECONDS)
+                raise
             finally:
                 _kill_group(proc.pid)
                 with contextlib.suppress(subprocess.TimeoutExpired):
@@ -550,10 +732,11 @@ class LocalExecutor:
             logger.warning("CLI not found on PATH: %s", cmd[0] if cmd else "(empty)")
             return None
         except subprocess.TimeoutExpired:
+            agent = unwrap_guarded(cmd)
             logger.warning(
                 "CLI timed out after %ds: %s",
                 timeout,
-                cmd[0] if cmd else "(empty)",
+                agent[0] if agent else "(empty)",
             )
             return None
         return ExecResult(

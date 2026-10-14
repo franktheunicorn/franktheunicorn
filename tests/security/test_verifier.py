@@ -20,7 +20,7 @@ from franktheunicorn.config.models import (
     SecurityVerifierConfig,
 )
 from franktheunicorn.core.models import SecurityVerification
-from franktheunicorn.review.tool_executor import ExecResult
+from franktheunicorn.review.tool_executor import ExecResult, unwrap_guarded
 from franktheunicorn.security.verifier import (
     parse_verdict,
     resolve_verifier_reviewer,
@@ -49,12 +49,18 @@ class _FakeExecutor:
         self.responses = responses
         self.cwd = cwd
         self.calls: list[list[str]] = []
+        self.guarded: list[bool] = []
 
     def prepare_repo(self, owner: str, repo: str, **kwargs: Any) -> str | None:
         self.subdir = kwargs.get("workspace_subdir", "")
         return self.cwd
 
     def run(self, cmd: list[str], cwd: str, timeout: int = 0, stdin: Any = None) -> Any:
+        # The agent runs inside the checkout-config guard; record and match the
+        # agent's own argv, and remember whether it was guarded.
+        unwrapped = unwrap_guarded(cmd)
+        self.guarded.append(unwrapped is not cmd)
+        cmd = unwrapped
         self.calls.append(cmd)
         # git calls match on their subcommand; anything else is the agent and
         # matches on argv[0] alone. Never on the whole argv: the prompt is a
@@ -259,6 +265,16 @@ class TestVerifyReport:
         assert {row.branch for row in rows} >= {"master", "branch-4.0"}
         assert all(row.verdict == "affected" for row in rows)
         assert all(row.commit == "deadbeefcafe" for row in rows)
+
+    def test_every_agent_run_is_guarded_and_no_git_call_is(self) -> None:
+        """Whatever has been merged to a release branch, including an agent hooks
+        file, is someone's; git itself needs no guard."""
+        _, _, executor = self._run(json.dumps({"verdict": "unclear"}))
+        runs = list(zip(executor.calls, executor.guarded, strict=True))
+        agent_runs = [guarded for cmd, guarded in runs if cmd[0] != "git"]
+        git_runs = [guarded for cmd, guarded in runs if cmd[0] == "git"]
+        assert agent_runs and all(agent_runs)
+        assert git_runs and not any(git_runs)
 
     def test_uses_a_distinct_checkout_from_the_review_pipeline(self) -> None:
         """This one gets checked out onto release branches and left there; doing

@@ -288,9 +288,22 @@ digest_enabled: false
 # servers; `--tools Read,Grep,Glob`, an allowlist, since a denylist left
 # Monitor and Workflow available), codex (`-s read-only --ignore-user-config`:
 # codex's MCP servers live in config.toml, and an empty `-c mcp_servers={}`
-# override does not remove them) and cursor-agent (`--mode ask`). Like
+# override does not remove them), cursor-agent (`--mode ask`) and pi
+# (`--tools read,grep,find,ls`; its default set includes bash). Like
 # `trust_args`, it is its own field so an `extra_args` override keeps it. Set
 # `readonly_args: []` to opt out; the worker warns at startup when you do.
+#
+# THE CHECKOUT'S OWN AGENT CONFIG. Separately from those flags, every agent
+# run (reviewers and the security verifier, seeded or yours) is wrapped so
+# the checkout's .claude/ .cursor/ .codex/ .pi/ .gemini/ .opencode/ .mcp.json
+# and opencode.json(c) are moved into the checkout's .git/frank-agent-guard/
+# while the agent runs and moved back after. A PR can put hooks, extensions,
+# MCP servers or package lists there that the CLI would execute on startup:
+# cursor-agent loads project hooks with --trust and has no flag to stop it,
+# and pi runs .pi/extensions and installs .pi/settings.json packages with no
+# trust prompt at all. Nothing to configure; the remote host needs only sh,
+# mv and git. If a run is killed outright the entries wait in that directory
+# and the next run puts them back.
 # agent_cli_reviewers:
 #   - name: "claude"
 #     enabled: "auto"                # "auto" (default) | true | false
@@ -312,6 +325,7 @@ digest_enabled: false
 #   - name: "pi"
 #     prompt_mode: "flag"
 #     prompt_arg: "-p"
+#     # readonly_args: ["--tools", "read,grep,find,ls"] is seeded
 #   - name: "cursor-agent"           # the binary is cursor-agent, not cursor
 #     prompt_mode: "flag"
 #     prompt_arg: "-p"
@@ -319,7 +333,9 @@ digest_enabled: false
 #                                    # is an alias for --force ("allow commands
 #                                    # unless explicitly denied") — a much bigger
 #                                    # grant than "this is the directory I meant"
-#     extra_args: ["--mode", "ask"]  # read-only Q&A mode; the actual containment
+#     # readonly_args: ["--mode", "ask"] is seeded: read-only Q&A mode, the
+#     # actual containment. It used to sit in extra_args, where an override
+#     # dropped it.
 #
 # Two models, one binary. `name` is the identity (findings, agent_runs);
 # `command` is the binary (`cli_path` is the same field). A second entry

@@ -625,7 +625,7 @@ def _check_agent_cli_reviewers(operator_config: OperatorConfig) -> None:
 
 #: Binaries frank ships read-only flags for; an entry for one of them with empty
 #: ``readonly_args`` has had them overridden away, which the startup check names.
-_READONLY_SEEDED_BINARIES = frozenset({"claude", "codex", "cursor-agent"})
+_READONLY_SEEDED_BINARIES = frozenset({"claude", "codex", "cursor-agent", "pi"})
 
 #: Echoed through the remote command path to prove a command actually ran there.
 _REMOTE_PROBE_SENTINEL = "frank-remote-ok"

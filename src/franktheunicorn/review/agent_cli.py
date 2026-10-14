@@ -362,9 +362,15 @@ def run_agent_cli_review(
         timeout,
         len(diff),
     )
+    from franktheunicorn.review.tool_executor import guard_agent_argv, guard_notes
+
     started = time.monotonic()
-    result = executor.run(cmd, cwd=cwd, timeout=timeout)
+    # The checkout is the PR author's; its agent config is moved out for the
+    # run (see tool_executor.AGENT_CONFIG_ENTRIES).
+    result = executor.run(guard_agent_argv(cmd), cwd=cwd, timeout=timeout)
     elapsed = time.monotonic() - started
+    for note in guard_notes(result.stderr if result is not None else ""):
+        logger.warning("%s review in %s: %s", config.name, cwd, note)
     if result is None:
         # The single loudest silent failure on this path: for a RemoteSSHExecutor
         # this is "the ssh_command did not come back" — a bad `ssh_command`, an

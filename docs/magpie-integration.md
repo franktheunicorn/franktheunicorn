@@ -443,9 +443,11 @@ effort. "Done" means it is on this branch with tests.
 - **What.** A `readonly_args` field on `AgentCLIReviewerConfig`, seeded so the
   `claude` reviewer runs with `--setting-sources user --strict-mcp-config
   --tools Read,Grep,Glob`, `codex exec` with `-s read-only
-  --ignore-user-config`, and `cursor-agent` with `--mode ask` (moved out of
+  --ignore-user-config`, `cursor-agent` with `--mode ask` (moved out of
   its `extra_args`, where an override silently dropped it; a config that
-  still restates it there passes it once). Both lenses scored it 4 or 5.
+  still restates it there passes it once), and `pi` with `--tools
+  read,grep,find,ls` (its default set includes bash, edit and write, and the
+  seed passed nothing). Both lenses scored it 4 or 5.
 - **Found in review: a denylist leaks.** The first version used Magpie's
   `--disallowedTools Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch,Task`.
   With claude 2.1.299 the session's init event still listed 34 tools,
@@ -467,9 +469,8 @@ effort. "Done" means it is on this branch with tests.
   contributor could run code on the worker by adding that file to a PR.
   Reproduced with claude 2.1.299 (a SessionStart hook in the checkout ran
   under the other flags, not with this one); this predates the read-only
-  work, which is where it was caught. Whether `cursor-agent` and `codex` load
-  equivalent project-level hooks from the checkout is an open question
-  (section 9).
+  work, which is where it was caught. `cursor-agent` and `pi` turned out to
+  have the same door with no flag to shut it; 4.18 closes it for every agent.
 - **Why.** These reviewers run inside a checkout of someone else's PR. With
   a shell, an editor and the operator's MCP servers, an instruction planted
   in the diff has somewhere to go. `cursor-agent` already ran `--mode ask`;
@@ -626,6 +627,77 @@ effort. "Done" means it is on this branch with tests.
   and `tools/contributor-metrics` (`MAINTAINER_ASSOC`) at the pinned commit;
   the detection table exists at 0.1.0.
 - **Remote path.** Worker host only.
+
+### 4.18 Agents never start with the checkout's own agent config (done)
+
+- **What.** Every agent run, review or security verification, seeded
+  reviewer or the operator's own, goes through `guard_agent_argv`: one
+  `sh -c` that moves the checkout's `.claude`, `.cursor`, `.codex`, `.pi`,
+  `.gemini`, `.opencode`, `.mcp.json` and `opencode.json(c)` into
+  `.git/frank-agent-guard/`, runs the agent, and moves them back. The agent
+  never starts with one in place: an entry that will not move ends the run
+  with status 97 before the agent starts, and a missing binary is 127
+  before anything moves. Whole directories and links, not files inside
+  them, so a `.claude -> ~/.claude` symlink hides the link and leaves the
+  operator's directory alone.
+- **Why.** A PR can carry config that an agent CLI executes on startup, and
+  the reviewer runs in that PR's checkout. Read-only flags (4.11) do not
+  reach it, because none of it goes through the tool system:
+  - `claude -p` runs the hooks in `.claude/settings.json` (reproduced with
+    2.1.299). `--setting-sources user` also stops it.
+  - cursor-agent's hook loader (build 2026.10.12-d47ca18) reads
+    `.cursor/hooks.json` and the Claude-format `.claude/settings.json` and
+    `settings.local.json`. `loadProjectHooks` defaults to true and `--trust`,
+    which frank must pass, clears the workspace gate. No flag turns it off.
+    This was read from the bundle and not executed, because auth is checked
+    first. [Cursor's hooks documentation](https://cursor.com/docs/hooks)
+    describes project hooks, and [Cursor closed a pre-trust command-execution
+    gap](https://thearabianpost.com/cursor-closes-command-execution-gap-before-workspace-trust/)
+    in the IDE, which `--trust` sidesteps by design.
+  - pi 0.73.1, run here: `.pi/extensions/*.ts` executed at startup with no
+    credentials and no prompt, and a package listed in `.pi/settings.json`
+    was `git clone`d even under `--no-extensions`. An `npm:` package would
+    have run its install scripts.
+  - codex loads `.codex/config.toml` and project hooks only for a project its
+    config marks trusted, which frank never does (read from the codex-rs
+    config loader). It is listed anyway, so an operator's own trust entry
+    cannot switch it on behind frank's back.
+- **What comes back.** Restoring is a move back, not a `git checkout`, so the
+  tree afterwards is exactly what it was. That includes the PR's uncommitted
+  state and anything untracked the operator keeps in the clone: the first
+  draft deleted files with `rm`, which would have lost a hand-written
+  `.claude/settings.local.json` for good. The restore waits for the agent to
+  exit: the guard runs it in the background and traps HUP, INT and TERM,
+  and `_run_local` now sends TERM with a 10s grace before its SIGKILL. A run
+  killed outright leaves the entries in the stash, and the next guarded run
+  puts them back before anything else. When the tree has the entry again in
+  the meantime (the next PR's checkout wrote it), the tree's copy wins and
+  the stashed one moves to `.git/frank-agent-guard.displaced/`, never
+  deleted, with a WARNING naming where. A killed run does not block the next
+  checkout, because git treats a missing tracked file as up to date when it
+  switches commits; a test pins that. A lock directory beside the stash,
+  holding the run's pid, refuses a second run in the same checkout while the
+  first is alive. The worker's lanes already prevent that, but if two ever
+  met, the second's recovery would hand the first agent its hooks back. A
+  lock whose pid is gone is taken over.
+- **Where.** `review/tool_executor.py` (`AGENT_CONFIG_ENTRIES`,
+  `guard_agent_argv`, `unwrap_guarded`, `guard_notes`, the TERM grace),
+  `review/agent_cli.py` and `security/verifier.py` (the two agent call
+  sites). The `agent-cli` LLM backend is not wrapped: it runs in an empty
+  scratch directory, not a checkout.
+- **Upstream source.** None. Magpie's adversarial-review runner starts its
+  agents with the repository under review as their working directory
+  (`runner.py`, `ctx.repo_dir`, at the pinned commit) and nothing moved
+  aside, so the same finding applies to it (section 7).
+- **Remote path.** One argv and no stdin, so it fits both delivery shapes.
+  The agent's stdin is `/dev/null`, so it cannot eat the rest of a
+  stdin-delivered script. The host needs a POSIX `sh`, `mv` and `git`, all
+  already assumed. Tests run the real script under dash and `bash --posix`,
+  through stdin delivery and through argv delivery.
+- **Not covered.** Prompt material the CLIs read from the checkout
+  (`AGENTS.md`, `CLAUDE.md`, and `.cursor/rules` outside a guarded run) can
+  still steer a review. That is an integrity problem, not code execution,
+  and the untrusted-content framing (4.4) is the defence there.
 
 ---
 

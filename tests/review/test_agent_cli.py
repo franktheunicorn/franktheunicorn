@@ -11,6 +11,7 @@ import pytest
 from franktheunicorn.config.models import (
     CLAUDE_READONLY_ARGS,
     CODEX_READONLY_ARGS,
+    PI_READONLY_ARGS,
     AgentCLIReviewerConfig,
     ClaudeCLIConfig,
     OperatorConfig,
@@ -24,7 +25,7 @@ from franktheunicorn.review.agent_cli import (
     create_drafts_from_agent_cli,
     run_agent_cli_review,
 )
-from franktheunicorn.review.tool_executor import ExecResult
+from franktheunicorn.review.tool_executor import ExecResult, unwrap_guarded
 from franktheunicorn.worker.runner import resolve_agent_cli_reviewers
 from tests.factories import AntiPatternFactory
 
@@ -157,6 +158,33 @@ class TestRunAgentCLIReview:
         assert findings[0].file_path == "src/auth/session.py"
         assert findings[0].severity == "high"
 
+    def test_the_agent_runs_inside_the_checkout_guard(self) -> None:
+        """The diff read is plain git; the agent itself never starts with the
+        checkout's own agent config in place."""
+        diff_result = ExecResult(returncode=0, stdout="diff --git a/x b/x\n+pass\n", stderr="")
+        cli_result = ExecResult(returncode=0, stdout="Review completed", stderr="")
+        executor = _executor_returning(diff_result, cli_result)
+        run_agent_cli_review(
+            cwd="/tmp/repo", base_commit="abc", config=self._config(), executor=executor
+        )
+        diff_call, agent_call = (c.args[0] for c in executor.run.call_args_list)
+        assert diff_call[0] == "git"
+        assert agent_call[:2] == ["sh", "-c"]
+        assert unwrap_guarded(agent_call)[:2] == ["codex", "exec"]
+
+    def test_what_the_guard_moved_aside_is_logged(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A run that succeeds would otherwise swallow the one line saying where
+        an interrupted run's stashed config went."""
+        note = "frank: .claude from an interrupted agent run is in /w/.git/x"
+        diff_result = ExecResult(returncode=0, stdout="diff --git a/x b/x\n+pass\n", stderr="")
+        cli_result = ExecResult(returncode=0, stdout="Review completed", stderr=note + "\n")
+        executor = _executor_returning(diff_result, cli_result)
+        with caplog.at_level("WARNING"):
+            run_agent_cli_review(
+                cwd="/tmp/repo", base_commit="abc", config=self._config(), executor=executor
+            )
+        assert any(note in r.getMessage() and r.levelname == "WARNING" for r in caplog.records)
+
     def test_subcommand_prompt_is_positional(self) -> None:
         diff_result = ExecResult(returncode=0, stdout="diff --git a/x b/x\n+pass\n", stderr="")
         cli_result = ExecResult(returncode=0, stdout="Review completed", stderr="")
@@ -164,7 +192,7 @@ class TestRunAgentCLIReview:
         run_agent_cli_review(
             cwd="/tmp/repo", base_commit="abc", config=self._config(), executor=executor
         )
-        cmd = executor.run.call_args_list[1].args[0]
+        cmd = unwrap_guarded(executor.run.call_args_list[1].args[0])
         # codex exec <prompt> — subcommand first, prompt is the last argument.
         assert cmd[:2] == ["codex", "exec"]
         assert "You are a senior code reviewer" in cmd[-1]
@@ -224,7 +252,7 @@ class TestRunAgentCLIReview:
             config=self._config(max_diff_chars=10_000),
             executor=executor,
         )
-        prompt = executor.run.call_args_list[1].args[0][-1]
+        prompt = unwrap_guarded(executor.run.call_args_list[1].args[0])[-1]
         assert "[...diff truncated...]" in prompt
 
     def test_model_flag_passed_through(self) -> None:
@@ -237,7 +265,7 @@ class TestRunAgentCLIReview:
             config=self._config(model="gpt-5"),
             executor=executor,
         )
-        cmd = executor.run.call_args_list[1].args[0]
+        cmd = unwrap_guarded(executor.run.call_args_list[1].args[0])
         assert "--model" in cmd
         assert cmd[cmd.index("--model") + 1] == "gpt-5"
 
@@ -265,7 +293,7 @@ class TestSecurityFocus:
         run_agent_cli_review(
             cwd="/tmp/repo", base_commit="abc", config=config, executor=executor, **kwargs
         )
-        return executor.run.call_args_list[1].args[0][-1]
+        return unwrap_guarded(executor.run.call_args_list[1].args[0])[-1]
 
     def test_default_focus_is_general(self) -> None:
         cfg = AgentCLIReviewerConfig(name="pi")
@@ -808,6 +836,14 @@ class TestReadOnlyFlags:
         # skipping the user config keeps the operator's MCP servers away.
         assert "--ignore-user-config" in argv
         assert "mcp_servers={}" not in argv
+
+    def test_pi_seed_gets_only_its_read_only_tools(self) -> None:
+        """pi's default tools include bash, edit and write; the seed passed none
+        of its own flags, so the reviewer had a shell in the PR's checkout."""
+        pi = self._by_name(OperatorConfig())["pi"]
+        argv = [*pi.cli_argv, *pi.build_invocation("REVIEW")]
+        assert argv == ["pi", *PI_READONLY_ARGS, "-p", "REVIEW"]
+        assert argv[argv.index("--tools") + 1] == "read,grep,find,ls"
 
     def test_cursor_agent_keeps_ask_mode_through_an_extra_args_override(self) -> None:
         """``--mode ask`` used to live in the seed's extra_args, where any

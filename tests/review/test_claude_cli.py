@@ -16,7 +16,7 @@ from franktheunicorn.review.claude_cli import (
     create_drafts_from_claude_cli,
     run_claude_cli_review,
 )
-from franktheunicorn.review.tool_executor import ExecResult
+from franktheunicorn.review.tool_executor import ExecResult, unwrap_guarded
 from tests.factories import AntiPatternFactory
 
 FIXTURES_DIR = Path(__file__).parent.parent / "fixtures"
@@ -222,7 +222,7 @@ class TestClaudeCLICliArgv:
 
         # The second executor.run call is the actual CLI invocation.
         cli_call = executor.run.call_args_list[1]
-        cmd = cli_call.args[0]
+        cmd = unwrap_guarded(cli_call.args[0])
         assert cmd[:3] == ["corp-wrap", "claude", "--headless"]
 
     def test_empty_rejected(self) -> None:
