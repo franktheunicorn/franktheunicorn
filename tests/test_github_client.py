@@ -778,7 +778,8 @@ class TestMergeReadinessEndpoints:
             json={"check_runs": [{"name": "last", "status": "completed", "conclusion": "success"}]},
         )
         httpx_mock.add_response(
-            url="https://api.github.test/repos/org/repo/commits/abc/status?per_page=100", json={"statuses": []}
+            url="https://api.github.test/repos/org/repo/commits/abc/status?per_page=100",
+            json={"statuses": []},
         )
         checks = client.get_commit_checks("org", "repo", "abc")
         assert len(checks) == 101
