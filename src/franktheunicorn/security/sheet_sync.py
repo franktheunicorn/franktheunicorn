@@ -61,6 +61,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from franktheunicorn.core.models import SecurityReport, SecuritySheetSnapshot
+from franktheunicorn.security import agent_source
 
 if TYPE_CHECKING:
     # Structural, not TextIO: the export writes to a real file, to a StringIO and
@@ -174,6 +175,10 @@ _HEADER = (
     "priority_reason",
     "source",
     "source_archive",
+    # Read-only. A reviewer weighing a finding should know a scanner wrote it,
+    # and the export can be scoped to one agent, so a sheet of "agent X's
+    # reports" carries the column that proves its own premise.
+    "source_agent",
     "finding_id",
     "created",
 )
@@ -370,6 +375,7 @@ def _row_for(report: SecurityReport, *, full: bool) -> dict[str, str]:
         "priority_reason": report.priority_reason,
         "source": report.source,
         "source_archive": report.source_archive,
+        "source_agent": report.source_agent,
         "finding_id": report.finding_id,
         # Date only. A full timestamp is noise in a review sheet, and Sheets
         # reformats it on import anyway — nothing here parses it back.
@@ -456,7 +462,7 @@ class _RowBuffer:
         return joined
 
 
-def export_filename(*, full: bool = False, status: str = "") -> str:
+def export_filename(*, full: bool = False, status: str = "", agent: str = "") -> str:
     """A filename that says what the sheet is, dated, for a Downloads folder.
 
     The status filter is in there because without it two differently-scoped
@@ -467,9 +473,16 @@ def export_filename(*, full: bool = False, status: str = "") -> str:
     :meth:`SecurityReport.list_filters` before it reaches here — statuses plus the
     cross-cutting filters, all of them filename-safe literals, which is what lets
     this interpolate the value straight into a ``Content-Disposition``.
+
+    *agent* is an agent scope for the same reason — a sheet of one agent's
+    findings and a sheet of everything must not share a name — and is just as
+    safe to interpolate: :func:`agent_source.parse_scope` folds it to
+    ``[a-z0-9._-]``. ``all`` is no scope and adds nothing.
     """
     stamp = timezone.now().date().isoformat()
     scope = f"-{status}" if status else ""
+    if agent and agent != agent_source.SCOPE_ALL:
+        scope += f"-agent-{agent}"
     suffix = "-full" if full else ""
     return f"security-review{scope}-{stamp}{suffix}.csv"
 
@@ -1204,15 +1217,24 @@ def reports_for_export(
     project: str = "",
     limit: int | None = None,
     sort: str = DEFAULT_EXPORT_SORT,
+    agent: str = agent_source.SCOPE_ALL,
 ) -> QuerySet[SecurityReport]:
     """The export selection, ordered the way the list page is ordering it.
 
     Defaults to priority because that's the order the sheet should be reviewed in
     and a reviewer works top-down; an unknown *sort* falls back to it rather than
     erroring, matching the list view.
+
+    *agent* is the list page's source scope (see :mod:`agent_source`). Callers
+    parse it first and refuse what doesn't parse: a scope silently widened to
+    ``all`` here is the whole backlog in a shared sheet.
     """
     order = EXPORT_SORTS.get(sort, EXPORT_SORTS[DEFAULT_EXPORT_SORT])
-    reports = SecurityReport.objects.select_related("project").order_by(*order)
+    reports = (
+        SecurityReport.objects.select_related("project")
+        .filter(agent_source.scope_q(agent))
+        .order_by(*order)
+    )
     if status == SecurityReport.CVE_NO_BRANCH_FILTER:
         # Not a status — the list page's cross-cutting "assigned a CVE, nothing
         # fixing it" tab. Accepted here because the export's whole contract is

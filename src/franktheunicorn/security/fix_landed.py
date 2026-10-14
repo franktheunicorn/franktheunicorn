@@ -45,6 +45,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 from franktheunicorn.core.models import SecurityReport
+from franktheunicorn.security import agent_source
 from franktheunicorn.security.branch_scan import _prepare
 from franktheunicorn.security.release_tags import (
     DEFAULT_RULE,
@@ -127,17 +128,24 @@ class FixLandedRun:
         return line
 
 
-def check_project_fixes(project: Project, operator_config: OperatorConfig) -> FixLandedRun:
+def check_project_fixes(
+    project: Project,
+    operator_config: OperatorConfig,
+    *,
+    agent_scope: str = agent_source.SCOPE_ALL,
+) -> FixLandedRun:
     """Check every fix-branch-carrying report of *project* against origin.
 
     Never raises: a run that could not start carries ``error``, which is a
     different thing from having looked and found nothing provable. Reports
     already known ``released`` are left out — tags do not un-happen, so that
-    verdict never needs re-checking.
+    verdict never needs re-checking. *agent_scope* narrows to one source's
+    reports (see :mod:`agent_source`).
     """
     run = FixLandedRun(project=project.full_name)
     reports = list(
         SecurityReport.objects.filter(project=project)
+        .filter(agent_source.scope_q(agent_scope))
         .exclude(status__in=SecurityReport.NO_FIX_OWED_STATUSES)
         .filter(Q(fix_branch__gt="") | Q(fix_branch_sha__gt="") | Q(fixed_in_branch__gt=""))
         .exclude(fix_landed_status=RELEASED)
@@ -216,7 +224,12 @@ class CveFixLandedRun:
         return f"{self.project}: {self.match_summary} / {self.landed_summary}"
 
 
-def check_cve_fixes(project: Project, operator_config: OperatorConfig) -> CveFixLandedRun:
+def check_cve_fixes(
+    project: Project,
+    operator_config: OperatorConfig,
+    *,
+    agent_scope: str = agent_source.SCOPE_ALL,
+) -> CveFixLandedRun:
     """Tie fix branches, then test whether they landed — the CVE button's sweep.
 
     The match half runs first because its strongest signal is the report's CVE
@@ -229,12 +242,14 @@ def check_cve_fixes(project: Project, operator_config: OperatorConfig) -> CveFix
     from franktheunicorn.security.branch_scan import match_fix_branches
 
     run = CveFixLandedRun(project=project.full_name)
-    match_run = match_fix_branches(project, operator_config)
+    match_run = match_fix_branches(project, operator_config, agent_scope=agent_scope)
     if match_run.error:
         run.error = match_run.error
         return run
     run.match_summary = match_run.summary()
-    run.landed_summary = check_project_fixes(project, operator_config).summary()
+    run.landed_summary = check_project_fixes(
+        project, operator_config, agent_scope=agent_scope
+    ).summary()
     return run
 
 

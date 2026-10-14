@@ -34,6 +34,7 @@ from franktheunicorn.core.models import (
     SecurityTriageFeedback,
     SecurityTriageGuidance,
     TestRun,
+    WorkerCommand,
 )
 from franktheunicorn.review.backends.stub_backend import StubBackend
 
@@ -284,6 +285,24 @@ class SecurityRecheckRunFactory(factory.django.DjangoModelFactory):  # type: ign
     status = "launched"
     report_count = 1
     detail = ""
+
+
+class WorkerCommandFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
+    """Factory for WorkerCommand (a job queued for the worker) instances.
+
+    Targetless by default, like the git sweeps and the recheck poll; a test that
+    needs a target passes ``security_report=`` or ``pull_request=``. Built through
+    the model rather than ``security.queue`` on purpose: a test of the queue's
+    dedup needs rows the queue didn't vet.
+    """
+
+    class Meta:
+        model = WorkerCommand
+
+    command = "match_security_branches"
+    status = "pending"
+    priority = 0
+    kwargs = factory.LazyFunction(dict)
 
 
 def patched_report(**kwargs: Any) -> Any:

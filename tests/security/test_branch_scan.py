@@ -892,3 +892,52 @@ class TestProjectSelection:
         SecurityReportFactory(project=project)
         SecurityReportFactory(project=project)
         assert projects_with_open_reports() == [project]
+
+
+@pytest.mark.django_db
+class TestAgentScope:
+    """A press scoped to one agent's reports sweeps those reports and no others."""
+
+    def test_project_selection_honours_the_scope(self) -> None:
+        human_only, agent_only = ProjectFactory(), ProjectFactory()
+        SecurityReportFactory(project=human_only, source_agent="")
+        SecurityReportFactory(project=agent_only, source_agent="xbow")
+
+        # No fetch for a project that has none of the scope's reports.
+        assert projects_with_open_reports("xbow") == [agent_only]
+        assert projects_with_open_reports("none") == [human_only]
+        assert projects_with_open_reports() == [human_only, agent_only]
+
+    def test_the_branch_match_only_considers_the_scopes_reports(self) -> None:
+        project = ProjectFactory()
+        agents = SecurityReportFactory(
+            project=project, matched_cve_id="CVE-2025-12345", source_agent="xbow"
+        )
+        persons = SecurityReportFactory(
+            project=project, matched_cve_id="CVE-2025-12345", source_agent=""
+        )
+        executor = _GitExecutor(
+            {
+                "--format=%s%n%b%n": ExecResult(0, "", ""),
+                "--name-only": ExecResult(0, "", ""),
+            }
+        )
+
+        with patch("franktheunicorn.review.tool_executor.make_executor", return_value=executor):
+            run = match_fix_branches(project, _operator(), agent_scope="xbow")
+
+        agents.refresh_from_db()
+        persons.refresh_from_db()
+        assert run.reports_considered == 1
+        assert agents.fixed_in_branch == "fix-cve-2025-12345"
+        assert persons.fixed_in_branch == ""
+
+    def test_the_fixed_scan_skips_reports_outside_the_scope_before_any_git(self) -> None:
+        project = ProjectFactory()
+        SecurityReportFactory(project=project, proposed_patch=_PATCH, source_agent="")
+
+        with patch("franktheunicorn.security.branch_scan._prepare") as prepare:
+            run = scan_already_fixed(project, _operator(), agent_scope="xbow")
+
+        assert run.reports_considered == 0
+        assert not prepare.called

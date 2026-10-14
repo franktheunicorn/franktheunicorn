@@ -1294,6 +1294,32 @@ class TestRedetectAcrossBacklog:
         report.refresh_from_db()
         assert report.duplicate_of_id == elsewhere.pk
 
+    def test_a_link_to_a_report_outside_the_sweep_is_not_repointed(self) -> None:
+        """The link half follows the clear half's rule. A scoped press (one agent's
+        reports) groups two of that agent's findings; the newer already pointed at a
+        person's report of the same hole, which the model was never shown — so
+        "grouped with the older finding" says nothing about that link."""
+        from franktheunicorn.security.duplicates import redetect_across_backlog
+
+        project = ProjectFactory(owner="apache", repo="spark")
+        person = SecurityReportFactory(project=project, source_agent="", **_RPC_REPORT)
+        older = SecurityReportFactory(project=project, source_agent="codex", **_RPC_REPORT)
+        newer = SecurityReportFactory(
+            project=project,
+            source_agent="codex",
+            duplicate_of=person,
+            duplicate_confidence=0.9,
+            **_RPC_REPORT,
+        )
+
+        result = redetect_across_backlog(
+            [older, newer], _config(), CannedLLMBackend(_groups_response([older.pk, newer.pk]))
+        )
+
+        assert result == (0, 0)
+        newer.refresh_from_db()
+        assert newer.duplicate_of_id == person.pk
+
     def test_a_coincidental_finding_id_collision_is_not_linked(self) -> None:
         """The external key is not identity: two reports sharing a per-archive
         sequence id from different archives are linked only if the titles say so

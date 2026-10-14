@@ -1371,6 +1371,16 @@ class SecurityReport(models.Model):
     # what was scanned.
     source_archive = models.CharField(max_length=255, blank=True, default="")
 
+    # Which automated agent produced this report, or "" for one a person sent.
+    # Orthogonal to ``source``, which is the *door* (paste, email, zip): another
+    # agent's findings arrive through all three, and a human's backlog arrives as
+    # a zip too. Named by the operator at import — no archive we've seen says who
+    # wrote it, and guessing from a manifest's shape is wrong exactly when it
+    # matters. Normalised by ``security.agent_source.clean_agent_name`` so
+    # "Claude Code" and "claude-code" are one filter, not two. Indexed because
+    # every bulk button and the list's source row filter on it.
+    source_agent = models.CharField(max_length=100, blank=True, default="", db_index=True)
+
     # Email metadata (populated when source=email)
     email_message_id = models.CharField(max_length=500, blank=True, default="")
     email_received_at = models.DateTimeField(null=True, blank=True)
@@ -1517,6 +1527,12 @@ class SecurityRecheckRun(models.Model):
     #: project alone — that identifies a run within a batch, and it is what makes
     #: the uniqueness constraint below expressible.
     chunk_index = models.IntegerField(default=0)
+    #: The security list's source scope the run was launched under ("all", "none",
+    #: "any" or an agent name — see ``security.agent_source``). Recorded because a
+    #: scoped press covers only part of a project: without it, a run over one
+    #: agent's reports made every later press for that project read as "already
+    #: running", and the reports outside that agent were in no agent's prompt.
+    agent_scope = models.CharField(max_length=100, default="all")
     #: Where it landed: verdict counts on success, the failure reason otherwise.
     detail = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(default=timezone.now)

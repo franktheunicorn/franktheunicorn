@@ -190,6 +190,35 @@ class TestFileSecurityReport:
         assert "PR #99" in report.title
         assert "clear injection attempt" in report.raw_text
         assert SecurityReport.objects.count() == 1
+        # frank's own output is an agent's output: not in the people-sent scope.
+        assert report.source_agent == "franktheunicorn-prefilter"
+
+    def test_the_migration_labels_pre_filter_reports_filed_before_the_field(self, db: Any) -> None:
+        import importlib
+
+        from django.apps import apps
+
+        from franktheunicorn.core.models import SecurityReport
+        from tests.factories import SecurityReportFactory
+
+        migration = importlib.import_module(
+            "franktheunicorn.core.migrations.0066_securityreport_source_agent"
+        )
+        filed = SecurityReportFactory(
+            reporter_name="franktheunicorn (auto pre-filter)",
+            operator_notes="[prefilter:pr-1-7]",
+            source_agent="",
+        )
+        # Same reporter name typed by a person, no marker: left alone.
+        lookalike = SecurityReportFactory(
+            reporter_name="franktheunicorn (auto pre-filter)", operator_notes=""
+        )
+        person = SecurityReportFactory(reporter_name="Ryan")
+
+        migration._label_prefilter_reports(apps, None)
+
+        labels = dict(SecurityReport.objects.values_list("pk", "source_agent"))
+        assert labels == {filed.pk: "franktheunicorn-prefilter", lookalike.pk: "", person.pk: ""}
 
     def test_no_report_on_clean_verdict(self, db: Any) -> None:
         from franktheunicorn.core.models import SecurityReport

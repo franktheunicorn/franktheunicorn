@@ -889,7 +889,9 @@ def redetect_across_backlog(
       question was asked.
     * **Link** every member of each group the model called out, at the group's
       canonical (oldest) report. ``link_duplicate`` still has the final word on
-      cycles and hand-set links.
+      cycles and hand-set links. A member that already carries an auto-link to a
+      report the model did not see alongside it keeps that link — the same "only
+      an answer when the question was asked" rule as the clear half.
 
     Clear runs first because ``link_duplicate`` resolves a new link's canonical
     through existing ones: written first, a group member's link would chain
@@ -955,8 +957,29 @@ def redetect_across_backlog(
 
         for group in sweep.groups:
             for member_id in group.ids[1:]:
+                member = by_id[member_id]
+                current = member.duplicate_of_id
+                if (
+                    current is not None
+                    and member.duplicate_confidence is not None
+                    and not any(member_id in chunk and current in chunk for chunk in sweep.chunks)
+                ):
+                    # The clear half's rule, applied to the link half: "grouped with
+                    # X" is no answer about a link to a report the model was never
+                    # shown. That target is in another chunk, or outside a scoped
+                    # press altogether (the agent filter on the security list), and
+                    # repointing the link here silently dropped the one place an
+                    # agent's finding pointed at a person's report of the same hole.
+                    logger.info(
+                        "Re-check: leaving report #%s's duplicate link to #%s; the "
+                        "model was not shown #%s, so its grouping says nothing about it.",
+                        member_id,
+                        current,
+                        current,
+                    )
+                    continue
                 match = _group_match(group, member_id)
-                if match is not None and link_duplicate(by_id[member_id], match):
+                if match is not None and link_duplicate(member, match):
                     linked += 1
 
     if swept and not any_answered:

@@ -40,6 +40,7 @@ from django.db.models import QuerySet
 from django.utils import timezone
 
 from franktheunicorn.core.models import SecurityReport
+from franktheunicorn.security import agent_source
 from franktheunicorn.security.fix_agent import base_branch_for
 from franktheunicorn.security.verifier import (
     _checkout,
@@ -623,15 +624,19 @@ def score_branch(candidate: _Candidate, evidence: BranchEvidence) -> BranchMatch
     return None
 
 
-def _candidates_for(project: Project) -> list[_Candidate]:
+def _candidates_for(
+    project: Project, agent_scope: str = agent_source.SCOPE_ALL
+) -> list[_Candidate]:
     """Reports of *project* with no branch recorded yet, most important first.
 
     Reports whose status says no fix is owed are left out: for those, no branch
     *is* the answer rather than a gap, which is the same call
-    ``cve_without_branch_q`` makes.
+    ``cve_without_branch_q`` makes. *agent_scope* narrows to one source's
+    reports (see :mod:`agent_source`); the branch walk is the same either way.
     """
     reports = (
         SecurityReport.objects.filter(project=project, fixed_in_branch="")
+        .filter(agent_source.scope_q(agent_scope))
         .exclude(status__in=SecurityReport.NO_FIX_OWED_STATUSES)
         .prefetch_related("verifications")
         .order_by("-priority", "pk")
@@ -654,7 +659,12 @@ def _candidates_for(project: Project) -> list[_Candidate]:
     return candidates
 
 
-def match_fix_branches(project: Project, operator_config: OperatorConfig) -> BranchMatchRun:
+def match_fix_branches(
+    project: Project,
+    operator_config: OperatorConfig,
+    *,
+    agent_scope: str = agent_source.SCOPE_ALL,
+) -> BranchMatchRun:
     """Fetch origin and tie a branch to every report of *project* that lacks one.
 
     Never raises: a run that could not start carries ``error``, which is a
@@ -679,7 +689,7 @@ def match_fix_branches(project: Project, operator_config: OperatorConfig) -> Bra
     # whose backlog is fully tied paid for a full `git fetch --all` of a
     # Spark-sized mirror and then logged "every report already has a branch".
     # Two buttons times N projects times one pointless fetch each.
-    candidates = _candidates_for(project)
+    candidates = _candidates_for(project, agent_scope)
     run.reports_considered = len(candidates)
     if not candidates:
         logger.info("Branch match for %s: every report already has a branch.", project.full_name)
@@ -780,7 +790,9 @@ def _apply(candidate: _Candidate, now: datetime) -> bool:
     return bool(written and applied)
 
 
-def _fixed_scan_candidates(project: Project) -> QuerySet[SecurityReport]:
+def _fixed_scan_candidates(
+    project: Project, agent_scope: str = agent_source.SCOPE_ALL
+) -> QuerySet[SecurityReport]:
     """Reports of *project* worth asking git whether they are already fixed.
 
     Wider than the agent recheck's set, which is untriaged reports only. This
@@ -793,12 +805,18 @@ def _fixed_scan_candidates(project: Project) -> QuerySet[SecurityReport]:
     return (
         SecurityReport.objects.filter(project=project, status__in=("new", "valid"))
         .filter(fixed_in_branch="")
+        .filter(agent_source.scope_q(agent_scope))
         .exclude(proposed_patch="")
         .order_by("-priority", "pk")
     )
 
 
-def scan_already_fixed(project: Project, operator_config: OperatorConfig) -> FixedScanRun:
+def scan_already_fixed(
+    project: Project,
+    operator_config: OperatorConfig,
+    *,
+    agent_scope: str = agent_source.SCOPE_ALL,
+) -> FixedScanRun:
     """Ask git whether each report's proposed patch is already in the tree.
 
     ``git apply --check -R`` succeeds only when the patch's change is present,
@@ -831,9 +849,9 @@ def scan_already_fixed(project: Project, operator_config: OperatorConfig) -> Fix
     # 500-report backlog, for patches each needed for a couple of seconds. The
     # patch itself is fetched per group, below.
     shortlist = list(
-        _fixed_scan_candidates(project).only("pk", "fix_base_branch", "source_archive")[
-            : config.max_reports_per_scan
-        ]
+        _fixed_scan_candidates(project, agent_scope).only(
+            "pk", "fix_base_branch", "source_archive"
+        )[: config.max_reports_per_scan]
     )
     if not shortlist:
         logger.info(
@@ -842,7 +860,7 @@ def scan_already_fixed(project: Project, operator_config: OperatorConfig) -> Fix
             project.full_name,
         )
         return run
-    total = _fixed_scan_candidates(project).count()
+    total = _fixed_scan_candidates(project, agent_scope).count()
     if total > len(shortlist):
         # Said out loud. A silent top-N reads as "we checked everything".
         logger.info(
@@ -975,16 +993,19 @@ def _scan_one(
     return True
 
 
-def projects_with_open_reports() -> list[Project]:
+def projects_with_open_reports(agent_scope: str = agent_source.SCOPE_ALL) -> list[Project]:
     """Projects that have a report either sweep could act on.
 
     Project-less reports are excluded throughout: both sweeps need a repo to
-    look at, and a report with no project has none.
+    look at, and a report with no project has none. Scoped like the sweeps
+    themselves, so a press scoped to one agent doesn't fetch a project that has
+    none of its reports.
     """
     from franktheunicorn.core.models import Project
 
     project_ids = (
         SecurityReport.objects.filter(project__isnull=False)
+        .filter(agent_source.scope_q(agent_scope))
         .exclude(status__in=SecurityReport.NO_FIX_OWED_STATUSES)
         .values_list("project_id", flat=True)
         .distinct()

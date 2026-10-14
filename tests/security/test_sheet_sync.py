@@ -981,6 +981,35 @@ class TestSelection:
         assert "-full" in export_filename(full=True)
         assert "-new-" not in export_filename()
 
+    def test_the_filename_names_the_agent_scope_too(self) -> None:
+        from franktheunicorn.security.sheet_sync import export_filename
+
+        assert "-new-agent-xbow-" in export_filename(status="new", agent="xbow")
+        assert "-agent-none-" in export_filename(agent="none")
+        assert "agent" not in export_filename(agent="all")
+
+    def test_the_export_honours_the_agent_scope(self) -> None:
+        from franktheunicorn.security.sheet_sync import reports_for_export
+
+        agents = SecurityReportFactory(source_agent="xbow")
+        persons = SecurityReportFactory(source_agent="")
+
+        assert list(reports_for_export(agent="xbow")) == [agents]
+        assert list(reports_for_export(agent="none")) == [persons]
+        assert len(list(reports_for_export())) == 2
+
+    def test_the_agent_is_a_read_only_column(self) -> None:
+        """A sheet of one agent's reports carries the column that proves its premise —
+        and the importer never writes it back."""
+        report = SecurityReportFactory(source_agent="xbow")
+        text = _export([report])
+
+        assert _rows(text)[0]["source_agent"] == "xbow"
+        assert "source_agent" not in WRITABLE_COLUMNS
+        _apply(_edit(text, report.pk, "source_agent", "claude-code"))
+        report.refresh_from_db()
+        assert report.source_agent == "xbow"
+
 
 @pytest.mark.django_db
 class TestForcedCountIsNotDerivedFromProse:

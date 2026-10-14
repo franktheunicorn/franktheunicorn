@@ -7,7 +7,33 @@
     Triage incoming security vulnerability reports. Paste reports or ingest from email.
 </p>
 
-<div style="margin-bottom: 1rem; display: flex; gap: 0.5rem; align-items: center;">
+{# Source scope: one agent's reports, any agent's, none, or all. One control for #}
+{# "work on what came from agent X": it filters the rows and tab counts, travels #}
+{# with Export, and rides into every bulk button below as a hidden field. The #}
+{# hover text is how each source's reports were ruled — "how often is this agent #}
+{# right?" is the first question to ask of another agent's output. #}
+{# Hidden until some report has an agent: on an install that has never labelled #}
+{# one, "All 40 · Not from an agent 40" is two chips saying nothing. #}
+{% if scope_options|length > 2 or agent_scope != "all" %}
+<nav class="source-scope" aria-label="Filter by source">
+    <span>Source:</span>
+    {% for option in scope_options %}
+    <a href="{% url 'dashboard:security_list' %}{{ option.query }}"
+       {% if option.key == agent_scope %}class="active" aria-current="true"{% endif %}
+       {% if option.breakdown %}title="{{ option.breakdown }}"{% endif %}>
+        {% if option.key != "all" and option.key != "none" and option.key != "any" %}🤖 {% endif %}{{ option.label }}
+        <span class="tab-count">{{ option.count }}</span>
+    </a>
+    {% endfor %}
+</nav>
+<p class="source-scope-note">
+    Rows, tab counts, Export and the bulk buttons below act on
+    <strong>{{ agent_scope_label }}</strong>.
+    {% if agent_scope != "all" %}<a href="{% url 'dashboard:security_list' %}?sort={{ active_sort }}{% if active_status != 'all' %}&amp;status={{ active_status|urlencode }}{% endif %}">Show every source</a>{% endif %}
+</p>
+{% endif %}
+
+<div class="security-actions">
     <a href="{% url 'dashboard:security_create' %}" class="action-btn post" style="font-size: 0.85rem; padding: 0.4rem 0.8rem; text-decoration: none;">+ New Report</a>
     <a href="{% url 'dashboard:email_activity' %}" class="action-btn" style="font-size: 0.85rem; padding: 0.4rem 0.8rem; text-decoration: none;" title="Read-only audit of every email the scanner has read">📬 Email Activity</a>
     <a href="{% url 'dashboard:security_guidance' %}" class="action-btn" style="font-size: 0.85rem; padding: 0.4rem 0.8rem; text-decoration: none;" title="Learned guidance distilled from operator agree/disagree feedback">🎓 Learned Guidance</a>
@@ -16,11 +42,32 @@
     {# so it works without htmx; htmx gets HX-Redirect back to this page with a flash. #}
     <form method="post" action="{% url 'dashboard:security_rerun_triage' %}" style="display: inline;">
         {% csrf_token %}
+        <input type="hidden" name="agent" value="{{ agent_scope }}">
         <button type="submit" class="action-btn post"
                 style="font-size: 0.85rem; padding: 0.4rem 0.8rem;"
                 hx-post="{% url 'dashboard:security_rerun_triage' %}"
-                hx-confirm="Re-run triage across every report in the queue you haven't ruled on? Procedural close is free; LLM triage is two calls per report; version mapping + verification fan out for the ones triage calls valid.">
+                hx-confirm="Re-run triage across every report in the queue you haven't ruled on? Procedural close is free; LLM triage is two calls per report; version mapping + verification fan out for the ones triage calls valid. Acting on: {{ agent_scope_label }}.">
             ↻ Re-run Triage
+        </button>
+    </form>
+    {# Confirm / re-verify: is each issue actually in the code? The question to ask #}
+    {# of another agent's output before anyone spends time on it, and worth asking #}
+    {# again after the code moves. "git" maps cited files and whether the proposed #}
+    {# patch applies on every active branch — no agent, no cap. "+ coding agent" #}
+    {# also puts a coding agent in a checkout per report per branch: capped at N #}
+    {# outstanding, least-recently-verified first, so later presses walk the backlog. #}
+    <form method="post" action="{% url 'dashboard:security_reverify' %}" style="display: inline-flex; gap: 0.3rem; align-items: center;">
+        {% csrf_token %}
+        <input type="hidden" name="agent" value="{{ agent_scope }}">
+        <select name="depth" aria-label="How deep to verify">
+            <option value="git">git: cited files + patch</option>
+            <option value="agent">+ coding agent (max {{ reverify_cap }})</option>
+        </select>
+        <button type="submit" class="action-btn post"
+                style="font-size: 0.85rem; padding: 0.4rem 0.8rem;"
+                hx-post="{% url 'dashboard:security_reverify' %}"
+                hx-confirm="Confirm / re-verify open reports against the code? The git check maps cited files and whether each proposed patch applies on every active release branch — no agent. With the coding agent it is also a full agent run per report per active branch, at most {{ reverify_cap }} verifications queued or running at once, least recently verified first. Reports ruled invalid, expected or duplicate are skipped. Acting on: {{ agent_scope_label }}.">
+            ✓ Confirm / Re-verify
         </button>
     </form>
     {# The narrow sibling: only reports whose last triage run FAILED in the #}
@@ -28,10 +75,11 @@
     {# this goes straight to them. #}
     <form method="post" action="{% url 'dashboard:security_rerun_triage_failed' %}" style="display: inline;">
         {% csrf_token %}
+        <input type="hidden" name="agent" value="{{ agent_scope }}">
         <button type="submit" class="action-btn"
                 style="font-size: 0.85rem; padding: 0.4rem 0.8rem;"
                 hx-post="{% url 'dashboard:security_rerun_triage_failed' %}"
-                hx-confirm="Re-queue triage for reports whose last triage run failed? Reports you've ruled on since (status, notes, a CVE, or a fix branch) are skipped.">
+                hx-confirm="Re-queue triage for reports whose last triage run failed? Reports you've ruled on since (status, notes, a CVE, or a fix branch) are skipped. Acting on: {{ agent_scope_label }}.">
             ↻ Re-run Failed Triage
         </button>
     </form>
@@ -39,10 +87,11 @@
     {# zero LLM cost. Works with no backend configured at all. #}
     <form method="post" action="{% url 'dashboard:security_rerun_procedural' %}" style="display: inline;">
         {% csrf_token %}
+        <input type="hidden" name="agent" value="{{ agent_scope }}">
         <button type="submit" class="action-btn"
                 style="font-size: 0.85rem; padding: 0.4rem 0.8rem;"
                 hx-post="{% url 'dashboard:security_rerun_procedural' %}"
-                hx-confirm="Re-run only the cheap procedural close across the queue? Zero LLM cost — it just re-applies the auth-disabled regex to reports you haven't ruled on.">
+                hx-confirm="Re-run only the cheap procedural close across the queue? Zero LLM cost — it just re-applies the auth-disabled regex to reports you haven't ruled on. Acting on: {{ agent_scope_label }}.">
             ↻ Re-close (procedural)
         </button>
     </form>
@@ -51,10 +100,11 @@
     {# and clears stale auto-links it saw both halves of and didn't group. #}
     <form method="post" action="{% url 'dashboard:security_rerun_duplicates' %}" style="display: inline;">
         {% csrf_token %}
+        <input type="hidden" name="agent" value="{{ agent_scope }}">
         <button type="submit" class="action-btn"
                 style="font-size: 0.85rem; padding: 0.4rem 0.8rem;"
                 hx-post="{% url 'dashboard:security_rerun_duplicates' %}"
-                hx-confirm="Re-check duplicates across the whole backlog? One LLM call per project per few hundred reports. Links the groups the model calls out and clears stale auto-links it saw both titles of and didn't group — hand-set links are left alone.">
+                hx-confirm="Re-check duplicates across the whole backlog? One LLM call per project per few hundred reports. Links the groups the model calls out and clears stale auto-links it saw both titles of and didn't group — hand-set links are left alone. Acting on: {{ agent_scope_label }}.">
             ↻ Re-check Duplicates
         </button>
     </form>
@@ -63,10 +113,11 @@
     {# verdict (still plausibly valid / likely fixed). Batch, not per-item. #}
     <form method="post" action="{% url 'dashboard:security_recheck_fixed' %}" style="display: inline;">
         {% csrf_token %}
+        <input type="hidden" name="agent" value="{{ agent_scope }}">
         <button type="submit" class="action-btn"
                 style="font-size: 0.85rem; padding: 0.4rem 0.8rem;"
                 hx-post="{% url 'dashboard:security_recheck_fixed' %}"
-                hx-confirm="Check every untriaged report against the last month's commits? Launches one Cursor cloud agent per project — real money, minutes per run. Verdicts land on the reports as runs finish.">
+                hx-confirm="Check every untriaged report against the last month's commits? Launches one Cursor cloud agent per project — real money, minutes per run. Verdicts land on the reports as runs finish. Acting on: {{ agent_scope_label }}.">
             ↻ Check Untriaged vs Recent Changes
         </button>
     </form>
@@ -76,10 +127,11 @@
     {# left to the run in flight. #}
     <form method="post" action="{% url 'dashboard:security_check_valid_fixed' %}" style="display: inline;">
         {% csrf_token %}
+        <input type="hidden" name="agent" value="{{ agent_scope }}">
         <button type="submit" class="action-btn"
                 style="font-size: 0.85rem; padding: 0.4rem 0.8rem;"
                 hx-post="{% url 'dashboard:security_check_valid_fixed' %}"
-                hx-confirm="Fan out one Cursor cloud agent per valid report to check whether each confirmed issue is fixed upstream? One paid run per report — real money, minutes each. Verdicts land on the reports as the runs finish.">
+                hx-confirm="Fan out one Cursor cloud agent per valid report to check whether each confirmed issue is fixed upstream? One paid run per report — real money, minutes each. Verdicts land on the reports as the runs finish. Acting on: {{ agent_scope_label }}.">
             ↻ Check Valid Reports Fixed
         </button>
     </form>
@@ -88,19 +140,21 @@
     {# Worker commands at bulk priority; the flash says where to watch. #}
     <form method="post" action="{% url 'dashboard:security_match_branches' %}" style="display: inline;">
         {% csrf_token %}
+        <input type="hidden" name="agent" value="{{ agent_scope }}">
         <button type="submit" class="action-btn"
                 style="font-size: 0.85rem; padding: 0.4rem 0.8rem;"
                 hx-post="{% url 'dashboard:security_match_branches' %}"
-                hx-confirm="Fetch origin and look for the branch carrying each report's fix? Git only, no agent — but it walks every recently-touched branch of every project, so it takes a while. Only a branch NAME containing the CVE id, or a branch frank itself pushed for the report, is recorded as the fix branch — marked as auto-filled, and clearing it rejects it. Everything softer, including a CVE merely mentioned in a commit, is left as a suggestion.">
+                hx-confirm="Fetch origin and look for the branch carrying each report's fix? Git only, no agent — but it walks every recently-touched branch of every project, so it takes a while. Only a branch NAME containing the CVE id, or a branch frank itself pushed for the report, is recorded as the fix branch — marked as auto-filled, and clearing it rejects it. Everything softer, including a CVE merely mentioned in a commit, is left as a suggestion. Acting on: {{ agent_scope_label }}.">
             ⑃ Find Fix Branches
         </button>
     </form>
     <form method="post" action="{% url 'dashboard:security_scan_fixed' %}" style="display: inline;">
         {% csrf_token %}
+        <input type="hidden" name="agent" value="{{ agent_scope }}">
         <button type="submit" class="action-btn"
                 style="font-size: 0.85rem; padding: 0.4rem 0.8rem;"
                 hx-post="{% url 'dashboard:security_scan_fixed' %}"
-                hx-confirm="Reverse-apply every proposed patch to see which fixes already landed? Git only, no agent, and it's proof rather than a guess — a patch that reverse-applies is already in the tree. Slow: a checkout per branch. Reports with no patch are skipped; the cloud recheck above is the one for those.">
+                hx-confirm="Reverse-apply every proposed patch to see which fixes already landed? Git only, no agent, and it's proof rather than a guess — a patch that reverse-applies is already in the tree. Slow: a checkout per branch. Reports with no patch are skipped; the cloud recheck above is the one for those. Acting on: {{ agent_scope_label }}.">
             ⑃ Check Fixed (git)
         </button>
     </form>
@@ -109,19 +163,21 @@
     {# indeterminate, and the second button pays a cloud agent to read the log. #}
     <form method="post" action="{% url 'dashboard:security_check_fixes_landed' %}" style="display: inline;">
         {% csrf_token %}
+        <input type="hidden" name="agent" value="{{ agent_scope }}">
         <button type="submit" class="action-btn"
                 style="font-size: 0.85rem; padding: 0.4rem 0.8rem;"
                 hx-post="{% url 'dashboard:security_check_fixes_landed' %}"
-                hx-confirm="Check whether every recorded fix branch landed upstream? Git only, no agent — each branch's tip is tested against master, the release lines and the release tags, which is proof rather than a guess. Reports git can't settle come back indeterminate.">
+                hx-confirm="Check whether every recorded fix branch landed upstream? Git only, no agent — each branch's tip is tested against master, the release lines and the release tags, which is proof rather than a guess. Reports git can't settle come back indeterminate. Acting on: {{ agent_scope_label }}.">
             ⑃ Check Fixes Landed (git)
         </button>
     </form>
     <form method="post" action="{% url 'dashboard:security_fix_landed_recheck' %}" style="display: inline;">
         {% csrf_token %}
+        <input type="hidden" name="agent" value="{{ agent_scope }}">
         <button type="submit" class="action-btn"
                 style="font-size: 0.85rem; padding: 0.4rem 0.8rem;"
                 hx-post="{% url 'dashboard:security_fix_landed_recheck' %}"
-                hx-confirm="Ask a cloud agent about the reports git couldn't settle? One Cursor agent per project reads the log for each indeterminate report — real money, minutes per run. Its answer is a pointer; the git check's is proof.">
+                hx-confirm="Ask a cloud agent about the reports git couldn't settle? One Cursor agent per project reads the log for each indeterminate report — real money, minutes per run. Its answer is a pointer; the git check's is proof. Acting on: {{ agent_scope_label }}.">
             ↻ Ask Agent About Indeterminate
         </button>
     </form>
@@ -130,10 +186,11 @@
     {# for landed-ness. Both halves git-only, both at bulk priority. #}
     <form method="post" action="{% url 'dashboard:security_check_cve_fixes_landed' %}" style="display: inline;">
         {% csrf_token %}
+        <input type="hidden" name="agent" value="{{ agent_scope }}">
         <button type="submit" class="action-btn"
                 style="font-size: 0.85rem; padding: 0.4rem 0.8rem;"
                 hx-post="{% url 'dashboard:security_check_cve_fixes_landed' %}"
-                hx-confirm="Check whether fixes have landed for everything with a CVE? First ties CVE-named branches to reports that lack one, then tests every recorded branch against master, the release lines and the release tags. Git only, no agent — but it walks every recently-touched branch of every project, so it takes a while.">
+                hx-confirm="Check whether fixes have landed for everything with a CVE? First ties CVE-named branches to reports that lack one, then tests every recorded branch against master, the release lines and the release tags. Git only, no agent — but it walks every recently-touched branch of every project, so it takes a while. Acting on: {{ agent_scope_label }}.">
             ⑃ Check CVE Fixes Landed
         </button>
     </form>
@@ -157,6 +214,12 @@
             <option value="{{ project.pk }}">{{ project.full_name }}</option>
             {% endfor %}
         </select>
+        {# Whose output this is. Blank means people sent these. Named, not guessed: #}
+        {# no archive we've seen says which agent wrote it. #}
+        <input type="text" name="source_agent" list="known-agents"
+               autocapitalize="none" spellcheck="false"
+               placeholder="Agent (blank if people sent these)"
+               aria-label="Agent that produced these reports">
         <label class="zip-import-triage"
                title="Off by default: one NVD lookup and two LLM calls per report">
             <input type="checkbox" name="auto_triage"> Triage on import
@@ -179,6 +242,9 @@
         </label>
         <button type="submit" class="action-btn post">📦 Upload &amp; Import</button>
     </form>
+    <datalist id="known-agents">
+        {% for agent in known_agents %}<option value="{{ agent }}">{% endfor %}
+    </datalist>
 
     <p class="zip-import-hint">
         One report per file (<code>.eml</code>, <code>.txt</code>, <code>.md</code>,
@@ -190,6 +256,7 @@
     <pre class="zip-import-cmd"><code>{{ zip_import_command }}</code></pre>
     <p class="zip-import-hint">
         Add <code>--project owner/repo</code> to attach a project,
+        <code>--agent NAME</code> to label them as that agent's output,
         <code>--triage</code> to queue triage,
         <code>--verify-versions</code> to map cited files and whether the proposed patch applies onto every active release branch,
         <code>--find-introduction</code> to date the vulnerable code and list the releases containing it.
@@ -202,7 +269,7 @@
     <table class="zip-archives">
         <caption>Imported archives</caption>
         <thead>
-            <tr><th>Archive</th><th>Reports</th><th>Imported</th><th></th></tr>
+            <tr><th>Archive</th><th>Reports</th><th>Agent</th><th>Imported</th><th></th></tr>
         </thead>
         <tbody>
             {% for archive in archives %}
@@ -212,6 +279,22 @@
                     {{ archive.total }}
                     {% if archive.findings %}<span class="muted">({{ archive.findings }} findings)</span>{% endif %}
                     {% if archive.touched %}<span class="zip-archives-touched" title="Already triaged or ruled on — dropping loses that work">{{ archive.touched }} triaged</span>{% endif %}
+                </td>
+                <td>
+                    {# Relabel: the backfill for an archive imported before reports #}
+                    {# had an agent, since re-uploading it dedups every entry. Blank #}
+                    {# clears the label — people sent these. #}
+                    <form method="post" action="{% url 'dashboard:security_archive_set_agent' %}">
+                        {% csrf_token %}
+                        <input type="hidden" name="agent" value="{{ agent_scope }}">
+                        <input type="hidden" name="archive" value="{{ archive.source_archive }}">
+                        <input type="text" name="source_agent" value="{{ archive.agent }}"
+                               list="known-agents" placeholder="none"
+                               autocapitalize="none" spellcheck="false"
+                               aria-label="Agent that produced {{ archive.source_archive }}">
+                        <button type="submit" class="action-btn">Set</button>
+                    </form>
+                    {% if archive.agent_mixed %}<span class="muted" title="Rows from this archive carry different agent labels; Set makes them one">mixed</span>{% endif %}
                 </td>
                 <td class="muted">{{ archive.last_seen|timesince }} ago</td>
                 <td>
@@ -223,6 +306,7 @@
                     {# the list and every tab count. #}
                     <form method="post" action="{% url 'dashboard:security_archive_drop' %}">
                         {% csrf_token %}
+                        <input type="hidden" name="agent" value="{{ agent_scope }}">
                         <input type="hidden" name="archive" value="{{ archive.source_archive }}">
                         <button type="submit" class="action-btn reject"
                                 hx-post="{% url 'dashboard:security_archive_drop' %}"
@@ -283,11 +367,11 @@
     {# showing, so the cap keeps the rows the operator is actually looking at. #}
     <div class="sheet-sync-row">
         <a class="action-btn"
-           href="{% url 'dashboard:security_export_csv' %}?sort={{ active_sort }}{% if active_status != 'all' %}&amp;status={{ active_status|urlencode }}{% endif %}">
-            ⬇ Export CSV{% if active_status != 'all' %} ({{ active_status }}){% endif %}
+           href="{% url 'dashboard:security_export_csv' %}?sort={{ active_sort }}{% if active_status != 'all' %}&amp;status={{ active_status|urlencode }}{% endif %}{{ agent_query }}">
+            ⬇ Export CSV{% if active_status != 'all' %} ({{ active_status }}){% endif %}{% if agent_scope != 'all' %} — {{ agent_scope_label }}{% endif %}
         </a>
         <a class="action-btn sheet-sync-full"
-           href="{% url 'dashboard:security_export_csv' %}?full=1&amp;sort={{ active_sort }}{% if active_status != 'all' %}&amp;status={{ active_status|urlencode }}{% endif %}"
+           href="{% url 'dashboard:security_export_csv' %}?full=1&amp;sort={{ active_sort }}{% if active_status != 'all' %}&amp;status={{ active_status|urlencode }}{% endif %}{{ agent_query }}"
            title="Also include the raw report text and any proposed patch — bigger, and a good deal more sensitive to leave in a shared Drive">
             ⬇ Export CSV (full text)
         </a>
@@ -348,7 +432,7 @@
 
 <div class="tab-bar">
     {% for tab in status_tabs %}
-    <a href="{% url 'dashboard:security_list' %}?sort={{ active_sort }}{% if tab.key != 'all' %}&amp;status={{ tab.key|urlencode }}{% endif %}"
+    <a href="{% url 'dashboard:security_list' %}?sort={{ active_sort }}{% if tab.key != 'all' %}&amp;status={{ tab.key|urlencode }}{% endif %}{{ agent_query }}"
        {% if active_status == tab.key and not cve_filter %}class="active"{% endif %}>
         {{ tab.label }}
         <span class="tab-count">{{ tab.count }}</span>
@@ -363,7 +447,7 @@
     Sort:
     {% for key, label in sort_options %}
     {% if key == active_sort %}<strong>{{ label }}</strong>{% else %}<a
-        href="{% url 'dashboard:security_list' %}?sort={{ key }}{% if active_status != 'all' %}&amp;status={{ active_status|urlencode }}{% endif %}">{{ label }}</a>{% endif %}
+        href="{% url 'dashboard:security_list' %}?sort={{ key }}{% if active_status != 'all' %}&amp;status={{ active_status|urlencode }}{% endif %}{{ agent_query }}">{{ label }}</a>{% endif %}
     {% if not forloop.last %}&middot;{% endif %}
     {% endfor %}
 </p>
@@ -403,6 +487,9 @@
             {% if report.priority_reason %}<span class="muted">{{ report.priority_reason }}</span> &middot; {% endif %}
             {% endif %}
             {{ report.get_source_display }}
+            {# Whose output it is, beside how it arrived: another agent's finding #}
+            {# must never read as a person's report at a glance. #}
+            {% if report.source_agent %} &middot; <span class="agent-badge" title="Produced by an automated agent, not a person">🤖 {{ report.source_agent }}</span>{% endif %}
             {# Which archive, for a zip import. Two scans of one repo carry the same #}
             {# entry paths, so the title alone doesn't say which scan found this. #}
             {% if report.source_archive %} &middot; {{ report.source_archive }}{% endif %}
@@ -483,8 +570,8 @@
         {% if cve_filter %}
         <p>No local report names {{ cve_filter }}.</p>
         <p style="font-size: 0.85rem;"><a href="{% url 'dashboard:security_list' %}?sort={{ active_sort }}">Show all reports</a></p>
-        {% elif active_status != 'all' %}
-        <p>No reports on this tab.</p>
+        {% elif active_status != 'all' or agent_scope != 'all' %}
+        <p>No reports on this tab{% if agent_scope != 'all' %} among {{ agent_scope_label }}{% endif %}.</p>
         <p style="font-size: 0.85rem;"><a href="{% url 'dashboard:security_list' %}?sort={{ active_sort }}">Show all reports</a></p>
         {% else %}
         <p>No security reports yet.</p>

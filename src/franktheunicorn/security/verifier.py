@@ -53,10 +53,12 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, TypedDict
 
+from django.db.models import F, OuterRef, QuerySet, Subquery
 from django.utils import timezone
 
-from franktheunicorn.core.models import SecurityVerification
+from franktheunicorn.core.models import SecurityReport, SecurityVerification, WorkerCommand
 from franktheunicorn.review.backends.base import json_object_candidates
+from franktheunicorn.security import agent_source
 
 if TYPE_CHECKING:
     from franktheunicorn.config.models import (
@@ -64,7 +66,6 @@ if TYPE_CHECKING:
         OperatorConfig,
         SecurityVerifierConfig,
     )
-    from franktheunicorn.core.models import SecurityReport
     from franktheunicorn.review.tool_executor import ToolExecutor
 
 logger = logging.getLogger(__name__)
@@ -365,6 +366,50 @@ def _version_sort_key(name: str) -> tuple[int, tuple[int, ...], str]:
     """
     numbers = tuple(int(part) for part in re.findall(r"\d+", name)[:6])
     return (1 if numbers else 0, numbers, name.lower())
+
+
+#: Verifications the bulk Confirm / Re-verify button keeps queued or running at
+#: once. Same number as the import's auto-verify cap and for the same reason: each
+#: one is (max_branches + 1) agent runs of up to half an hour. Counted against
+#: what is outstanding, not per press, or pressing again (as the flash invites)
+#: stacked another batch on the first. Unlike the import, the button truncates
+#: rather than refusing — :func:`reverify_candidates` orders least-recently-sent
+#: first, so a later press carries on where this one stopped.
+MAX_BULK_VERIFY = 25
+
+
+def reverify_candidates(
+    agent_scope: str = agent_source.SCOPE_ALL,
+) -> QuerySet[SecurityReport]:
+    """Reports worth confirming against the code, least recently sent to the verifier first.
+
+    Open ones only: a report ruled invalid, expected or duplicate owes nothing, and
+    the operator's ruling isn't reopened by a button. A report with a *confirmed*
+    fix branch is left out for the reason the version follow-on leaves it out —
+    the question is answered, and this is the expensive path. A project is
+    required because there is no repo to read without one.
+
+    Ordered on the last ``verify_security_report`` command, not on the last
+    verdict row, for the reason :func:`recheck.valid_reports` orders on the
+    launch: a run that produced nothing (a timeout, a gate) leaves no verdict, and
+    ordering on verdicts would put the same reports at the head of every press.
+    """
+    last_attempt = (
+        WorkerCommand.objects.filter(
+            command="verify_security_report", security_report=OuterRef("pk")
+        )
+        .order_by("-created_at")
+        .values("created_at")[:1]
+    )
+    return (
+        SecurityReport.objects.filter(project__isnull=False)
+        .exclude(status__in=SecurityReport.NO_FIX_OWED_STATUSES)
+        .exclude(SecurityReport.confirmed_branch_q())
+        .filter(agent_source.scope_q(agent_scope))
+        .select_related("project")
+        .annotate(last_verify=Subquery(last_attempt))
+        .order_by(F("last_verify").asc(nulls_first=True), "-priority", "pk")
+    )
 
 
 def resolve_verifier_reviewer(
