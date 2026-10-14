@@ -430,6 +430,7 @@ def _refresh_pull_request(
     operator_review_posted_at: str | None = None
     author_replies: list[str] | None = None
     comment_bodies: list[str] | None = None
+    comment_events: list[dict[str, str]] | None = None
     fetched_comments: list[dict[str, Any]] | None = None
 
     try:
@@ -440,6 +441,19 @@ def _refresh_pull_request(
         )
         fetched_comments = all_comments
         comment_bodies = [str(c.get("body", "")) for c in all_comments if c.get("body")]
+        # Who said what, when, in posting order: the "whose court is the ball
+        # in" signal needs the last human speaker, not just the words.
+        comment_events = sorted(
+            (
+                {
+                    "author": str((c.get("user") or {}).get("login", "")),
+                    "body": str(c.get("body", "") or ""),
+                    "created_at": str(c.get("created_at", "") or ""),
+                }
+                for c in all_comments
+            ),
+            key=lambda e: e["created_at"],
+        )
 
         latest_posted_at = (
             ReviewDraft.objects.filter(
@@ -492,6 +506,7 @@ def _refresh_pull_request(
         operator_review_posted_at=operator_review_posted_at,
         author_replies_after_review=author_replies,
         comment_bodies=comment_bodies,
+        comment_events=comment_events,
     )
     pr_obj.interest_score = score
     pr_obj.score_breakdown = breakdown

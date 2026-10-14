@@ -26,6 +26,7 @@ WEIGHTS: dict[str, int] = {
     "committer_is_on_it": -25,
     "updated_since_operator_review": 25,
     "pending_response": 20,
+    "author_awaiting_maintainer": 20,
     "downstream_impact": 20,
     "sentry_errors": 15,
     "cve_file_history": 25,
@@ -368,6 +369,50 @@ def score_pending_response(
     if not operator_review_posted_at or not author_replies_after_review:
         return None
     return WEIGHTS["pending_response"]
+
+
+def score_author_awaiting_maintainer(
+    comments: list[dict[str, str]],
+    pr_author: str,
+    operator_username: str,
+    committers: list[str],
+) -> int | None:
+    """Boost when the ball is in the maintainers' court.
+
+    The last human comment on the PR is the author's, and it @-mentions the
+    operator, a committer or a team (``org/team``). Nobody with merge rights
+    has spoken since, by construction, so the author is waiting on us; a stale
+    sweep or a low score would read that silence as theirs. This is Apache
+    Magpie's pr-triage pre-filter F5c ("author question to a maintainer: ball
+    in our court", ``tools/pr-management/src/pr_management/triage/signals.py``
+    and ``plugins/magpie-pr-management/skills/pr-triage/design-notes.md`` at
+    apache/magpie commit dadb315caa8b881fc1d2195bef03223dac25915a), rewritten
+    on frank's data rather than ported. Two differences: frank knows its
+    maintainers as the operator plus ``committers``, so an unknown mentioned
+    login does not count (Magpie counts it and resolves later); and it sees
+    issue comments only, so a maintainer who answered with a formal review
+    rather than a comment is not seen.
+
+    ``comments`` are ``{"author", "body", "created_at"}`` in posting order.
+    The operator's own PRs never fire: there the operator is the one waiting.
+    """
+    from franktheunicorn.backends.mentions import mention_scan
+
+    op = operator_username.lower()
+    author = pr_author.lower()
+    if not author or author == op:
+        return None
+    human = [c for c in comments if c.get("author") and not is_likely_bot(c["author"])]
+    if not human or human[-1]["author"].lower() != author:
+        return None
+    maintainers = _lowered(committers)
+    if op:
+        maintainers.add(op)
+    for hit in mention_scan(human[-1].get("body", "")):
+        handle = hit.handle.lower()
+        if "/" in handle or handle in maintainers:
+            return WEIGHTS["author_awaiting_maintainer"]
+    return None
 
 
 def score_draft_findings(draft_findings_count: int | None) -> int | None:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from franktheunicorn.scoring.signals import (
     WEIGHTS,
     is_ai_agent,
@@ -456,3 +458,54 @@ class TestCveFileHistory:
     def test_no_prefix_false_positive(self) -> None:
         """Exact path 'src/auth.py' should NOT match 'src/auth.py.bak'."""
         assert score_cve_file_history(["src/auth.py.bak"], ["src/auth.py"]) is None
+
+
+class TestAuthorAwaitingMaintainer:
+    """The author's last word asks one of us, and nobody has answered: the ball
+    is in the maintainers' court (Magpie's pr-triage F5c)."""
+
+    @staticmethod
+    def _c(author: str, body: str, at: str = "2026-10-01T00:00:00Z") -> dict[str, str]:
+        return {"author": author, "body": body, "created_at": at}
+
+    def _score(self, comments: list[dict[str, str]], committers: list[str] | None = None) -> Any:
+        from franktheunicorn.scoring.signals import score_author_awaiting_maintainer
+
+        return score_author_awaiting_maintainer(comments, "alice", "holdenk", committers or [])
+
+    def test_the_author_asking_the_operator_fires(self) -> None:
+        assert self._score([self._c("alice", "@holdenk could you take another look?")]) == 20
+
+    def test_asking_a_committer_or_a_team_fires(self) -> None:
+        assert self._score([self._c("alice", "ping @srowen")], committers=["srowen"]) == 20
+        assert self._score([self._c("alice", "cc @apache/spark-committers")]) == 20
+
+    def test_a_maintainer_answering_last_does_not(self) -> None:
+        comments = [
+            self._c("alice", "@holdenk ready?", "2026-10-01T00:00:00Z"),
+            self._c("holdenk", "Looking now.", "2026-10-02T00:00:00Z"),
+        ]
+        assert self._score(comments) is None
+
+    def test_a_bot_after_the_author_is_ignored(self) -> None:
+        comments = [
+            self._c("alice", "@holdenk ready?", "2026-10-01T00:00:00Z"),
+            self._c("github-actions[bot]", "CI passed", "2026-10-02T00:00:00Z"),
+        ]
+        assert self._score(comments) == 20
+
+    def test_mentioning_nobody_with_merge_rights_does_not(self) -> None:
+        assert self._score([self._c("alice", "thanks @bob for the idea")]) is None
+        assert self._score([self._c("alice", "no mention at all")]) is None
+
+    def test_a_mention_inside_code_does_not_count(self) -> None:
+        assert self._score([self._c("alice", "see `@holdenk` in the CODEOWNERS file")]) is None
+
+    def test_the_operators_own_pr_never_fires(self) -> None:
+        from franktheunicorn.scoring.signals import score_author_awaiting_maintainer
+
+        comments = [self._c("holdenk", "@srowen could you review?")]
+        assert score_author_awaiting_maintainer(comments, "holdenk", "holdenk", ["srowen"]) is None
+
+    def test_no_comments_no_signal(self) -> None:
+        assert self._score([]) is None

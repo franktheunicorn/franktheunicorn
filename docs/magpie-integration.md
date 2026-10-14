@@ -552,6 +552,30 @@ effort. "Done" means it is on this branch with tests.
 - **Remote path.** Worker and web processes only; the verifier prompt is
   built on the worker before it reaches the agent host.
 
+### 4.16 "Ball in our court" as a scoring signal (done)
+
+- **What.** `author_awaiting_maintainer` (+20): the last human comment on the
+  PR is the author's and it @-mentions the operator, a project committer or
+  a team. Bots are skipped, mentions inside code do not count, and the
+  operator's own PRs never fire. Both lenses scored it 4.
+- **Why.** The author asked one of us something and nobody has answered.
+  frank's existing re-engagement signal (`pending_response`) only fires
+  after a review frank posted, and `committer_is_on_it` is never fed by the
+  poller, so a PR in that state looked as idle as an abandoned one.
+- **Where.** `scoring/signals.py` (`score_author_awaiting_maintainer`, the
+  weight), `scoring/scorer.py`, and `backends/poller.py`, which already
+  fetched every issue comment and now passes author, body and time in
+  posting order rather than the bodies alone. A failed comment fetch leaves
+  the signal off. Weight overridable per project like any other.
+- **Differences from Magpie.** frank's maintainers are the operator plus
+  `committers`, so an unknown mentioned login does not count; and it reads
+  issue comments only, so a maintainer who answered with a formal review is
+  not seen. Both are stricter than Magpie, not looser.
+- **Upstream source.** `tools/pr-management/src/pr_management/triage/signals.py`
+  (`f5c`) and `plugins/magpie-pr-management/skills/pr-triage/design-notes.md`
+  at the pinned commit; the principle exists at 0.1.0.
+- **Remote path.** Worker host only.
+
 ---
 
 ## 5. Tier 2: Adopt Later

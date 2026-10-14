@@ -434,3 +434,23 @@ class TestCveFileHistoryInScorer:
             cve_affected_files=["src/auth.py"],
         )
         assert bd["cve_file_history"] == 50.0
+
+
+class TestAuthorAwaitingMaintainerInTheScore:
+    def test_it_lands_in_the_breakdown(self) -> None:
+        events = [
+            {"author": "alice", "body": "@holdenk ping", "created_at": "2026-03-30T10:00:00Z"}
+        ]
+        _, bd = score_pull_request(_ALICE_PR, {}, "holdenk", comment_events=events)
+        assert bd["author_awaiting_maintainer"] == 20.0
+
+    def test_it_is_skipped_when_comments_were_not_fetched(self) -> None:
+        _, bd = score_pull_request(_ALICE_PR, {}, "holdenk")
+        assert "author_awaiting_maintainer" not in bd
+
+    def test_committers_come_from_the_project_config(self) -> None:
+        events = [{"author": "alice", "body": "@srowen ?", "created_at": "2026-03-30T10:00:00Z"}]
+        _, bd = score_pull_request(
+            _ALICE_PR, {"committers": ["srowen"]}, "holdenk", comment_events=events
+        )
+        assert "author_awaiting_maintainer" in bd
