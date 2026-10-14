@@ -937,6 +937,10 @@ class SecurityReport(models.Model):
         ("RESERVED", "Reserved"),
         ("PUBLISHED", "Published"),
         ("REJECT", "Rejected"),
+        ("DRAFT", "Draft (ASF workflow)"),
+        ("REVIEW", "In review (ASF workflow)"),
+        ("READY", "Ready to publish (ASF workflow)"),
+        ("PUBLIC", "Public (sent to cve.org)"),
         ("unknown", "Unrecognised response"),
     ]
     cve_record_state = models.CharField(
