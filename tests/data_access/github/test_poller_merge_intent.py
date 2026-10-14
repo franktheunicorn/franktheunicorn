@@ -67,7 +67,9 @@ def _comment(login: str, body: str, at: str = "2026-10-01T10:00:00Z") -> dict[st
 @pytest.mark.django_db
 class TestPollMergeIntent:
     def _config(self) -> ProjectConfig:
-        return ProjectConfig(owner="apache", repo="spark")
+        # Merge readiness off: these pin the merge-intent sync's own reads.
+        # Both on is TestReadinessSharesTheReads.
+        return ProjectConfig(owner="apache", repo="spark", merge_readiness={"enabled": False})
 
     def test_operator_approval_routes_to_queue(self, tmp_path: Path) -> None:
         client = _ReviewsClient(tmp_path)
@@ -274,9 +276,47 @@ class TestPollMergeIntent:
 
 
 @pytest.mark.django_db
+class TestReadinessSharesTheReads:
+    """Both queues on: one reviews read per PR, and CI from readiness's checks."""
+
+    def test_one_reviews_read_and_no_second_ci_read(self, tmp_path: Path) -> None:
+        client = _ReviewsClient(tmp_path)
+        client.reviews[42] = [_approval()]
+        client.ci["1" * 40] = "fail"  # would win if the one-word read still ran
+
+        poll_project(
+            client, ProjectConfig(owner="apache", repo="spark"), operator_username="holdenk"
+        )
+
+        pr = PullRequest.objects.get(number=42)
+        assert pr.merge_intent == "approved"
+        assert pr.queue == "intending-to-merge"
+        assert sorted(client.review_calls) == [42, 43, 44]
+        assert client.ci_calls == []
+        assert pr.ci_checks_sha == pr.head_sha
+        assert pr.ci_status == "pass"  # the mock's default green check
+
+    def test_disabled_intent_still_reads_reviews_for_readiness(self, tmp_path: Path) -> None:
+        client = _ReviewsClient(tmp_path)
+        client.reviews[42] = [_approval("cloud-fan")]
+
+        poll_project(
+            client,
+            ProjectConfig(owner="apache", repo="spark"),
+            operator_username="holdenk",
+            merge_intent=MergeIntentConfig(enabled=False),
+        )
+
+        pr = PullRequest.objects.get(number=42)
+        assert sorted(client.review_calls) == [42, 43, 44]
+        assert pr.merge_intent == ""
+        assert pr.review_states["cloud-fan"]["state"] == "APPROVED"
+
+
+@pytest.mark.django_db
 class TestIngestSinglePRMergeIntent:
     def _run(self, client: _ReviewsClient, operator: OperatorConfig) -> PullRequest:
-        pc = ProjectConfig(owner="apache", repo="spark")
+        pc = ProjectConfig(owner="apache", repo="spark", merge_readiness={"enabled": False})
         with (
             patch("franktheunicorn.config.loader.get_operator_config", return_value=operator),
             patch("franktheunicorn.config.loader.get_project_config", return_value=pc),

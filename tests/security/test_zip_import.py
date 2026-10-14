@@ -1083,6 +1083,64 @@ class TestCompositionDependencyWiring:
 
 
 @pytest.mark.django_db
+class TestSourceAgent:
+    """Naming the agent that produced an archive, at import."""
+
+    def test_every_created_report_gets_the_label(self, no_auto_triage: Any) -> None:
+        archive = make_zip(
+            {"one.txt": REPORT_TEXT, "two.md": REPORT_TEXT + "Second distinct exploit path."}
+        )
+
+        result = import_reports_from_zip(archive, source_agent="Claude Code")
+
+        assert result.imported == 2
+        # Normalised, so "Claude Code" and "claude-code" are one filter.
+        assert set(SecurityReport.objects.values_list("source_agent", flat=True)) == {"claude-code"}
+
+    def test_findings_from_a_scan_archive_get_it_too(self, no_auto_triage: Any) -> None:
+        findings = {
+            "findings": [
+                {"id": "f001", "file": "core/Foo.java", "description": "A vulnerability: exploit."},
+                {"id": "f002", "file": "core/Bar.java", "description": "A vulnerability: exploit."},
+            ]
+        }
+        archive = make_zip({"VULN-FINDINGS.json": json.dumps(findings)})
+
+        result = import_reports_from_zip(archive, source_agent="xbow")
+
+        assert result.imported == 2, [e.detail for e in result.entries]
+        assert set(SecurityReport.objects.values_list("source_agent", flat=True)) == {"xbow"}
+
+    def test_a_duplicate_keeps_its_earlier_label(self, no_auto_triage: Any) -> None:
+        """The earlier row may have been relabelled by hand; a re-import is not a ruling."""
+        import_reports_from_zip(make_zip({"one.txt": REPORT_TEXT}), source_agent="xbow")
+
+        result = import_reports_from_zip(
+            make_zip({"one.txt": REPORT_TEXT, "two.txt": REPORT_TEXT + "New finding."}),
+            source_agent="claude-code",
+        )
+
+        assert result.duplicates == 1
+        assert sorted(SecurityReport.objects.values_list("source_agent", flat=True)) == [
+            "claude-code",
+            "xbow",
+        ]
+
+    def test_no_agent_means_people_sent_them(self, no_auto_triage: Any) -> None:
+        import_reports_from_zip(make_zip({"one.txt": REPORT_TEXT}))
+
+        assert SecurityReport.objects.get().source_agent == ""
+
+    def test_a_reserved_name_refuses_the_whole_archive(self, no_auto_triage: Any) -> None:
+        """Filing an agent's output as human-sent is the mislabel that defeats the field."""
+        result = import_reports_from_zip(make_zip({"one.txt": REPORT_TEXT}), source_agent="none")
+
+        assert "reserved" in result.error
+        assert result.imported == 0
+        assert not SecurityReport.objects.exists()
+
+
+@pytest.mark.django_db
 class TestInjectionScanAtTheZipDoor:
     def test_an_imported_steering_report_is_flagged(self, no_auto_triage: Any) -> None:
         archive = make_zip(

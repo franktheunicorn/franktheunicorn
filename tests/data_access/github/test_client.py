@@ -157,3 +157,32 @@ class TestInferGitHubUsername:
             json={"id": 1, "type": "User"},
         )
         assert infer_github_username("ghp_valid_token") == ""
+
+
+class TestMockClientMergeReadiness:
+    def test_reviews_default_to_none(self, tmp_path: Path) -> None:
+        client = MockGitHubClient(tmp_path)
+        assert client.list_pull_request_reviews("apache", "spark", 42) == []
+
+    def test_reviews_from_fixture(self, tmp_path: Path) -> None:
+        (tmp_path / "apache_spark_pr42_reviews.json").write_text(
+            json.dumps([{"user": {"login": "bob"}, "state": "APPROVED"}])
+        )
+        client = MockGitHubClient(tmp_path)
+        assert client.list_pull_request_reviews("apache", "spark", 42)[0]["state"] == "APPROVED"
+
+    def test_checks_default_green(self, tmp_path: Path) -> None:
+        client = MockGitHubClient(tmp_path)
+        checks = client.get_commit_checks("apache", "spark", "abc")
+        assert checks[0]["conclusion"] == "success"
+
+    def test_checks_from_fixture(self, tmp_path: Path) -> None:
+        (tmp_path / "apache_spark_checks_abc.json").write_text(
+            json.dumps([{"name": "slow", "status": "completed", "conclusion": "timed_out"}])
+        )
+        client = MockGitHubClient(tmp_path)
+        assert client.get_commit_checks("apache", "spark", "abc")[0]["name"] == "slow"
+
+    def test_create_issue_comment_is_canned(self, tmp_path: Path) -> None:
+        client = MockGitHubClient(tmp_path)
+        assert client.create_issue_comment("apache", "spark", 42, "hi")["body"] == "hi"

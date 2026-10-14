@@ -18,11 +18,13 @@ from franktheunicorn.core.models import (
     AgentFeedback,
     Alert,
     AntiPattern,
+    CICheckHistory,
     CostRecord,
     CVEAPIToken,
     DependencyChange,
     EmailScanRecord,
     LLMBackendFallback,
+    MergeReadinessFeedback,
     OperatorAction,
     Project,
     PullRequest,
@@ -32,6 +34,9 @@ from franktheunicorn.core.models import (
     SecurityTriageFeedback,
     SecurityTriageGuidance,
     TestRun,
+    WorkerCommand,
+    ZombieAssessment,
+    ZombieScanState,
 )
 from franktheunicorn.review.backends.stub_backend import StubBackend
 
@@ -193,6 +198,33 @@ class TestRunFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
     container_image = "python:3.12-slim"
 
 
+class MergeReadinessFeedbackFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
+    """Factory for MergeReadinessFeedback (almost-ready-to-merge verdicts)."""
+
+    class Meta:
+        model = MergeReadinessFeedback
+
+    pull_request = factory.SubFactory(PullRequestFactory)
+    project = factory.LazyAttribute(lambda o: o.pull_request.project)
+    verdict = "not-ready"
+    reason_code = ""
+    reason_text = ""
+    head_sha = ""
+    features = factory.LazyFunction(dict)
+
+
+class CICheckHistoryFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
+    """Factory for CICheckHistory (learned flakiness per CI check)."""
+
+    class Meta:
+        model = CICheckHistory
+
+    project = factory.SubFactory(ProjectFactory)
+    check_name = factory.Sequence(lambda n: f"check-{n}")
+    flaky_count = 0
+    real_count = 0
+
+
 class AgentFeedbackFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
     """Factory for AgentFeedback model instances."""
 
@@ -255,6 +287,24 @@ class SecurityRecheckRunFactory(factory.django.DjangoModelFactory):  # type: ign
     status = "launched"
     report_count = 1
     detail = ""
+
+
+class WorkerCommandFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
+    """Factory for WorkerCommand (a job queued for the worker) instances.
+
+    Targetless by default, like the git sweeps and the recheck poll; a test that
+    needs a target passes ``security_report=`` or ``pull_request=``. Built through
+    the model rather than ``security.queue`` on purpose: a test of the queue's
+    dedup needs rows the queue didn't vet.
+    """
+
+    class Meta:
+        model = WorkerCommand
+
+    command = "match_security_branches"
+    status = "pending"
+    priority = 0
+    kwargs = factory.LazyFunction(dict)
 
 
 def patched_report(**kwargs: Any) -> Any:
@@ -361,6 +411,44 @@ class LLMBackendFallbackFactory(factory.django.DjangoModelFactory):  # type: ign
     base_url = ""
     token_param = "max_completion_tokens"
     supports_json_object = True
+
+
+class ZombieAssessmentFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
+    """Factory for ZombieAssessment: a closed-unmerged PR with an open JIRA.
+
+    The PR it hangs off is closed and in the zombie queue by default, which
+    is the only state the scan ever creates one in.
+    """
+
+    class Meta:
+        model = ZombieAssessment
+
+    pull_request = factory.SubFactory(PullRequestFactory, state="closed", queue="zombie")
+    jira_ticket_id = factory.LazyAttribute(lambda o: f"SPARK-{o.pull_request.number}")
+    jira_status = "Open"
+    jira_summary = ""
+    jira_url = factory.LazyAttribute(
+        lambda o: f"https://issues.apache.org/jira/browse/{o.jira_ticket_id}"
+    )
+    verdict = "unassessed"
+    needed_changes = factory.LazyFunction(list)
+    disposition = "pending"
+    attempts = 0
+
+
+class ZombieScanStateFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
+    """Factory for ZombieScanState (one project's closed-PR cursor)."""
+
+    class Meta:
+        model = ZombieScanState
+
+    project = factory.SubFactory(ProjectFactory)
+    lowest_number_seen = None
+    next_page = 1
+    exhausted = False
+    jira_retry = factory.LazyFunction(list)
+    prs_examined = 0
+    candidates_found = 0
 
 
 class CannedLLMBackend(StubBackend):

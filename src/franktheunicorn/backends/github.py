@@ -129,6 +129,37 @@ class GitHubClient(ForgeClient):
                 break
         return result
 
+    def list_pull_requests_page(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        state: str = "closed",
+        page: int = 1,
+        per_page: int = 100,
+        sort: str = "created",
+    ) -> list[dict[str, Any]]:
+        """One page of PRs in *state*, newest first by *sort*.
+
+        No scrape fallback, unlike :meth:`list_pull_requests`: the search page
+        the scrape reads has no stable paging and no ``merged_at``, and a walk
+        through history that cannot tell merged from unmerged is worse than one
+        that stops. A 401/403 raises and the caller says so.
+        """
+        response = self._get(
+            f"/repos/{owner}/{repo}/pulls",
+            params={
+                "state": state,
+                "sort": sort,
+                "direction": "desc",
+                "per_page": min(per_page, 100),
+                "page": page,
+            },
+        )
+        response.raise_for_status()
+        data: list[dict[str, Any]] = response.json()
+        return data
+
     def get_pull_request(self, owner: str, repo: str, pr_number: int) -> dict[str, Any]:
         """Fetch a single PR detail (includes mergeable status)."""
         url = f"/repos/{owner}/{repo}/pulls/{pr_number}"
@@ -443,6 +474,55 @@ class GitHubClient(ForgeClient):
             )
         return found
 
+    def get_commit_checks(self, owner: str, repo: str, sha: str) -> list[dict[str, Any]]:
+        """Check runs plus commit statuses for ``sha``, in one normalised list.
+
+        Two endpoints because GitHub has two CI models: Actions and most apps
+        write check runs, older integrations (and anything using the Status
+        API, e.g. Jenkins) write commit statuses. ``filter=latest`` is the
+        check-runs default, so a re-run replaces its earlier attempt rather
+        than appearing beside it. Past the same 1000-run cap as
+        :meth:`get_commit_ci_status` it raises: a failure on an unread page
+        is still a failure, so a partial list must not summarise as green.
+        """
+        runs = self._check_runs(owner, repo, sha)
+        if runs is None:
+            msg = f"{owner}/{repo}@{sha[:12]} has more than 1000 check runs"
+            raise RuntimeError(msg)
+        checks: list[dict[str, Any]] = [
+            {
+                "name": run["name"],
+                "status": str(run.get("status") or ""),
+                "conclusion": str(run.get("conclusion") or ""),
+                "url": str(run.get("html_url") or run.get("details_url") or ""),
+            }
+            for run in runs
+            if isinstance(run, dict) and isinstance(run.get("name"), str)
+        ]
+        for item in self._commit_statuses(owner, repo, sha):
+            if not isinstance(item, dict) or not isinstance(item.get("context"), str):
+                continue
+            state = str(item.get("state") or "")
+            checks.append(
+                {
+                    "name": item["context"],
+                    "status": "completed" if state in ("success", "failure", "error") else "queued",
+                    "conclusion": _STATUS_STATE_TO_CONCLUSION.get(state, ""),
+                    "url": str(item.get("target_url") or ""),
+                }
+            )
+        return checks
+
+    def create_issue_comment(
+        self, owner: str, repo: str, issue_number: int, body: str
+    ) -> dict[str, Any]:
+        """Post a conversation comment on a PR (the Issues API — PRs are issues)."""
+        url = f"/repos/{owner}/{repo}/issues/{issue_number}/comments"
+        response = self._client.post(url, json={"body": body})
+        response.raise_for_status()
+        result: dict[str, Any] = response.json()
+        return result
+
     def delete_review_comment(self, owner: str, repo: str, pr_number: int, comment_id: int) -> None:
         """Delete a review comment (for recall). ``pr_number`` is unused on GitHub."""
         del pr_number
@@ -564,6 +644,16 @@ class GitHubClient(ForgeClient):
 
 _REQUIRED_SCOPES = {"repo", "public_repo"}
 _FINE_GRAINED_NOTE = "Fine-grained PAT: enable 'Pull requests: Read' under repository permissions."
+
+
+# Commit-status states onto check-run conclusions, so both CI models read the
+# same way downstream. "error" is a failure that never produced a verdict
+# (infrastructure, usually), which is exactly the kind that flakes.
+_STATUS_STATE_TO_CONCLUSION: dict[str, str] = {
+    "success": "success",
+    "failure": "failure",
+    "error": "failure",
+}
 
 
 def _is_rate_limit_response(response: httpx.Response) -> bool:

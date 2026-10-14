@@ -16,6 +16,7 @@ from tests.factories import (
     ProjectFactory,
     PullRequestFactory,
     SecurityReportFactory,
+    WorkerCommandFactory,
     make_operator_config,
 )
 
@@ -904,13 +905,100 @@ class TestGitSweepHandlers:
 
         with patch(
             "franktheunicorn.security.branch_scan.match_fix_branches",
-            side_effect=lambda p, _c: BranchMatchRun(project=p.full_name, applied=1),
+            side_effect=lambda p, _c, **_kw: BranchMatchRun(project=p.full_name, applied=1),
         ) as matcher:
             _dispatch(cmd, make_operator_config())
 
         assert matcher.call_count == 2
         assert first.full_name in cmd.log
         assert second.full_name in cmd.log
+        # Not by accident: a stub that raised would also log the project names.
+        assert "the sweep raised" not in cmd.log
+
+    @pytest.mark.django_db
+    def test_a_scoped_sweep_covers_only_that_agents_projects_and_passes_the_scope(self) -> None:
+        from franktheunicorn.security.branch_scan import BranchMatchRun
+        from tests.factories import ProjectFactory, SecurityReportFactory
+
+        agents, persons = ProjectFactory(), ProjectFactory()
+        SecurityReportFactory(project=agents, source_agent="xbow")
+        SecurityReportFactory(project=persons, source_agent="")
+        cmd = WorkerCommandFactory(
+            command="match_security_branches", status="running", kwargs={"agent_scope": "xbow"}
+        )
+
+        with patch(
+            "franktheunicorn.security.branch_scan.match_fix_branches",
+            side_effect=lambda p, _c, **_kw: BranchMatchRun(project=p.full_name, applied=1),
+        ) as matcher:
+            _dispatch(cmd, make_operator_config())
+
+        assert matcher.call_count == 1
+        assert matcher.call_args.args[0] == agents
+        assert matcher.call_args.kwargs == {"agent_scope": "xbow"}
+        assert persons.full_name not in cmd.log
+
+    @pytest.mark.django_db
+    @pytest.mark.parametrize(
+        ("command", "target"),
+        [
+            ("scan_security_fixed", "franktheunicorn.security.branch_scan.scan_already_fixed"),
+            ("check_fixes_landed", "franktheunicorn.security.fix_landed.check_project_fixes"),
+            ("check_cve_fixes_landed", "franktheunicorn.security.fix_landed.check_cve_fixes"),
+        ],
+    )
+    def test_every_sweep_hands_its_scope_to_the_per_project_function(
+        self, command: str, target: str
+    ) -> None:
+        """Not just the branch match: a handler that dropped the kwarg would sweep
+        the whole project while the flash said one agent's reports."""
+        from franktheunicorn.security.branch_scan import BranchMatchRun
+        from tests.factories import SecurityReportFactory
+
+        SecurityReportFactory(source_agent="xbow")
+        cmd = WorkerCommandFactory(
+            command=command, status="running", kwargs={"agent_scope": "xbow"}
+        )
+
+        with patch(
+            target,
+            side_effect=lambda p, _c, **_kw: BranchMatchRun(project=p.full_name),
+        ) as sweep:
+            _dispatch(cmd, make_operator_config())
+
+        assert sweep.call_count == 1
+        assert sweep.call_args.kwargs == {"agent_scope": "xbow"}
+
+    @pytest.mark.django_db
+    def test_a_scope_that_does_not_parse_sweeps_nothing(self) -> None:
+        """Refused, never widened to every report."""
+        from tests.factories import SecurityReportFactory
+
+        SecurityReportFactory()
+        cmd = WorkerCommandFactory(
+            command="scan_security_fixed", status="running", kwargs={"agent_scope": "&&&"}
+        )
+
+        with patch("franktheunicorn.security.branch_scan.scan_already_fixed") as scanner:
+            _dispatch(cmd, make_operator_config())
+
+        assert not scanner.called
+        assert "doesn't parse" in cmd.log
+
+    @pytest.mark.django_db
+    def test_a_scope_with_no_reports_says_so_with_the_scope(self) -> None:
+        from tests.factories import SecurityReportFactory
+
+        SecurityReportFactory(source_agent="")
+        cmd = WorkerCommandFactory(
+            command="check_fixes_landed", status="running", kwargs={"agent_scope": "xbow"}
+        )
+
+        with patch("franktheunicorn.security.fix_landed.check_project_fixes") as checker:
+            _dispatch(cmd, make_operator_config())
+
+        assert not checker.called
+        assert "(reports from agent xbow)" in cmd.log
 
     @pytest.mark.django_db
     def test_the_fixed_sweep_covers_every_project(self) -> None:
@@ -923,7 +1011,7 @@ class TestGitSweepHandlers:
 
         with patch(
             "franktheunicorn.security.branch_scan.scan_already_fixed",
-            side_effect=lambda p, _c: FixedScanRun(project=p.full_name, fixed=2),
+            side_effect=lambda p, _c, **_kw: FixedScanRun(project=p.full_name, fixed=2),
         ) as scanner:
             _dispatch(cmd, make_operator_config())
 
@@ -944,7 +1032,7 @@ class TestGitSweepHandlers:
         SecurityReportFactory(project=bad)
         cmd = WorkerCommand.objects.create(command="match_security_branches", status="running")
 
-        def _one_explodes(project: Any, _config: Any) -> BranchMatchRun:
+        def _one_explodes(project: Any, _config: Any, **_kw: Any) -> BranchMatchRun:
             if project.pk == bad.pk:
                 raise OSError("prepare_repo blew up")
             return BranchMatchRun(project=project.full_name, applied=1)
@@ -1005,7 +1093,7 @@ class TestFixLandedHandlers:
 
         with patch(
             "franktheunicorn.security.fix_landed.check_project_fixes",
-            side_effect=lambda p, _c: FixLandedRun(project=p.full_name, merged=1),
+            side_effect=lambda p, _c, **_kw: FixLandedRun(project=p.full_name, merged=1),
         ) as checker:
             _dispatch(cmd, make_operator_config())
 
@@ -1034,7 +1122,7 @@ class TestFixLandedHandlers:
 
         with patch(
             "franktheunicorn.security.fix_landed.check_cve_fixes",
-            side_effect=lambda p, _c: CveFixLandedRun(
+            side_effect=lambda p, _c, **_kw: CveFixLandedRun(
                 project=p.full_name, match_summary="matched", landed_summary="checked"
             ),
         ) as checker:
@@ -1092,3 +1180,53 @@ class TestRecordAgentRunMergesFreshState:
         assert "stale" not in runs["claude"]
         # ...and the others keep the mark that says they are not.
         assert runs["llm"]["stale"] is True
+
+
+@pytest.mark.django_db
+class TestZombieCommands:
+    def test_scan_sweeps_every_jira_project(self, db_pr: PullRequest) -> None:
+        from franktheunicorn.review.zombie import ZombieScanRun
+
+        operator_config = MagicMock()
+        cmd = WorkerCommand.objects.create(command="scan_zombie_prs")
+        project = db_pr.project
+
+        def fake_scan(proj: Any, opc: Any) -> ZombieScanRun:
+            return ZombieScanRun(project=proj.full_name, examined=3, candidates=1, assessed=1)
+
+        with (
+            patch("franktheunicorn.review.zombie.zombie_projects", return_value=[(project, None)]),
+            patch("franktheunicorn.review.zombie.scan_project", side_effect=fake_scan),
+        ):
+            process_pending_commands(operator_config)
+
+        cmd.refresh_from_db()
+        assert cmd.status == "completed"
+        assert "apache/spark: examined 3 closed PR(s)" in cmd.log
+        assert "1 new zombie(s)" in cmd.log
+
+    def test_scan_with_no_jira_project_completes_with_the_reason(self) -> None:
+        cmd = WorkerCommand.objects.create(command="scan_zombie_prs")
+        with patch("franktheunicorn.review.zombie.zombie_projects", return_value=[]):
+            process_pending_commands(MagicMock())
+        cmd.refresh_from_db()
+        assert cmd.status == "completed"
+        assert "jira.enabled" in cmd.log
+
+    def test_assess_dispatches_to_assess_pr(self, db_pr: PullRequest) -> None:
+        cmd = WorkerCommand.objects.create(command="assess_zombie_pr", pull_request=db_pr)
+        with patch(
+            "franktheunicorn.review.zombie.assess_pr", return_value="verdict=revive: fine"
+        ) as assess:
+            process_pending_commands(MagicMock())
+        cmd.refresh_from_db()
+        assert cmd.status == "completed"
+        assert cmd.log == "verdict=revive: fine"
+        assert assess.call_args[0][0] == db_pr
+
+    def test_assess_requires_a_pr(self) -> None:
+        cmd = WorkerCommand.objects.create(command="assess_zombie_pr")
+        process_pending_commands(MagicMock())
+        cmd.refresh_from_db()
+        assert cmd.status == "failed"
+        assert "requires a pull_request" in cmd.error

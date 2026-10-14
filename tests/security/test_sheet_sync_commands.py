@@ -38,6 +38,24 @@ class TestExportCommand:
         assert "1 report(s) exported." in err.getvalue()
         assert "exported" not in out.getvalue()
 
+    def test_agent_narrows_the_export_and_names_the_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        SecurityReportFactory(title="Scanner finding", source_agent="xbow")
+        SecurityReportFactory(title="Person-sent", source_agent="")
+        monkeypatch.chdir(tmp_path)
+
+        call_command("export_security_csv", "--agent", "XBOW", "--out", stdout=io.StringIO())
+
+        (written,) = tmp_path.glob("security-review-agent-xbow-*.csv")
+        body = written.read_text()
+        assert "Scanner finding" in body
+        assert "Person-sent" not in body
+
+    def test_an_agent_that_does_not_parse_is_an_error_not_everything(self) -> None:
+        with pytest.raises(CommandError, match="isn't an agent name"):
+            call_command("export_security_csv", "--agent", "&&&", stdout=io.StringIO())
+
     def test_writes_a_dated_file_when_out_is_given_bare(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

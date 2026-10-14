@@ -93,7 +93,9 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px
 header { border-bottom: 2px solid var(--border); padding-bottom: 0.5rem; margin-bottom: 1rem; }
 header h1 { font-size: 1.4rem; display: inline; }
 header h1 a { color: var(--text); text-decoration: none; }
-nav { display: flex; gap: 1rem; align-items: center; margin-top: 0.5rem; font-size: 0.85rem; }
+/* Wraps so the PR lookup drops to its own line on a phone instead of pushing
+   every page ~100px wider than the screen. */
+nav { display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; margin-top: 0.5rem; font-size: 0.85rem; }
 nav a { color: var(--muted); text-decoration: none; }
 nav a:hover, nav a.active { color: var(--accent); font-weight: 600; }
 .workspace-select { margin-left: auto; }
@@ -262,6 +264,39 @@ thead th { border-bottom: 2px solid var(--border); }
    on all of them; the accent is reused for the left rule. */
 .context-panel.is-jira { background: var(--blue-bg); border-color: var(--blue); border-left-width: 3px; }
 .context-panel.is-session { background: var(--blue-bg); border-color: var(--blue); border-left-width: 3px; margin-top: 0.75rem; padding: 0.5rem 0.75rem; }
+/* Zombie Queue: closed-but-unmerged PRs whose JIRA is still open. Green,
+   because zombies. Every colour is a theme token so dark mode follows. */
+.context-panel.is-zombie { background: var(--green-bg); border-color: var(--green); border-left-width: 3px; }
+.context-panel.is-zombie.is-dismissed { opacity: 0.7; }
+.zombie-head { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; }
+.zombie-head img { vertical-align: middle; }
+.zombie-summary { margin: 0.5rem 0 0.25rem; font-size: 0.9rem; }
+.zombie-questions { margin: 0.4rem 0; font-size: 0.85rem; }
+.zombie-questions dt { font-weight: 600; margin-top: 0.3rem; }
+.zombie-questions dd { margin: 0.1rem 0 0 0; }
+.zombie-tlc { font-size: 0.85rem; margin: 0.4rem 0; }
+.zombie-tlc ul { margin: 0.2rem 0 0 1.2rem; padding: 0; }
+.zombie-closing { font-size: 0.75rem; white-space: pre-wrap; max-height: 16rem; overflow: auto; background: var(--code-bg); padding: 0.4rem; border-radius: 3px; }
+.zombie-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; margin-top: 0.5rem; }
+.zombie-verdict { display: inline-block; padding: 0.05rem 0.35rem; border-radius: 3px; font-weight: 600; font-size: 0.75rem; background: var(--code-bg); color: var(--muted); }
+.zombie-verdict-revive { background: var(--green-bg); color: var(--green); }
+.zombie-verdict-revive-with-changes { background: var(--yellow-bg); color: var(--orange); }
+.zombie-verdict-rethink { background: var(--orange-bg); color: var(--orange); }
+.zombie-verdict-drop { background: var(--red-bg); color: var(--red); }
+.zombie-verdict-unclear, .zombie-verdict-unassessed { background: var(--code-bg); color: var(--muted); }
+.zombie-answer { font-weight: 600; }
+.zombie-answer-yes { color: var(--green); }
+.zombie-answer-no { color: var(--red); }
+.zombie-answer-unclear { color: var(--muted); }
+.zombie-row { font-size: 0.8rem; margin-top: 0.35rem; padding-top: 0.35rem; border-top: 1px dashed var(--border); }
+.zombie-row-summary { margin-top: 0.2rem; color: var(--text); }
+.zombie-toolbar { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 0.6rem 0.75rem; margin-bottom: 0.75rem; }
+.zombie-toolbar .zombie-hunt { display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.85rem; padding: 0.3rem 0.6rem; }
+.zombie-toolbar .zombie-hunt:disabled { opacity: 0.6; cursor: default; }
+.zombie-scan-rows { list-style: none; margin: 0.4rem 0 0; padding: 0; font-size: 0.8rem; color: var(--muted); }
+.zombie-scan-rows li { margin: 0.15rem 0; }
+.tab-icon { vertical-align: text-bottom; margin-right: 0.25rem; }
+
 .context-panel.is-vibe { background: var(--yellow-bg); border-color: var(--orange); border-left-width: 3px; margin: 0 0 0.5rem; }
 .context-panel.is-notes { white-space: pre-wrap; font-size: 0.85rem; margin-top: 0.5rem; }
 .context-panel.is-compose { padding: 1rem; }
@@ -589,6 +624,53 @@ thead th { border-bottom: 2px solid var(--border); }
 
 .security-sort { font-size: 0.8rem; color: var(--muted); margin: 0.5rem 0; }
 
+/* The security page's bulk buttons. Wraps: a dozen buttons in a row that
+   didn't was a sideways scroll on a laptop and unusable on a phone. */
+.security-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: center;
+    margin-bottom: 1rem;
+}
+.security-actions select { font-size: 0.8rem; }
+
+/* Which source the page — rows, tab counts, Export and every bulk button — is
+   scoped to. Chips rather than a <select> so it works with no JS at all. */
+.source-scope {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    align-items: center;
+    font-size: 0.8rem;
+    margin: 0 0 0.5rem;
+}
+.source-scope a {
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0.1rem 0.55rem;
+    color: var(--muted);
+    text-decoration: none;
+    white-space: nowrap;
+}
+.source-scope a.active { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.source-scope-note { font-size: 0.8rem; color: var(--muted); margin: 0 0 0.5rem; }
+
+/* Marks another agent's output in the list and on the report, so a scanner
+   finding never reads as a person's report at a glance. */
+.agent-badge {
+    display: inline-block;
+    border: 1px solid var(--purple);
+    color: var(--purple);
+    padding: 0 0.35rem;
+    border-radius: 3px;
+    white-space: nowrap;
+}
+.zip-archives input[type="text"] { width: 9rem; font-size: 0.8rem; }
+.agent-relabel { display: inline-flex; gap: 0.3rem; align-items: center; margin-left: 0.4rem; }
+.agent-relabel input[type="text"] { width: 9rem; font-size: 0.8rem; }
+.agent-relabel .action-btn { font-size: 0.75rem; padding: 0.1rem 0.5rem; }
+
 /* The archive's own ranking, as read at import. */
 .priority-badge {
     display: inline-block;
@@ -615,6 +697,58 @@ thead th { border-bottom: 2px solid var(--border); }
     overflow: auto;
     max-height: 480px;
 }
+
+/* Almost Ready to Merge: one panel per candidate under its row (and on the
+   detail page). Tint by verdict on the left edge only — the badge says it in
+   words, and three fully-coloured panels in a row would read as alarms. */
+.mc-intro { margin-bottom: 0.75rem; font-size: 0.85rem; }
+.mc-intro p { margin: 0 0 0.4rem; }
+.mc-learned { font-size: 0.8rem; }
+.mc-learned summary { cursor: pointer; color: var(--accent); }
+.mc-learned ul { margin: 0.3rem 0 0; padding-left: 1.2rem; }
+.merge-candidate {
+    margin-top: 0.5rem;
+    padding: 0.5rem 0.65rem;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--muted);
+    border-radius: var(--radius, 4px);
+    font-size: 0.82rem;
+    background: var(--card);
+}
+.merge-candidate.mc-ready { border-left-color: var(--green); }
+.merge-candidate.mc-flaky-ci { border-left-color: var(--yellow); }
+.mc-head { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
+.mc-badge {
+    display: inline-block; padding: 0.1rem 0.45rem; border-radius: 3px;
+    font-size: 0.72rem; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase;
+}
+.mc-ready { background: var(--green-bg); color: var(--green); }
+.mc-flaky { background: var(--yellow-bg); color: var(--orange); }
+.mc-not, .mc-dismissed { background: var(--border); color: var(--muted); }
+.mc-score { color: var(--muted); }
+.mc-ci { font-weight: 600; }
+.mc-ci-green { color: var(--green); }
+.mc-ci-flaky { color: var(--orange); }
+.mc-ci-red { color: var(--red); }
+.mc-ci-pending, .mc-ci-unknown { color: var(--muted); }
+.mc-check {
+    display: inline-block; background: var(--yellow-bg); color: var(--orange);
+    padding: 0.05rem 0.35rem; border-radius: 3px; font-family: var(--font-mono); font-size: 0.75rem;
+}
+.mc-approvals { color: var(--green); }
+.mc-changes { color: var(--red); }
+.mc-reasons, .mc-blockers { margin: 0.35rem 0 0; padding-left: 1.1rem; }
+.mc-reasons li { color: var(--text); }
+.mc-blockers li { color: var(--red); }
+.mc-actions { display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; margin-top: 0.5rem; }
+.mc-actions .action-btn { margin-right: 0; text-decoration: none; }
+.mc-hint { color: var(--muted); font-size: 0.78rem; }
+.mc-dismiss summary { display: inline-block; list-style: none; }
+.mc-dismiss summary::-webkit-details-marker { display: none; }
+.mc-dismiss-form { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.4rem; }
+.mc-dismiss-form input[type="text"] { flex: 1 1 12rem; min-width: 0; font-size: 0.8rem; }
+.mc-result { margin-top: 0.3rem; }
+.mc-evaluated { font-size: 0.72rem; margin-top: 0.2rem; }
 
 @media (max-width: 600px) {
     body { padding: 0.5rem; }

@@ -97,6 +97,33 @@ class ForgeClient(ABC):
     ) -> list[dict[str, Any]]:
         pass
 
+    def list_pull_requests_page(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        state: str = "closed",
+        page: int = 1,
+        per_page: int = 100,
+        sort: str = "created",
+    ) -> list[dict[str, Any]]:
+        """One page of PRs in *state*, newest first by *sort* (``created`` or
+        ``updated``).
+
+        The paginated sibling of :meth:`list_pull_requests`, for callers that
+        walk history rather than snapshot the open set — the zombie scan reads
+        a project's closed PRs a page at a time across many runs, and needs to
+        say which page. ``created`` descending means PR numbers descend too,
+        which is what makes a stored frontier number a cursor; ``updated``
+        descending is how the same scan catches what closed since it last ran.
+
+        Only GitHub implements it today; the default raises so a caller can
+        degrade (log and skip the project) rather than silently see nothing.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support list_pull_requests_page()"
+        )
+
     @abstractmethod
     def get_pull_request(self, owner: str, repo: str, pr_number: int) -> dict[str, Any]:
         pass
@@ -158,9 +185,9 @@ class ForgeClient(ABC):
         Each dict carries ``user.login``, ``state`` (``APPROVED``,
         ``CHANGES_REQUESTED``, ``COMMENTED``, ``DISMISSED``), ``body``,
         ``submitted_at`` (ISO 8601, may be empty) and ``commit_id`` (may be
-        empty). The intending-to-merge detector reads these; forges without
-        a reviews API inherit this empty default and the queue stays empty
-        for their projects rather than erroring.
+        empty). The intending-to-merge detector and the almost-ready queue
+        read these; forges without a reviews API inherit this empty default
+        and see no approvals rather than erroring.
         """
         return []
 
@@ -212,6 +239,30 @@ class ForgeClient(ABC):
     @abstractmethod
     def close(self) -> None:
         pass
+
+    def get_commit_checks(self, owner: str, repo: str, sha: str) -> list[dict[str, Any]]:
+        """Return CI results for a commit, normalised to one shape.
+
+        Each entry is ``{"name", "status", "conclusion", "url"}`` where
+        ``status`` is ``completed`` / ``in_progress`` / ``queued`` and
+        ``conclusion`` is ``success`` / ``failure`` / ``timed_out`` /
+        ``cancelled`` / ``neutral`` / ``skipped`` / ``action_required`` or
+        ``""`` while running. Check runs and plain commit statuses both land
+        here. The default raises ``NotImplementedError``; the almost-ready
+        queue then runs without CI signals.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support get_commit_checks()")
+
+    def create_issue_comment(
+        self, owner: str, repo: str, issue_number: int, body: str
+    ) -> dict[str, Any]:
+        """Post a conversation comment (not a review) on a PR.
+
+        Used by the "ask the author to rebase" button. The default raises
+        ``NotImplementedError``; callers fall back to a body-only
+        ``create_review`` with ``event="COMMENT"``, which every forge supports.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support create_issue_comment()")
 
     def search_prs_involving(self, username: str, max_results: int = 100) -> list[dict[str, Any]]:
         """Search for open PRs where ``username`` is involved (mention/assign/review-request).

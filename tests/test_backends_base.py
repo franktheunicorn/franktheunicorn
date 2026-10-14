@@ -124,3 +124,17 @@ def test_forge_client_concrete_subclass_works() -> None:
 
     stub = Stub()
     assert infer_username(stub) == "stub"
+
+
+def test_forge_client_merge_readiness_defaults_raise_not_implemented() -> None:
+    """The CI/comment calls degrade per forge: the defaults say they can't.
+
+    list_pull_request_reviews defaults to ``[]`` instead (test_forge_reviews.py).
+    """
+    import pytest
+
+    dummy = MagicMock()
+    with pytest.raises(NotImplementedError, match="get_commit_checks"):
+        ForgeClient.get_commit_checks(dummy, "o", "r", "sha")
+    with pytest.raises(NotImplementedError, match="create_issue_comment"):
+        ForgeClient.create_issue_comment(dummy, "o", "r", 1, "hi")

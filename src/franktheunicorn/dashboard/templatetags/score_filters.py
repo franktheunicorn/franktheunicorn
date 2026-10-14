@@ -23,3 +23,16 @@ def score100(value: object) -> str:
     except (InvalidOperation, TypeError, ValueError):
         return ""
     return floatformat(scaled, 0)
+
+
+@register.filter(name="get_item")
+def get_item(mapping: object, key: object) -> object:
+    """``{{ counts|get_item:"not-ready" }}`` — dict lookup for keys the dot syntax can't spell.
+
+    Django's ``{{ d.not-ready }}`` is a subtraction, not a lookup. Returns
+    ``None`` for anything that isn't a mapping or lacks the key, so
+    ``|default:0`` behaves.
+    """
+    if isinstance(mapping, dict):
+        return mapping.get(key)
+    return None

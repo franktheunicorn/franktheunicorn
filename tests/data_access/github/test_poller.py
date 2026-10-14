@@ -1473,6 +1473,150 @@ class TestConcurrentAgentRunRecording:
         assert PullRequest.objects.get(pk=pr.pk).agent_runs["llm"]["stale"] is True
 
 
+class _FlakyCIMockClient(_CountingMockClient):
+    """The mock client with one approving review and a timed-out check."""
+
+    def list_pull_request_reviews(
+        self, owner: str, repo: str, pr_number: int
+    ) -> list[dict[str, Any]]:
+        return [{"user": {"login": "bob"}, "state": "APPROVED", "commit_id": _HEAD_SHA}]
+
+    def get_commit_checks(self, owner: str, repo: str, sha: str) -> list[dict[str, Any]]:
+        return [
+            {"name": "build", "status": "completed", "conclusion": "success", "url": ""},
+            {"name": "slow", "status": "completed", "conclusion": "timed_out", "url": ""},
+        ]
+
+
+@pytest.mark.django_db
+class TestMergeReadinessInPoller:
+    """The poll cycle populates reviews, CI and the almost-ready verdict."""
+
+    def test_poll_stores_reviews_checks_and_verdict(self, tmp_path: Path) -> None:
+        client = _FlakyCIMockClient(tmp_path, [_listed_pr()])
+        config = ProjectConfig(owner="apache", repo="spark", committers=["bob"])
+        poll_project(client, config, operator_username="somebody-else")
+
+        pr = PullRequest.objects.get(number=99)
+        assert pr.review_states == {
+            "bob": {"state": "APPROVED", "commit_id": _HEAD_SHA, "submitted_at": ""}
+        }
+        assert pr.approval_count == 1
+        assert pr.ci_status == "fail"
+        assert pr.ci_checks_sha == pr.head_sha == _HEAD_SHA
+        assert [c["name"] for c in pr.ci_checks] == ["build", "slow"]
+        assert pr.merge_readiness_detail["ci"]["status"] == "flaky"
+        assert pr.merge_readiness_verdict in ("flaky-ci", "")
+        assert "blockers" in pr.merge_readiness_detail
+
+    def test_default_mock_is_green_with_no_reviews(self, tmp_path: Path) -> None:
+        client = _CountingMockClient(tmp_path, [_listed_pr()])
+        config = ProjectConfig(owner="apache", repo="spark")
+        poll_project(client, config, operator_username="somebody-else")
+        pr = PullRequest.objects.get(number=99)
+        assert pr.ci_status == "pass"
+        assert pr.review_states == {}
+        assert pr.merge_readiness_detail["ci"]["status"] == "green"
+
+    def test_disabled_skips_the_extra_calls(self, tmp_path: Path) -> None:
+        client = _FlakyCIMockClient(tmp_path, [_listed_pr()])
+        config = ProjectConfig(owner="apache", repo="spark", merge_readiness={"enabled": False})
+        poll_project(client, config, operator_username="somebody-else")
+        pr = PullRequest.objects.get(number=99)
+        assert pr.ci_checks == []
+        assert pr.review_states == {}
+        assert pr.merge_readiness_detail == {}
+
+    def test_candidates_refresh_hourly(self, tmp_path: Path) -> None:
+        """A check finishing never bumps updated_at; a candidate can't wait a day."""
+        client = _CountingMockClient(tmp_path, [_listed_pr()])
+        config = ProjectConfig(owner="apache", repo="spark", poll_refresh_hours=24)
+        poll_project(client, config, operator_username="somebody-else")
+        PullRequest.objects.filter(number=99).update(
+            last_polled_at=timezone.now() - timedelta(hours=2),
+            merge_readiness_verdict="ready",
+        )
+        client.detail_calls.clear()
+        assert len(poll_project(client, config, operator_username="somebody-else")) == 1
+        assert client.detail_calls == [99]
+
+    def test_rebase_requested_refreshes_hourly(self, tmp_path: Path) -> None:
+        client = _CountingMockClient(tmp_path, [_listed_pr()])
+        config = ProjectConfig(owner="apache", repo="spark", poll_refresh_hours=24)
+        poll_project(client, config, operator_username="somebody-else")
+        PullRequest.objects.filter(number=99).update(
+            last_polled_at=timezone.now() - timedelta(hours=2),
+            rebase_requested_sha="old",
+        )
+        client.detail_calls.clear()
+        assert len(poll_project(client, config, operator_username="somebody-else")) == 1
+
+    def test_pending_ci_gets_a_middle_window(self, tmp_path: Path) -> None:
+        client = _CountingMockClient(tmp_path, [_listed_pr()])
+        config = ProjectConfig(owner="apache", repo="spark", poll_refresh_hours=24)
+        poll_project(client, config, operator_username="somebody-else")
+        PullRequest.objects.filter(number=99).update(
+            last_polled_at=timezone.now() - timedelta(hours=2), ci_status="pending"
+        )
+        client.detail_calls.clear()
+        assert poll_project(client, config, operator_username="somebody-else") == []
+        PullRequest.objects.filter(number=99).update(
+            last_polled_at=timezone.now() - timedelta(hours=7)
+        )
+        assert len(poll_project(client, config, operator_username="somebody-else")) == 1
+
+    def test_rebase_outcome_learned_on_the_next_poll(self, tmp_path: Path) -> None:
+        """We asked for a rebase on 'slow'; the author pushed and it went green."""
+        from franktheunicorn.core.models import CICheckHistory
+
+        client = _CountingMockClient(tmp_path, [_listed_pr()])
+        config = ProjectConfig(owner="apache", repo="spark")
+        poll_project(client, config, operator_username="somebody-else")
+        PullRequest.objects.filter(number=99).update(
+            rebase_requested_sha="0" * 40,
+            rebase_requested_at=timezone.now(),
+            rebase_requested_checks=["slow", "build"],
+            last_polled_at=timezone.now() - timedelta(days=2),
+        )
+        client.get_pull_request = _detail_with_head(client, "2" * 40)  # type: ignore[method-assign]
+        client.get_commit_checks = lambda owner, repo, sha: [  # type: ignore[method-assign]
+            {"name": "build", "status": "completed", "conclusion": "success"},
+            {"name": "slow", "status": "completed", "conclusion": "failure"},
+        ]
+        poll_project(client, config, operator_username="somebody-else")
+        pr = PullRequest.objects.get(number=99)
+        assert pr.rebase_requested_sha == ""
+        project = Project.objects.get(owner="apache", repo="spark")
+        rows = {
+            r.check_name: (r.flaky_count, r.real_count)
+            for r in CICheckHistory.objects.filter(project=project)
+        }
+        assert rows == {"build": (1, 0), "slow": (0, 1)}
+
+
+@pytest.mark.django_db
+class TestMergeReadinessDisabledClearsVerdicts:
+    def test_disabling_the_feature_clears_a_stored_verdict(self, tmp_path: Path) -> None:
+        client = _CountingMockClient(tmp_path, [_listed_pr()])
+        enabled = ProjectConfig(owner="apache", repo="spark", poll_refresh_hours=0)
+        poll_project(client, enabled, operator_username="somebody-else")
+        PullRequest.objects.filter(number=99).update(
+            merge_readiness_verdict="ready", merge_readiness_score=0.9
+        )
+
+        disabled = ProjectConfig(
+            owner="apache",
+            repo="spark",
+            poll_refresh_hours=0,
+            merge_readiness={"enabled": False},
+        )
+        poll_project(client, disabled, operator_username="somebody-else")
+        pr = PullRequest.objects.get(number=99)
+        assert pr.merge_readiness_verdict == ""
+        assert pr.merge_readiness_score == 0.0
+        assert pr.merge_readiness_detail == {}
+
+
 @pytest.mark.django_db
 class TestCommentEventsReachTheScorer:
     def test_who_said_what_is_passed_in_posting_order(self, tmp_path: Path) -> None:

@@ -31,10 +31,15 @@ Commands supported:
   gives the check half a ref to test for CVE-carrying reports.
 - ``run_agents``: force-run the review pipeline on a PR (no trusted-author
   gate, no dedup against existing drafts).
+- ``scan_zombie_prs``: the closed-PR follow-up sweep — every JIRA-enabled
+  project's closed-but-unmerged PRs, newest first, kept when the JIRA is still
+  open and assessed by the model. Bounded per run, resumes from a cursor.
+- ``assess_zombie_pr``: the per-PR re-run of that assessment.
 """
 
 from __future__ import annotations
 
+import functools
 import logging
 import time
 from datetime import datetime, timedelta
@@ -337,6 +342,8 @@ def _dispatch(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
         "check_cve_fixes_landed": _check_cve_fixes_landed,
         "run_agents": _run_agents,
         "analyze_ci_failures": _analyze_ci_failures,
+        "scan_zombie_prs": _scan_zombie_prs,
+        "assess_zombie_pr": _assess_zombie_pr,
     }
     handler = handlers.get(cmd.command)
     if handler is None:
@@ -620,6 +627,38 @@ def _sweep_log(
     return "\n".join(lines)
 
 
+def _sweep_scope(cmd: WorkerCommand) -> str | None:
+    """The agent scope a sweep was queued with (``kwargs["agent_scope"]``).
+
+    None for one that doesn't parse, which the handler refuses rather than
+    widening: a sweep queued for one agent's reports must not run over the whole
+    backlog because its row was hand-edited or written by a newer version.
+    """
+    from franktheunicorn.security.agent_source import SCOPE_ALL, parse_scope
+
+    raw = (cmd.kwargs or {}).get("agent_scope", SCOPE_ALL)
+    return parse_scope(raw) if isinstance(raw, str) else None
+
+
+def _scoped_projects(cmd: WorkerCommand, label: str) -> tuple[str, list[Project]] | None:
+    """The scope and the projects a sweep covers, or None after logging why none."""
+    from franktheunicorn.security.agent_source import scope_suffix
+    from franktheunicorn.security.branch_scan import projects_with_open_reports
+
+    scope = _sweep_scope(cmd)
+    if scope is None:
+        cmd.log = (
+            f"{label}: agent_scope {cmd.kwargs.get('agent_scope')!r} doesn't parse; nothing swept"
+        )
+        logger.warning("%s (command #%s)", cmd.log, cmd.pk)
+        return None
+    projects = projects_with_open_reports(scope)
+    if not projects:
+        cmd.log = f"{label}: no project has an open security report{scope_suffix(scope)}"
+        return None
+    return scope, projects
+
+
 def _match_security_branches(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
     """Fetch origin and tie a fix branch to every report that hasn't got one.
 
@@ -627,24 +666,26 @@ def _match_security_branches(cmd: WorkerCommand, operator_config: OperatorConfig
     expensive part (the fetch, the branch walk) is per project and doing it once
     per report would be the same work several hundred times.
     """
-    from franktheunicorn.security.branch_scan import match_fix_branches, projects_with_open_reports
+    from franktheunicorn.security.branch_scan import match_fix_branches
 
-    projects = projects_with_open_reports()
-    if not projects:
-        cmd.log = "branch match: no project has an open security report"
+    scoped = _scoped_projects(cmd, "branch match")
+    if scoped is None:
         return
-    cmd.log = _sweep_log(cmd, projects, match_fix_branches, operator_config)
+    scope, projects = scoped
+    sweep = functools.partial(match_fix_branches, agent_scope=scope)
+    cmd.log = _sweep_log(cmd, projects, sweep, operator_config)
 
 
 def _scan_security_fixed(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
     """Reverse-apply proposed patches to find the reports a fix already landed for."""
-    from franktheunicorn.security.branch_scan import projects_with_open_reports, scan_already_fixed
+    from franktheunicorn.security.branch_scan import scan_already_fixed
 
-    projects = projects_with_open_reports()
-    if not projects:
-        cmd.log = "fixed-scan: no project has an open security report"
+    scoped = _scoped_projects(cmd, "fixed-scan")
+    if scoped is None:
         return
-    cmd.log = _sweep_log(cmd, projects, scan_already_fixed, operator_config)
+    scope, projects = scoped
+    sweep = functools.partial(scan_already_fixed, agent_scope=scope)
+    cmd.log = _sweep_log(cmd, projects, sweep, operator_config)
 
 
 def _check_fix_landed(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
@@ -665,14 +706,14 @@ def _check_fixes_landed(cmd: WorkerCommand, operator_config: OperatorConfig) -> 
     Targetless for the same reason the other sweeps are — the fetch is per
     project, and per report it would be the same fetch several hundred times.
     """
-    from franktheunicorn.security.branch_scan import projects_with_open_reports
     from franktheunicorn.security.fix_landed import check_project_fixes
 
-    projects = projects_with_open_reports()
-    if not projects:
-        cmd.log = "fix-landed check: no project has an open security report"
+    scoped = _scoped_projects(cmd, "fix-landed check")
+    if scoped is None:
         return
-    cmd.log = _sweep_log(cmd, projects, check_project_fixes, operator_config)
+    scope, projects = scoped
+    sweep = functools.partial(check_project_fixes, agent_scope=scope)
+    cmd.log = _sweep_log(cmd, projects, sweep, operator_config)
 
 
 def _check_cve_fixes_landed(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
@@ -682,14 +723,14 @@ def _check_cve_fixes_landed(cmd: WorkerCommand, operator_config: OperatorConfig)
     gives the landed check a ref to test for a CVE-carrying report that had
     no branch recorded.
     """
-    from franktheunicorn.security.branch_scan import projects_with_open_reports
     from franktheunicorn.security.fix_landed import check_cve_fixes
 
-    projects = projects_with_open_reports()
-    if not projects:
-        cmd.log = "cve fix-landed check: no project has an open security report"
+    scoped = _scoped_projects(cmd, "cve fix-landed check")
+    if scoped is None:
         return
-    cmd.log = _sweep_log(cmd, projects, check_cve_fixes, operator_config)
+    scope, projects = scoped
+    sweep = functools.partial(check_cve_fixes, agent_scope=scope)
+    cmd.log = _sweep_log(cmd, projects, sweep, operator_config)
 
 
 def _run_agents(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
@@ -739,3 +780,33 @@ def _run_agents(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
         cmd.log = f"{summary}\n{joined}"
     else:
         cmd.log = summary
+
+
+def _scan_zombie_prs(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
+    """The Zombie Queue sweep: closed-unmerged PRs whose JIRA is still open.
+
+    Targetless and per project like the git sweeps — the listing is per
+    project, and the cursor it resumes from is per project.
+    """
+    from franktheunicorn.review.zombie import scan_project, zombie_projects
+
+    projects = [project for project, _config in zombie_projects()]
+    if not projects:
+        cmd.log = (
+            "zombie scan: no enabled project has jira.enabled and jira.server set, so there "
+            "is no ticket to check a closed PR against"
+        )
+        logger.info(cmd.log)
+        return
+    cmd.log = _sweep_log(cmd, projects, scan_project, operator_config)
+
+
+def _assess_zombie_pr(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
+    """The detail page's "Re-assess" button: one PR, one LLM call."""
+    if cmd.pull_request is None:
+        msg = "assess_zombie_pr requires a pull_request target"
+        raise ValueError(msg)
+
+    from franktheunicorn.review.zombie import assess_pr
+
+    cmd.log = assess_pr(cmd.pull_request, operator_config)

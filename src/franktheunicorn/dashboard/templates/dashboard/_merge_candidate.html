@@ -1,0 +1,92 @@
+{% load score_filters %}
+{% comment %}
+  One PR's merge-readiness panel: the verdict, why, and the buttons. Rendered
+  per row on the "Almost Ready to Merge" tab and on the PR detail page. Every
+  button posts back and swaps this whole panel (outerHTML), so the id has to
+  be stable across re-renders. `cand` comes from views._merge_candidate_context.
+{% endcomment %}
+<div class="merge-candidate mc-{{ cand.verdict|default:'not-ready' }}" id="merge-candidate-{{ pr.pk }}">
+  <div class="mc-head">
+    {% if cand.verdict == "ready" %}
+    <span class="mc-badge mc-ready" title="Nothing blocking: this probably deserves an LGTM or a merge">Ready</span>
+    {% elif cand.verdict == "flaky-ci" %}
+    <span class="mc-badge mc-flaky" title="Ready but for a CI failure that is probably a flake">Flaky CI</span>
+    {% elif cand.dismissed_here %}
+    <span class="mc-badge mc-dismissed" title="You marked this not ready at this commit; it comes back after the next push">Not ready (your call)</span>
+    {% else %}
+    <span class="mc-badge mc-not" title="Something is blocking; see below">Not ready</span>
+    {% endif %}
+    <span class="mc-score" title="Readiness score, 0-100">readiness {{ cand.score|score100 }}</span>
+    <span class="mc-ci mc-ci-{{ cand.ci_status }}" title="{{ cand.ci_reasons|join:'; ' }}">CI {{ cand.ci_status }}</span>
+    {% for check in cand.failing_checks %}
+    {% if check.url %}<a class="mc-check" href="{{ check.url }}" target="_blank" rel="noopener noreferrer" title="{{ check.confidence }}% likely a flake">{{ check.name }}{% if cand.ci_status == "flaky" %} ({{ check.confidence }}% flake){% endif %}</a>
+    {% else %}<span class="mc-check" title="{{ check.confidence }}% likely a flake">{{ check.name }}{% if cand.ci_status == "flaky" %} ({{ check.confidence }}% flake){% endif %}</span>{% endif %}
+    {% endfor %}
+    {% if cand.approvers %}<span class="mc-approvals" title="Current approvals">&#10003; {{ cand.approvers|join:", " }}</span>{% endif %}
+    {% if cand.stale_approvers %}<span class="mc-approvals muted" title="Approved before the latest push">&#10003; {{ cand.stale_approvers|join:", " }} (pre-push)</span>{% endif %}
+    {% if cand.changes_requested_by %}<span class="mc-changes" title="Changes requested">&#10007; {{ cand.changes_requested_by|join:", " }}</span>{% endif %}
+  </div>
+  {% if cand.reasons %}
+  <ul class="mc-reasons">{% for reason in cand.reasons %}<li>{{ reason }}</li>{% endfor %}</ul>
+  {% endif %}
+  {% if cand.blockers %}
+  <ul class="mc-blockers">{% for blocker in cand.blockers %}<li>{{ blocker }}</li>{% endfor %}</ul>
+  {% endif %}
+  <div class="mc-actions">
+    {% if cand.can_lgtm %}
+    <button type="button" class="action-btn approve mc-lgtm"
+            hx-post="{% url 'dashboard:merge_candidate_lgtm' pr.pk %}"
+            hx-target="#merge-candidate-{{ pr.pk }}" hx-swap="outerHTML"
+            hx-confirm="Post an approving LGTM review on {{ pr.project }} #{{ pr.number }}?">LGTM</button>
+    {% elif cand.operator_approved %}
+    <span class="mc-hint">you approved this</span>
+    {% endif %}
+    {% if cand.merge_enabled %}
+      {% if cand.merge_command %}
+      <button type="button" class="action-btn copy-cmd-btn" data-command="{{ cand.merge_command }}"
+              onclick="copyMergeCommand(this)" title="Copy the PR number for the merge script">Copy PR #</button>
+      {% elif cand.merge_eligible %}
+      <button type="button" class="action-btn post mc-merge"
+              hx-post="{% url 'dashboard:merge_pr' pr.pk %}"
+              hx-target="#mc-result-{{ pr.pk }}" hx-swap="innerHTML"
+              hx-confirm="Merge {{ pr.project }} #{{ pr.number }} now?">Merge</button>
+      {% else %}
+      <span class="mc-hint" title="{{ cand.merge_details|join:', ' }}">merge queue: {{ cand.merge_details|join:', ' }}</span>
+      {% endif %}
+    {% endif %}
+    <a class="action-btn" href="{{ pr.url }}" target="_blank" rel="noopener noreferrer">Open on forge &nearr;</a>
+    {% if cand.ci_status == "flaky" %}
+      {% if cand.rebase_requested %}
+      <span class="mc-hint" title="Asked at this commit; CI is re-checked on the next poll">asked for a rebase {% if pr.rebase_requested_at %}{{ pr.rebase_requested_at|timesince }} ago{% endif %}</span>
+      {% else %}
+      <button type="button" class="action-btn edit mc-rebase"
+              hx-post="{% url 'dashboard:merge_candidate_request_rebase' pr.pk %}"
+              hx-target="#merge-candidate-{{ pr.pk }}" hx-swap="outerHTML"
+              hx-confirm="Post this comment on {{ pr.project }} #{{ pr.number }}?&#10;&#10;{{ cand.rebase_preview }}">Ask to rebase</button>
+      {% endif %}
+    {% endif %}
+    <button type="button" class="action-btn mc-refresh"
+            hx-post="{% url 'dashboard:merge_candidate_refresh' pr.pk %}"
+            hx-target="#merge-candidate-{{ pr.pk }}" hx-swap="outerHTML"
+            title="Re-fetch head, reviews and CI from the forge now">Refresh CI</button>
+    {% if not cand.dismissed_here %}
+    <details class="mc-dismiss">
+      <summary class="action-btn reject">Not ready&hellip;</summary>
+      <form class="mc-dismiss-form"
+            hx-post="{% url 'dashboard:merge_candidate_dismiss' pr.pk %}"
+            hx-target="#merge-candidate-{{ pr.pk }}" hx-swap="outerHTML">
+        {% csrf_token %}
+        <select name="reason_code" aria-label="Why isn't this ready?">
+          {% for code, label in cand.reason_choices %}
+          <option value="{{ code }}">{{ label }}</option>
+          {% endfor %}
+        </select>
+        <input type="text" name="reason_text" maxlength="500" placeholder="why (optional; remembered)">
+        <button type="submit" class="action-btn reject">Mark not ready</button>
+      </form>
+    </details>
+    {% endif %}
+  </div>
+  <div id="mc-result-{{ pr.pk }}" class="mc-result">{% if cand.note %}<span class="{% if cand.error %}error-note{% else %}ok-note{% endif %}">{{ cand.note }}</span>{% endif %}</div>
+  {% if cand.evaluated_at %}<div class="mc-evaluated fainter">evaluated {{ cand.evaluated_at|slice:":16" }} UTC</div>{% endif %}
+</div>

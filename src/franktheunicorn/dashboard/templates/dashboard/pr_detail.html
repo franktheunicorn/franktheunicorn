@@ -81,6 +81,8 @@
 </div>
 {% endif %}
 
+{% if zombie %}{% include "dashboard/_zombie_panel.html" %}{% endif %}
+
 {% if pr.score_breakdown %}
 <h3 style="margin-top: 1.5rem;">Score Breakdown</h3>
 <dl class="breakdown">
@@ -89,6 +91,11 @@
     <dd>{{ value|floatformat:3 }}</dd>
     {% endfor %}
 </dl>
+{% endif %}
+
+{% if candidate %}
+<h3 style="margin-top: 1.5rem;">Merge Readiness</h3>
+{% include "dashboard/_merge_candidate.html" with cand=candidate %}
 {% endif %}
 
 <div style="margin-bottom: 0.75rem; margin-top: 1.5rem; display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: flex-start;">

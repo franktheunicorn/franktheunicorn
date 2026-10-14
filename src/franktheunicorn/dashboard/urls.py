@@ -43,9 +43,32 @@ urlpatterns = [
     # Stats
     path("stats/", views.stats, name="stats"),
     path("project/<int:project_id>/wipe-prs/", views.project_wipe_prs, name="project_wipe_prs"),
+    # Zombie Queue: closed-but-unmerged PRs whose JIRA is still open. The hunt
+    # is a worker sweep (bulk priority); the two per-PR buttons live on the
+    # detail page and swap the panel.
+    path("zombies/scan/", views.zombie_scan, name="zombie_scan"),
+    path("pr/<int:pr_id>/zombie/dismiss/", views.zombie_dismiss, name="zombie_dismiss"),
+    path("pr/<int:pr_id>/zombie/reassess/", views.zombie_reassess, name="zombie_reassess"),
     # Merge queue (v2)
     path("merge-queue/", views.merge_queue_view, name="merge_queue"),
     path("pr/<int:pr_id>/merge/", views.merge_pr, name="merge_pr"),
+    # Almost Ready to Merge: the candidate panel's buttons (htmx fragments)
+    path("pr/<int:pr_id>/lgtm/", views.merge_candidate_lgtm, name="merge_candidate_lgtm"),
+    path(
+        "pr/<int:pr_id>/not-ready/",
+        views.merge_candidate_dismiss,
+        name="merge_candidate_dismiss",
+    ),
+    path(
+        "pr/<int:pr_id>/request-rebase/",
+        views.merge_candidate_request_rebase,
+        name="merge_candidate_request_rebase",
+    ),
+    path(
+        "pr/<int:pr_id>/refresh-readiness/",
+        views.merge_candidate_refresh,
+        name="merge_candidate_refresh",
+    ),
     # Security report triage
     path("security/", views.security_report_list, name="security_list"),
     path("security/new/", views.security_report_create, name="security_create"),
@@ -98,6 +121,9 @@ urlpatterns = [
     # The two git-only backlog sweeps: which branch carries each fix, and which
     # reports a fix already landed for. Both fetch origin first; both are worker
     # commands because both are minutes of git per project.
+    # Confirm / re-verify open reports against the code: git check for all,
+    # optionally the coding agent for a capped batch. Scoped by the agent field.
+    path("security/reverify/", views.security_reverify, name="security_reverify"),
     path(
         "security/match-branches/",
         views.security_match_branches,
@@ -142,6 +168,12 @@ urlpatterns = [
     path("security/upload/", views.security_report_upload, name="security_upload"),
     # The undo for one: delete every report that came from a named archive.
     path("security/drop-archive/", views.security_archive_drop, name="security_archive_drop"),
+    # Relabel an archive's reports with the agent that produced them (backfill).
+    path(
+        "security/archive-agent/",
+        views.security_archive_set_agent,
+        name="security_archive_set_agent",
+    ),
     # Round-trip through a shared spreadsheet, for a backlog other people rule on.
     # ".csv" in the path so a browser and a shell both name the download sensibly.
     path("security/export.csv", views.security_report_export_csv, name="security_export_csv"),
@@ -161,6 +193,13 @@ urlpatterns = [
         "security/<int:report_id>/",
         views.security_report_detail,
         name="security_detail",
+    ),
+    # One report's agent label: the relabel for pasted/emailed reports, which
+    # have no archive for the bulk relabel to reach.
+    path(
+        "security/<int:report_id>/agent/",
+        views.security_report_set_agent,
+        name="security_set_agent",
     ),
     path(
         "security/<int:report_id>/triage/",

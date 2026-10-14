@@ -41,6 +41,7 @@ from typing import IO, TYPE_CHECKING
 from django.db import transaction
 
 from franktheunicorn.core.models import SecurityReport
+from franktheunicorn.security.agent_source import clean_agent_name
 from franktheunicorn.security.intake import record_injection_hits
 from franktheunicorn.security.scan_archive import (
     MAX_FINDINGS,
@@ -203,6 +204,12 @@ class ZipImportResult:
     #: import stopped"; the CLI turns it into a non-zero exit, so a cap that was
     #: reached after doing the work belongs here instead.
     warnings: list[str] = field(default_factory=list)
+    #: Already-present reports whose agent label differs from the one this import
+    #: was given. A duplicate keeps its label — it may have been relabelled by hand
+    #: since — so re-uploading an archive with the Agent box filled labels nothing
+    #: that was already there, and the caller has to say so rather than flash a
+    #: green "already imported".
+    agent_label_kept: int = 0
     #: The archive had more entries than the caller allowed. A flag, not a
     #: substring of ``error``: the dashboard used ``"over the" in result.error`` to
     #: decide whether to suggest the CLI, which breaks the moment anyone rewords
@@ -248,6 +255,10 @@ class ZipImportResult:
             parts.append(f"{self.queued_version_maps} queued for version mapping")
         if self.queued_introduction_scans:
             parts.append(f"{self.queued_introduction_scans} queued for introduction dating")
+        if self.agent_label_kept:
+            parts.append(
+                f"{self.agent_label_kept} already-present report(s) kept their existing agent label"
+            )
         parts.extend(self.warnings)
         if self.error:
             # A cap tripped mid-walk after rows were already committed. Saying
@@ -267,6 +278,7 @@ def import_reports_from_zip(
     require_security_content: bool = True,
     max_entries: int = MAX_ENTRIES,
     archive_label: str = "",
+    source_agent: str = "",
 ) -> ZipImportResult:
     """Create a :class:`SecurityReport` for each report file in *source*.
 
@@ -316,11 +328,24 @@ def import_reports_from_zip(
     whole import runs inside one HTTP request, which the single-transaction walk
     made cheap enough not to matter.
 
+    ``source_agent`` names the automated agent that produced the archive, or ""
+    when people did. Every report this run *creates* gets it; a duplicate keeps
+    whatever its earlier import said, since that row may have been relabelled by
+    hand since. Validated here rather than at each door, so the dashboard and the
+    command refuse a reserved word ("all", "none", "any") with one message.
+
     Never raises for a bad archive: a corrupt or non-zip file comes back as
     ``result.error`` so the caller can show it. Per-entry problems are recorded
     against the entry and the rest of the archive still imports.
     """
     result = ZipImportResult()
+    try:
+        source_agent = clean_agent_name(source_agent)
+    except ValueError as exc:
+        # Before the archive is opened. An agent's findings filed as human-sent
+        # is the mislabel that defeats the whole field, so nothing imports.
+        result.error = str(exc)
+        return result
     # Recorded on every row for provenance. Derived from a path when the caller
     # didn't name it; the dashboard passes the upload's filename, which is the
     # only name a browser upload has.
@@ -369,6 +394,7 @@ def import_reports_from_zip(
                 require_security_content,
                 max_entries,
                 archive_label,
+                source_agent,
             )
     except zipfile.BadZipFile:
         result.error = "not a valid zip archive"
@@ -624,6 +650,7 @@ def _import_entries(
     require_security_content: bool,
     max_entries: int,
     archive_label: str,
+    source_agent: str = "",
 ) -> None:
     """Walk the archive in name order, recording an outcome for every entry."""
     candidates = [info for info in archive.infolist() if not _is_ignorable(info)]
@@ -696,6 +723,35 @@ def _import_entries(
             require_security_content,
             archive_label,
             {name: text.encode("utf-8") for name, text in expanded.residuals.items()},
+        )
+        if source_agent:
+            _stamp_agent(result, source_agent)
+
+
+def _stamp_agent(result: ZipImportResult, source_agent: str) -> None:
+    """Label every report this run created with the agent that produced it.
+
+    One UPDATE at the end of the walk's transaction rather than a seventh
+    parameter threaded through both creation paths. Inside the transaction is
+    what makes that safe: a triage command queued mid-walk is not visible to the
+    worker until commit, and by then the label is on the row, so the triage
+    prompt always knows it is reading another agent's output.
+    """
+    ids = [entry.report_id for entry in result.entries if entry.outcome == "imported"]
+    if ids:
+        SecurityReport.objects.filter(pk__in=ids).update(source_agent=source_agent)
+    # Duplicates keep their label; count the ones that disagree so the caller can
+    # say the label it was given didn't reach them.
+    duplicate_ids = {
+        entry.report_id
+        for entry in result.entries
+        if entry.outcome == "duplicate" and entry.report_id is not None
+    }
+    if duplicate_ids:
+        result.agent_label_kept = (
+            SecurityReport.objects.filter(pk__in=duplicate_ids)
+            .exclude(source_agent=source_agent)
+            .count()
         )
 
 
