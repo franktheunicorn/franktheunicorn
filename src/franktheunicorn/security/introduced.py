@@ -25,12 +25,17 @@ never runs by itself — a button, a checkbox or ``--find-introduction``.
 from __future__ import annotations
 
 import logging
-import re
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from franktheunicorn.security.release_tags import (
+    DEFAULT_RULE,
+    FINAL,
+    ReleaseTagRule,
+    release_tag_rule_for,
+)
 from franktheunicorn.security.verifier import (
     _checkout,
     _default_branch,
@@ -60,9 +65,6 @@ MIN_NEEDLE_CHARS = 24
 #: Longest needle handed to ``git log -S``. Long lines are usually reformatted
 #: somewhere in history, and a needle that never matches is a wasted walk.
 MAX_NEEDLE_CHARS = 200
-
-#: Tags that name a release rather than a checkpoint. Matched case-insensitively.
-_RELEASE_TAG_RE = re.compile(r"^v?\d+\.\d+(\.\d+)?$", re.IGNORECASE)
 
 #: How many release tags to keep. Measured on apache/spark: a 2014 commit is
 #: contained by 254 tags, 86 of them real releases — a wall nobody reads, in a
@@ -231,7 +233,9 @@ def find_introduction(report: SecurityReport, operator_config: OperatorConfig) -
 
     _summarise(run)
     if run.commit:
-        tags = _releases_containing(executor, cwd, run.commit)
+        tags = _releases_containing(
+            executor, cwd, run.commit, release_tag_rule_for(project.full_name)
+        )
         run.release_count = len(tags)
         run.releases = tags[:MAX_RELEASES]
     run.duration_seconds = time.monotonic() - started
@@ -328,12 +332,15 @@ def _origin_sort_key(pair: tuple[datetime | None, PathOrigin]) -> datetime:
     return pair[0] or datetime.min.replace(tzinfo=UTC)
 
 
-def _releases_containing(executor: ToolExecutor, cwd: str, commit: str) -> list[str]:
+def _releases_containing(
+    executor: ToolExecutor, cwd: str, commit: str, tag_rule: ReleaseTagRule = DEFAULT_RULE
+) -> list[str]:
     """Release tags containing *commit*, oldest version first.
 
     This is the payoff: a definitive list of shipped versions carrying the code,
     where file presence could only ever be circumstantial. Checkpoint and
-    release-candidate tags are filtered out — a maintainer acts on ``v3.5.0``.
+    release-candidate tags are filtered out — a maintainer acts on ``v3.5.0`` —
+    by the same rule ``fix_landed`` uses (``security.release_tags``).
     """
     result = executor.run(
         ["git", "tag", "--contains", commit, "--sort=v:refname"],
@@ -344,7 +351,7 @@ def _releases_containing(executor: ToolExecutor, cwd: str, commit: str) -> list[
         detail = "no result" if result is None else (result.stderr or "").strip()[:200]
         logger.info("Could not list tags containing %s: %s", commit[:12], detail)
         return []
-    return [tag.strip() for tag in result.stdout.splitlines() if _RELEASE_TAG_RE.match(tag.strip())]
+    return [tag.strip() for tag in result.stdout.splitlines() if tag_rule.classify(tag) == FINAL]
 
 
 def persist_introduction(report: SecurityReport, run: IntroductionRun) -> None:

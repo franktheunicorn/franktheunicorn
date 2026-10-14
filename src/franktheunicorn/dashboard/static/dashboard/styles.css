@@ -651,3 +651,11 @@ thead th { border-bottom: 2px solid var(--border); }
 .badge-ci.fail { background: var(--red-bg); color: var(--red); }
 .badge-ci.pending { background: var(--yellow-bg); color: var(--yellow); }
 .intent-excerpt { color: var(--muted); font-style: italic; }
+
+/* Attachment manifest on the security report page: metadata only. */
+.attachment-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+.attachment-table th, .attachment-table td {
+  text-align: left; padding: 0.25rem 0.5rem; border-bottom: 1px solid var(--border);
+  word-break: break-all;
+}
+.attachment-table th { color: var(--muted); font-weight: 600; }

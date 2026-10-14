@@ -77,8 +77,14 @@ _REQUESTED_VIA_EMAIL_MARKER = "email has been sent"
 #: recognise the shape, short enough to not fill the worker log with a page.
 _UNKNOWN_BODY_LOG_CHARS = 500
 
-#: Record states we recognise. Anything else is stored as "unknown".
-_KNOWN_STATES = frozenset({"RESERVED", "PUBLISHED", "REJECT"})
+#: Record states we recognise. Anything else is stored as "unknown". The
+#: first three are CVE Services'; DRAFT, REVIEW, READY and PUBLIC are the ASF
+#: workflow's own ``CNA_private.state`` lifecycle (PUBLIC is terminal and is
+#: what feeds cve.org; see Apache Magpie's tools/cve-tool-vulnogram/record.md,
+#: "State transitions", at dadb315caa8b881fc1d2195bef03223dac25915a). Without
+#: them the panel read "Unrecognised response" right after an advisory push
+#: moved a record to PUBLIC.
+_KNOWN_STATES = frozenset({"RESERVED", "PUBLISHED", "REJECT", "DRAFT", "REVIEW", "READY", "PUBLIC"})
 
 
 class CVEAPIError(Exception):

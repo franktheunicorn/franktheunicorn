@@ -430,6 +430,7 @@ def _refresh_pull_request(
     operator_review_posted_at: str | None = None
     author_replies: list[str] | None = None
     comment_bodies: list[str] | None = None
+    comment_events: list[dict[str, str]] | None = None
     fetched_comments: list[dict[str, Any]] | None = None
 
     try:
@@ -440,24 +441,10 @@ def _refresh_pull_request(
         )
         fetched_comments = all_comments
         comment_bodies = [str(c.get("body", "")) for c in all_comments if c.get("body")]
-
-        latest_posted_at = (
-            ReviewDraft.objects.filter(
-                pull_request=pr_obj, status="posted", posted_at__isnull=False
-            )
-            .order_by("-posted_at")
-            .values_list("posted_at", flat=True)
-            .first()
+        comment_events = _comment_events(all_comments)
+        operator_review_posted_at, author_replies = _replies_since_posted_review(
+            pr_obj, all_comments
         )
-        if latest_posted_at is not None:
-            operator_review_posted_at = latest_posted_at.isoformat()
-            pr_author = pr_obj.author.lower()
-            author_replies = [
-                c["created_at"]
-                for c in all_comments
-                if c.get("user", {}).get("login", "").lower() == pr_author
-                and c.get("created_at", "") >= operator_review_posted_at
-            ]
     except Exception:
         logger.debug("Could not fetch comments for PR #%d", pr_number)
 
@@ -492,6 +479,7 @@ def _refresh_pull_request(
         operator_review_posted_at=operator_review_posted_at,
         author_replies_after_review=author_replies,
         comment_bodies=comment_bodies,
+        comment_events=comment_events,
     )
     pr_obj.interest_score = score
     pr_obj.score_breakdown = breakdown
@@ -701,6 +689,46 @@ def _mark_reviews_stale(pr_obj: PullRequest) -> None:
         PullRequest.objects.filter(pk=pr_obj.pk).update(agent_runs=updated)
 
 
+def _replies_since_posted_review(
+    pr_obj: PullRequest, comments: list[dict[str, Any]]
+) -> tuple[str | None, list[str] | None]:
+    """When the operator's latest review on *pr_obj* was posted, and when the
+    author commented since: the pending-response signal's two inputs. Both
+    ``None`` while nothing has been posted."""
+    latest_posted_at = (
+        ReviewDraft.objects.filter(pull_request=pr_obj, status="posted", posted_at__isnull=False)
+        .order_by("-posted_at")
+        .values_list("posted_at", flat=True)
+        .first()
+    )
+    if latest_posted_at is None:
+        return None, None
+    posted_at = latest_posted_at.isoformat()
+    pr_author = pr_obj.author.lower()
+    return posted_at, [
+        c["created_at"]
+        for c in comments
+        if c.get("user", {}).get("login", "").lower() == pr_author
+        and c.get("created_at", "") >= posted_at
+    ]
+
+
+def _comment_events(comments: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """Who said what, when, in posting order: the "whose court is the ball in"
+    signal needs the last human speaker, not just the words."""
+    return sorted(
+        (
+            {
+                "author": str((c.get("user") or {}).get("login", "")),
+                "body": str(c.get("body", "") or ""),
+                "created_at": str(c.get("created_at", "") or ""),
+            }
+            for c in comments
+        ),
+        key=lambda e: e["created_at"],
+    )
+
+
 def _sync_merge_intent(
     client: ForgeClient,
     owner: str,
@@ -832,6 +860,7 @@ def _route_pr_to_queue(
         "changed_files": pr_obj.changed_files,
         "requested_reviewers": pr_obj.requested_reviewers,
         "assignees": pr_obj.assignees,
+        "author_association": pr_obj.author_association,
     }
     if pr_obj.github_created_at:
         from datetime import UTC, datetime
@@ -1038,6 +1067,10 @@ def _upsert_pull_request(
                 "is_draft": pr_data.get("draft", False),
                 "github_created_at": _parse_github_datetime(pr_data.get("created_at")),
                 "github_updated_at": _parse_github_datetime(pr_data.get("updated_at")),
+                # GitHub's own answer to "has this author committed here"; ""
+                # from Gitea, GitLab and the scrape path, where the known-authors
+                # rule decides as before.
+                "author_association": str(pr_data.get("author_association", "") or "")[:32],
             }
         )
 
@@ -1154,6 +1187,25 @@ def ingest_single_pr(
             if side_data.get("ref"):
                 setattr(pr_obj, ref_field, side_data["ref"])
 
+    # One comments read for scoring and the merge-intent sync below. Scoring
+    # without them wrote over the poll's mention bonus, "ball in our court" and
+    # pending-response bumps on every own-PR scan, which is every cycle for
+    # exactly the PRs the operator is engaged in.
+    fetched_comments: list[dict[str, Any]] | None = None
+    comment_bodies: list[str] | None = None
+    comment_events: list[dict[str, str]] | None = None
+    operator_review_posted_at: str | None = None
+    author_replies: list[str] | None = None
+    try:
+        fetched_comments = client.get_issue_comments(owner, repo, pr_number)
+        comment_bodies = [str(c.get("body", "")) for c in fetched_comments if c.get("body")]
+        comment_events = _comment_events(fetched_comments)
+        operator_review_posted_at, author_replies = _replies_since_posted_review(
+            pr_obj, fetched_comments
+        )
+    except Exception:
+        logger.debug("Could not fetch comments for PR #%d during on-demand ingest", pr_number)
+
     if project_config:
         try:
             from franktheunicorn.data_access.context_orchestrator import fetch_jira_context
@@ -1169,6 +1221,10 @@ def ingest_single_pr(
             pr=pr_obj,
             project_config=project_config,
             operator_username=operator_config.github_username or "",
+            operator_review_posted_at=operator_review_posted_at,
+            author_replies_after_review=author_replies,
+            comment_bodies=comment_bodies,
+            comment_events=comment_events,
         )
         pr_obj.interest_score = score
         pr_obj.score_breakdown = breakdown
@@ -1189,6 +1245,7 @@ def ingest_single_pr(
         pr_obj,
         operator_config.github_username or "",
         operator_config.merge_intent,
+        comments=fetched_comments,
     )
 
     _route_pr_to_queue(

@@ -41,6 +41,7 @@ from typing import IO, TYPE_CHECKING
 from django.db import transaction
 
 from franktheunicorn.core.models import SecurityReport
+from franktheunicorn.security.intake import record_injection_hits
 from franktheunicorn.security.scan_archive import (
     MAX_FINDINGS,
     ScanArchive,
@@ -794,6 +795,7 @@ def _import_findings(
                     priority=record.priority,
                     priority_reason=record.priority_reason[:200],
                 )
+                record_injection_hits(report)
         except Exception as exc:
             logger.warning("Could not store finding %s", record.finding_id, exc_info=True)
             _record(
@@ -1217,7 +1219,12 @@ def _import_entry(
                 # disagree and the message-id door stops working.
                 email_message_id=str(parsed.message_id)[:_MESSAGE_ID_MAX_LEN],
                 email_received_at=parsed.received_at,
+                relay_kind=parsed.relay_kind,
+                reporter_credit=parsed.reporter_credit[:255],
+                credit_kind=parsed.credit_kind,
+                attachments=parsed.attachment_rows(),
             )
+            record_injection_hits(report)
     except Exception as exc:
         # The only unguarded call in the loop was this one, so a DataError or a
         # "database is locked" (web and worker share one SQLite file) escaped to

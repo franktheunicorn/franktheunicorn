@@ -15,7 +15,12 @@ from typing import TYPE_CHECKING, NamedTuple
 
 from franktheunicorn.config.models import LLMBackendConfig
 from franktheunicorn.security.cve_lookup import search_cves
-from franktheunicorn.security.prompt import build_parse_prompt, build_triage_prompt
+from franktheunicorn.security.intake import record_injection_hits
+from franktheunicorn.security.prompt import (
+    TRIAGE_DISPOSITIONS,
+    build_parse_prompt,
+    build_triage_prompt,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -319,9 +324,9 @@ def triage_report(
             logger.info("Parsing report #%d via LLM (%s)", report.pk, backend.label)
             parsed = _parse_report(report, backend)
             logger.info(
-                "Parse complete for report #%d: severity=%r component=%r",
+                "Parse complete for report #%d: reporter claims severity=%r component=%r",
                 report.pk,
-                report.assessed_severity,
+                report.claimed_severity,
                 report.parsed_component[:60] if report.parsed_component else "",
             )
 
@@ -1012,8 +1017,11 @@ def _parse_report(report: SecurityReport, backend: BaseLLMBackend) -> bool:
         report.parsed_component = str(parsed.get("component", ""))[:500]
         report.parsed_poc = str(parsed.get("poc", ""))
         report.parsed_impact = str(parsed.get("impact", ""))
+        # The reporter's claim, not a rating: it goes to claimed_severity and
+        # never to assessed_severity, which is the analysis step's and the
+        # operator's alone.
         severity = str(parsed.get("severity", "unknown")).lower()
-        report.assessed_severity = severity if severity in _VALID_SEVERITIES else "unknown"
+        report.claimed_severity = severity if severity in _VALID_SEVERITIES else "unknown"
 
         if not report.reporter_name and parsed.get("reporter_name"):
             report.reporter_name = str(parsed["reporter_name"])[:255]
@@ -1026,12 +1034,15 @@ def _parse_report(report: SecurityReport, backend: BaseLLMBackend) -> bool:
                 "parsed_component",
                 "parsed_poc",
                 "parsed_impact",
-                "assessed_severity",
+                "claimed_severity",
                 "reporter_name",
                 "reporter_email",
                 "updated_at",
             ]
         )
+        # The POC is new text the intake scan never saw — and the one field a
+        # steering payload most naturally lands in ("to reproduce, run ...").
+        record_injection_hits(report)
         return True
     return False
 
@@ -1045,17 +1056,34 @@ class _AnalysisOutcome(NamedTuple):
     call_failed: bool
 
 
+#: Magpie disposition -> the status the Agree button would apply. Two classes
+#: map to no status on purpose: FIX-ALREADY-PUBLIC is "confirm the public fix
+#: covers this", a next step rather than a verdict, and UNCERTAIN falls through
+#: to the older plausible/expected derivation below.
+_DISPOSITION_STATUS: dict[str, str] = {
+    "VALID": "valid",
+    "DEFENSE-IN-DEPTH": "defense-in-depth",
+    "INFO-ONLY": "info-only",
+    "INVALID": "invalid",
+    "PROBABLE-DUP": "duplicate",
+}
+
+
 def _suggested_status(report: SecurityReport) -> str:
     """The machine's suggested verdict from what triage populated.
 
-    ``expected-behavior`` beats everything (it's not a vulnerability at all);
-    a plausible POC that isn't expected behaviour is ``valid``; an implausible
-    one is ``invalid``; a model that said neither leaves it blank for
-    "inconclusive". This is what the Agree button copies into ``status`` and
-    what the version/verify follow-on gates on — "looks valid" is exactly
-    ``valid``, so an inconclusive or expected-behavior report doesn't spend
-    the agent runs.
+    The disposition (``auto_triage_disposition``, Magpie's six classes) decides
+    when the model gave one. Otherwise, the older derivation: ``expected-behavior``
+    beats everything (it's not a vulnerability at all); a plausible POC that isn't
+    expected behaviour is ``valid``; an implausible one is ``invalid``; a model
+    that said neither leaves it blank for "inconclusive". This is what the Agree
+    button copies into ``status`` and what the version/verify follow-on gates on
+    — "looks valid" is exactly ``valid``, so an inconclusive, defense-in-depth or
+    expected-behavior report doesn't spend the agent runs.
     """
+    mapped = _DISPOSITION_STATUS.get(report.auto_triage_disposition)
+    if mapped:
+        return mapped
     if report.is_expected_behavior:
         return "expected-behavior"
     if report.poc_plausible is True:
@@ -1150,6 +1178,11 @@ def _analyze_report(
             analysis.get("expected_behavior_explanation", "")
         )
         report.triage_summary = str(analysis.get("triage_summary", ""))
+        # The class is a proposal; anything outside the vocabulary is "did not
+        # say", not an error — an older backend or prompt simply omits it.
+        disposition = str(analysis.get("disposition", "") or "").strip().upper()
+        report.auto_triage_disposition = disposition if disposition in TRIAGE_DISPOSITIONS else ""
+        report.triage_model_quote = str(analysis.get("model_quote", "") or "").strip()[:2000]
 
         severity = str(analysis.get("assessed_severity", "")).lower()
         if severity in _VALID_SEVERITIES:
@@ -1185,6 +1218,8 @@ def _analyze_report(
             "is_expected_behavior",
             "expected_behavior_explanation",
             "triage_summary",
+            "auto_triage_disposition",
+            "triage_model_quote",
             "assessed_severity",
             "status",
             "updated_at",

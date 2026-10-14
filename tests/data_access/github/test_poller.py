@@ -1471,3 +1471,70 @@ class TestConcurrentAgentRunRecording:
         _mark_reviews_stale(pr)
 
         assert PullRequest.objects.get(pk=pr.pk).agent_runs["llm"]["stale"] is True
+
+
+@pytest.mark.django_db
+class TestCommentEventsReachTheScorer:
+    def test_who_said_what_is_passed_in_posting_order(self, tmp_path: Path) -> None:
+        client = _CountingMockClient(tmp_path, [_listed_pr(99)])
+        comments = [
+            {"user": {"login": "holdenk"}, "body": "Looking", "created_at": "2026-04-02T00:00:00Z"},
+            {
+                "user": {"login": "alice"},
+                "body": "@holdenk ?",
+                "created_at": "2026-04-03T00:00:00Z",
+            },
+            {"user": {"login": "alice"}, "body": "hi", "created_at": "2026-04-01T00:00:00Z"},
+        ]
+        seen: dict[str, Any] = {}
+
+        def capture(pr: PullRequest, **kwargs: Any) -> tuple[float, dict[str, Any]]:
+            seen.update(kwargs)
+            return 0.5, {}
+
+        with (
+            patch.object(client, "get_issue_comments", return_value=comments),
+            patch(
+                "franktheunicorn.backends.poller.score_pull_request_from_model",
+                side_effect=capture,
+            ),
+        ):
+            poll_project(
+                client,
+                ProjectConfig(owner="apache", repo="spark", poll_refresh_hours=24),
+                operator_username="holdenk",
+            )
+
+        events = seen["comment_events"]
+        assert [e["author"] for e in events] == ["alice", "holdenk", "alice"]
+        assert events[-1]["body"] == "@holdenk ?"
+
+
+@pytest.mark.django_db
+class TestAuthorAssociationIsStored:
+    @pytest.mark.parametrize(
+        ("association", "is_new"),
+        [("CONTRIBUTOR", False), ("FIRST_TIME_CONTRIBUTOR", True)],
+    )
+    def test_the_api_value_lands_on_the_row_and_decides_new_contributor(
+        self, tmp_path: Path, association: str, is_new: bool
+    ) -> None:
+        """Both directions, so the assertion cannot pass whatever the value is."""
+        client = _CountingMockClient(tmp_path, [_listed_pr(99, author_association=association)])
+        poll_project(
+            client,
+            ProjectConfig(owner="apache", repo="spark", poll_refresh_hours=24),
+            operator_username="nobody",
+        )
+        pr = PullRequest.objects.get(number=99)
+        assert pr.author_association == association
+        assert pr.is_new_contributor is is_new
+
+    def test_a_missing_value_is_blank(self, tmp_path: Path) -> None:
+        client = _CountingMockClient(tmp_path, [_listed_pr(98)])
+        poll_project(
+            client,
+            ProjectConfig(owner="apache", repo="spark", poll_refresh_hours=24),
+            operator_username="nobody",
+        )
+        assert PullRequest.objects.get(number=98).author_association in ("", "NONE")

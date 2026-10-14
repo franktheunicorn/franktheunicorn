@@ -26,6 +26,7 @@ WEIGHTS: dict[str, int] = {
     "committer_is_on_it": -25,
     "updated_since_operator_review": 25,
     "pending_response": 20,
+    "author_awaiting_maintainer": 20,
     "downstream_impact": 20,
     "sentry_errors": 15,
     "cve_file_history": 25,
@@ -70,6 +71,32 @@ def _matches_identity(raw: str, wanted: set[str]) -> bool:
     if not raw or not wanted:
         return False
     return any(variant in wanted for variant in _identity_variants(raw))
+
+
+#: GitHub ``author_association`` values that mean "has committed here before".
+#: The forge computes this per repository, so it is right where frank's own
+#: known-authors list is not: GitHub's contributors listing stops at 500
+#: logins, and on a Spark-sized repo everyone past that with no PR in frank's
+#: database used to read as new. Apache Magpie's mentoring-welcome
+#: first-time detection reads the same field (``first-time-detection.md`` and
+#: ``tools/contributor-metrics`` at apache/magpie commit
+#: dadb315caa8b881fc1d2195bef03223dac25915a).
+KNOWN_ASSOCIATIONS: frozenset[str] = frozenset({"CONTRIBUTOR", "COLLABORATOR", "MEMBER", "OWNER"})
+#: Values that mean "has not committed here", which is positive evidence of a
+#: newcomer even when the contributors listing could not be fetched.
+FIRST_TIME_ASSOCIATIONS: frozenset[str] = frozenset({"FIRST_TIME_CONTRIBUTOR", "FIRST_TIMER"})
+
+
+def association_says_new(association: str) -> bool | None:
+    """True / False when the forge's author association decides it; None when it
+    does not (empty: Gitea, GitLab, a scraped row; ``NONE``; anything unknown),
+    which leaves the decision to frank's known-authors rule."""
+    value = (association or "").upper()
+    if value in KNOWN_ASSOCIATIONS:
+        return False
+    if value in FIRST_TIME_ASSOCIATIONS:
+        return True
+    return None
 
 
 def is_likely_bot(author: str) -> bool:
@@ -193,13 +220,16 @@ def score_new_human_contributor(
     operator_username: str,
     known_authors: list[str],
     ai_agents: list[str] | None = None,
+    author_association: str = "",
 ) -> int | None:
-    """New contributor bump. Excludes bots, AI agents, known authors, and operator."""
+    """New contributor bump. Excludes bots, AI agents, known authors, the
+    operator, and anyone the forge says has committed here before."""
     author_lower = author.lower()
     if (
         is_ai_agent(author, ai_agents or [])
         or author_lower == operator_username.lower()
         or author_lower in _lowered(known_authors)
+        or association_says_new(author_association) is False
     ):
         return None
     return WEIGHTS["new_human_contributor"]
@@ -368,6 +398,55 @@ def score_pending_response(
     if not operator_review_posted_at or not author_replies_after_review:
         return None
     return WEIGHTS["pending_response"]
+
+
+def score_author_awaiting_maintainer(
+    comments: list[dict[str, str]],
+    pr_author: str,
+    operator_username: str,
+    committers: list[str],
+    org: str = "",
+) -> int | None:
+    """Boost when the ball is in the maintainers' court.
+
+    The last human comment on the PR is the author's, and it @-mentions the
+    operator, a committer or a team (``org/team``). Nobody with merge rights
+    has spoken since, by construction, so the author is waiting on us; a stale
+    sweep or a low score would read that silence as theirs. This is Apache
+    Magpie's pr-triage pre-filter F5c ("author question to a maintainer: ball
+    in our court", ``tools/pr-management/src/pr_management/triage/signals.py``
+    and ``plugins/magpie-pr-management/skills/pr-triage/design-notes.md`` at
+    apache/magpie commit dadb315caa8b881fc1d2195bef03223dac25915a), rewritten
+    on frank's data rather than ported. Two differences: frank knows its
+    maintainers as the operator plus ``committers``, so an unknown mentioned
+    login does not count (Magpie counts it and resolves later); and it sees
+    issue comments only, so a maintainer who answered with a formal review
+    rather than a comment is not seen.
+
+    ``comments`` are ``{"author", "body", "created_at"}`` in posting order.
+    The operator's own PRs never fire: there the operator is the one waiting.
+    A team mention counts only for the project's own ``org`` when it is known:
+    ``@types/node`` in a dependency bump is an npm scope, not a team.
+    """
+    from franktheunicorn.backends.mentions import mention_scan
+
+    op = operator_username.lower()
+    author = pr_author.lower()
+    if not author or author == op:
+        return None
+    human = [c for c in comments if c.get("author") and not is_likely_bot(c["author"])]
+    if not human or human[-1]["author"].lower() != author:
+        return None
+    maintainers = _lowered(committers)
+    if op:
+        maintainers.add(op)
+    team_prefix = f"{org.lower()}/" if org else "/"
+    for hit in mention_scan(human[-1].get("body", "")):
+        handle = hit.handle.lower()
+        is_team = handle.startswith(team_prefix) if org else "/" in handle
+        if is_team or handle in maintainers:
+            return WEIGHTS["author_awaiting_maintainer"]
+    return None
 
 
 def score_draft_findings(draft_findings_count: int | None) -> int | None:

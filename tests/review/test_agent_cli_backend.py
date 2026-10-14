@@ -294,6 +294,21 @@ class TestFailureHandling:
 
         assert "trust_args" in caplog.text
 
+    def test_a_logged_out_cli_is_named_as_one(self, caplog: Any) -> None:
+        """frank uses the CLI's own login; "exit 1" from a logged-out binary on
+        the remote should say where to log in, not just that it failed."""
+        import logging
+
+        executor = _FakeExecutor(
+            ExecResult(returncode=1, stdout="", stderr="Error: Not logged in. Run login first.")
+        )
+        backend = AgentCLIBackend(LLMBackendConfig(provider="agent-cli", reviewer="cursor-agent"))
+
+        with caplog.at_level(logging.ERROR):
+            assert _run(backend, executor, _operator()) == ""
+
+        assert "not logged in on the remote host" in caplog.text
+
     def test_no_result_at_all_names_what_to_check(self, caplog: Any) -> None:
         import logging
 

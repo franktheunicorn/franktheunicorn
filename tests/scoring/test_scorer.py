@@ -72,6 +72,23 @@ class TestScoringFromModel:
         assert "jira_linked" in bd
         assert "jira_priority_author_created" in bd
 
+    def test_team_mentions_count_for_the_projects_own_org_only(
+        self, make_pr: Any, spark_project_config: ProjectConfig
+    ) -> None:
+        """The org comes from the project config, so ``@types/node`` in a
+        dependency bump on apache/spark is an npm scope, not a team."""
+        pr = make_pr(author="alice")
+
+        def ask(body: str) -> dict[str, float]:
+            events = [{"author": "alice", "body": body, "created_at": "2026-01-01T00:00:00Z"}]
+            _, bd = score_pull_request_from_model(
+                pr, spark_project_config, "holdenk", comment_events=events
+            )
+            return bd
+
+        assert "author_awaiting_maintainer" not in ask("Bumped @types/node, anyone?")
+        assert "author_awaiting_maintainer" in ask("@apache/spark-committers could you look?")
+
     def test_score_normalized(self, make_pr: Any, spark_project_config: ProjectConfig) -> None:
         pr = make_pr()
         score, _ = score_pull_request_from_model(pr, spark_project_config, "holdenk")
@@ -434,3 +451,23 @@ class TestCveFileHistoryInScorer:
             cve_affected_files=["src/auth.py"],
         )
         assert bd["cve_file_history"] == 50.0
+
+
+class TestAuthorAwaitingMaintainerInTheScore:
+    def test_it_lands_in_the_breakdown(self) -> None:
+        events = [
+            {"author": "alice", "body": "@holdenk ping", "created_at": "2026-03-30T10:00:00Z"}
+        ]
+        _, bd = score_pull_request(_ALICE_PR, {}, "holdenk", comment_events=events)
+        assert bd["author_awaiting_maintainer"] == 20.0
+
+    def test_it_is_skipped_when_comments_were_not_fetched(self) -> None:
+        _, bd = score_pull_request(_ALICE_PR, {}, "holdenk")
+        assert "author_awaiting_maintainer" not in bd
+
+    def test_committers_come_from_the_project_config(self) -> None:
+        events = [{"author": "alice", "body": "@srowen ?", "created_at": "2026-03-30T10:00:00Z"}]
+        _, bd = score_pull_request(
+            _ALICE_PR, {"committers": ["srowen"]}, "holdenk", comment_events=events
+        )
+        assert "author_awaiting_maintainer" in bd

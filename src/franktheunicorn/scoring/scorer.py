@@ -12,6 +12,7 @@ from franktheunicorn.scoring.signals import (
     MAX_SCORE,
     WEIGHTS,
     score_ai_generated,
+    score_author_awaiting_maintainer,
     score_committer_is_on_it,
     score_cve_file_history,
     score_draft_findings,
@@ -65,6 +66,7 @@ def score_pull_request(
     cve_affected_files: list[str] | None = None,
     draft_findings_count: int | None = None,
     comment_bodies: list[str] | None = None,
+    comment_events: list[dict[str, str]] | None = None,
 ) -> tuple[float, dict[str, float]]:
     """Score a PR for operator interest. Pure function — no Django imports.
 
@@ -120,6 +122,7 @@ def score_pull_request(
             operator_username,
             known_authors or [],
             ai_agents or None,
+            str(pr_dict.get("author_association", "") or ""),
         ),
     )
     _add("keyword_match", score_keyword_match(title, body, keywords))
@@ -193,6 +196,18 @@ def score_pull_request(
             "pending_response",
             score_pending_response(operator_review_posted_at, author_replies_after_review),
         )
+    # Ball in the maintainers' court: the author's last comment asks one of us.
+    if comment_events is not None:
+        _add(
+            "author_awaiting_maintainer",
+            score_author_awaiting_maintainer(
+                comment_events,
+                author,
+                operator_username,
+                _get_list(project_config_dict, "committers"),
+                org=str(project_config_dict.get("owner", "") or ""),
+            ),
+        )
 
     # Cross-project downstream impact (v1.5 §2.5)
     if downstream_apis:
@@ -252,6 +267,7 @@ def score_pull_request_from_model(
     cve_affected_files: list[str] | None = None,
     draft_findings_count: int | None = None,
     comment_bodies: list[str] | None = None,
+    comment_events: list[dict[str, str]] | None = None,
 ) -> tuple[float, dict[str, float]]:
     """Django-aware wrapper: converts models to dicts, resolves known_authors."""
     pr_dict: dict[str, object] = {
@@ -266,6 +282,7 @@ def score_pull_request_from_model(
         "body": pr.body,
         "assignees": pr.assignees,
         "jira_cache": pr.jira_cache,
+        "author_association": pr.author_association,
     }
     if pr.github_created_at:
         age = (datetime.now(tz=UTC) - pr.github_created_at).days
@@ -284,6 +301,8 @@ def score_pull_request_from_model(
         committers = project_config.committers
 
     config_dict: dict[str, object] = {
+        # Scopes the awaiting-maintainer signal's team mentions to this org.
+        "owner": project_config.owner,
         "watched_paths": project_config.watched_paths,
         "frequent_contributors": project_config.frequent_contributors,
         "watch_keywords": project_config.watch_keywords,
@@ -362,4 +381,5 @@ def score_pull_request_from_model(
         cve_affected_files=cve_affected_files,
         draft_findings_count=draft_findings_count,
         comment_bodies=comment_bodies,
+        comment_events=comment_events,
     )

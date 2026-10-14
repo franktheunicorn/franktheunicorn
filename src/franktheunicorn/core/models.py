@@ -114,6 +114,10 @@ class PullRequest(models.Model):
     likely_ai_generated = models.BooleanField(default=False)
     is_operator_pr = models.BooleanField(default=False)
     is_new_contributor = models.BooleanField(default=False)
+    #: GitHub's ``author_association`` for the PR author (CONTRIBUTOR, MEMBER,
+    #: FIRST_TIME_CONTRIBUTOR, ...). Decides ``is_new_contributor`` when present;
+    #: blank for forges and scrape rows that do not supply it.
+    author_association = models.CharField(max_length=32, blank=True, default="")
     is_mentioned = models.BooleanField(default=False)
     is_low_context = models.BooleanField(default=False)
     is_likely_unowned = models.BooleanField(default=False)
@@ -649,12 +653,36 @@ class SecurityReport(models.Model):
         ("invalid", "Invalid"),
         ("duplicate", "Duplicate"),
         ("expected-behavior", "Expected Behavior"),
+        # The two verdicts between valid and invalid that a real backlog is
+        # mostly made of, from Apache Magpie's triage taxonomy: the code does
+        # what the report says, but the attack sits outside the security
+        # model. Defense-in-depth still owes an ordinary (non-CVE) fix;
+        # info-only owes an explanation and nothing else.
+        ("defense-in-depth", "Defense in Depth"),
+        ("info-only", "Info Only"),
+    ]
+
+    #: The machine's triage class, staged like ``auto_triage_status`` and never a
+    #: verdict. Six classes plus the honest "not sure", adapted from Apache
+    #: Magpie's ``security-issue-triage`` skill; see ``security/prompt.py``.
+    DISPOSITION_CHOICES = [
+        ("VALID", "Valid"),
+        ("DEFENSE-IN-DEPTH", "Defense in depth"),
+        ("INFO-ONLY", "Info only"),
+        ("INVALID", "Invalid"),
+        ("PROBABLE-DUP", "Probable duplicate"),
+        ("FIX-ALREADY-PUBLIC", "Fix already public"),
+        ("UNCERTAIN", "Uncertain"),
     ]
 
     SOURCE_CHOICES = [
         ("paste", "Pasted"),
         ("email", "Email"),
         ("zip", "Zip import"),
+    ]
+    RELAY_KIND_CHOICES = [
+        ("asf-security", "ASF Security Team"),
+        ("ghsa", "GitHub Security Advisory"),
     ]
 
     SEVERITY_CHOICES = [
@@ -689,7 +717,7 @@ class SecurityReport(models.Model):
     #: A tuple for a stable order in the emitted parameters and in anything that
     #: prints them; the SQL text is identical either way, since ``IN`` values are
     #: bound parameters rather than inlined.
-    NO_FIX_OWED_STATUSES = ("invalid", "expected-behavior", "duplicate")
+    NO_FIX_OWED_STATUSES = ("invalid", "expected-behavior", "duplicate", "info-only")
 
     @classmethod
     def list_filters(cls) -> set[str]:
@@ -842,11 +870,42 @@ class SecurityReport(models.Model):
     # "never triaged"; the two are told apart by whether the assessment
     # fields below are populated.
     auto_triage_status = models.CharField(max_length=20, blank=True, default="")
+    #: The class behind that suggestion, kept even where statuses collapse it:
+    #: PROBABLE-DUP and FIX-ALREADY-PUBLIC both end in no CVE for this report,
+    #: but the operator's next step differs (link the duplicate / confirm the
+    #: public fix covers it). Blank when the model did not say.
+    auto_triage_disposition = models.CharField(
+        max_length=24, blank=True, default="", choices=DISPOSITION_CHOICES
+    )
+    #: The one line of the security model or project context the model says
+    #: its disposition rests on, verbatim. Empty when it cited nothing, which
+    #: is itself worth seeing: a confident class with no quoted rule is a guess.
+    triage_model_quote = models.TextField(blank=True, default="")
+    #: Prompt-injection patterns in the report's text (title, raw text, parsed
+    #: POC), by name, written by ``security.intake.record_injection_hits`` the
+    #: moment the row exists and again once triage fills the POC. Empty is
+    #: clean. The verifier and fix agent keep their own per-launch copies
+    #: (``fix_injection_hits``); this one is the callout above the report
+    #: text, there before anyone clicks anything, and the thing to read when a
+    #: later verdict on this report looks steered.
+    injection_hits = models.JSONField(default=list, blank=True)
 
     # LLM-parsed structured fields (populated by triage pipeline)
     parsed_component = models.CharField(max_length=500, blank=True, default="")
     parsed_poc = models.TextField(blank=True, default="")
     parsed_impact = models.TextField(blank=True, default="")
+    #: The severity the *reporter* claims, as the parse step read it off the
+    #: report. Attacker-supplied and routinely inflated, so it is context and
+    #: never a rating: it goes to the verifier labelled as the reporter's, and
+    #: the page shows it as "reporter claims". ``assessed_severity`` below is
+    #: frank's analysis or the operator's ruling and nothing else. Apache
+    #: Magpie's rule, "treat every reporter-supplied CVSS score as informational
+    #: background only" (``AGENTS.md`` at apache/magpie commit
+    #: dadb315caa8b881fc1d2195bef03223dac25915a).
+    claimed_severity = models.CharField(max_length=20, choices=SEVERITY_CHOICES, default="unknown")
+    #: frank's rating: written by the triage analysis step, the verdict form or
+    #: the sheet import. Until migration 0062 the parse step wrote the reporter's
+    #: claim here too; rows from before that keep whatever they had.
     assessed_severity = models.CharField(max_length=20, choices=SEVERITY_CHOICES, default="unknown")
 
     # LLM triage analysis
@@ -878,6 +937,10 @@ class SecurityReport(models.Model):
         ("RESERVED", "Reserved"),
         ("PUBLISHED", "Published"),
         ("REJECT", "Rejected"),
+        ("DRAFT", "Draft (ASF workflow)"),
+        ("REVIEW", "In review (ASF workflow)"),
+        ("READY", "Ready to publish (ASF workflow)"),
+        ("PUBLIC", "Public (sent to cve.org)"),
         ("unknown", "Unrecognised response"),
     ]
     cve_record_state = models.CharField(
@@ -993,6 +1056,12 @@ class SecurityReport(models.Model):
     #: is then the whole mitigation — so it has to reach the operator in every
     #: state, not just the failed one, next to the branch they are about to judge.
     fix_injection_hits = models.JSONField(default=list, blank=True)
+    #: Security-saying wording found on the fix branch name(s) by
+    #: ``security.fix_language.scan_branches`` at the last refresh: a CVE id, a
+    #: phrase like "sql injection", or the report's own identifiers. Empty is
+    #: clean. Never a block (frank does not open the PR), always a red badge:
+    #: the branch list on a public fork is readable before the advisory is.
+    fix_language_hits = models.JSONField(default=list, blank=True)
     fix_launched_at = models.DateTimeField(null=True, blank=True)
 
     # Which branch actually carries the fix — the operator's answer, the way
@@ -1181,6 +1250,24 @@ class SecurityReport(models.Model):
     # Email metadata (populated when source=email)
     email_message_id = models.CharField(max_length=500, blank=True, default="")
     email_received_at = models.DateTimeField(null=True, blank=True)
+    #: How the report reached the inbox when a relay forwarded it: the ASF
+    #: Security Team's "Dear PMC" template, or a GitHub Security Advisory
+    #: notification. Blank when the reporter wrote directly or the parser could
+    #: not tell. The sender of a relayed mail is the broker, never the reporter,
+    #: which is what the next two fields are for.
+    relay_kind = models.CharField(max_length=20, blank=True, default="", choices=RELAY_KIND_CHOICES)
+    #: The name the relay's credit line gives, verbatim ("This vulnerability was
+    #: discovered and reported by ..."). What the CVE record's credits should
+    #: say; ``reporter_name`` is who the mail came from.
+    reporter_credit = models.CharField(max_length=255, blank=True, default="")
+    #: "human", "tool" or "service" for a credited name, from Magpie's kind
+    #: hints. A tool is credited in CVE 5 as type "tool", not as a finder.
+    credit_kind = models.CharField(max_length=10, blank=True, default="")
+    #: ``[{"filename", "content_type", "size_bytes", "sha256"}]`` for every MIME
+    #: attachment on an emailed report. Data about the attachment, never its
+    #: bytes: nothing is extracted or executed. The click-gated sandbox runs
+    #: text the operator pasted into it, and only that.
+    attachments = models.JSONField(default=list, blank=True)
 
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
