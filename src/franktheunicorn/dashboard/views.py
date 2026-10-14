@@ -709,7 +709,11 @@ def post_review(request: HttpRequest, pr_id: int) -> HttpResponse:
         on_stale_head = "refuse"
 
     try:
-        from franktheunicorn.backends.poster import GitHubPoster, StaleHeadError
+        from franktheunicorn.backends.poster import (
+            GitHubPoster,
+            PostUnverifiedError,
+            StaleHeadError,
+        )
 
         client = _make_posting_client(pr)
         if client is None:
@@ -734,10 +738,29 @@ def post_review(request: HttpRequest, pr_id: int) -> HttpResponse:
                 'hx-target="#post-result" hx-swap="innerHTML">Post as review body only</button>'
                 "</div>"
             )
+        except PostUnverifiedError:
+            return HttpResponse(
+                '<div class="post-result error-note">'
+                "Posting failed, and frank could not read the PR's reviews back to tell "
+                "whether it landed anyway. Check the PR before posting again: a second "
+                "post would put a duplicate review on it, and a review cannot be deleted."
+                "</div>"
+            )
         finally:
             client.close()  # type: ignore[attr-defined]
 
+        if result is None:
+            return HttpResponse(
+                '<div class="post-result error-note">'
+                "Failed to post review. frank checked the PR afterwards and nothing landed, "
+                "so it is safe to try again.</div>"
+            )
         note = f"Posted {len(approved)} findings to GitHub."
+        if isinstance(result, dict) and result.get("verified_after_error"):
+            note = (
+                f"The forge reported an error, but the review landed; recorded "
+                f"{len(approved)} findings as posted."
+            )
         if isinstance(result, dict):
             escaped = result.get("mentions_escaped") or []
             if escaped:

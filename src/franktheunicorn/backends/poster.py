@@ -31,6 +31,21 @@ RECALL_WINDOW_HOURS = 24
 STALE_HEAD_MODES: tuple[str, ...] = ("refuse", "post", "body-only")
 
 
+class PostUnverifiedError(Exception):
+    """``create_review`` failed and frank could not tell whether the review landed.
+
+    A forge can accept a review and still fail the request (a timeout on the
+    response, a 5xx on the follow-up comment read), and a submitted review
+    cannot be taken back, so retrying blind can put a second copy on a
+    contributor's PR. When the read-back that would settle it also fails, the
+    honest answer is "unknown", and the operator should look before posting
+    again. The rule is Apache Magpie's code-review posting step ("verify the
+    post-condition instead of retrying", ``plugins/magpie-pr-management/skills/
+    code-review/posting.md`` at apache/magpie commit
+    dadb315caa8b881fc1d2195bef03223dac25915a).
+    """
+
+
 class StaleHeadError(Exception):
     """The PR has new commits since the drafts were produced.
 
@@ -120,6 +135,17 @@ def _folded(comment: ReviewComment, reason: str) -> ReviewComment:
         line_end=None,
         side=comment.side,
     )
+
+
+def _parse_timestamp(value: object) -> datetime | None:
+    """A forge's ISO 8601 timestamp as an aware datetime; None when unusable."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 def _same_sha(a: str, b: str) -> bool:
@@ -251,6 +277,7 @@ class GitHubPoster:
             )
         review = ReviewBody(event=event, comments=comments)
 
+        attempt_started = datetime.now(tz=UTC)
         try:
             result: dict[str, Any] = self._client.create_review(
                 pr.project.owner,
@@ -260,7 +287,26 @@ class GitHubPoster:
             )
         except Exception:
             logger.exception("Failed to post review for PR #%d", pr.number)
-            return None
+            outcome, landed = self._find_landed_review(pr, attempt_started)
+            if outcome == "absent":
+                logger.info(
+                    "Checked PR #%d after the failed post: no review of ours landed, so "
+                    "posting again is safe.",
+                    pr.number,
+                )
+                return None
+            if outcome == "unknown" or landed is None:
+                raise PostUnverifiedError(
+                    f"posting to PR #{pr.number} failed and frank could not read the PR's "
+                    "reviews back to see whether it landed anyway"
+                ) from None
+            logger.warning(
+                "Posting to PR #%d raised, but review %s with frank's marker landed; "
+                "recording the drafts as posted rather than leaving them to be posted twice.",
+                pr.number,
+                landed.get("id"),
+            )
+            result = {"id": landed.get("id"), "verified_after_error": True}
 
         now = datetime.now(tz=UTC)
 
@@ -288,6 +334,47 @@ class GitHubPoster:
             draft.save(update_fields=["status", "posted_at", "forge_comment_id", "updated_at"])
 
         return result
+
+    def _find_landed_review(
+        self, pr: PullRequest, since: datetime
+    ) -> tuple[str, dict[str, Any] | None]:
+        """After a failed post: ``("landed", review)``, ``("absent", None)`` or
+        ``("unknown", None)``.
+
+        A review counts as ours when its body or one of its comments carries
+        ``MANAGED_MARKER`` and it was submitted no earlier than two minutes
+        before the attempt (clock skew between here and the forge). The
+        correlation keys cannot be used: they never reach the forge.
+        """
+        owner, repo, number = pr.project.owner, pr.project.repo, pr.number
+        try:
+            reviews = self._client.list_pull_request_reviews(owner, repo, number)
+        except Exception:
+            logger.warning("Could not list PR #%d's reviews to verify the post", number)
+            return "unknown", None
+        floor = since - timedelta(minutes=2)
+        for review in reversed(list(reviews)):
+            submitted = _parse_timestamp(review.get("submitted_at"))
+            if submitted is not None and submitted < floor:
+                continue
+            if MANAGED_MARKER in str(review.get("body") or ""):
+                return "landed", review
+            review_id = review.get("id")
+            if not isinstance(review_id, int):
+                continue
+            try:
+                comments = self._client.get_review_comments(owner, repo, number, review_id)
+            except Exception:
+                logger.warning(
+                    "Could not read review %s on PR #%d to verify the post", review_id, number
+                )
+                return "unknown", None
+            if any(
+                isinstance(c, dict) and MANAGED_MARKER in str(c.get("body") or "")
+                for c in comments or []
+            ):
+                return "landed", review
+        return "absent", None
 
     def _live_head_sha(self, pr: PullRequest) -> str:
         """The PR's head sha as the forge sees it now; "" when it cannot be read.

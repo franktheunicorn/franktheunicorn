@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -50,11 +51,14 @@ class TestGitHubPoster:
 
         mock_client = MagicMock()
         mock_client.create_review.side_effect = Exception("API error")
+        mock_client.list_pull_request_reviews.return_value = []
 
         poster = GitHubPoster(mock_client)
         result = poster.post_review(pr, [draft])
 
         assert result is None
+        draft.refresh_from_db()
+        assert draft.status == "accepted"
 
     def test_post_review_empty_drafts(self) -> None:
         pr = PullRequestFactory()
@@ -324,3 +328,72 @@ class TestMovedHeadGuard:
         draft = ReviewDraftFactory(pull_request=pr, status="accepted")
         with pytest.raises(ValueError, match="on_stale_head"):
             GitHubPoster(MagicMock()).post_review(pr, [draft], on_stale_head="yolo")
+
+
+@pytest.mark.django_db
+class TestVerifyAfterAFailedPost:
+    """A forge can accept a review and still fail the request, and a submitted
+    review cannot be deleted. So a failure is checked, never blindly retried."""
+
+    MARKER_BODY = "x\n<!-- franktheunicorn-managed -->"
+
+    def _setup(self) -> tuple[Any, Any, MagicMock]:
+        pr = PullRequestFactory()
+        draft = ReviewDraftFactory(
+            pull_request=pr, file_path="a.py", line_number=1, status="accepted"
+        )
+        client = MagicMock()
+        client.create_review.side_effect = TimeoutError("read timed out")
+        return pr, draft, client
+
+    def test_a_review_that_landed_anyway_is_recorded_as_posted(self) -> None:
+        pr, draft, client = self._setup()
+        now = datetime.now(tz=UTC).isoformat()
+        client.list_pull_request_reviews.return_value = [
+            {"id": 77, "body": "", "submitted_at": now}
+        ]
+        client.get_review_comments.return_value = [{"id": 5, "body": self.MARKER_BODY}]
+
+        result = GitHubPoster(client).post_review(pr, [draft])
+
+        assert result is not None
+        assert result["id"] == 77
+        assert result["verified_after_error"] is True
+        draft.refresh_from_db()
+        assert draft.status == "posted"
+
+    def test_a_marker_in_the_review_body_is_enough(self) -> None:
+        pr, draft, client = self._setup()
+        client.list_pull_request_reviews.return_value = [
+            {"id": 78, "body": self.MARKER_BODY, "submitted_at": "2999-01-01T00:00:00Z"}
+        ]
+        assert GitHubPoster(client).post_review(pr, [draft]) is not None
+        client.get_review_comments.assert_not_called()
+
+    def test_an_older_review_of_ours_does_not_count(self) -> None:
+        pr, draft, client = self._setup()
+        old = (datetime.now(tz=UTC) - timedelta(hours=3)).isoformat()
+        client.list_pull_request_reviews.return_value = [
+            {"id": 1, "body": self.MARKER_BODY, "submitted_at": old}
+        ]
+        assert GitHubPoster(client).post_review(pr, [draft]) is None
+        draft.refresh_from_db()
+        assert draft.status == "accepted"
+
+    def test_someone_elses_review_does_not_count(self) -> None:
+        pr, draft, client = self._setup()
+        client.list_pull_request_reviews.return_value = [
+            {"id": 2, "body": "LGTM", "submitted_at": datetime.now(tz=UTC).isoformat()}
+        ]
+        client.get_review_comments.return_value = [{"body": "nice"}]
+        assert GitHubPoster(client).post_review(pr, [draft]) is None
+
+    def test_an_unreadable_pr_is_unknown_not_absent(self) -> None:
+        from franktheunicorn.backends.poster import PostUnverifiedError
+
+        pr, draft, client = self._setup()
+        client.list_pull_request_reviews.side_effect = RuntimeError("502")
+        with pytest.raises(PostUnverifiedError):
+            GitHubPoster(client).post_review(pr, [draft])
+        draft.refresh_from_db()
+        assert draft.status == "accepted"

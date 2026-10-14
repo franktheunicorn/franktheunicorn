@@ -507,6 +507,28 @@ effort. "Done" means it is on this branch with tests.
   shell's. The auth advice applies in both modes and names the remote host
   when `remote.mode` is `ssh`.
 
+### 4.14 A failed post is verified, never blindly retried (done)
+
+- **What.** When `create_review` raises, the poster reads the PR's reviews
+  back (`list_pull_request_reviews`, added to every forge client by the
+  intending-to-merge work) and looks for frank's `MANAGED_MARKER` in a review
+  submitted since the attempt, in its body or its comments. Landed: the
+  drafts are recorded as posted. Absent: the view says a retry is safe.
+  Unknown (the read-back failed too): `PostUnverifiedError`, and the view says
+  to check the PR before posting again. Both lenses scored it 3 or 4.
+- **Why.** A forge can accept a review and still fail the request: a lost
+  response inside the 30-second client timeout, or a 5xx on the follow-up
+  comment read. A submitted review cannot be deleted, so "Failed to post
+  review" followed by a second click put a duplicate on a contributor's PR.
+  The view also used to say "Posted" whatever the poster returned.
+- **Where.** `backends/poster.py` (`_find_landed_review`, `PostUnverifiedError`),
+  the `post_review` view. Correlation keys cannot identify the review: they
+  never reach the forge, so the marker plus recency does.
+- **Upstream source.** `plugins/magpie-pr-management/skills/code-review/posting.md`
+  ("verify the post-condition instead of retrying") at the pinned commit.
+- **Remote path.** Web process only; one or two forge reads on the failure
+  path.
+
 ---
 
 ## 5. Tier 2: Adopt Later
