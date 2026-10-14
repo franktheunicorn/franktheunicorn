@@ -16,6 +16,9 @@ from franktheunicorn.scoring.signals import (
     score_cve_file_history,
     score_draft_findings,
     score_has_review_request,
+    score_jira_linked,
+    score_jira_priority_author_commented,
+    score_jira_priority_author_created,
     score_keyword_match,
     score_llm_interest,
     score_mentioned_or_assigned,
@@ -79,6 +82,12 @@ def score_pull_request(
     watched = _get_list(project_config_dict, "watched_paths")
     contributors = _get_list(project_config_dict, "frequent_contributors")
     keywords = _get_list(project_config_dict, "watch_keywords")
+    jira_enabled = bool(project_config_dict.get("jira_enabled", False))
+    jira_priority_authors = _get_list(project_config_dict, "jira_priority_authors")
+    if not jira_priority_authors and operator_username:
+        jira_priority_authors = [operator_username]
+    jira_cache_raw = pr_dict.get("jira_cache")
+    jira_cache = jira_cache_raw if isinstance(jira_cache_raw, dict) else None
 
     # Per-project weight overrides
     weights = dict(WEIGHTS)
@@ -201,6 +210,16 @@ def score_pull_request(
         _add("sentry_errors", WEIGHTS.get("sentry_errors", 15))
 
     _add("draft_findings", score_draft_findings(draft_findings_count))
+    if jira_enabled:
+        _add("jira_linked", score_jira_linked(jira_cache))
+        _add(
+            "jira_priority_author_created",
+            score_jira_priority_author_created(jira_cache, jira_priority_authors),
+        )
+        _add(
+            "jira_priority_author_commented",
+            score_jira_priority_author_commented(jira_cache, jira_priority_authors),
+        )
 
     if custom_expressions:
         for i, expr in enumerate(custom_expressions):
@@ -246,6 +265,7 @@ def score_pull_request_from_model(
         "title": pr.title,
         "body": pr.body,
         "assignees": pr.assignees,
+        "jira_cache": pr.jira_cache,
     }
     if pr.github_created_at:
         age = (datetime.now(tz=UTC) - pr.github_created_at).days
@@ -271,6 +291,8 @@ def score_pull_request_from_model(
         "scoring_weights": project_config.scoring_weights,
         "custom_scoring_max_boost": project_config.custom_scoring_max_boost,
         "committers": committers,
+        "jira_enabled": project_config.jira.enabled,
+        "jira_priority_authors": project_config.jira.priority_authors,
     }
 
     if known_authors is None:

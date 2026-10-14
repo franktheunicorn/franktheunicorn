@@ -12,6 +12,9 @@ from franktheunicorn.scoring.signals import (
     score_cve_file_history,
     score_draft_findings,
     score_has_review_request,
+    score_jira_linked,
+    score_jira_priority_author_commented,
+    score_jira_priority_author_created,
     score_keyword_match,
     score_llm_interest,
     score_mentioned_or_assigned,
@@ -353,6 +356,52 @@ class TestDraftFindings:
     def test_many_findings(self) -> None:
         # Boolean signal: count doesn't scale the boost.
         assert score_draft_findings(50) == WEIGHTS["draft_findings"]
+
+
+class TestJiraSignals:
+    _BASE_CACHE = {
+        "ticket_id": "SPARK-12345",
+        "creator": "Holden Karau",
+        "creator_username": "holdenk",
+        "recent_comments": [
+            {"author": "Dongjoon Hyun", "author_username": "dongjoon-hyun", "body": "Looks good"}
+        ],
+    }
+
+    def test_linked(self) -> None:
+        assert score_jira_linked(self._BASE_CACHE) == WEIGHTS["jira_linked"]
+
+    def test_linked_requires_ticket_id(self) -> None:
+        assert score_jira_linked({"creator": "Holden Karau"}) is None
+
+    def test_created_by_priority_author(self) -> None:
+        assert (
+            score_jira_priority_author_created(self._BASE_CACHE, ["Holden Karau"])
+            == WEIGHTS["jira_priority_author_created"]
+        )
+
+    def test_created_by_matches_username(self) -> None:
+        assert (
+            score_jira_priority_author_created(self._BASE_CACHE, ["holdenk"])
+            == WEIGHTS["jira_priority_author_created"]
+        )
+
+    def test_commented_by_priority_author(self) -> None:
+        cache = {
+            "ticket_id": "SPARK-12345",
+            "creator": "Someone Else",
+            "recent_comments": [{"author": "Holden Karau"}],
+        }
+        assert (
+            score_jira_priority_author_commented(cache, ["Holden Karau"])
+            == WEIGHTS["jira_priority_author_commented"]
+        )
+
+    def test_commented_suppressed_when_creator_matches(self) -> None:
+        assert score_jira_priority_author_commented(self._BASE_CACHE, ["holdenk"]) is None
+
+    def test_commented_missing_author_match(self) -> None:
+        assert score_jira_priority_author_commented(self._BASE_CACHE, ["alice"]) is None
 
 
 class TestCveFileHistory:

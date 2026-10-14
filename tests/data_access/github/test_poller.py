@@ -55,6 +55,26 @@ class TestPoller:
         assert pr42.interest_score > 0
         assert len(pr42.score_breakdown) > 0
 
+    def test_poll_fetches_jira_context_for_scoring_when_enabled(self, tmp_path: Any) -> None:
+        client = MockGitHubClient(tmp_path)
+        config = ProjectConfig(
+            owner="apache",
+            repo="spark",
+            jira={
+                "enabled": True,
+                "server": "https://issues.apache.org/jira",
+                "project_prefix": "SPARK",
+            },
+        )
+        with patch(
+            "franktheunicorn.data_access.context_orchestrator.fetch_jira_context",
+            return_value="",
+        ) as mock_jira:
+            prs = poll_project(client, config, operator_username="holdenk")
+
+        assert len(prs) == 3
+        assert mock_jira.call_count == len(prs)
+
     def test_disabled_project_warns_once_per_process(
         self, tmp_path: Any, caplog: pytest.LogCaptureFixture
     ) -> None:

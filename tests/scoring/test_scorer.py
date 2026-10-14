@@ -56,6 +56,22 @@ class TestScoringFromModel:
         _, bd = score_pull_request_from_model(pr, spark_project_config, "holdenk")
         assert "ai_generated" in bd
 
+    def test_jira_cache_boost(self, make_pr: Any, spark_project_config: ProjectConfig) -> None:
+        from franktheunicorn.config.models import JiraConfig
+
+        pr = make_pr(
+            jira_cache={
+                "ticket_id": "SPARK-12345",
+                "creator": "Holden Karau",
+            }
+        )
+        config = spark_project_config.model_copy(
+            update={"jira": JiraConfig(enabled=True, priority_authors=["Holden Karau"])}
+        )
+        _, bd = score_pull_request_from_model(pr, config, "holdenk")
+        assert "jira_linked" in bd
+        assert "jira_priority_author_created" in bd
+
     def test_score_normalized(self, make_pr: Any, spark_project_config: ProjectConfig) -> None:
         pr = make_pr()
         score, _ = score_pull_request_from_model(pr, spark_project_config, "holdenk")
@@ -99,6 +115,59 @@ class TestPureFunctionOrchestrator:
         _, bd = score_pull_request(pr, {}, "holdenk")
         assert "llm_interest" in bd
 
+    def test_jira_linked(self) -> None:
+        pr = {**_ALICE_PR, "jira_cache": {"ticket_id": "SPARK-12345"}}
+        _, bd = score_pull_request(pr, {"jira_enabled": True}, "holdenk")
+        assert bd.get("jira_linked") == 5.0
+
+    def test_jira_created_by_priority_author(self) -> None:
+        pr = {
+            **_ALICE_PR,
+            "jira_cache": {
+                "ticket_id": "SPARK-12345",
+                "creator": "Holden Karau",
+                "creator_username": "holdenk",
+            },
+        }
+        _, bd = score_pull_request(
+            pr,
+            {"jira_enabled": True, "jira_priority_authors": ["Holden Karau"]},
+            "holdenk",
+        )
+        # "double it and add a constant" is represented by jira_linked + created boost.
+        assert bd.get("jira_linked") == 5.0
+        assert bd.get("jira_priority_author_created") == 15.0
+
+    def test_jira_commented_by_priority_author(self) -> None:
+        pr = {
+            **_ALICE_PR,
+            "jira_cache": {
+                "ticket_id": "SPARK-12345",
+                "creator": "Someone Else",
+                "recent_comments": [{"author": "Holden Karau"}],
+            },
+        }
+        _, bd = score_pull_request(
+            pr,
+            {"jira_enabled": True, "jira_priority_authors": ["Holden Karau"]},
+            "holdenk",
+        )
+        assert bd.get("jira_priority_author_commented") == 3.0
+
+    def test_jira_priority_defaults_to_operator_username(self) -> None:
+        pr = {
+            **_ALICE_PR,
+            "jira_cache": {"ticket_id": "SPARK-12345", "creator_username": "holdenk"},
+        }
+        _, bd = score_pull_request(pr, {"jira_enabled": True}, "holdenk")
+        assert bd.get("jira_priority_author_created") == 15.0
+
+    def test_jira_disabled_skips_jira_signals(self) -> None:
+        pr = {**_ALICE_PR, "jira_cache": {"ticket_id": "SPARK-12345", "creator": "Holden Karau"}}
+        _, bd = score_pull_request(pr, {"jira_enabled": False}, "holdenk")
+        assert "jira_linked" not in bd
+        assert "jira_priority_author_created" not in bd
+
     def test_custom_expression(self) -> None:
         _, bd = score_pull_request(_ALICE_PR, {}, "holdenk", custom_expressions=["0.5"])
         assert "custom_0" in bd
@@ -114,6 +183,15 @@ class TestPureFunctionOrchestrator:
         pr = {**_ALICE_PR, "requested_reviewers": ["holdenk"]}
         _, bd = score_pull_request(pr, {"scoring_weights": {"has_review_request": 50}}, "holdenk")
         assert bd.get("has_review_request") == 50.0
+
+    def test_weight_override_jira_linked(self) -> None:
+        pr = {**_ALICE_PR, "jira_cache": {"ticket_id": "SPARK-12345"}}
+        _, bd = score_pull_request(
+            pr,
+            {"jira_enabled": True, "scoring_weights": {"jira_linked": 10}},
+            "holdenk",
+        )
+        assert bd.get("jira_linked") == 10.0
 
     def test_normalization(self) -> None:
         pr = {**_ALICE_PR, "requested_reviewers": ["holdenk"]}

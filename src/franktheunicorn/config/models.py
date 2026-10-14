@@ -501,6 +501,9 @@ class JiraConfig(BaseModel):
     enabled: bool = False
     server: str = ""
     project_prefix: str = ""
+    # Identities (display names or usernames) that should increase PR scoring
+    # when they created or commented on the linked ticket.
+    priority_authors: list[str] = Field(default_factory=list)
 
     @field_validator("server")
     @classmethod
@@ -510,6 +513,11 @@ class JiraConfig(BaseModel):
             msg = "JIRA server must be a URL starting with http:// or https://"
             raise ValueError(msg)
         return v
+
+    @field_validator("priority_authors")
+    @classmethod
+    def priority_authors_normalized(cls, v: list[str]) -> list[str]:
+        return [name.strip() for name in v if name.strip()]
 
 
 KNOWN_COMMUNITY_SOURCE_TYPES: frozenset[str] = frozenset(

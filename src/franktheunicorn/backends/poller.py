@@ -473,6 +473,15 @@ def _refresh_pull_request(
         comments=fetched_comments,
     )
 
+    # Populate JIRA cache before scoring so JIRA-derived ranking signals are
+    # available during normal poll-based ingest, not only during agent runs.
+    try:
+        from franktheunicorn.data_access.context_orchestrator import fetch_jira_context
+
+        fetch_jira_context(pr_obj, project_config)
+    except Exception:
+        logger.debug("Could not fetch JIRA context for PR #%d", pr_number, exc_info=True)
+
     # Score the PR
     score, breakdown = score_pull_request_from_model(
         pr=pr_obj,
@@ -1146,6 +1155,16 @@ def ingest_single_pr(
                 setattr(pr_obj, ref_field, side_data["ref"])
 
     if project_config:
+        try:
+            from franktheunicorn.data_access.context_orchestrator import fetch_jira_context
+
+            fetch_jira_context(pr_obj, project_config)
+        except Exception:
+            logger.debug(
+                "Could not fetch JIRA context for PR #%d during on-demand ingest",
+                pr_number,
+                exc_info=True,
+            )
         score, breakdown = score_pull_request_from_model(
             pr=pr_obj,
             project_config=project_config,

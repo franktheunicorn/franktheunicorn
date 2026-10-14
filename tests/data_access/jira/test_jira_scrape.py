@@ -23,6 +23,8 @@ class TestJiraScrapeFetch:
         assert result.status == "Open"
         assert result.priority == "Major"
         assert result.assignee == "Huaxin Gao"
+        assert result.creator == "Holden Karau"
+        assert result.creator_username == "holdenk"
 
     def test_parses_description(
         self, httpx_mock: HTTPXMock, jira_fetcher: JiraFetcher, ticket_scrape_html: str
@@ -44,4 +46,5 @@ class TestJiraScrapeFetch:
         result = jira_fetcher.fetch_via_scrape("https://issues.apache.org/jira", "SPARK-12345")
         assert len(result.recent_comments) == 2
         assert result.recent_comments[0].author == "Dongjoon Hyun"
+        assert result.recent_comments[0].author_username == "dongjoon-hyun"
         assert "batching" in result.recent_comments[0].body

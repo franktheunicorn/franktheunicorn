@@ -30,6 +30,9 @@ WEIGHTS: dict[str, int] = {
     "sentry_errors": 15,
     "cve_file_history": 25,
     "draft_findings": 5,
+    "jira_linked": 5,
+    "jira_priority_author_created": 15,
+    "jira_priority_author_commented": 3,
     "mailing_list_mention": 15,
     "mailing_list_blame_author": 10,
 }
@@ -48,6 +51,25 @@ LARGE_PR_THRESHOLD: int = 500
 
 def _lowered(items: list[str]) -> set[str]:
     return {s.lower() for s in items}
+
+
+def _identity_variants(raw: str) -> set[str]:
+    """Build comparable identity forms from a display name or username."""
+    folded = " ".join(raw.lower().split())
+    if not folded:
+        return set()
+    compact = re.sub(r"[^a-z0-9]+", "", folded)
+    out = {folded}
+    if compact:
+        out.add(compact)
+    return out
+
+
+def _matches_identity(raw: str, wanted: set[str]) -> bool:
+    """Check whether *raw* matches one of the normalized wanted identities."""
+    if not raw or not wanted:
+        return False
+    return any(variant in wanted for variant in _identity_variants(raw))
 
 
 def is_likely_bot(author: str) -> bool:
@@ -357,6 +379,79 @@ def score_draft_findings(draft_findings_count: int | None) -> int | None:
     if not draft_findings_count or draft_findings_count <= 0:
         return None
     return WEIGHTS["draft_findings"]
+
+
+def _jira_has_ticket(jira_cache: dict[str, object] | None) -> bool:
+    if not jira_cache:
+        return False
+    ticket_id = jira_cache.get("ticket_id")
+    return isinstance(ticket_id, str) and bool(ticket_id.strip())
+
+
+def _jira_priority_author_set(priority_authors: list[str]) -> set[str]:
+    out: set[str] = set()
+    for author in priority_authors:
+        out.update(_identity_variants(author))
+    return out
+
+
+def _jira_creator_matches(jira_cache: dict[str, object] | None, wanted: set[str]) -> bool:
+    if not jira_cache or not wanted:
+        return False
+    for key in ("creator", "creator_username", "reporter", "reporter_username"):
+        raw = jira_cache.get(key)
+        if isinstance(raw, str) and _matches_identity(raw, wanted):
+            return True
+    return False
+
+
+def score_jira_linked(jira_cache: dict[str, object] | None) -> int | None:
+    """Small bump when a PR is linked to a JIRA issue."""
+    if not _jira_has_ticket(jira_cache):
+        return None
+    return WEIGHTS["jira_linked"]
+
+
+def score_jira_priority_author_created(
+    jira_cache: dict[str, object] | None,
+    priority_authors: list[str],
+) -> int | None:
+    """Large bump when a tracked person created/reported the linked JIRA issue."""
+    if not _jira_has_ticket(jira_cache):
+        return None
+    wanted = _jira_priority_author_set(priority_authors)
+    if not wanted:
+        return None
+    return (
+        WEIGHTS["jira_priority_author_created"]
+        if _jira_creator_matches(jira_cache, wanted)
+        else None
+    )
+
+
+def score_jira_priority_author_commented(
+    jira_cache: dict[str, object] | None,
+    priority_authors: list[str],
+) -> int | None:
+    """Small bump when a tracked person commented on the linked JIRA issue."""
+    if not _jira_has_ticket(jira_cache):
+        return None
+    if jira_cache is None:
+        return None
+    wanted = _jira_priority_author_set(priority_authors)
+    if not wanted or _jira_creator_matches(jira_cache, wanted):
+        return None
+    raw_comments = jira_cache.get("recent_comments", [])
+    if not isinstance(raw_comments, list):
+        return None
+    for raw_comment in raw_comments:
+        if not isinstance(raw_comment, dict):
+            continue
+        for key in ("author", "author_username"):
+            raw = raw_comment.get(key)
+            if isinstance(raw, str) and _matches_identity(raw, wanted):
+                return WEIGHTS["jira_priority_author_commented"]
+    return None
 
 
 def score_mailing_list_mention(
