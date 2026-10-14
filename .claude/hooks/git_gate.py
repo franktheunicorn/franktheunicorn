@@ -30,8 +30,10 @@ import re
 import shlex
 import sys
 
-#: Tokens that end one simple command and start the next.
-_SEPARATORS = frozenset({"&&", "||", "|", ";", "&", "|&", ";;", "(", ")", "\n"})
+#: Characters shlex groups into operator tokens. A token made only of these
+#: is a separator, whatever the run: ``)`` glued to ``;`` or ``&&`` lexes as
+#: one token (``);``, ``)&&``) and must still end the segment before it.
+_OPERATOR_CHARS = frozenset(";&|()")
 
 #: Words that can precede the command proper in a segment.
 _PREFIX_WORDS = frozenset(
@@ -47,6 +49,52 @@ _GIT_VALUE_FLAGS = frozenset(
 
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
 _HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+
+
+def strip_comments(command: str) -> str:
+    """*command* with shell comments removed, quote-aware.
+
+    A ``#`` starts a comment only at the start of a word and outside quotes,
+    and the comment runs to the end of its line. Without this, an apostrophe
+    in a comment ("# it's committed") opened a quote that swallowed the next
+    line's ``git push``, and the tokeniser still balanced it.
+    """
+    out: list[str] = []
+    quote = ""
+    prev = "\n"
+    i = 0
+    n = len(command)
+    while i < n:
+        ch = command[i]
+        if quote:
+            out.append(ch)
+            if ch == "\\" and quote == '"' and i + 1 < n:
+                out.append(command[i + 1])
+                i += 2
+                prev = command[i - 1]
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch == "\\" and i + 1 < n:
+            out.append(ch)
+            out.append(command[i + 1])
+            i += 2
+            prev = command[i - 1]
+            continue
+        elif ch in "'\"":
+            quote = ch
+            out.append(ch)
+        elif ch == "#" and (prev.isspace() or prev in _OPERATOR_CHARS):
+            end = command.find("\n", i)
+            if end == -1:
+                break
+            i = end
+            continue
+        else:
+            out.append(ch)
+        prev = ch
+        i += 1
+    return "".join(out)
 
 
 def strip_heredocs(command: str) -> str:
@@ -70,7 +118,7 @@ def segments(command: str) -> list[list[str]]:
     """Simple commands in *command*, as argv lists. Raises ValueError when the
     text cannot be tokenised (unbalanced quotes)."""
     lexer = shlex.shlex(
-        strip_heredocs(command).replace("\n", " ; "),
+        strip_comments(strip_heredocs(command)).replace("\n", " ; "),
         posix=True,
         punctuation_chars=";&|()",
     )
@@ -79,7 +127,7 @@ def segments(command: str) -> list[list[str]]:
     out: list[list[str]] = []
     current: list[str] = []
     for token in lexer:
-        if token in _SEPARATORS:
+        if token and set(token) <= _OPERATOR_CHARS:
             if current:
                 out.append(current)
             current = []
@@ -130,7 +178,7 @@ def gate_for(command: str) -> str:
     try:
         subcommands = {git_subcommand(command_argv(seg)) for seg in segments(command)}
     except ValueError:
-        text = strip_heredocs(command)
+        text = strip_comments(strip_heredocs(command))
         if re.search(r"\bgit\b[^\n]*\bpush\b", text):
             return "push"
         if re.search(r"\bgit\b[^\n]*\bcommit\b", text):

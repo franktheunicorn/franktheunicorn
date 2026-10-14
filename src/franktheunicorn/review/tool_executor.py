@@ -231,9 +231,17 @@ _AUTH_FAILURE_RE = re.compile(
 )
 
 
+#: How much of stderr's end the auth check reads. A CLI's own error is the last
+#: thing it prints; ``codex exec`` echoes the whole prompt (the diff, or the
+#: security report) to stderr first, and a report titled "Unauthorized access
+#: to the admin API" must not read as a login failure.
+_AUTH_TAIL_LINES = 5
+
+
 def looks_like_auth_failure(stderr: str) -> bool:
-    """Whether a failed CLI's stderr says it has no usable login."""
-    return bool(_AUTH_FAILURE_RE.search(stderr or ""))
+    """Whether a failed CLI's last stderr lines say it has no usable login."""
+    tail = "\n".join((stderr or "").strip().splitlines()[-_AUTH_TAIL_LINES:])
+    return bool(_AUTH_FAILURE_RE.search(tail))
 
 
 def auth_failure_advice(reviewer_name: str, binary: str, *, remote: bool) -> str:

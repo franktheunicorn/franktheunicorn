@@ -123,6 +123,16 @@ class TestAuthFailure:
         ):
             assert looks_like_auth_failure(line), line
 
+    def test_a_prompt_echoed_to_stderr_does_not_count(self) -> None:
+        """codex prints the whole prompt to stderr before its own error; a
+        report about unauthorized access is not a login failure."""
+        from franktheunicorn.review.tool_executor import looks_like_auth_failure
+
+        lines = ["user", "Report: Unauthorized access to the admin API", *(["..."] * 10)]
+        stderr = "\n".join([*lines, "error: stream disconnected before completion"])
+        assert not looks_like_auth_failure(stderr)
+        assert looks_like_auth_failure(stderr + "\nError: Not logged in")
+
     def test_an_ordinary_failure_is_not(self) -> None:
         from franktheunicorn.review.tool_executor import looks_like_auth_failure
 

@@ -43,6 +43,13 @@ gate = _load()
         "timeout 600 git push",
         "cd repo\ngit push",
         "git commit -q -m 'x' && git push",
+        # An apostrophe in a comment must not open a quote over the next line.
+        "cd repo\n# Push the branch (it's already committed)\ngit push -u origin b\n# it's done",
+        "git commit -m wip # it's a wip\ngit push # it's fine",
+        # ``)`` glued to an operator still ends the command before it.
+        'BR=$(git rev-parse --abbrev-ref HEAD); git push -u origin "$BR"',
+        "(cd sub && make)&& git push",
+        "echo $(date)|| git push",
     ],
 )
 def test_push_is_gated_however_it_is_spelled(command: str) -> None:
@@ -71,6 +78,9 @@ def test_commit_is_gated(command: str) -> None:
         "grep -rn 'git push' docs/",
         "git commit-tree HEAD^{tree}",
         "cat <<'EOF'\ngit push origin main\nEOF",
+        "# git push later\ngit status",
+        'echo "not # a comment"; git log',
+        "echo ${#arr}; git diff",
     ],
 )
 def test_everything_else_passes(command: str) -> None:

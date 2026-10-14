@@ -441,10 +441,20 @@ effort. "Done" means it is on this branch with tests.
 ### 4.11 Read-only flags for the claude and codex reviewers (done)
 
 - **What.** A `readonly_args` field on `AgentCLIReviewerConfig`, seeded so the
-  `claude` reviewer runs with `--strict-mcp-config` and Bash, Edit, Write,
-  NotebookEdit, WebFetch, WebSearch and Task denied, and `codex exec` runs
-  with `-s read-only -c mcp_servers={}`. Read, Grep and Glob stay. Both lenses
-  scored it 4 or 5.
+  `claude` reviewer runs with `--setting-sources user`, `--strict-mcp-config`
+  and Bash, Edit, Write, NotebookEdit, WebFetch, WebSearch and Task denied,
+  and `codex exec` runs with `-s read-only -c mcp_servers={}`. Read, Grep and
+  Glob stay. Both lenses scored it 4 or 5.
+- **Found in review: the checkout's own settings.** `claude -p` skips the
+  workspace-trust prompt, so without `--setting-sources user` it loaded the
+  PR's `.claude/settings.json`, and a hook there is a shell command run
+  outside the tool system, which `--disallowedTools` does not stop. A
+  contributor could run code on the worker by adding that file to a PR.
+  Reproduced with claude 2.1.299 (a SessionStart hook in the checkout ran
+  under the other flags, not with this one); this predates the read-only
+  work, which is where it was caught. Whether `cursor-agent` and `codex` load
+  equivalent project-level hooks from the checkout is an open question
+  (section 9).
 - **Why.** These reviewers run inside a checkout of someone else's PR. With
   a shell, an editor and the operator's MCP servers, an instruction planted
   in the diff has somewhere to go. `cursor-agent` already ran `--mode ask`;

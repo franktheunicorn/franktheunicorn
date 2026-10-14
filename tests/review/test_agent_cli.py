@@ -822,6 +822,25 @@ class TestReadOnlyFlags:
         )
         assert self._by_name(oc)["codex"].build_invocation("p") == ["exec", "p"]
 
+    def test_the_checkouts_own_claude_settings_are_not_loaded(self) -> None:
+        """The PR's .claude/settings.json can define hooks, which are shell
+        commands outside the tool system; only user settings may load."""
+        argv = self._by_name(OperatorConfig())["claude"].build_invocation("R")
+        assert argv[argv.index("--setting-sources") + 1] == "user"
+
+    def test_a_path_qualified_binary_inherits_the_seed(self) -> None:
+        oc = OperatorConfig(
+            agent_cli_reviewers=[
+                AgentCLIReviewerConfig(
+                    name="claude-opus", cli_path="/home/op/.local/bin/claude", model="opus"
+                ),
+                AgentCLIReviewerConfig(name="cursor-k3", cli_path="/opt/bin/cursor-agent"),
+            ]
+        )
+        by_name = self._by_name(oc)
+        assert by_name["claude-opus"].readonly_args == list(CLAUDE_READONLY_ARGS)
+        assert by_name["cursor-k3"].trust_args == ["--trust"]
+
     def test_a_second_entry_on_the_claude_binary_inherits_them(self) -> None:
         oc = OperatorConfig(
             agent_cli_reviewers=[

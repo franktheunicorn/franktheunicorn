@@ -283,9 +283,11 @@ digest_enabled: false
 # `extra_args` would mean anyone customizing `--mode` silently lost it.
 #
 # READ-ONLY. A reviewer reads a stranger's PR; it needs Read/Grep, not a shell.
-# `readonly_args` is seeded for claude (no MCP servers; Bash, Edit, Write,
-# NotebookEdit, WebFetch, WebSearch and Task denied) and codex (`-s read-only`,
-# no MCP servers); cursor-agent gets the same from `--mode ask`. Like
+# `readonly_args` is seeded for claude (`--setting-sources user`, so the PR
+# checkout's own .claude/settings.json and its hooks never load; no MCP
+# servers; Bash, Edit, Write, NotebookEdit, WebFetch, WebSearch and Task
+# denied) and codex (`-s read-only`); cursor-agent gets the same from
+# `--mode ask`. Like
 # `trust_args`, it is its own field so an `extra_args` override keeps it. Set
 # `readonly_args: []` to opt out; the worker warns at startup when you do.
 # agent_cli_reviewers:

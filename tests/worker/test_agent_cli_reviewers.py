@@ -836,7 +836,10 @@ class TestReadOnlyStartupLine:
         oc = OperatorConfig(agent_cli_reviewers=[self._local()])
         with caplog.at_level(logging.INFO):
             _check_agent_cli_reviewers(oc)
-        assert "read-only via --strict-mcp-config --disallowedTools" in caplog.text
+        assert (
+            "read-only via --setting-sources user --strict-mcp-config --disallowedTools"
+            in caplog.text
+        )
         assert not any(r.levelno >= logging.WARNING for r in caplog.records)
 
     def test_an_override_to_nothing_warns(self, caplog: Any) -> None:

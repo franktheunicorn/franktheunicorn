@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import shlex
+from pathlib import PurePath
 from typing import Literal
 
 from pydantic import (
@@ -406,16 +407,26 @@ class AgentCLIReviewerConfig(BaseModel):
         return [*model_part, *fixed, self.prompt_arg, prompt]
 
 
-#: ``claude`` with no MCP servers and no tool that writes, executes or fetches:
-#: Read, Grep and Glob remain, which is what a review needs. ``--strict-mcp-config``
-#: with no ``--mcp-config`` loads no servers; without it the reviewer inherits the
-#: operator's (mail, chat, forge writes), reachable from an instruction in the
-#: diff. The tool list is Apache Magpie's (``CLAUDE_DENIED_TOOLS`` in
+#: ``claude`` with no MCP servers, no tool that writes, executes or fetches,
+#: and no settings from the checkout it runs in. Read, Grep and Glob remain,
+#: which is what a review needs.
+#:
+#: ``--setting-sources user`` is the one that matters most. The reviewer runs
+#: in a checkout of the PR, ``-p`` skips the workspace-trust prompt, and so
+#: without it claude loads the PR's own ``.claude/settings.json``, whose hooks
+#: are shell commands run outside the tool system: ``--disallowedTools`` does
+#: not stop them. Verified with claude 2.1.299: a SessionStart hook in the
+#: checkout ran under the other flags and did not run with this one.
+#: ``--strict-mcp-config`` with no ``--mcp-config`` loads no MCP servers; without
+#: it the reviewer inherits the operator's (mail, chat, forge writes). The tool
+#: list is Apache Magpie's (``CLAUDE_DENIED_TOOLS`` in
 #: ``tools/adversarial-review/src/adversarial_review/backends.py`` at
-#: apache/magpie commit dadb315caa8b881fc1d2195bef03223dac25915a, Apache-2.0);
-#: both flags are in ``claude --help``. ``--disallowedTools`` takes a variadic
-#: list, which ends at the next ``-``-flag (``-p`` in the seed's argv).
+#: apache/magpie commit dadb315caa8b881fc1d2195bef03223dac25915a, Apache-2.0).
+#: ``--disallowedTools`` takes a variadic list, which ends at the next
+#: ``-``-flag, so it goes last here.
 CLAUDE_READONLY_ARGS: tuple[str, ...] = (
+    "--setting-sources",
+    "user",
     "--strict-mcp-config",
     "--disallowedTools",
     "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch,Task",
@@ -1967,11 +1978,14 @@ class OperatorConfig(BaseModel):
         # ``cursor-agent`` *name* at ``command: cursor`` must not become the
         # template for every other entry that still execs ``cursor-agent``.
         seed_names = {seed.name for seed in seeds}
-        seeds_by_binary = {seed.cli_argv[0]: seed for seed in seeds}
+        # By basename: an operator whose service PATH lacks ~/.local/bin writes
+        # ``command: /home/op/.local/bin/claude``, and that entry must inherit the
+        # claude seed's trust and read-only flags as much as a bare ``claude``.
+        seeds_by_binary = {PurePath(seed.cli_argv[0]).name: seed for seed in seeds}
         for entry in self.agent_cli_reviewers:
             if entry.name in seed_names:
                 continue
-            binary_seed = seeds_by_binary.get(entry.cli_argv[0])
+            binary_seed = seeds_by_binary.get(PurePath(entry.cli_argv[0]).name)
             if binary_seed is not None:
                 _fill_unset_reviewer_fields(entry, binary_seed)
 
