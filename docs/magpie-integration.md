@@ -480,6 +480,33 @@ effort. "Done" means it is on this branch with tests.
   (`split_segments`, `Segment`, `git_subcommand_index`) at the pinned commit.
 - **Remote path.** Developer tooling only; not part of the worker.
 
+### 4.13 Local agent runs in their own process group; a logged-out CLI says so (done)
+
+- **What.** `LocalExecutor.run` starts the agent in its own session with its
+  output going to temp files, and kills the whole process group when it
+  returns, finished or timed out. Process stdin is a file too, empty when
+  there is nothing to send. Separately, a failed agent CLI whose stderr says
+  it is not logged in gets one sentence naming where to log it in (this
+  machine, or the remote host), at all three agent-CLI error sites: the
+  reviewer, the `agent-cli` LLM backend and the security verifier, where it
+  also lands in the verdict summary on the report page. Scored 4/3.
+- **Why.** With pipes, reading to EOF waited for the last process holding
+  them, so a helper the agent spawned could hold a finished review past its
+  budget; `subprocess.run` killed only the direct child on timeout, so
+  helpers outlived it. And "exited with code 1" from a CLI frank drives with
+  its own login, not an API key, is most often "nobody logged it in there",
+  which the bare exit code does not say.
+- **Where.** `review/tool_executor.py` (`_run_local`, `_kill_group`,
+  `looks_like_auth_failure`, `auth_failure_advice`), `review/agent_cli.py`,
+  `review/backends/agent_cli_backend.py`, `security/verifier.py`. The local
+  runner falls back to plain `subprocess.run` where `os.killpg` is missing.
+- **Upstream source.** `tools/adversarial-review/src/adversarial_review/runner.py`
+  (`_execute`, `_AUTH_ERRORS`) at the pinned commit; not at 0.1.0.
+- **Remote path.** The process-group change is local only: on the remote the
+  ssh client is the child, and the agent's own lifetime is the remote
+  shell's. The auth advice applies in both modes and names the remote host
+  when `remote.mode` is `ssh`.
+
 ---
 
 ## 5. Tier 2: Adopt Later

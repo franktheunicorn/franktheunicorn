@@ -95,7 +95,7 @@ class TestRunSnowflakeReview:
             == []
         )
 
-    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    @patch("franktheunicorn.review.tool_executor._run_local")
     def test_default_executor_is_local(self, mock_run: Any) -> None:
         mock_run.return_value = subprocess.CompletedProcess(
             args=[], returncode=0, stdout="Review completed", stderr=""

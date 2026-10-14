@@ -401,6 +401,8 @@ def run_agent_cli_review(
         raise AgentCLIRunError(f"{cmd[0]} returned nothing after {elapsed:.0f}s")
     if not result.ok:
         from franktheunicorn.review.tool_executor import (
+            auth_failure_advice,
+            looks_like_auth_failure,
             looks_like_workspace_trust_refusal,
             workspace_trust_advice,
         )
@@ -412,12 +414,21 @@ def run_agent_cli_review(
             if looks_like_workspace_trust_refusal(result.stderr, result.stdout)
             else ""
         )
+        auth = (
+            " "
+            + auth_failure_advice(
+                config.name, config.cli_argv[0], remote=config.remote.mode == "ssh"
+            )
+            if looks_like_auth_failure(result.stderr)
+            else ""
+        )
         logger.error(
-            "%s CLI exited with code %d: %s%s",
+            "%s CLI exited with code %d: %s%s%s",
             config.name,
             result.returncode,
             (result.stderr or "")[:500] or "(no stderr)",
             trust,
+            auth,
         )
         raise AgentCLIRunError(f"{cmd[0]} exited with code {result.returncode}")
 

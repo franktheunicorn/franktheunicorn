@@ -13,11 +13,15 @@ from __future__ import annotations
 
 import base64
 import binascii
+import contextlib
 import logging
+import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
+import tempfile
 import time
 import uuid
 from collections.abc import Iterator
@@ -213,6 +217,93 @@ def workspace_trust_advice(reviewer_name: str) -> str:
         "not `extra_args`: the seeded entries already set it, and overriding "
         "`extra_args` replaces the seed rather than merging with it."
     )
+
+
+#: A CLI that is not logged in, by what it prints on stderr. Matched against
+#: stderr only: stdout is the review, and a review of login code talks about
+#: logins. Apache Magpie's adversarial-review classifier (``_AUTH_ERRORS`` in
+#: ``tools/adversarial-review/src/adversarial_review/runner.py`` at apache/magpie
+#: commit dadb315caa8b881fc1d2195bef03223dac25915a, Apache-2.0).
+_AUTH_FAILURE_RE = re.compile(
+    r"not logged in|please (?:log ?in|sign ?in|authenticate)|(?:login|authentication) required"
+    r"|unauthori[sz]ed|invalid api key|set an auth method|re-?authenticate",
+    re.IGNORECASE,
+)
+
+
+def looks_like_auth_failure(stderr: str) -> bool:
+    """Whether a failed CLI's stderr says it has no usable login."""
+    return bool(_AUTH_FAILURE_RE.search(stderr or ""))
+
+
+def auth_failure_advice(reviewer_name: str, binary: str, *, remote: bool) -> str:
+    """One sentence naming the fix, for appending to whatever error we log.
+
+    frank drives these CLIs with their own login, not an API key it holds, so
+    "exited 1" is most often "nobody has logged this binary in where it runs".
+    """
+    where = (
+        "on the remote host it runs on"
+        if remote
+        else "on this machine, as the user the worker runs as"
+    )
+    return (
+        f"This looks like {reviewer_name} is not logged in {where}. frank uses the "
+        f"CLI's own login rather than an API key, so log {binary} in there once, "
+        "interactively; nothing in operator.yaml can do it for you."
+    )
+
+
+def _kill_group(pgid: int) -> None:
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(pgid, signal.SIGKILL)
+
+
+def _run_local(
+    cmd: list[str], cwd: str, timeout: int, stdin: str | None
+) -> subprocess.CompletedProcess[str]:
+    """``subprocess.run`` with captured text output, minus two ways it fails an
+    agent CLI. Same contract: raises ``FileNotFoundError`` for a missing binary
+    and ``subprocess.TimeoutExpired`` past *timeout*.
+
+    The child runs in its own session, writes to files rather than pipes, and
+    its whole process group is killed when it returns, finished or not. With
+    pipes, reading to EOF waits for the last process holding them, so a helper
+    the agent spawned (a language server, a sandbox, a background ``git``)
+    could hold a finished review past the budget; and ``subprocess.run`` kills
+    only the direct child on timeout, so the helpers outlived it, some of them
+    still billing. Apache Magpie's adversarial-review runner learned both the
+    hard way (``runner.py``, ``_execute``, at the pinned commit) and this is
+    its shape. Process stdin is a file too: empty when there is no *stdin*,
+    rather than whatever the worker's own stdin happens to be.
+
+    Where ``os.killpg`` does not exist (not POSIX), falls back to plain
+    ``subprocess.run``.
+    """
+    if not hasattr(os, "killpg"):
+        return subprocess.run(
+            cmd, capture_output=True, text=True, cwd=cwd, timeout=timeout, input=stdin
+        )
+    with tempfile.TemporaryDirectory(prefix="frank-exec-") as tmp:
+        io_dir = Path(tmp)
+        (io_dir / "stdin").write_text(stdin or "", encoding="utf-8")
+        with (
+            open(io_dir / "stdin", encoding="utf-8") as fin,
+            open(io_dir / "stdout", "w", encoding="utf-8") as fout,
+            open(io_dir / "stderr", "w", encoding="utf-8") as ferr,
+        ):
+            proc = subprocess.Popen(
+                cmd, stdin=fin, stdout=fout, stderr=ferr, cwd=cwd, start_new_session=True
+            )
+            try:
+                proc.wait(timeout=timeout)
+            finally:
+                _kill_group(proc.pid)
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    proc.wait(timeout=5)
+        out = (io_dir / "stdout").read_text(encoding="utf-8", errors="replace")
+        err = (io_dir / "stderr").read_text(encoding="utf-8", errors="replace")
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 
 
 class ToolExecutor(Protocol):
@@ -446,14 +537,7 @@ class LocalExecutor:
         stdin: str | None = None,
     ) -> ExecResult | None:
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                cwd=cwd,
-                timeout=timeout,
-                input=stdin,
-            )
+            result = _run_local(cmd, cwd, timeout, stdin)
         except FileNotFoundError:
             logger.warning("CLI not found on PATH: %s", cmd[0] if cmd else "(empty)")
             return None

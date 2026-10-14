@@ -47,38 +47,95 @@ class TestLocalExecutorPrepareRepo:
 
 
 class TestLocalExecutorRun:
-    @patch("franktheunicorn.review.tool_executor.subprocess.run")
-    def test_run_passes_through_subprocess(self, mock_run: Any) -> None:
+    """Real processes, not a mocked ``subprocess.run``: the point of the local
+    runner is how it behaves with real children, helpers and timeouts."""
+
+    @patch("franktheunicorn.review.tool_executor._run_local")
+    def test_run_goes_through_the_process_group_runner(self, mock_run: Any) -> None:
         mock_run.return_value = subprocess.CompletedProcess(
             args=[], returncode=0, stdout="hi\n", stderr=""
         )
-        result = LocalExecutor().run(["echo", "hi"], cwd="/tmp")
+        result = LocalExecutor().run(["echo", "hi"], cwd="/tmp", timeout=7, stdin="in")
         assert result is not None
         assert result.ok
         assert result.stdout == "hi\n"
-        mock_run.assert_called_once()
-        kwargs = mock_run.call_args.kwargs
-        assert kwargs["cwd"] == "/tmp"
-        assert kwargs["capture_output"] is True
-        assert kwargs["text"] is True
+        mock_run.assert_called_once_with(["echo", "hi"], "/tmp", 7, "in")
 
-    @patch("franktheunicorn.review.tool_executor.subprocess.run")
-    def test_run_forwards_stdin(self, mock_run: Any) -> None:
-        mock_run.return_value = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="", stderr=""
-        )
-        LocalExecutor().run(["cat"], cwd="/tmp", stdin="hello")
-        assert mock_run.call_args.kwargs["input"] == "hello"
+    def test_output_and_exit_code_come_back(self) -> None:
+        result = LocalExecutor().run(["sh", "-c", "echo out; echo err >&2; exit 3"], cwd="/tmp")
+        assert result is not None
+        assert (result.returncode, result.stdout, result.stderr) == (3, "out\n", "err\n")
 
-    @patch("franktheunicorn.review.tool_executor.subprocess.run")
-    def test_run_returns_none_on_file_not_found(self, mock_run: Any) -> None:
-        mock_run.side_effect = FileNotFoundError("no such binary")
-        assert LocalExecutor().run(["nope"], cwd="/tmp") is None
+    def test_stdin_is_delivered(self) -> None:
+        result = LocalExecutor().run(["cat"], cwd="/tmp", stdin="hello")
+        assert result is not None
+        assert result.stdout == "hello"
 
-    @patch("franktheunicorn.review.tool_executor.subprocess.run")
-    def test_run_returns_none_on_timeout(self, mock_run: Any) -> None:
-        mock_run.side_effect = subprocess.TimeoutExpired(cmd="x", timeout=1)
-        assert LocalExecutor().run(["x"], cwd="/tmp", timeout=1) is None
+    def test_no_stdin_means_end_of_file_not_the_workers_stdin(self) -> None:
+        """``cat`` with nothing to read must return at once, not wait on whatever
+        the worker process was started with."""
+        started = time.monotonic()
+        result = LocalExecutor().run(["cat"], cwd="/tmp", timeout=20)
+        assert result is not None
+        assert result.stdout == ""
+        assert time.monotonic() - started < 10
+
+    def test_a_missing_binary_is_none(self) -> None:
+        assert LocalExecutor().run(["frank-no-such-binary-xyz"], cwd="/tmp") is None
+
+    def test_a_timeout_is_none_and_does_not_wait_out_the_child(self) -> None:
+        started = time.monotonic()
+        assert LocalExecutor().run(["sh", "-c", "sleep 30"], cwd="/tmp", timeout=1) is None
+        assert time.monotonic() - started < 10
+
+    def test_a_helper_holding_stdout_neither_delays_the_answer_nor_survives(
+        self, tmp_path: Path
+    ) -> None:
+        """The agent exits with its answer while a helper it spawned still holds
+        the output stream. With pipes the read waited for the helper; here the
+        answer comes back at once and the helper is killed with the group."""
+        pidfile = tmp_path / "helper.pid"
+        script = f"sleep 30 & echo $! > {pidfile}; echo done"
+        started = time.monotonic()
+
+        result = LocalExecutor().run(["sh", "-c", script], cwd="/tmp", timeout=60)
+
+        assert result is not None
+        assert result.stdout == "done\n"
+        assert time.monotonic() - started < 10
+        status = Path(f"/proc/{pidfile.read_text().strip()}/status")
+        if status.exists():  # killed but not yet reaped is fine; running is not
+            state = next(
+                line for line in status.read_text().splitlines() if line.startswith("State:")
+            )
+            assert "Z" in state
+
+
+class TestAuthFailure:
+    def test_a_login_complaint_on_stderr_is_recognised(self) -> None:
+        from franktheunicorn.review.tool_executor import looks_like_auth_failure
+
+        for line in (
+            "Error: Not logged in. Please run /login",
+            "Authentication required",
+            "401 Unauthorized",
+            "Invalid API key",
+        ):
+            assert looks_like_auth_failure(line), line
+
+    def test_an_ordinary_failure_is_not(self) -> None:
+        from franktheunicorn.review.tool_executor import looks_like_auth_failure
+
+        assert not looks_like_auth_failure("error: model overloaded")
+        assert not looks_like_auth_failure("")
+
+    def test_the_advice_says_where_to_log_in(self) -> None:
+        from franktheunicorn.review.tool_executor import auth_failure_advice
+
+        remote = auth_failure_advice("cursor-agent", "cursor-agent", remote=True)
+        local = auth_failure_advice("claude", "claude", remote=False)
+        assert "remote host" in remote and "cursor-agent" in remote
+        assert "this machine" in local and "log claude in" in local
 
 
 # ---------------------------------------------------------------------------

@@ -142,7 +142,7 @@ class TestRunClaudeCLIReview:
         assert "--model" in cmd
         assert cmd[cmd.index("--model") + 1] == "claude-sonnet-4-6"
 
-    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    @patch("franktheunicorn.review.tool_executor._run_local")
     def test_default_executor_is_local(self, mock_run: Any) -> None:
         """When no executor is supplied, the call falls through to LocalExecutor."""
         # First call: git diff returns empty so CLI is skipped.

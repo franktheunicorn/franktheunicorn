@@ -947,12 +947,25 @@ def _verify_one_branch(
         # as well as the log, because the summary is what the operator reads on the
         # report page and there is nothing else there to explain an empty answer.
         from franktheunicorn.review.tool_executor import (
+            auth_failure_advice,
+            looks_like_auth_failure,
             looks_like_workspace_trust_refusal,
             workspace_trust_advice,
         )
 
         detail = (result.stderr or result.stdout).strip()[:500]
         summary = f"The {reviewer.name} CLI exited {result.returncode}: {detail}"
+        if looks_like_auth_failure(result.stderr):
+            advice = auth_failure_advice(
+                reviewer.name, reviewer.cli_argv[0], remote=reviewer.remote.mode == "ssh"
+            )
+            summary = f"{summary}\n\n{advice}"
+            logger.warning(
+                "Verification of report #%s on %s failed on the CLI's login. %s",
+                report.pk,
+                branch,
+                advice,
+            )
         if looks_like_workspace_trust_refusal(result.stderr, result.stdout):
             advice = workspace_trust_advice(reviewer.name)
             summary = f"{summary}\n\n{advice}"

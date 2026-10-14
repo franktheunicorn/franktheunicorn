@@ -1215,6 +1215,36 @@ class TestWorkspaceTrust:
 
 
 @pytest.mark.django_db
+class TestLoggedOutCLI:
+    def test_the_verdict_says_to_log_the_cli_in(self) -> None:
+        report = SecurityReportFactory(
+            project=ProjectFactory(owner="apache", repo="spark"), title="t", raw_text="b"
+        )
+        config = _operator(_verifier(reviewer="cursor-agent"))
+        config.agent_cli_reviewers = [
+            AgentCLIReviewerConfig(name="cursor-agent", cli_path="cursor-agent")
+        ]
+        executor = _FakeExecutor(
+            {
+                "symbolic-ref": ExecResult(returncode=0, stdout="origin/master\n", stderr=""),
+                "for-each-ref": _BRANCH_LISTING,
+                "checkout": ExecResult(returncode=0, stdout="", stderr=""),
+                "rev-parse HEAD": ExecResult(returncode=0, stdout="abc123\n", stderr=""),
+                "cursor-agent": ExecResult(
+                    returncode=1, stdout="", stderr="Authentication required"
+                ),
+            }
+        )
+        with patch("franktheunicorn.review.tool_executor.make_executor", return_value=executor):
+            verify_report(report, config)
+
+        row = report.verifications.first()
+        assert row is not None
+        assert row.verdict == "error"
+        assert "not logged in on this machine" in row.summary
+
+
+@pytest.mark.django_db
 class TestUpstreamRefresh:
     """The checkout is refreshed from upstream before anything is decided.
 
