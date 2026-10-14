@@ -67,6 +67,26 @@ class _HasSummary(Protocol):
     def summary(self) -> str: ...
 
 
+def _analyze_ci_failures(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
+    if cmd.pull_request is None:
+        msg = "analyze_ci_failures requires a pull_request target"
+        raise ValueError(msg)
+
+    from franktheunicorn.config.loader import get_project_config
+    from franktheunicorn.review.backends.preflight import disabled_at_boot
+    from franktheunicorn.review.ci_triage import analyze_ci_failures
+
+    pr = cmd.pull_request
+    project_config = get_project_config(pr.project.full_name)
+    forge_client = _forge_client_for(project_config, operator_config) if project_config else None
+    if forge_client is None:
+        msg = f"No forge client for {pr.project.full_name}"
+        raise ValueError(msg)
+    n = analyze_ci_failures(pr, forge_client, operator_config, disabled_at_boot())
+    # The head is in the log so the dashboard's "CI is clean" can't outlive a push.
+    cmd.log = f"Analysed {n} failed CI check(s) on {(pr.head_sha or '')[:12]}"
+
+
 def _forge_client_for(
     project_config: ProjectConfig, operator_config: OperatorConfig
 ) -> ForgeClient | None:
@@ -321,6 +341,7 @@ def _dispatch(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
         "check_fixes_landed": _check_fixes_landed,
         "check_cve_fixes_landed": _check_cve_fixes_landed,
         "run_agents": _run_agents,
+        "analyze_ci_failures": _analyze_ci_failures,
         "scan_zombie_prs": _scan_zombie_prs,
         "assess_zombie_pr": _assess_zombie_pr,
     }

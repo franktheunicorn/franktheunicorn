@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -73,6 +74,19 @@ def generate_auto_build_dockerfile(
     return "\n".join(lines) + "\n"
 
 
+def _buildx_build(workspace: Path, dockerfile: str, tag: str, contexts: dict[str, str]) -> None:
+    """``docker buildx build`` for named contexts, which docker-py's build can't pass."""
+    df = workspace / dockerfile
+    argv = ["docker", "buildx", "build", "--load", "-t", tag, "-f", str(df)]
+    for name, rel in contexts.items():
+        argv += ["--build-context", f"{name}={workspace / rel}"]
+    argv.append(str(df.parent))
+    proc = subprocess.run(argv, capture_output=True, text=True, timeout=3 * 3600)
+    if proc.returncode != 0:
+        msg = f"docker buildx build failed for {tag}: {proc.stderr[-2000:]}"
+        raise RuntimeError(msg)
+
+
 def resolve_image(
     docker: Any,
     owner: str,
@@ -103,6 +117,9 @@ def resolve_image(
         # stable name tied to the current Dockerfile contents.
         tag = f"{IMAGE_TAG_PREFIX}/{owner}-{repo}:{_hash_inputs(df_bytes)}"
         logger.info("Building test image %s from %s", tag, tests.dockerfile)
+        if tests.build_contexts:
+            _buildx_build(workspace, tests.dockerfile, tag, tests.build_contexts)
+            return tag
         docker.images.build(
             path=str(workspace),
             dockerfile=tests.dockerfile,

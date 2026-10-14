@@ -18,6 +18,7 @@ from bs4 import BeautifulSoup
 
 from franktheunicorn.backends.base import (
     MAX_LISTED_PULL_REQUESTS,
+    FailedCheck,
     ForgeClient,
     ReviewBody,
     ReviewComment,
@@ -29,6 +30,10 @@ if TYPE_CHECKING:
     from franktheunicorn.data_access.rate_limiter import GitHubRateLimiter
 
 logger = logging.getLogger(__name__)
+
+#: Check-run conclusions worth explaining. "cancelled" is left out: on GitHub
+#: it is usually a newer push superseding the run, not a failure.
+_FAILED_CONCLUSIONS = frozenset({"failure", "timed_out", "startup_failure"})
 
 
 class GitHubClient(ForgeClient):
@@ -324,10 +329,19 @@ class GitHubClient(ForgeClient):
 
         if not sha:
             return ""
-        # A large Actions matrix (Spark's is one) can pass 100 check runs on a
-        # single commit, and a failure on page two is still a failure. Read to
-        # the end; a commit with more than the cap is reported unknown rather
-        # than green on the part that was read.
+        check_runs = self._check_runs(owner, repo, sha)
+        if check_runs is None:
+            return ""
+        return classify_ci(check_runs, self._commit_statuses(owner, repo, sha))
+
+    def _check_runs(self, owner: str, repo: str, sha: str) -> list[dict[str, Any]] | None:
+        """Every check run on *sha*, or None past the page cap.
+
+        A large Actions matrix (Spark's is one) can pass 100 check runs on a
+        single commit, and a failure on page two is still a failure. Read to
+        the end; a commit with more than the cap is unknown rather than green
+        on the part that was read.
+        """
         check_runs: list[dict[str, Any]] = []
         max_pages = 10
         for page in range(1, max_pages + 1):
@@ -339,22 +353,85 @@ class GitHubClient(ForgeClient):
             page_runs = checks_resp.json().get("check_runs") or []
             check_runs.extend(page_runs)
             if len(page_runs) < 100:
-                break
-        else:
-            logger.warning(
-                "%s/%s@%s has more than %d check runs; CI status left unknown",
-                owner,
-                repo,
-                sha[:12],
-                max_pages * 100,
-            )
-            return ""
+                return check_runs
+        logger.warning(
+            "%s/%s@%s has more than %d check runs; CI status left unknown",
+            owner,
+            repo,
+            sha[:12],
+            max_pages * 100,
+        )
+        return None
+
+    def _commit_statuses(self, owner: str, repo: str, sha: str) -> list[dict[str, Any]]:
         status_resp = self._get(
             f"/repos/{owner}/{repo}/commits/{sha}/status", params={"per_page": 100}
         )
         status_resp.raise_for_status()
-        statuses = status_resp.json().get("statuses") or []
-        return classify_ci(check_runs, statuses)
+        statuses: list[dict[str, Any]] = status_resp.json().get("statuses") or []
+        return statuses
+
+    def list_failed_checks(
+        self, owner: str, repo: str, pr_number: int, sha: str
+    ) -> list[FailedCheck]:
+        if not sha:
+            return []
+        repos = [f"{owner}/{repo}"]
+        # Spark's test jobs run on the contributor's fork; apache/spark only
+        # gets a "Build" check pointing at them.
+        head = (self.get_pull_request(owner, repo, pr_number).get("head") or {}).get("repo")
+        if head and head.get("full_name") and head["full_name"] not in repos:
+            repos.append(head["full_name"])
+        failed: list[FailedCheck] = []
+        for full in repos:
+            o, r = full.split("/", 1)
+            runs = self._check_runs(o, r, sha)
+            if runs is None:
+                # Unknown, not clean: "no failures" here would be a false green.
+                msg = f"{full}@{sha[:12]} has too many check runs to read"
+                raise RuntimeError(msg)
+            for run in runs:
+                if run.get("conclusion") not in _FAILED_CONCLUSIONS:
+                    continue
+                output = run.get("output") or {}
+                slug = (run.get("app") or {}).get("slug", "")
+                failed.append(
+                    FailedCheck(
+                        repo=full,
+                        id=int(run["id"]),
+                        name=run.get("name") or "",
+                        conclusion=run["conclusion"],
+                        url=run.get("html_url") or "",
+                        kind="actions" if slug == "github-actions" else "check",
+                        details="\n".join(
+                            str(output[k]) for k in ("title", "summary", "text") if output.get(k)
+                        ),
+                    )
+                )
+            for st in self._commit_statuses(o, r, sha):
+                if st.get("state") in ("failure", "error"):
+                    failed.append(
+                        FailedCheck(
+                            repo=full,
+                            id=int(st["id"]),
+                            name=st.get("context") or "",
+                            conclusion=st["state"],
+                            url=st.get("target_url") or "",
+                            kind="status",
+                            details=st.get("description") or "",
+                        )
+                    )
+        return failed
+
+    def get_check_log(self, check: FailedCheck) -> str:
+        if check.kind != "actions":
+            return check.details
+        # A 302 to blob storage; httpx drops the token on the cross-origin hop.
+        resp = self._get(f"/repos/{check.repo}/actions/jobs/{check.id}/logs", follow_redirects=True)
+        if resp.status_code != 200:
+            logger.info("No log for %s job %d (HTTP %d)", check.repo, check.id, resp.status_code)
+            return check.details
+        return resp.text
 
     def list_pull_review_comments(
         self, owner: str, repo: str, pr_number: int
@@ -408,36 +485,21 @@ class GitHubClient(ForgeClient):
         :meth:`get_commit_ci_status` it raises: a failure on an unread page
         is still a failure, so a partial list must not summarise as green.
         """
-        checks: list[dict[str, Any]] = []
-        runs_url = f"/repos/{owner}/{repo}/commits/{sha}/check-runs"
-        max_pages = 10
-        for page in range(1, max_pages + 1):
-            response = self._get(runs_url, params={"per_page": 100, "page": page})
-            response.raise_for_status()
-            payload = response.json()
-            runs = payload.get("check_runs", []) if isinstance(payload, dict) else []
-            for run in runs:
-                if not isinstance(run, dict) or not isinstance(run.get("name"), str):
-                    continue
-                checks.append(
-                    {
-                        "name": run["name"],
-                        "status": str(run.get("status") or ""),
-                        "conclusion": str(run.get("conclusion") or ""),
-                        "url": str(run.get("html_url") or run.get("details_url") or ""),
-                    }
-                )
-            if len(runs) < 100:
-                break
-        else:
-            msg = f"{owner}/{repo}@{sha[:12]} has more than {max_pages * 100} check runs"
+        runs = self._check_runs(owner, repo, sha)
+        if runs is None:
+            msg = f"{owner}/{repo}@{sha[:12]} has more than 1000 check runs"
             raise RuntimeError(msg)
-
-        status_resp = self._get(f"/repos/{owner}/{repo}/commits/{sha}/status")
-        status_resp.raise_for_status()
-        status_payload = status_resp.json()
-        statuses = status_payload.get("statuses", []) if isinstance(status_payload, dict) else []
-        for item in statuses:
+        checks: list[dict[str, Any]] = [
+            {
+                "name": run["name"],
+                "status": str(run.get("status") or ""),
+                "conclusion": str(run.get("conclusion") or ""),
+                "url": str(run.get("html_url") or run.get("details_url") or ""),
+            }
+            for run in runs
+            if isinstance(run, dict) and isinstance(run.get("name"), str)
+        ]
+        for item in self._commit_statuses(owner, repo, sha):
             if not isinstance(item, dict) or not isinstance(item.get("context"), str):
                 continue
             state = str(item.get("state") or "")

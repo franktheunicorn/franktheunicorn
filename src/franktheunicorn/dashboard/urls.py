@@ -21,6 +21,7 @@ urlpatterns = [
     path("draft/<int:draft_id>/recall/", views.recall_draft, name="recall_draft"),
     path("pr/<int:pr_id>/post/", views.post_review, name="post_review"),
     path("pr/<int:pr_id>/run-agents/", views.run_agents, name="run_agents"),
+    path("pr/<int:pr_id>/ci-failures/", views.pr_ci_failures, name="pr_ci_failures"),
     path(
         "pr/<int:pr_id>/regenerate-findings/",
         views.regenerate_findings,

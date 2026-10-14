@@ -127,6 +127,58 @@ RUN pip install -e .
 | `test_command` | `python -m pytest {tests} --tb=short -q` | Format string. `{tests}` is replaced with the space-joined test scope. |
 | `workdir` | `/workspace` | Where the repo gets bind-mounted (read-only) inside the container. |
 | `env` | `{}` | Extra environment variables passed to the container. |
+| `test_globs` | `[]` | fnmatch globs; only identified tests matching one reach `test_command`. |
+| `build_contexts` | `{}` | Named contexts for `dockerfile` (`COPY --from=<name>`), repo-relative. Builds with `docker buildx`. |
+| `build_command` | _unset_ | Runs in the checkout before the tests, offline. See below. |
+| `warm_command` | `build_command` | Fills the dependency cache from base code, with network. |
+| `warm_key_files` | `[]` | Files/dirs whose content keys the cache; re-warm when they change. |
+| `offline_env` | `{}` | Env for the offline build/test container only (e.g. `COURSIER_MODE: offline`). |
+| `build_timeout_seconds` | `5400` | Added to the tier's timeout when there is a build. |
+
+## Projects that must build before they test
+
+PySpark tests need Spark's jars, so the checkout has to be built first. PR
+code still never gets network:
+
+1. **Warm** (base code, network on): `warm_command` runs in a checkout of the
+   PR's base and of its fork point with master, with `$HOME` bound to
+   `data/test-cache/<owner>-<repo>/`. Skipped while `warm_key_files` are
+   unchanged since a previous warm. The fork point matters: a PR branched
+   before a dependency bump builds against the old version.
+2. **Build + test** (PR code, `--network=none`): the cache is mounted
+   read-only, copied into a per-run `$HOME`, then `build_command` and
+   `test_command` run with `offline_env`. A PR that adds a dependency the
+   cache doesn't have fails the build, and a failed build is an `infra`
+   verdict, never a test result.
+
+The workspace is writable for builds, and these containers run as the
+worker's uid, so build output on a rootful daemon stays cleanable.
+
+```yaml
+# Apache Spark — what this machine runs
+tests:
+  enabled: true
+  dockerfile: dev/spark-test-image/python-312/Dockerfile
+  build_contexts: {root: "."}
+  resource_tier: heavy
+  test_globs: ["python/pyspark/*test_*.py"]
+  warm_key_files: ["pom.xml", "project", "build"]
+  # build/sbt downloads its own launcher, so the warm stashes it in $HOME.
+  warm_command: "build/sbt -Phive package && cp build/sbt-launch-*.jar $HOME/"
+  build_command: "cp $HOME/sbt-launch-*.jar build/ && build/sbt -Phive package"
+  offline_env: {COURSIER_MODE: offline, SBT_OPTS: "-Dsbt.offline=true"}
+  env:
+    JAVA_TOOL_OPTIONS: "-Duser.home=/frank-home -Djava.io.tmpdir=/frank-home/tmp"
+    SPARK_HOME: /workspace
+    SPARK_TESTING: "1"
+    SPARK_LOCAL_IP: 127.0.0.1
+  # The image has no pytest (Spark's suites are unittest); paths become modules.
+  test_command: >-
+    mkdir -p $HOME/tmp &&
+    export PYTHONPATH=/workspace/python:$(ls /workspace/python/lib/py4j-*-src.zip) &&
+    python -m unittest -v $(for t in {tests}; do echo "$t" |
+    sed -e 's#^python/##' -e 's#\.py$##' -e 's#/#.#g'; done)
+```
 
 ## Resource tiers
 
@@ -176,4 +228,5 @@ See [`security-design.md` §4.1](security-design.md) and the master design
 doc §9.5. In short: rootless Docker, `--network=none`, `--read-only` root
 filesystem, `cap_drop=ALL`, `no-new-privileges`, repo bind-mounted read-only,
 ephemeral tmpfs only at the workdir. The runner never executes PR code on
-the host.
+the host. With `build_command` the workspace is writable and the dependency
+cache is mounted read-only; only the base-code warm gets network.

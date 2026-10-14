@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -428,3 +429,145 @@ class TestRunContainer:
         # User env merges with the scratch defaults; user keys win on collision.
         assert kwargs["environment"]["FOO"] == "bar"
         assert kwargs["environment"]["HOME"] == "/frank-scratch"
+
+
+def _build_config() -> ProjectConfig:
+    return ProjectConfig(
+        owner="apache",
+        repo="spark",
+        tests=TestExecutionConfig(
+            enabled=True,
+            build_command="build/sbt package",
+            warm_key_files=["build.sbt"],
+            offline_env={"COURSIER_MODE": "offline"},
+            test_globs=["python/*test_*.py"],
+        ),
+    )
+
+
+def _ok_docker(status: int = 0) -> MagicMock:
+    docker = MagicMock()
+    container = MagicMock()
+    container.wait.return_value = {"StatusCode": status}
+    container.logs.return_value = b""
+    docker.containers.run.return_value = container
+    return docker
+
+
+@pytest.mark.django_db
+class TestBuildStep:
+    """PR code builds offline from a cache only the base checkout filled."""
+
+    @pytest.fixture(autouse=True)
+    def _data_dir(self, tmp_path: Path, settings: Any) -> None:
+        settings.DATA_DIR = str(tmp_path / "data")
+
+    def test_pr_build_is_offline_with_a_read_only_cache(
+        self, tmp_path: Path, fake_workspaces: tuple[Path, Path]
+    ) -> None:
+        import os
+
+        docker = _ok_docker()
+        pr = _ready_pr(changed_files=["python/pyspark/tests/test_x.py", "core/src/test/A.scala"])
+        with patch.object(DockerTestRunner, "_get_docker", return_value=docker):
+            DockerTestRunner().run_differential_test(pr, _build_config(), tmp_path, force=True)
+
+        warm, pr_run, base_run = (c.kwargs for c in docker.containers.run.call_args_list)
+        assert warm["network_mode"] == "bridge"
+        assert "COURSIER_MODE" not in warm["environment"]
+        for run in (pr_run, base_run):
+            assert run["network_mode"] == "none"
+            assert run["user"] == f"{os.getuid()}:{os.getgid()}"
+            assert run["environment"]["COURSIER_MODE"] == "offline"
+            mounts = {v["bind"]: v["mode"] for v in run["volumes"].values()}
+            assert mounts == {
+                "/workspace": "rw",
+                "/frank-home": "rw",
+                "/frank-cache": "ro",
+                # getpwuid() has to find the uid, or the JDK's login NPEs.
+                "/etc/passwd": "ro",
+            }
+        cmd = pr_run["command"][-1]
+        assert "(build/sbt package) || { touch $HOME/.frank-build-failed; exit 1; }" in cmd
+        # test_globs drops the Scala file pytest can't run.
+        assert cmd.endswith("pytest python/pyspark/tests/test_x.py --tb=short -q")
+
+    def test_warm_runs_once_per_build_files_key(
+        self, tmp_path: Path, fake_workspaces: tuple[Path, Path]
+    ) -> None:
+        pr_ws, _ = fake_workspaces
+        (pr_ws / "build.sbt").write_text("v1")
+        runner = DockerTestRunner()
+        docker = _ok_docker()
+        for _ in range(2):
+            runner._warm_build_cache(docker, "img", tmp_path, "b" * 40, _build_config())
+        assert docker.containers.run.call_count == 1
+        (pr_ws / "build.sbt").write_text("v2")
+        runner._warm_build_cache(docker, "img", tmp_path, "b" * 40, _build_config())
+        assert docker.containers.run.call_count == 2
+
+    def test_a_failed_warm_backs_off_then_retries(
+        self, tmp_path: Path, fake_workspaces: tuple[Path, Path]
+    ) -> None:
+        """Not marked done, and not a 90-minute rebuild on every cycle either."""
+        import os
+
+        runner = DockerTestRunner()
+        docker = _ok_docker(status=1)
+        with pytest.raises(RuntimeError, match=r"exit 1"):
+            runner._warm_build_cache(docker, "img", tmp_path, "b" * 40, _build_config())
+        with pytest.raises(RuntimeError, match="recently"):
+            runner._warm_build_cache(docker, "img", tmp_path, "b" * 40, _build_config())
+        assert docker.containers.run.call_count == 1
+
+        cache = Path(str(tmp_path / "data" / "test-cache" / "apache-spark"))
+        for failed in cache.glob(".frank-warm-failed-*"):
+            os.utime(failed, (0, 0))
+        docker.containers.run.return_value.wait.return_value = {"StatusCode": 0}
+        runner._warm_build_cache(docker, "img", tmp_path, "b" * 40, _build_config())
+        assert docker.containers.run.call_count == 2
+        assert not list(cache.glob(".frank-warm-failed-*"))
+
+    def test_the_prs_fork_point_is_warmed_too(
+        self, tmp_path: Path, fake_workspaces: tuple[Path, Path]
+    ) -> None:
+        """An older PR builds against its fork point's dependencies, not master's."""
+        pr = _ready_pr(changed_files=["python/pyspark/tests/test_x.py"])
+        with (
+            patch.object(DockerTestRunner, "_get_docker", return_value=_ok_docker()),
+            patch("franktheunicorn.worker.test_runner._merge_base", return_value="f" * 40),
+            patch.object(DockerTestRunner, "_warm_build_cache") as warm,
+        ):
+            DockerTestRunner().run_differential_test(pr, _build_config(), tmp_path, force=True)
+        assert {c.args[3] for c in warm.call_args_list} == {"b" * 40, "f" * 40}
+
+    def test_a_failed_build_is_infra_not_a_test_result(self) -> None:
+        runner = DockerTestRunner()
+        built, broke = {"exit_code": 1}, {"exit_code": 1, "build_failed": True}
+        assert runner._compute_verdict({"exit_code": 0}, broke) == "infra"
+        assert runner._compute_verdict(broke, {"exit_code": 1}) == "infra"
+        # A test that happens to exit 97 is still a test result.
+        assert runner._compute_verdict({"exit_code": 97}, built) == "broken"
+
+    def test_a_warm_backoff_skips_before_any_image_build_or_row(
+        self, tmp_path: Path, fake_workspaces: tuple[Path, Path]
+    ) -> None:
+        from franktheunicorn.core.models import TestRun
+
+        cache = tmp_path / "data" / "test-cache" / "apache-spark"
+        cache.mkdir(parents=True)
+        (cache / ".frank-warm-failed-abc").touch()
+        pr = _ready_pr(changed_files=["python/pyspark/tests/test_x.py"])
+        cfg = _build_config()
+        cfg.committers = [pr.author]  # past the untrusted-author gate, to the new one
+        with (
+            patch.object(DockerTestRunner, "_get_docker", return_value=_ok_docker()),
+            patch("franktheunicorn.worker.test_runner.resolve_image") as resolve,
+        ):
+            assert DockerTestRunner().run_differential_test(pr, cfg, tmp_path) is None
+        resolve.assert_not_called()
+        assert not TestRun.objects.filter(pull_request=pr).exists()
+
+    def test_build_command_requires_warm_key_files(self) -> None:
+        with pytest.raises(ValueError, match="warm_key_files"):
+            TestExecutionConfig(enabled=True, build_command="make")

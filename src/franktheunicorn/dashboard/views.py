@@ -663,6 +663,7 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
     )
 
     prev_pr, next_pr = _adjacent_prs(pr)
+    _queue_ci_triage(pr)
 
     # Merge readiness: the verdict and, when it is "not ready", exactly why —
     # the detail page is where "why isn't this in the almost-ready tab" gets
@@ -676,6 +677,7 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
         request,
         "dashboard/pr_detail.html",
         {
+            **_ci_failures_context(pr),
             **_zombie_panel_context(pr, zombie),
             "pr": pr,
             "candidate": candidate,
@@ -694,6 +696,45 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
             "next_pr": next_pr,
         },
     )
+
+
+#: Opening a PR re-checks its CI at most this often; already-analysed checks
+#: cost only the listing, but a refresh loop shouldn't hammer the API.
+_CI_TRIAGE_THROTTLE = timedelta(minutes=10)
+
+
+def _queue_ci_triage(pr: PullRequest) -> None:
+    """Looking at a PR is the trigger: queue an LLM read of its failed checks."""
+    if pr.state != "open" or not pr.head_sha:
+        return
+    recent = WorkerCommand.objects.filter(
+        pull_request=pr,
+        command="analyze_ci_failures",
+        created_at__gte=timezone.now() - _CI_TRIAGE_THROTTLE,
+    ).exists()
+    if not recent:
+        from franktheunicorn.security.queue import PRIORITY_INTERACTIVE, queue_command
+
+        queue_command("analyze_ci_failures", pull_request=pr, priority=PRIORITY_INTERACTIVE)
+
+
+def _ci_failures_context(pr: PullRequest) -> dict[str, object]:
+    commands = WorkerCommand.objects.filter(pull_request=pr, command="analyze_ci_failures")
+    last = commands.order_by("-created_at").first()
+    head = (pr.head_sha or "")[:12]
+    return {
+        "ci_analyses": pr.ci_failure_analyses.filter(head_sha=pr.head_sha or ""),
+        "ci_in_flight": commands.filter(status__in=("pending", "running")).exists(),
+        "ci_last": last,
+        # Only a completed run on *this* head can say CI is clean.
+        "ci_clean": bool(last and last.status == "completed" and head and head in (last.log or "")),
+    }
+
+
+def pr_ci_failures(request: HttpRequest, pr_id: int) -> HttpResponse:
+    """The CI-failures section, which polls itself while the analysis runs."""
+    pr = get_object_or_404(PullRequest, pk=pr_id)
+    return render(request, "dashboard/_ci_failures.html", {"pr": pr, **_ci_failures_context(pr)})
 
 
 # --- Zombie Queue (closed-PR follow-up) ---
