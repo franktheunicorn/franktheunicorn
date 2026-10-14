@@ -140,7 +140,7 @@ committers:
   - cloud-fan
 tests:
   enabled: true
-  container_image: ghcr.io/apache/spark-test:latest
+  container_image: ghcr.io/apache/spark-test:latest  # illustrative: Spark publishes no runnable test image
   resource_tier: heavy          # 8 CPU, 16 GB RAM, 45 min timeout
   test_command: "python -m pytest {tests} --tb=short -q"
   workdir: /workspace

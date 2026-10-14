@@ -362,11 +362,14 @@ context:
   import_depth: 1
   package_roots: ["sql", "core", "python"]
 
-# Differential test runner (see docs/test-runner.md). Spark publishes a
-# CI-grade test image upstream, so we use it as-is rather than rebuilding.
+# Differential test runner (see docs/test-runner.md). Off for Spark: there is
+# no runnable upstream test image (ghcr.io/apache/spark-test doesn't exist and
+# the ghcr "-cache" images are BuildKit cache manifests), and PySpark tests
+# need Spark's jars, which a read-only, --network=none checkout doesn't have.
+# The Dockerfile below builds, but base and head would both just fail.
 tests:
-  enabled: true
-  container_image: ghcr.io/apache/spark-test:latest
+  enabled: false
+  dockerfile: dev/spark-test-image/python-312/Dockerfile
   resource_tier: heavy
   test_command: "python -m pytest {tests} --tb=short -q"
 
