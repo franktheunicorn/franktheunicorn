@@ -248,6 +248,11 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
     _check_ssh_configs(operator_config)
 
     signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
+    # Hangup too, so closing the terminal runs the same shutdown, including
+    # stopping local agents, which run in their own sessions and so no longer
+    # get the hangup themselves. Not under nohup, which ignores it on purpose.
+    if signal.getsignal(signal.SIGHUP) is not signal.SIG_IGN:
+        signal.signal(signal.SIGHUP, _raise_keyboard_interrupt)
 
     stop_interactive = threading.Event()
     interactive = threading.Thread(
@@ -314,6 +319,15 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
             logger.info(
                 "Interactive command still running at shutdown; leaving it to the "
                 "next worker's stuck-command sweep."
+            )
+        from franktheunicorn.review.tool_executor import stop_local_children
+
+        stopped = stop_local_children()
+        if stopped:
+            logger.info(
+                "Stopped %d local agent run(s) still going at shutdown, so none keeps "
+                "running (and billing) after the worker.",
+                stopped,
             )
         # Close each unique client exactly once (mock mode reuses one instance).
         for c in {id(v): v for v in clients.values()}.values():
@@ -581,6 +595,8 @@ def _check_agent_cli_reviewers(operator_config: OperatorConfig) -> None:
     Also primes the memoized cache on ``operator_config`` so per-PR processing
     reuses the PATH probe rather than re-running it.
     """
+    from franktheunicorn.config.models import agent_binary_in
+
     resolved = resolve_agent_cli_reviewers(operator_config)
     resolved_names = {rc.name for rc in resolved}
 
@@ -606,8 +622,8 @@ def _check_agent_cli_reviewers(operator_config: OperatorConfig) -> None:
             f", model {rc.model!r} via {rc.model_flag}" if rc.model else "",
             f", read-only via {' '.join(rc.readonly_args)}" if rc.readonly_args else "",
         )
-        binary = Path(rc.cli_argv[0]).name if rc.cli_argv else ""
-        if binary in _READONLY_SEEDED_BINARIES and not rc.readonly_args:
+        binary = agent_binary_in(rc.cli_argv, _READONLY_SEEDED_BINARIES)
+        if binary and not rc.readonly_args:
             # The seed's read-only flags were overridden away. Not an error (an
             # operator may want an agent that edits), but a reviewer that can run
             # shell commands in a checkout of a stranger's PR should be a choice

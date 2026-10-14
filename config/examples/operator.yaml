@@ -266,7 +266,8 @@ digest_enabled: false
 # The legacy top-level `claude_cli:` block is still accepted and is promoted
 # into this registry as the `claude` entry. It picks up the same
 # `model: "sonnet"` default, so if your `cli_path` is a wrapper that rejects
-# unknown flags, set `model: ""` there to go back to passing no --model at all.
+# unknown flags, set `model: ""` there to go back to passing no --model at all,
+# and `readonly_args: []` to drop the read-only flags (see READ-ONLY below).
 #
 # WORKSPACE TRUST. Every checkout frank drives an agent in is one frank created
 # — the review clone, and the verifier's separate `security-verify` tree — so

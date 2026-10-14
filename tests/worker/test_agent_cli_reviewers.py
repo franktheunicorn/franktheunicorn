@@ -842,6 +842,19 @@ class TestReadOnlyStartupLine:
         )
         assert not any(r.levelno >= logging.WARNING for r in caplog.records)
 
+    def test_an_override_to_nothing_on_a_launcher_warns(self, caplog: Any) -> None:
+        oc = OperatorConfig(
+            agent_cli_reviewers=[
+                AgentCLIReviewerConfig(
+                    name="claude-uv", enabled=True, cli_path="uv run claude", readonly_args=[]
+                )
+            ]
+        )
+        with caplog.at_level(logging.INFO):
+            _check_agent_cli_reviewers(oc)
+        warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("claude runs without read-only flags" in m for m in warnings)
+
     def test_an_override_to_nothing_warns(self, caplog: Any) -> None:
         oc = OperatorConfig(agent_cli_reviewers=[self._local(readonly_args=[])])
         with caplog.at_level(logging.INFO):

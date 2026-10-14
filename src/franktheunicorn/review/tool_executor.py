@@ -22,6 +22,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 from collections.abc import Iterator
@@ -443,6 +444,44 @@ def _kill_group(pgid: int, sig: signal.Signals = signal.SIGKILL) -> None:
         os.killpg(pgid, sig)
 
 
+def _group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+#: Process groups ``_run_local`` has started and not yet reaped. Each child
+#: gets its own session so its helpers die with it, which also puts it out of
+#: reach of the terminal's Ctrl-C and hangup. A run on the worker's daemon
+#: interactive thread is abandoned at shutdown without its ``finally``, so the
+#: worker stops these itself (``stop_local_children``) rather than leave an
+#: agent billing, and holding a lane's worktree, after it has gone.
+_LIVE_GROUPS: set[int] = set()
+_LIVE_GROUPS_LOCK = threading.Lock()
+
+
+def stop_local_children(grace: float = _TERM_GRACE_SECONDS) -> int:
+    """TERM every process group ``_run_local`` still has running, allow *grace*
+    seconds (the agent guard puts the checkout back in that window), then KILL
+    what is left. Returns how many groups there were."""
+    with _LIVE_GROUPS_LOCK:
+        groups = sorted(_LIVE_GROUPS)
+    for pgid in groups:
+        _kill_group(pgid, signal.SIGTERM)
+    alive = groups
+    deadline = time.monotonic() + grace
+    while alive and time.monotonic() < deadline:
+        time.sleep(0.05)
+        alive = [pgid for pgid in alive if _group_alive(pgid)]
+    for pgid in alive:
+        _kill_group(pgid)
+    return len(groups)
+
+
 def _run_local(
     cmd: list[str], cwd: str, timeout: int, stdin: str | None
 ) -> subprocess.CompletedProcess[str]:
@@ -459,8 +498,10 @@ def _run_local(
     still billing. Apache Magpie's adversarial-review runner learned both the
     hard way (``runner.py``, ``_execute``, at the pinned commit) and this is
     its shape. Process stdin is a file too: empty when there is no *stdin*,
-    rather than whatever the worker's own stdin happens to be. Past *timeout*
-    the group gets TERM and ``_TERM_GRACE_SECONDS`` to act on it first.
+    rather than whatever the worker's own stdin happens to be. Past *timeout*,
+    or on Ctrl-C, the group gets TERM and ``_TERM_GRACE_SECONDS`` to act on it
+    before the KILL; ``stop_local_children`` does the same at shutdown for runs
+    on other threads.
 
     Where ``os.killpg`` does not exist (not POSIX), falls back to plain
     ``subprocess.run``.
@@ -480,9 +521,13 @@ def _run_local(
             proc = subprocess.Popen(
                 cmd, stdin=fin, stdout=fout, stderr=ferr, cwd=cwd, start_new_session=True
             )
+            with _LIVE_GROUPS_LOCK:
+                _LIVE_GROUPS.add(proc.pid)
             try:
                 proc.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
+            except BaseException:
+                # The timeout, or Ctrl-C landing in this thread. A second Ctrl-C
+                # during the grace period skips straight to the KILL below.
                 _kill_group(proc.pid, signal.SIGTERM)
                 with contextlib.suppress(subprocess.TimeoutExpired):
                     proc.wait(timeout=_TERM_GRACE_SECONDS)
@@ -491,6 +536,8 @@ def _run_local(
                 _kill_group(proc.pid)
                 with contextlib.suppress(subprocess.TimeoutExpired):
                     proc.wait(timeout=5)
+                with _LIVE_GROUPS_LOCK:
+                    _LIVE_GROUPS.discard(proc.pid)
         out = (io_dir / "stdout").read_text(encoding="utf-8", errors="replace")
         err = (io_dir / "stderr").read_text(encoding="utf-8", errors="replace")
     return subprocess.CompletedProcess(cmd, proc.returncode, out, err)

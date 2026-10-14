@@ -905,6 +905,51 @@ class TestReadOnlyFlags:
         assert by_name["claude-opus"].readonly_args == list(CLAUDE_READONLY_ARGS)
         assert by_name["cursor-k3"].trust_args == ["--trust"]
 
+    def test_a_launcher_wrapped_binary_inherits_the_seed(self) -> None:
+        """``uv run claude`` and ``npx codex`` are shapes operator.yaml documents;
+        keyed on argv[0] alone they ran with every tool."""
+        oc = OperatorConfig(
+            agent_cli_reviewers=[
+                AgentCLIReviewerConfig(name="claude-uv", cli_path="uv run claude"),
+                AgentCLIReviewerConfig(
+                    name="codex-npx",
+                    cli_path="npx codex",
+                    prompt_mode="subcommand",
+                    prompt_arg="exec",
+                ),
+            ]
+        )
+        by_name = self._by_name(oc)
+        assert by_name["claude-uv"].readonly_args == list(CLAUDE_READONLY_ARGS)
+        assert by_name["codex-npx"].readonly_args == list(CODEX_READONLY_ARGS)
+
+    def test_agent_binary_in_reads_the_whole_argv_by_basename(self) -> None:
+        from franktheunicorn.config.models import agent_binary_in
+
+        known = {"claude", "codex"}
+        assert agent_binary_in(["corp-wrap", "/opt/bin/claude", "--headless"], known) == "claude"
+        assert agent_binary_in(["npx", "codex"], known) == "codex"
+        assert agent_binary_in(["corp-wrap", "--config", "claude.yaml"], known) == ""
+        assert agent_binary_in([], known) == ""
+
+    def test_the_legacy_block_can_opt_out(self) -> None:
+        """A strict wrapper under the old ``claude_cli:`` block that rejects
+        unknown flags had no way to drop them."""
+        legacy = OperatorConfig.model_validate(
+            {"claude_cli": {"enabled": True, "cli_path": "corp-claude", "readonly_args": []}}
+        )
+        assert self._by_name(legacy)["claude"].build_invocation("p")[-2:] == ["-p", "p"]
+        assert self._by_name(legacy)["claude"].readonly_args == []
+        via_entry = OperatorConfig.model_validate(
+            {
+                "claude_cli": {"enabled": True},
+                "agent_cli_reviewers": [{"name": "claude", "readonly_args": []}],
+            }
+        )
+        assert self._by_name(via_entry)["claude"].readonly_args == []
+        default = OperatorConfig.model_validate({"claude_cli": {"enabled": True}})
+        assert self._by_name(default)["claude"].readonly_args == list(CLAUDE_READONLY_ARGS)
+
     def test_a_second_entry_on_the_claude_binary_inherits_them(self) -> None:
         oc = OperatorConfig(
             agent_cli_reviewers=[

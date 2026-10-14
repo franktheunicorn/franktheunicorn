@@ -481,7 +481,11 @@ effort. "Done" means it is on this branch with tests.
   when an override emptied them). Its own field, like `trust_args`, so an
   `extra_args` override keeps it; `readonly_args: []` is the opt-out. The
   verifier and the `agent-cli` LLM backend borrow reviewer entries through
-  `build_invocation`, so they inherit it. Magpie's `--ephemeral` and
+  `build_invocation`, so they inherit it. An extra entry inherits a seed's
+  flags when its argv runs the seed's binary anywhere, by basename, so
+  `/home/op/.local/bin/claude`, `uv run claude` and `npx codex` are covered.
+  The legacy `claude_cli:` block takes `readonly_args` too, for a wrapper
+  that rejects unknown flags. Magpie's `--ephemeral` and
   `--skip-git-repo-check` for codex are left out: neither contains anything.
 - **Upstream source.** `tools/adversarial-review/src/adversarial_review/backends.py`
   (`CLAUDE_DENIED_TOOLS`, `_codex`, `_claude`) at the pinned commit; not at
@@ -531,6 +535,15 @@ effort. "Done" means it is on this branch with tests.
   `looks_like_auth_failure`, `auth_failure_advice`), `review/agent_cli.py`,
   `review/backends/agent_cli_backend.py`, `security/verifier.py`. The local
   runner falls back to plain `subprocess.run` where `os.killpg` is missing.
+- **Found in review: orphans at shutdown.** In its own session, an agent no
+  longer gets the terminal's Ctrl-C or hangup, and a run on the worker's
+  daemon interactive thread is abandoned at exit without its `finally`. A
+  Verify press followed by Ctrl-C left the agent running and billing in the
+  force-run lane's worktree. `_run_local` now records each group it starts.
+  It sends TERM with a 10s grace before KILL on Ctrl-C, as on a timeout. The
+  worker's shutdown stops whatever is still recorded
+  (`stop_local_children`), and a hangup now runs that shutdown unless
+  SIGHUP is ignored (`nohup`).
 - **Upstream source.** `tools/adversarial-review/src/adversarial_review/runner.py`
   (`_execute`, `_AUTH_ERRORS`) at the pinned commit; not at 0.1.0.
 - **Remote path.** The process-group change is local only: on the remote the

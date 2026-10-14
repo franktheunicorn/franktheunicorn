@@ -2352,3 +2352,58 @@ class TestAgentConfigGuard:
         assert result.returncode == 3
         assert result.stdout.split() == [".git", "src"]
         assert _snapshot(repo) == before
+
+
+class TestLocalChildrenAtShutdown:
+    """Local agents run in their own session, so a Ctrl-C or hangup at the
+    worker's terminal no longer reaches them; the worker has to stop them."""
+
+    def test_stop_local_children_ends_a_run_on_another_thread(self, tmp_path: Path) -> None:
+        import threading
+
+        from franktheunicorn.review.tool_executor import guard_agent_argv, stop_local_children
+
+        repo = _pr_checkout(tmp_path)
+        before = _snapshot(repo)
+        results: list[Any] = []
+        worker = threading.Thread(
+            target=lambda: results.append(
+                LocalExecutor().run(guard_agent_argv(["sleep", "60"]), cwd=str(repo), timeout=120)
+            ),
+            daemon=True,
+        )
+        started = time.monotonic()
+        worker.start()
+        deadline = time.monotonic() + 10
+        while (repo / ".claude").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+
+        assert stop_local_children() == 1
+        worker.join(timeout=15)
+
+        assert not worker.is_alive()
+        assert time.monotonic() - started < 30
+        assert results and results[0] is not None and results[0].returncode == 143
+        assert _snapshot(repo) == before  # TERM first, so the guard put it back
+        assert stop_local_children() == 0
+
+    def test_ctrl_c_in_the_running_thread_terms_before_it_kills(self, tmp_path: Path) -> None:
+        import _thread
+        import threading
+
+        from franktheunicorn.review.tool_executor import _run_local, guard_agent_argv
+
+        repo = _pr_checkout(tmp_path)
+        before = _snapshot(repo)
+
+        def _interrupt_once_moved() -> None:
+            deadline = time.monotonic() + 10
+            while (repo / ".claude").exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            _thread.interrupt_main()
+
+        threading.Thread(target=_interrupt_once_moved, daemon=True).start()
+        with pytest.raises(KeyboardInterrupt):
+            _run_local(guard_agent_argv(["sleep", "60"]), str(repo), 120, None)
+
+        assert _snapshot(repo) == before

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import shlex
+from collections.abc import Collection
 from pathlib import PurePath
 from typing import Literal
 
@@ -222,6 +223,10 @@ class ClaudeCLIConfig(BaseModel):
     # Matches the registry default; see CLAUDE_CLI_DEFAULT_MODEL.
     model: str = CLAUDE_CLI_DEFAULT_MODEL
     extra_args: list[str] = Field(default_factory=list)
+    #: ``None`` takes ``CLAUDE_READONLY_ARGS`` (or what an ``agent_cli_reviewers``
+    #: ``claude`` entry set explicitly); ``[]`` opts out, for a wrapper that
+    #: rejects flags it does not know. The worker warns at startup either way.
+    readonly_args: list[str] | None = None
     timeout_seconds: int = 300
     max_diff_chars: int = 60_000
     remote: RemoteExecutionConfig = Field(default_factory=RemoteExecutionConfig)
@@ -243,6 +248,20 @@ class ClaudeCLIConfig(BaseModel):
     def cli_argv(self) -> list[str]:
         """``cli_path`` split into argv -- supports ``"cmd arg1 arg2"``."""
         return _parse_cli_path(self.cli_path)
+
+
+def agent_binary_in(argv: list[str], binaries: Collection[str]) -> str:
+    """The first of *binaries* that *argv* runs, by basename; ``""`` if none.
+
+    The whole argv, not just its head: ``uv run claude``, ``npx codex`` and
+    ``corp-wrap claude --headless`` are the launcher shapes operator.yaml
+    documents, and each still runs the binary the seed's flags are for.
+    """
+    for part in argv:
+        name = PurePath(part).name
+        if name in binaries:
+            return name
+    return ""
 
 
 class AgentCLIReviewerConfig(BaseModel):
@@ -2030,13 +2049,14 @@ class OperatorConfig(BaseModel):
         # By basename: an operator whose service PATH lacks ~/.local/bin writes
         # ``command: /home/op/.local/bin/claude``, and that entry must inherit the
         # claude seed's trust and read-only flags as much as a bare ``claude``.
+        # And anywhere in the argv, so ``uv run claude`` inherits them too.
         seeds_by_binary = {PurePath(seed.cli_argv[0]).name: seed for seed in seeds}
         for entry in self.agent_cli_reviewers:
             if entry.name in seed_names:
                 continue
-            binary_seed = seeds_by_binary.get(PurePath(entry.cli_argv[0]).name)
-            if binary_seed is not None:
-                _fill_unset_reviewer_fields(entry, binary_seed)
+            binary = agent_binary_in(entry.cli_argv, seeds_by_binary)
+            if binary:
+                _fill_unset_reviewer_fields(entry, seeds_by_binary[binary])
 
         # Promote iff the operator actually provided a ``claude_cli:`` block.
         # ``model_fields_set`` distinguishes "explicitly configured" (even
@@ -2045,6 +2065,18 @@ class OperatorConfig(BaseModel):
         # of silently reverting to the "auto" seed and auto-running Claude.
         legacy = self.claude_cli
         if "claude_cli" in self.model_fields_set:
+            # The legacy block's own setting first, then an explicit one on the
+            # entry being replaced, so an opt-out written in either place holds.
+            readonly = legacy.readonly_args
+            if readonly is None:
+                readonly = next(
+                    (
+                        rc.readonly_args
+                        for rc in self.agent_cli_reviewers
+                        if rc.name == "claude" and "readonly_args" in rc.model_fields_set
+                    ),
+                    list(CLAUDE_READONLY_ARGS),
+                )
             promoted = AgentCLIReviewerConfig(
                 name="claude",
                 enabled=legacy.enabled,
@@ -2052,7 +2084,7 @@ class OperatorConfig(BaseModel):
                 model=legacy.model,
                 prompt_mode="flag",
                 prompt_arg="-p",
-                readonly_args=list(CLAUDE_READONLY_ARGS),
+                readonly_args=list(readonly),
                 extra_args=list(legacy.extra_args),
                 timeout_seconds=legacy.timeout_seconds,
                 max_diff_chars=legacy.max_diff_chars,
