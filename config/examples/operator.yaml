@@ -631,3 +631,35 @@ digest_enabled: false
 #     folder: "INBOX"            # or a Gmail label you filter into
 #     poll_interval_seconds: 300
 #     ingested_tag: "frank/ingested"   # optional: tag mail ingested into frank
+
+# --- Zombie Queue (closed-PR follow-up) ---
+#
+# The dashboard's Zombie Queue tab: closed-but-unmerged PRs whose JIRA ticket is
+# still open, each with the model's answer to "does the ticket still make
+# sense, did the fix, and what would it need to land today". Found by walking a
+# project's closed PRs newest-first — a page of listing per 100 PRs, a JIRA
+# fetch per closed-unmerged PR that names a ticket, one LLM call per zombie —
+# so it is bounded per run and resumes from a stored cursor: press "Hunt for
+# zombies" (or run `python manage.py find_zombie_prs`) again to go further
+# back. A Spark-sized history is many presses; that is the design, not a limit
+# to raise.
+#
+# No `enabled` flag: nothing runs until the button or the command, and a
+# project needs `jira.enabled` + `jira.server` in its project YAML or there is
+# no ticket to check. Everything below is a budget.
+#
+# zombie_queue:
+#   max_prs_per_run: 500          # closed PRs examined per project per run (5 listing calls)
+#   max_assessments_per_run: 20   # LLM calls per project per run; the rest wait, newest first
+#   max_diff_chars: 40000         # diff handed to the model; longer is cut with a marker
+#   max_comments: 6               # closing comments the model sees (why was it closed?)
+#   jira_closed_statuses: ["Closed", "Resolved", "Done", "Won't Fix", "Duplicate"]
+#   # Which model answers. Falls back to llm_backends in order, then to a
+#   # resolved agent_cli_reviewers entry — the same fallthrough security triage
+#   # uses. Set this to give the question a stronger model than the per-PR
+#   # review gets without changing llm_backends[0] for everything else.
+#   # llm_backend:
+#   #   provider: "claude"
+#   #   model: claude-sonnet-5-5
+#   #   api_key_env: ANTHROPIC_API_KEY
+

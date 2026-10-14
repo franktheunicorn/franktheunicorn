@@ -2026,6 +2026,15 @@ Django. Responsive (mobile-first). htmx for interactivity, minimal JS. SQLite de
 - New contributors — first-time PR authors
 - Consider closing — stale, low-context, unowned PRs
 - Needs triage — low-context drive-bys
+- Zombie Queue — closed-but-unmerged PRs whose JIRA is still open. Not a routing
+  of open PRs: a bounded, resumable scan (`review/zombie.py`, the tab's "Hunt for
+  zombies" button or `manage.py find_zombie_prs`) walks a project's closed PRs
+  newest-first, keeps the ones that name a ticket still open in JIRA, and asks
+  the model whether the ticket still makes sense, whether the fix did, and what
+  the fix would need to land today. Each row shows the verdict (revive /
+  revive-with-changes / rethink / drop / unclear), the JIRA link and the
+  needed-changes list; the PR page has the full reasoning, the closing comments,
+  Re-assess and Dismiss. Zombie-duck icon.
 
 **PR Detail View:**
 - AI-generated summary

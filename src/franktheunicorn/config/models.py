@@ -1860,6 +1860,42 @@ class SecurityTriageConfig(BaseModel):
     cve_api: SecurityCVEAPIConfig = Field(default_factory=SecurityCVEAPIConfig)
 
 
+class ZombieQueueConfig(BaseModel):
+    """The closed-PR follow-up scan (``review/zombie.py``, the Zombie Queue tab).
+
+    Walks a project's closed-but-unmerged PRs newest-first, keeps the ones whose
+    JIRA ticket is still open, and asks the model whether the ticket and the fix
+    still make sense and what the fix would need to land today.
+
+    No ``enabled`` flag, on purpose: nothing here runs until somebody presses
+    "Hunt for zombies" or runs ``manage.py find_zombie_prs``, and a project
+    without ``jira.enabled`` has nothing for it to do. The knobs are budgets —
+    the scan is bounded per run and resumes from a stored cursor, so these set
+    how much of the backlog one press buys, not whether it runs.
+    """
+
+    #: Closed PRs examined per project per run. The listing is 100 per API call,
+    #: so this is API calls as much as PRs — five pages is five calls.
+    max_prs_per_run: int = 500
+    #: LLM assessments per project per run. Each is one call with a diff in it;
+    #: candidates past the budget are queued ``unassessed`` and taken newest-first
+    #: next run.
+    max_assessments_per_run: int = 20
+    #: Diff characters handed to the model. The rest is cut with a marker.
+    max_diff_chars: int = 40_000
+    #: Conversation comments (newest) shown to the model as the closing context.
+    max_comments: int = 6
+    #: JIRA status names that mean the ticket is done with. Case-insensitive.
+    jira_closed_statuses: list[str] = Field(
+        default_factory=lambda: ["Closed", "Resolved", "Done", "Won't Fix", "Duplicate"]
+    )
+    #: Backend for the assessment. Falls back to ``llm_backends`` in order, then
+    #: to resolved ``agent_cli_reviewers`` — the same fallthrough security triage
+    #: uses, for the same reason: a deployment with a coding-agent CLI and no API
+    #: key should still get an answer.
+    llm_backend: LLMBackendConfig | None = None
+
+
 class ForgeRegistryEntry(BaseModel):
     """A single forge instance the operator wants to talk to.
 
@@ -1981,6 +2017,7 @@ class OperatorConfig(BaseModel):
     perplexity: PerplexityConfig = Field(default_factory=PerplexityConfig)
     fine_tuning: FineTuningConfig = Field(default_factory=FineTuningConfig)
     security_triage: SecurityTriageConfig = Field(default_factory=SecurityTriageConfig)
+    zombie_queue: ZombieQueueConfig = Field(default_factory=ZombieQueueConfig)
     merge_intent: MergeIntentConfig = Field(default_factory=MergeIntentConfig)
     # Multiple LLM backends can run in parallel. Each produces findings
     # independently; results are combined and deduped via anti-patterns.

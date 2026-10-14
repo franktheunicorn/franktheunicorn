@@ -37,11 +37,43 @@
     {% for tab in queue_tabs %}
     <a href="?queue={{ tab.key }}{% if active_project_type %}&amp;project_type={{ active_project_type }}{% endif %}{% if active_project %}&amp;project={{ active_project }}{% endif %}"
        {% if active_queue == tab.key %}class="active"{% endif %}>
-        {{ tab.label }}
+        {% if tab.icon %}<img class="tab-icon" src="{% static tab.icon %}" alt="" width="20" height="16">{% endif %}{{ tab.label }}
         <span class="tab-count">{{ tab.count }}</span>
     </a>
     {% endfor %}
 </div>
+
+{% if active_queue == "zombie" %}
+{% comment %} The hunt is a worker sweep, so the toolbar shows where each project's
+   scan got to — the only feedback a bounded, resumable scan has. {% endcomment %}
+<div class="zombie-toolbar">
+    <form method="post" action="{% url 'dashboard:zombie_scan' %}" style="display: inline;">
+        {% csrf_token %}
+        <button type="submit" class="action-btn zombie-hunt" {% if zombie_scan_in_flight %}disabled title="A hunt is already queued or running"{% else %}title="Walk closed-but-unmerged PRs newest-first, keep the ones whose JIRA is still open, and ask the model whether they are worth reviving"{% endif %}>
+            <img src="{% static 'dashboard/img/zombie-duck.svg' %}" alt="" width="20" height="16"> Hunt for zombies
+        </button>
+    </form>
+    {% if zombie_scan_in_flight %}<span class="queued-note" style="font-size: 0.85rem;">A hunt is queued or running — reload in a few minutes.</span>
+    {% elif zombie_last_scan and zombie_last_scan.status == "failed" %}<span class="error-note" style="font-size: 0.85rem;">Last hunt failed: {{ zombie_last_scan.error|truncatechars:160 }}</span>{% endif %}
+    {% if not zombie_backend_configured %}<span class="warn-note" style="font-size: 0.85rem;">No LLM backend configured (zombie_queue.llm_backend / llm_backends): zombies are found but not assessed.</span>{% endif %}
+    {% if zombie_scan_rows %}
+    <ul class="zombie-scan-rows">
+        {% for row in zombie_scan_rows %}
+        <li><strong>{{ row.project }}</strong>:
+            {% if row.state %}
+                {{ row.state.prs_examined }} closed PR{{ row.state.prs_examined|pluralize }} examined, {{ row.state.candidates_found }} zombie{{ row.state.candidates_found|pluralize }} found{% if row.state.lowest_number_seen %}, back to #{{ row.state.lowest_number_seen }}{% endif %}{% if row.state.exhausted %} (whole closed-PR history covered){% endif %}{% if row.state.last_run_at %} · last hunt {{ row.state.last_run_at|timesince }} ago{% endif %}
+            {% else %}
+                never hunted
+            {% endif %}
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p class="muted" style="font-size: 0.85rem; margin: 0.4rem 0 0;">No project has <code>jira.enabled</code> and <code>jira.server</code> set, so there is nothing to hunt in. The scan needs JIRA to tell an open ticket from a closed one.</p>
+    {% endif %}
+    {% if zombie_dismissed_count %}<p class="muted" style="font-size: 0.8rem; margin: 0.3rem 0 0;">{{ zombie_dismissed_count }} dismissed zombie{{ zombie_dismissed_count|pluralize }} hidden (restore from the PR page).</p>{% endif %}
+</div>
+{% endif %}
 
 {% if pull_requests %}
 <ul class="pr-list">
@@ -81,15 +113,31 @@
             {% if pr.github_updated_at %}· <span title="Upstream {{ pr.github_updated_at|date:'Y-m-d H:i' }} UTC">upstream {{ pr.github_updated_at|timesince }} ago</span>{% endif %}
             {% if pr.last_local_action_at %}· <span title="Local action {{ pr.last_local_action_at|date:'Y-m-d H:i' }} UTC">reviewed {{ pr.last_local_action_at|timesince }} ago</span>{% else %}· <span class="muted" title="No accept/reject/edit actions yet">never reviewed locally</span>{% endif %}
         </div>
+        {% if pr.zombie %}
+        <div class="zombie-row">
+            <span class="zombie-verdict zombie-verdict-{{ pr.zombie.verdict }}">{{ pr.zombie.get_verdict_display }}</span>
+            JIRA {% if pr.zombie.jira_url %}<a href="{{ pr.zombie.jira_url }}" target="_blank" rel="noopener noreferrer">{{ pr.zombie.jira_ticket_id }} &nearr;</a>{% else %}{{ pr.zombie.jira_ticket_id }}{% endif %}
+            ({{ pr.zombie.jira_status|default:"open" }}){% if pr.zombie.pr_closed_at %} · closed {{ pr.zombie.pr_closed_at|timesince }} ago{% endif %}
+            {% if pr.zombie.summary %}<div class="zombie-row-summary">{{ pr.zombie.summary }}</div>{% endif %}
+            {% if pr.zombie.needed_changes %}<div class="zombie-row-summary muted">Needs: {{ pr.zombie.needed_changes|join:"; "|truncatechars:240 }}</div>{% endif %}
+            {% if not pr.zombie.is_assessed and pr.zombie.last_error %}<div class="zombie-row-summary error-note">Assessment failed: {{ pr.zombie.last_error|truncatechars:160 }}</div>{% endif %}
+        </div>
+        {% endif %}
     </li>
     {% endfor %}
 </ul>
 {% else %}
 <div class="empty-state">
+    {% if active_queue == "zombie" %}
+    <img src="{% static 'dashboard/img/zombie-duck.svg' %}" alt="" width="120" height="84">
+    <p>No zombies in the queue.</p>
+    <p>Press <strong>Hunt for zombies</strong> to walk the closed-but-unmerged PRs whose JIRA is still open.</p>
+    {% else %}
     <img src="{% static 'dashboard/img/bathtub.svg' %}" alt="" width="120" height="78">
     <img src="{% static 'dashboard/img/rubber-duck.svg' %}" alt="" width="60" height="48" style="margin-top: -2rem; opacity: 0.8;">
     <p>No pull requests in the <strong>{{ active_queue }}</strong> queue.</p>
     <p>Start the worker to poll GitHub or run in mock mode.</p>
+    {% endif %}
 </div>
 {% endif %}
 </div>

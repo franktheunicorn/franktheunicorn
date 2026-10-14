@@ -1180,3 +1180,53 @@ class TestRecordAgentRunMergesFreshState:
         assert "stale" not in runs["claude"]
         # ...and the others keep the mark that says they are not.
         assert runs["llm"]["stale"] is True
+
+
+@pytest.mark.django_db
+class TestZombieCommands:
+    def test_scan_sweeps_every_jira_project(self, db_pr: PullRequest) -> None:
+        from franktheunicorn.review.zombie import ZombieScanRun
+
+        operator_config = MagicMock()
+        cmd = WorkerCommand.objects.create(command="scan_zombie_prs")
+        project = db_pr.project
+
+        def fake_scan(proj: Any, opc: Any) -> ZombieScanRun:
+            return ZombieScanRun(project=proj.full_name, examined=3, candidates=1, assessed=1)
+
+        with (
+            patch("franktheunicorn.review.zombie.zombie_projects", return_value=[(project, None)]),
+            patch("franktheunicorn.review.zombie.scan_project", side_effect=fake_scan),
+        ):
+            process_pending_commands(operator_config)
+
+        cmd.refresh_from_db()
+        assert cmd.status == "completed"
+        assert "apache/spark: examined 3 closed PR(s)" in cmd.log
+        assert "1 new zombie(s)" in cmd.log
+
+    def test_scan_with_no_jira_project_completes_with_the_reason(self) -> None:
+        cmd = WorkerCommand.objects.create(command="scan_zombie_prs")
+        with patch("franktheunicorn.review.zombie.zombie_projects", return_value=[]):
+            process_pending_commands(MagicMock())
+        cmd.refresh_from_db()
+        assert cmd.status == "completed"
+        assert "jira.enabled" in cmd.log
+
+    def test_assess_dispatches_to_assess_pr(self, db_pr: PullRequest) -> None:
+        cmd = WorkerCommand.objects.create(command="assess_zombie_pr", pull_request=db_pr)
+        with patch(
+            "franktheunicorn.review.zombie.assess_pr", return_value="verdict=revive: fine"
+        ) as assess:
+            process_pending_commands(MagicMock())
+        cmd.refresh_from_db()
+        assert cmd.status == "completed"
+        assert cmd.log == "verdict=revive: fine"
+        assert assess.call_args[0][0] == db_pr
+
+    def test_assess_requires_a_pr(self) -> None:
+        cmd = WorkerCommand.objects.create(command="assess_zombie_pr")
+        process_pending_commands(MagicMock())
+        cmd.refresh_from_db()
+        assert cmd.status == "failed"
+        assert "requires a pull_request" in cmd.error

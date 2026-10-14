@@ -78,6 +78,33 @@ class ForgeClient(ABC):
     ) -> list[dict[str, Any]]:
         pass
 
+    def list_pull_requests_page(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        state: str = "closed",
+        page: int = 1,
+        per_page: int = 100,
+        sort: str = "created",
+    ) -> list[dict[str, Any]]:
+        """One page of PRs in *state*, newest first by *sort* (``created`` or
+        ``updated``).
+
+        The paginated sibling of :meth:`list_pull_requests`, for callers that
+        walk history rather than snapshot the open set — the zombie scan reads
+        a project's closed PRs a page at a time across many runs, and needs to
+        say which page. ``created`` descending means PR numbers descend too,
+        which is what makes a stored frontier number a cursor; ``updated``
+        descending is how the same scan catches what closed since it last ran.
+
+        Only GitHub implements it today; the default raises so a caller can
+        degrade (log and skip the project) rather than silently see nothing.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support list_pull_requests_page()"
+        )
+
     @abstractmethod
     def get_pull_request(self, owner: str, repo: str, pr_number: int) -> dict[str, Any]:
         pass

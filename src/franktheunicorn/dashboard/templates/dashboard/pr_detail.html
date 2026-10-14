@@ -81,6 +81,8 @@
 </div>
 {% endif %}
 
+{% if zombie %}{% include "dashboard/_zombie_panel.html" %}{% endif %}
+
 {% if pr.score_breakdown %}
 <h3 style="margin-top: 1.5rem;">Score Breakdown</h3>
 <dl class="breakdown">
