@@ -1,0 +1,39 @@
+{# Polls itself while the analyze_ci_failures command is in flight, then stops. #}
+<section id="ci-failures"
+    {% if ci_in_flight %}hx-get="{% url 'dashboard:pr_ci_failures' pr.pk %}" hx-trigger="every 5s" hx-swap="outerHTML"{% endif %}>
+{% if ci_analyses or ci_in_flight or ci_last %}
+<h3 style="margin-top: 1.5rem;">CI Failures</h3>
+{% endif %}
+{% if ci_analyses %}
+<table style="font-size: 0.85rem;">
+    <thead><tr><th>Check</th><th>Verdict</th><th>What it indicates</th></tr></thead>
+    <tbody>
+    {% for a in ci_analyses %}
+    <tr>
+        <td>{% if a.check_url %}<a href="{{ a.check_url }}">{{ a.check_name }}</a>{% else %}{{ a.check_name }}{% endif %}
+            <div class="fainter">{{ a.conclusion }} · {{ a.check_repo }}</div></td>
+        <td>
+            {% if a.verdict == "pr" %}<span class="error-note" style="font-weight: 600;">likely this PR</span>
+            {% elif a.verdict == "flake" %}<span class="warn-note" style="font-weight: 600;">likely flake</span>
+            {% elif a.verdict == "infra" %}<span class="source-badge neutral-chip">CI infra</span>
+            {% else %}<span class="fainter">unclear</span>{% endif %}
+            {% if a.confidence is not None %}<div class="fainter">{{ a.confidence|floatformat:2 }}</div>{% endif %}
+        </td>
+        <td>
+            <div>{{ a.summary }}</div>
+            {% if a.indicates %}<div class="faint">{{ a.indicates }}</div>{% endif %}
+            {% if a.suggested_action %}<div><strong>Next:</strong> {{ a.suggested_action }}</div>{% endif %}
+        </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+{% if ci_in_flight %}
+<p class="fainter">Analysing failed CI checks…</p>
+{% elif not ci_analyses and ci_last.status == "failed" %}
+<p class="error-note">CI triage failed: {{ ci_last.error|truncatechars:300 }}</p>
+{% elif not ci_analyses and ci_clean %}
+<p class="fainter">No failed CI checks on this head.</p>
+{% endif %}
+</section>

@@ -248,6 +248,8 @@
 </table>
 {% endif %}
 
+{% include "dashboard/_ci_failures.html" %}
+
 {% if test_runs %}
 <h3 style="margin-top: 1.5rem;">Test Runs</h3>
 {% for run in test_runs %}

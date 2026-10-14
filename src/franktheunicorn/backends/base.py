@@ -53,6 +53,25 @@ class ReviewBody:
     comments: list[ReviewComment] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class FailedCheck:
+    """One failed CI check on a commit, wherever it ran.
+
+    ``repo`` is where it ran ("owner/name"): Spark's real jobs run on the
+    contributor's fork, not on apache/spark. ``kind`` is ``"actions"`` (a
+    GitHub Actions job, so a log is fetchable), ``"check"`` (some other app;
+    ``details`` is all there is) or ``"status"`` (a commit status).
+    """
+
+    repo: str
+    id: int
+    name: str
+    conclusion: str
+    url: str
+    kind: str
+    details: str = ""
+
+
 class ForgeClient(ABC):
     """Abstract client for a code-forge REST API.
 
@@ -154,6 +173,19 @@ class ForgeClient(ABC):
         queue's eligibility check.
         """
         return ""
+
+    def list_failed_checks(
+        self, owner: str, repo: str, pr_number: int, sha: str
+    ) -> list[FailedCheck]:
+        """Failed checks on the PR's head *sha*, in the base repo and the head repo.
+
+        Empty on forges without a checks API (this default).
+        """
+        return []
+
+    def get_check_log(self, check: FailedCheck) -> str:
+        """The check's log text, or ``""`` when there is none to fetch."""
+        return check.details
 
     @abstractmethod
     def delete_review_comment(self, owner: str, repo: str, pr_number: int, comment_id: int) -> None:

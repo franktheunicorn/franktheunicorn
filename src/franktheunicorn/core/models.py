@@ -518,6 +518,52 @@ class CostRecord(models.Model):
         return f"{self.action_type} ({self.backend}): ${self.estimated_cost_usd}"
 
 
+class CIFailureAnalysis(models.Model):
+    """An LLM's read of one failed CI check on a PR head: flake, the PR, or infra.
+
+    One row per check run, so a PR viewed twice is analysed once per failure.
+    """
+
+    VERDICT_CHOICES = [
+        ("flake", "Likely flake"),
+        ("pr", "Likely caused by this PR"),
+        ("infra", "CI infrastructure"),
+        ("unclear", "Unclear"),
+    ]
+
+    pull_request = models.ForeignKey(
+        PullRequest, on_delete=models.CASCADE, related_name="ci_failure_analyses"
+    )
+    head_sha = models.CharField(max_length=40)
+    check_repo = models.CharField(max_length=255)
+    #: "actions" / "check" / "status" — status ids and check-run ids collide.
+    check_kind = models.CharField(max_length=10, default="check")
+    check_id = models.BigIntegerField()
+    check_name = models.CharField(max_length=500)
+    check_url = models.URLField(max_length=1000, blank=True, default="")
+    conclusion = models.CharField(max_length=30)
+    verdict = models.CharField(max_length=20, choices=VERDICT_CHOICES, default="unclear")
+    confidence = models.FloatField(null=True, blank=True)
+    summary = models.TextField(blank=True, default="")
+    indicates = models.TextField(blank=True, default="")
+    suggested_action = models.TextField(blank=True, default="")
+    log_excerpt = models.TextField(blank=True, default="")
+    backend = models.CharField(max_length=100, blank=True, default="")
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["check_name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["pull_request", "check_repo", "check_kind", "check_id"],
+                name="unique_ci_failure_analysis_per_check",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.check_name}: {self.verdict}"
+
+
 class TestRun(models.Model):
     """A differential test run for a PR (§9)."""
 
@@ -1743,6 +1789,7 @@ class WorkerCommand(models.Model):
         ("run_agents", "Force-run review agents"),
         ("check_fix_landed", "Check whether one report's fix landed upstream"),
         ("check_fixes_landed", "Sweep: check whether known fixes landed upstream"),
+        ("analyze_ci_failures", "LLM-triage a PR's failed CI checks"),
     ]
 
     STATUS_CHOICES = [
