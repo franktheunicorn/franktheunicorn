@@ -688,6 +688,132 @@ class TestLimiterCaching:
         assert _rate_limiter_for(path) is not None
 
 
+class TestMergeReadinessEndpoints:
+    """Reviews, check runs + statuses, and conversation comments."""
+
+    @pytest.fixture
+    def client(self) -> GitHubClient:
+        c = GitHubClient(token="test-token", base_url="https://api.github.test")
+        yield c
+        c.close()
+
+    def test_list_pull_request_reviews_paginates(
+        self, httpx_mock: HTTPXMock, client: GitHubClient
+    ) -> None:
+        base = "https://api.github.test/repos/org/repo/pulls/7/reviews"
+        httpx_mock.add_response(
+            url=f"{base}?per_page=100&page=1",
+            json=[{"id": i, "state": "COMMENTED"} for i in range(100)],
+        )
+        httpx_mock.add_response(
+            url=f"{base}?per_page=100&page=2",
+            json=[{"id": 100, "state": "APPROVED", "user": {"login": "bob"}}],
+        )
+        reviews = client.list_pull_request_reviews("org", "repo", 7)
+        assert len(reviews) == 101
+        assert reviews[-1]["user"]["login"] == "bob"
+
+    def test_get_commit_checks_merges_runs_and_statuses(
+        self, httpx_mock: HTTPXMock, client: GitHubClient
+    ) -> None:
+        httpx_mock.add_response(
+            url="https://api.github.test/repos/org/repo/commits/abc/check-runs?per_page=100&page=1",
+            json={
+                "check_runs": [
+                    {
+                        "name": "build",
+                        "status": "completed",
+                        "conclusion": "success",
+                        "html_url": "https://gh/build",
+                    },
+                    {"name": "slow", "status": "in_progress", "conclusion": None},
+                    {"status": "completed"},
+                ]
+            },
+        )
+        httpx_mock.add_response(
+            url="https://api.github.test/repos/org/repo/commits/abc/status",
+            json={
+                "state": "failure",
+                "statuses": [
+                    {"context": "jenkins", "state": "error", "target_url": "https://j/1"},
+                    {"context": "lint", "state": "pending"},
+                    {"state": "success"},
+                ],
+            },
+        )
+        checks = client.get_commit_checks("org", "repo", "abc")
+        assert checks == [
+            {
+                "name": "build",
+                "status": "completed",
+                "conclusion": "success",
+                "url": "https://gh/build",
+            },
+            {"name": "slow", "status": "in_progress", "conclusion": "", "url": ""},
+            {
+                "name": "jenkins",
+                "status": "completed",
+                "conclusion": "failure",
+                "url": "https://j/1",
+            },
+            {"name": "lint", "status": "queued", "conclusion": "", "url": ""},
+        ]
+
+    def test_get_commit_checks_paginates_runs(
+        self, httpx_mock: HTTPXMock, client: GitHubClient
+    ) -> None:
+        base = "https://api.github.test/repos/org/repo/commits/abc/check-runs"
+        httpx_mock.add_response(
+            url=f"{base}?per_page=100&page=1",
+            json={
+                "check_runs": [
+                    {"name": f"c{i}", "status": "completed", "conclusion": "success"}
+                    for i in range(100)
+                ]
+            },
+        )
+        httpx_mock.add_response(
+            url=f"{base}?per_page=100&page=2",
+            json={"check_runs": [{"name": "last", "status": "completed", "conclusion": "success"}]},
+        )
+        httpx_mock.add_response(
+            url="https://api.github.test/repos/org/repo/commits/abc/status", json={"statuses": []}
+        )
+        checks = client.get_commit_checks("org", "repo", "abc")
+        assert len(checks) == 101
+        assert checks[-1]["name"] == "last"
+
+    def test_get_commit_checks_past_the_cap_raises(
+        self, httpx_mock: HTTPXMock, client: GitHubClient
+    ) -> None:
+        """A failure on an unread page is still a failure: no partial green."""
+        base = "https://api.github.test/repos/org/repo/commits/abc/check-runs"
+        full_page = {
+            "check_runs": [
+                {"name": f"c{i}", "status": "completed", "conclusion": "success"}
+                for i in range(100)
+            ]
+        }
+        for page in range(1, 11):
+            httpx_mock.add_response(url=f"{base}?per_page=100&page={page}", json=full_page)
+        with pytest.raises(RuntimeError, match="more than 1000 check runs"):
+            client.get_commit_checks("org", "repo", "abc")
+
+    def test_create_issue_comment(self, httpx_mock: HTTPXMock, client: GitHubClient) -> None:
+        httpx_mock.add_response(
+            url="https://api.github.test/repos/org/repo/issues/7/comments",
+            method="POST",
+            json={"id": 55, "body": "please rebase"},
+        )
+        result = client.create_issue_comment("org", "repo", 7, "please rebase")
+        assert result["id"] == 55
+        import json as _json
+
+        sent = _json.loads(httpx_mock.get_requests()[-1].content)
+        assert sent == {"body": "please rebase"}
+
+
 class TestListPullRequestsPage:
     @pytest.fixture
     def client(self) -> GitHubClient:

@@ -18,11 +18,13 @@ from franktheunicorn.core.models import (
     AgentFeedback,
     Alert,
     AntiPattern,
+    CICheckHistory,
     CostRecord,
     CVEAPIToken,
     DependencyChange,
     EmailScanRecord,
     LLMBackendFallback,
+    MergeReadinessFeedback,
     OperatorAction,
     Project,
     PullRequest,
@@ -194,6 +196,33 @@ class TestRunFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
     status = "pending"
     test_scope = factory.LazyFunction(list)
     container_image = "python:3.12-slim"
+
+
+class MergeReadinessFeedbackFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
+    """Factory for MergeReadinessFeedback (almost-ready-to-merge verdicts)."""
+
+    class Meta:
+        model = MergeReadinessFeedback
+
+    pull_request = factory.SubFactory(PullRequestFactory)
+    project = factory.LazyAttribute(lambda o: o.pull_request.project)
+    verdict = "not-ready"
+    reason_code = ""
+    reason_text = ""
+    head_sha = ""
+    features = factory.LazyFunction(dict)
+
+
+class CICheckHistoryFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
+    """Factory for CICheckHistory (learned flakiness per CI check)."""
+
+    class Meta:
+        model = CICheckHistory
+
+    project = factory.SubFactory(ProjectFactory)
+    check_name = factory.Sequence(lambda n: f"check-{n}")
+    flaky_count = 0
+    real_count = 0
 
 
 class AgentFeedbackFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]

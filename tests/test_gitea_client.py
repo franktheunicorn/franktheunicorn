@@ -258,3 +258,19 @@ class TestGiteaClient:
             status_code=204,
         )
         client.delete_review_comment("org", "repo", 7, 123)
+
+
+class TestGiteaIssueComment:
+    def test_create_issue_comment(self, httpx_mock: HTTPXMock) -> None:
+        client = GiteaClient(token="test-token", base_url="https://codeberg.test")
+        try:
+            httpx_mock.add_response(
+                url="https://codeberg.test/api/v1/repos/org/repo/issues/7/comments",
+                method="POST",
+                json={"id": 9, "body": "please rebase"},
+            )
+            result = client.create_issue_comment("org", "repo", 7, "please rebase")
+        finally:
+            client.close()
+        assert result["id"] == 9
+        assert json.loads(httpx_mock.get_requests()[-1].content) == {"body": "please rebase"}

@@ -386,6 +386,8 @@ Some signals don't affect ranking — they route PRs into different queues with 
 
 These queues appear as tabs in the dashboard, not just score modifiers. Each queue can have its own default action templates.
 
+**Almost Ready to Merge** is a tab too, but not a routing queue: it cuts across the ones above (a new contributor's PR can be almost ready). `scoring/merge_readiness.py` scores every open PR for "could I LGTM or merge this right now?" — green CI, approvals (committer approvals count extra), nothing serious from frank's own review, small diff, known author, recent activity — and lists blockers (draft, conflicts, changes requested, red or pending CI, too big, stale, unresolved critical findings) so the detail page can say why a PR *isn't* there. A CI failure is classified per check as red or "probably a flake" (configured `flaky_checks` patterns, timed-out/cancelled conclusions, and the project's learned `CICheckHistory`); a flaky-only failure gets its own verdict and a one-click "Ask to rebase" comment to re-trigger CI. Every button press is recorded (`MergeReadinessFeedback`); a dismissal asks for a reason and the reasons feed back: dismissal rate per author/label/path/size token docks similar PRs, a reason that recurs three times becomes a blocker, "the CI failure is real" counts against the check, and a rebase that went green confirms a flake.
+
 ### 2.3 Shepherding (Operator's Own PRs)
 
 The operator's own PRs are a fundamentally different workflow — not reviewing someone else's code but tracking and responding to feedback on your own. In v1, this is a separate dashboard section ("Your PRs Needing Action") with:
@@ -2022,6 +2024,7 @@ Django. Responsive (mobile-first). htmx for interactivity, minimal JS. SQLite de
 
 **Queue Tabs:**
 - Review queue (default) — standard PR review
+- Almost Ready to Merge — PRs that probably deserve an LGTM or a merge, ranked by readiness; per-PR panel with LGTM / Merge / Ask to rebase (flaky CI) / Not ready (with reason, remembered)
 - AI-generated — PRs from bots/agents
 - New contributors — first-time PR authors
 - Consider closing — stale, low-context, unowned PRs

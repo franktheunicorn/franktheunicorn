@@ -51,6 +51,23 @@ urlpatterns = [
     # Merge queue (v2)
     path("merge-queue/", views.merge_queue_view, name="merge_queue"),
     path("pr/<int:pr_id>/merge/", views.merge_pr, name="merge_pr"),
+    # Almost Ready to Merge: the candidate panel's buttons (htmx fragments)
+    path("pr/<int:pr_id>/lgtm/", views.merge_candidate_lgtm, name="merge_candidate_lgtm"),
+    path(
+        "pr/<int:pr_id>/not-ready/",
+        views.merge_candidate_dismiss,
+        name="merge_candidate_dismiss",
+    ),
+    path(
+        "pr/<int:pr_id>/request-rebase/",
+        views.merge_candidate_request_rebase,
+        name="merge_candidate_request_rebase",
+    ),
+    path(
+        "pr/<int:pr_id>/refresh-readiness/",
+        views.merge_candidate_refresh,
+        name="merge_candidate_refresh",
+    ),
     # Security report triage
     path("security/", views.security_report_list, name="security_list"),
     path("security/new/", views.security_report_create, name="security_create"),

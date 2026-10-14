@@ -397,6 +397,70 @@ class GitHubClient(ForgeClient):
             )
         return found
 
+    def get_commit_checks(self, owner: str, repo: str, sha: str) -> list[dict[str, Any]]:
+        """Check runs plus commit statuses for ``sha``, in one normalised list.
+
+        Two endpoints because GitHub has two CI models: Actions and most apps
+        write check runs, older integrations (and anything using the Status
+        API, e.g. Jenkins) write commit statuses. ``filter=latest`` is the
+        check-runs default, so a re-run replaces its earlier attempt rather
+        than appearing beside it. Past the same 1000-run cap as
+        :meth:`get_commit_ci_status` it raises: a failure on an unread page
+        is still a failure, so a partial list must not summarise as green.
+        """
+        checks: list[dict[str, Any]] = []
+        runs_url = f"/repos/{owner}/{repo}/commits/{sha}/check-runs"
+        max_pages = 10
+        for page in range(1, max_pages + 1):
+            response = self._get(runs_url, params={"per_page": 100, "page": page})
+            response.raise_for_status()
+            payload = response.json()
+            runs = payload.get("check_runs", []) if isinstance(payload, dict) else []
+            for run in runs:
+                if not isinstance(run, dict) or not isinstance(run.get("name"), str):
+                    continue
+                checks.append(
+                    {
+                        "name": run["name"],
+                        "status": str(run.get("status") or ""),
+                        "conclusion": str(run.get("conclusion") or ""),
+                        "url": str(run.get("html_url") or run.get("details_url") or ""),
+                    }
+                )
+            if len(runs) < 100:
+                break
+        else:
+            msg = f"{owner}/{repo}@{sha[:12]} has more than {max_pages * 100} check runs"
+            raise RuntimeError(msg)
+
+        status_resp = self._get(f"/repos/{owner}/{repo}/commits/{sha}/status")
+        status_resp.raise_for_status()
+        status_payload = status_resp.json()
+        statuses = status_payload.get("statuses", []) if isinstance(status_payload, dict) else []
+        for item in statuses:
+            if not isinstance(item, dict) or not isinstance(item.get("context"), str):
+                continue
+            state = str(item.get("state") or "")
+            checks.append(
+                {
+                    "name": item["context"],
+                    "status": "completed" if state in ("success", "failure", "error") else "queued",
+                    "conclusion": _STATUS_STATE_TO_CONCLUSION.get(state, ""),
+                    "url": str(item.get("target_url") or ""),
+                }
+            )
+        return checks
+
+    def create_issue_comment(
+        self, owner: str, repo: str, issue_number: int, body: str
+    ) -> dict[str, Any]:
+        """Post a conversation comment on a PR (the Issues API — PRs are issues)."""
+        url = f"/repos/{owner}/{repo}/issues/{issue_number}/comments"
+        response = self._client.post(url, json={"body": body})
+        response.raise_for_status()
+        result: dict[str, Any] = response.json()
+        return result
+
     def delete_review_comment(self, owner: str, repo: str, pr_number: int, comment_id: int) -> None:
         """Delete a review comment (for recall). ``pr_number`` is unused on GitHub."""
         del pr_number
@@ -518,6 +582,16 @@ class GitHubClient(ForgeClient):
 
 _REQUIRED_SCOPES = {"repo", "public_repo"}
 _FINE_GRAINED_NOTE = "Fine-grained PAT: enable 'Pull requests: Read' under repository permissions."
+
+
+# Commit-status states onto check-run conclusions, so both CI models read the
+# same way downstream. "error" is a failure that never produced a verdict
+# (infrastructure, usually), which is exactly the kind that flakes.
+_STATUS_STATE_TO_CONCLUSION: dict[str, str] = {
+    "success": "success",
+    "failure": "failure",
+    "error": "failure",
+}
 
 
 def _is_rate_limit_response(response: httpx.Response) -> bool:

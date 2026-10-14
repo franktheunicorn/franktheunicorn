@@ -202,6 +202,16 @@ class GiteaClient(ForgeClient):
         result: list[dict[str, Any]] = response.json()
         return result
 
+    def create_issue_comment(
+        self, owner: str, repo: str, issue_number: int, body: str
+    ) -> dict[str, Any]:
+        """Post a conversation comment on a PR (same Issues endpoint shape as GitHub)."""
+        url = f"/repos/{owner}/{repo}/issues/{issue_number}/comments"
+        response = self._client.post(url, json={"body": body})
+        response.raise_for_status()
+        result: dict[str, Any] = response.json()
+        return result
+
     def delete_review_comment(self, owner: str, repo: str, pr_number: int, comment_id: int) -> None:
         """Delete a posted review comment. ``pr_number`` is unused on Gitea/Forgejo.
 

@@ -438,6 +438,24 @@ posting:
 #   slot: "first-pass"       # first-pass | fast | primary | reasoning
 #   refine_with: "primary"   # which backend refines the first-pass output
 
+# Almost Ready to Merge — the dashboard tab of PRs that probably deserve an
+# LGTM or a merge. On by default; costs three read calls per refreshed PR
+# (reviews, check runs, commit statuses). Say "not ready" with a reason and
+# the queue learns from it; a CI failure on a check that has flaked before
+# gets a one-click "please rebase" comment instead of blocking the PR.
+merge_readiness:
+  enabled: true
+  ready_threshold: 0.5          # readiness score (0-1) to be listed
+  flaky_checks:                 # check-name globs known to flake (case-insensitive)
+    - "*pyspark*"
+    - "*docker-integration*"
+  max_diff_lines: 2000          # bigger is never a one-click merge
+  stale_after_days: 90          # 0 disables the staleness blocker
+  require_ci: true              # unknown CI counts as not ready
+  require_committer_approval: false
+  lgtm_body: "LGTM"
+  # rebase_request_template: "Hi @{author}, ... {checks} ... `{base_branch}` ..."
+
 # Merge queue — track and merge PRs meeting configurable criteria
 merge_queue:
   enabled: true

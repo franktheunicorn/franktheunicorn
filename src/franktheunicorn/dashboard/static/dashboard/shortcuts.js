@@ -110,3 +110,22 @@
         }
     });
 })();
+
+/**
+ * "Copy PR #" on the merge queue and the almost-ready tab: puts the PR number
+ * on the clipboard for a merge script (e.g. dev/merge_spark_pr.py).
+ * navigator.clipboard is undefined on insecure origins (plain-HTTP over
+ * Tailscale is the documented phone use case) — fall back to a prompt.
+ */
+function copyMergeCommand(btn) {
+    var cmd = btn.getAttribute("data-command");
+    if (!navigator.clipboard) {
+        window.prompt("Copy the merge command:", cmd);
+        return;
+    }
+    navigator.clipboard.writeText(cmd).then(function() {
+        var orig = btn.textContent;
+        btn.textContent = "Copied!";
+        setTimeout(function() { btn.textContent = orig; }, 1500);
+    });
+}

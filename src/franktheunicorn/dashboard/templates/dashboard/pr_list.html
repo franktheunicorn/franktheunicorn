@@ -43,6 +43,18 @@
     {% endfor %}
 </div>
 
+{% if active_queue == almost_ready_queue %}
+<div class="mc-intro">
+    <p class="muted">PRs that probably deserve an LGTM or a merge: green CI (or a failure that is probably a flake), approved or approvable, small enough to take in at a glance, nothing serious from your own review. Say "not ready" and why — the reason is remembered and feeds the ranking.</p>
+    {% if learned_rules %}
+    <details class="mc-learned">
+        <summary>What this queue has learned ({{ learned_rules|length }})</summary>
+        <ul>{% for rule in learned_rules %}<li>{{ rule }}</li>{% endfor %}</ul>
+    </details>
+    {% endif %}
+</div>
+{% endif %}
+
 {% if active_queue == "zombie" %}
 {% comment %} The hunt is a worker sweep, so the toolbar shows where each project's
    scan got to — the only feedback a bounded, resumable scan has. {% endcomment %}
@@ -113,6 +125,9 @@
             {% if pr.github_updated_at %}· <span title="Upstream {{ pr.github_updated_at|date:'Y-m-d H:i' }} UTC">upstream {{ pr.github_updated_at|timesince }} ago</span>{% endif %}
             {% if pr.last_local_action_at %}· <span title="Local action {{ pr.last_local_action_at|date:'Y-m-d H:i' }} UTC">reviewed {{ pr.last_local_action_at|timesince }} ago</span>{% else %}· <span class="muted" title="No accept/reject/edit actions yet">never reviewed locally</span>{% endif %}
         </div>
+        {% if active_queue == almost_ready_queue and pr.candidate %}
+        {% include "dashboard/_merge_candidate.html" with cand=pr.candidate %}
+        {% endif %}
         {% if pr.zombie %}
         <div class="zombie-row">
             <span class="zombie-verdict zombie-verdict-{{ pr.zombie.verdict }}">{{ pr.zombie.get_verdict_display }}</span>
