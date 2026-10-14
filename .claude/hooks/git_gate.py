@@ -35,11 +35,33 @@ import sys
 #: one token (``);``, ``)&&``) and must still end the segment before it.
 _OPERATOR_CHARS = frozenset(";&|()")
 
-#: Words that can precede the command proper in a segment.
-_PREFIX_WORDS = frozenset(
-    {"if", "then", "else", "elif", "do", "while", "until", "!", "{", "}", "time",
-     "command", "exec", "builtin", "nohup", "env"}
-)
+#: Shell keywords that can precede the command proper in a segment.
+_KEYWORDS = frozenset({"if", "then", "else", "elif", "do", "while", "until", "!", "{", "}"})
+
+#: Commands that run the rest of their argv as another command, with the
+#: options of each that take a separate value. ``timeout`` also takes a
+#: duration positional, handled below.
+_WRAPPERS: dict[str, frozenset[str]] = {
+    "env": frozenset({"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}),
+    "sudo": frozenset({"-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U", "-R"}),
+    "nice": frozenset({"-n", "--adjustment"}),
+    "timeout": frozenset({"-s", "--signal", "-k", "--kill-after"}),
+    "stdbuf": frozenset({"-i", "-o", "-e"}),
+    "nohup": frozenset(),
+    "command": frozenset(),
+    "builtin": frozenset(),
+    "exec": frozenset({"-a"}),
+    "time": frozenset({"-f", "--format", "-o", "--output"}),
+    "xargs": frozenset({"-I", "-L", "-n", "-P", "-d", "-E", "-s", "-a"}),
+}
+
+#: Shells whose ``-c`` argument is itself a command line to gate.
+_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
+
+#: ``$( ... )`` (one level of nesting) and backticks inside a token. A quoted
+#: substitution is one shlex token, so ``out="$(git push)"`` would otherwise be
+#: read as an assignment and dropped.
+_SUBSTITUTION = re.compile(r"\$\(((?:[^()]|\([^()]*\))*)\)|`([^`]*)`")
 
 #: git global options that take a value as the next token (Magpie's table).
 _GIT_VALUE_FLAGS = frozenset(
@@ -48,7 +70,8 @@ _GIT_VALUE_FLAGS = frozenset(
 )
 
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
-_HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+#: ``<<EOF`` / ``<<-'EOF'`` but not the ``<<<`` here-string, which has no body.
+_HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 
 
 def strip_comments(command: str) -> str:
@@ -97,6 +120,27 @@ def strip_comments(command: str) -> str:
     return "".join(out)
 
 
+def _inside_quotes(line: str, index: int) -> bool:
+    """Whether *index* in *line* falls inside a quoted string on that line."""
+    quote = ""
+    i = 0
+    while i < index:
+        ch = line[i]
+        if quote:
+            if ch == "\\" and quote == '"':
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch == "\\":
+            i += 2
+            continue
+        elif ch in "'\"":
+            quote = ch
+        i += 1
+    return bool(quote)
+
+
 def strip_heredocs(command: str) -> str:
     """*command* with every heredoc body removed (the ``<<EOF`` line stays)."""
     lines = command.split("\n")
@@ -107,6 +151,8 @@ def strip_heredocs(command: str) -> str:
         kept.append(line)
         i += 1
         for match in _HEREDOC.finditer(line):
+            if _inside_quotes(line, match.start()):
+                continue  # `git commit -m "a <<EOF b"` opens no heredoc
             terminator = match.group(2)
             while i < len(lines) and lines[i].strip() != terminator:
                 i += 1
@@ -139,23 +185,59 @@ def segments(command: str) -> list[list[str]]:
 
 
 def command_argv(segment: list[str]) -> list[str]:
-    """The segment with keywords, wrappers and env assignments peeled off and
-    the head reduced to its basename (``/usr/bin/git`` is ``git``)."""
+    """The segment with keywords, wrappers (and their options) and env
+    assignments peeled off and the head reduced to its basename
+    (``/usr/bin/git`` is ``git``)."""
     i = 0
     while i < len(segment):
         token = segment[i]
-        if token in _PREFIX_WORDS or _ASSIGNMENT.fullmatch(token):
+        head = os.path.basename(token)
+        if token in _KEYWORDS or _ASSIGNMENT.fullmatch(token):
             i += 1
-        elif token == "timeout":
+        elif head in _WRAPPERS:
+            value_flags = _WRAPPERS[head]
             i += 1
-            while i < len(segment) and (segment[i].startswith("-") or segment[i][:1].isdigit()):
-                i += 1
+            while i < len(segment):
+                opt = segment[i]
+                if opt in value_flags:
+                    i += 2
+                elif opt.startswith("-") or _ASSIGNMENT.fullmatch(opt):
+                    i += 1
+                elif head == "timeout" and opt[:1].isdigit():
+                    i += 1
+                    break
+                else:
+                    break
         else:
             break
     argv = segment[i:]
     if argv:
         argv = [os.path.basename(argv[0]), *argv[1:]]
     return argv
+
+
+def nested_commands(argv: list[str]) -> list[str]:
+    """Command lines a simple command runs: a shell's ``-c`` argument and
+    ``eval``'s arguments."""
+    found: list[str] = []
+    if argv and argv[0] in _SHELLS and "-c" in argv[1:]:
+        at = argv.index("-c", 1)
+        if at + 1 < len(argv):
+            found.append(argv[at + 1])
+    if argv and argv[0] == "eval":
+        found.append(" ".join(argv[1:]))
+    return found
+
+
+def substitutions(command: str) -> list[str]:
+    """Every ``$( ... )`` and backtick body in *command*, read off the text
+    rather than the tokens: a backtick pair is split across tokens, and a
+    quoted ``"$(git push)"`` is inside one. A literal ``'$(...)'`` in single
+    quotes is caught too, which errs toward running the checks."""
+    return [
+        m.group(1) if m.group(1) is not None else m.group(2)
+        for m in _SUBSTITUTION.finditer(strip_comments(strip_heredocs(command)))
+    ]
 
 
 def git_subcommand(argv: list[str]) -> str | None:
@@ -172,11 +254,25 @@ def git_subcommand(argv: list[str]) -> str | None:
     return None
 
 
-def gate_for(command: str) -> str:
+_RANK = {"none": 0, "commit": 1, "push": 2}
+
+
+def gate_for(command: str, _depth: int = 0) -> str:
     """``push`` if any simple command is a git push, else ``commit`` if any is a
-    git commit, else ``none``."""
+    git commit, else ``none``. Command lines nested in ``sh -c``, ``eval`` or a
+    command substitution count too, to a fixed depth."""
     try:
-        subcommands = {git_subcommand(command_argv(seg)) for seg in segments(command)}
+        subcommands: set[str | None] = set()
+        nested: list[str] = []
+        for seg in segments(command):
+            argv = command_argv(seg)
+            subcommands.add(git_subcommand(argv))
+            if _depth < 4:
+                nested.extend(nested_commands(argv))
+        if _depth < 4:
+            nested.extend(substitutions(command))
+        for inner in nested:
+            subcommands.add(gate_for(inner, _depth + 1))
     except ValueError:
         text = strip_comments(strip_heredocs(command))
         if re.search(r"\bgit\b[^\n]*\bpush\b", text):

@@ -706,8 +706,8 @@ class TestTwoModelsOneCommand:
         assert resolved["cursor-glm"].cli_argv == ["cursor-agent"]
         assert resolved["cursor-k3"].cli_argv == ["cursor-agent"]
         assert resolved["cursor-glm"].trust_args == ["--trust"]
-        assert resolved["cursor-glm"].extra_args == ["--mode", "ask"]
-        assert resolved["cursor-k3"].extra_args == ["--mode", "ask"]
+        assert resolved["cursor-glm"].readonly_args == ["--mode", "ask"]
+        assert resolved["cursor-k3"].readonly_args == ["--mode", "ask"]
 
     def test_explicit_empty_extra_args_are_not_replaced(self) -> None:
         oc = OperatorConfig(
@@ -793,9 +793,11 @@ class TestReadOnlyFlags:
         claude = self._by_name(OperatorConfig())["claude"]
         argv = [*claude.cli_argv, *claude.build_invocation("REVIEW")]
         assert argv == ["claude", "--model", "sonnet", *CLAUDE_READONLY_ARGS, "-p", "REVIEW"]
-        denied = argv[argv.index("--disallowedTools") + 1].split(",")
-        assert {"Bash", "Edit", "Write", "WebFetch"} <= set(denied)
-        assert "Read" not in denied and "Grep" not in denied
+        # An allowlist: claude 2.1.299 left 34 tools (Monitor, Workflow,
+        # SendMessage among them) under the old denylist and exactly these
+        # three under --tools.
+        assert argv[argv.index("--tools") + 1] == "Read,Grep,Glob"
+        assert "--disallowedTools" not in argv
 
     def test_codex_seed_runs_in_the_read_only_sandbox(self) -> None:
         codex = self._by_name(OperatorConfig())["codex"]
@@ -807,10 +809,32 @@ class TestReadOnlyFlags:
         assert "--ignore-user-config" in argv
         assert "mcp_servers={}" not in argv
 
-    def test_cursor_agent_is_unchanged(self) -> None:
+    def test_cursor_agent_keeps_ask_mode_through_an_extra_args_override(self) -> None:
+        """``--mode ask`` used to live in the seed's extra_args, where any
+        override replaced it and the main remote reviewer ran with write and
+        shell access. Its argv is unchanged."""
         cursor = self._by_name(OperatorConfig())["cursor-agent"]
-        assert cursor.readonly_args == []
+        assert cursor.readonly_args == ["--mode", "ask"]
         assert cursor.build_invocation("R") == ["--trust", "--mode", "ask", "-p", "R"]
+
+        oc = OperatorConfig(
+            agent_cli_reviewers=[
+                AgentCLIReviewerConfig(name="cursor-agent", extra_args=["--output-format", "text"])
+            ]
+        )
+        argv = self._by_name(oc)["cursor-agent"].build_invocation("R")
+        assert argv == ["--trust", "--mode", "ask", "--output-format", "text", "-p", "R"]
+
+    def test_a_config_that_restates_the_flags_passes_them_once(self) -> None:
+        """operator.yaml examples written before readonly_args existed spell
+        ``extra_args: ["--mode", "ask"]``; the mode must not appear twice."""
+        oc = OperatorConfig(
+            agent_cli_reviewers=[
+                AgentCLIReviewerConfig(name="cursor-agent", extra_args=["--mode", "ask"])
+            ]
+        )
+        argv = self._by_name(oc)["cursor-agent"].build_invocation("R")
+        assert argv == ["--trust", "--mode", "ask", "-p", "R"]
 
     def test_overriding_extra_args_keeps_the_read_only_flags(self) -> None:
         oc = OperatorConfig(

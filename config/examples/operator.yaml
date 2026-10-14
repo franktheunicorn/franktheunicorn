@@ -285,10 +285,10 @@ digest_enabled: false
 # READ-ONLY. A reviewer reads a stranger's PR; it needs Read/Grep, not a shell.
 # `readonly_args` is seeded for claude (`--setting-sources user`, so the PR
 # checkout's own .claude/settings.json and its hooks never load; no MCP
-# servers; Bash, Edit, Write, NotebookEdit, WebFetch, WebSearch and Task
-# denied) and codex (`-s read-only --ignore-user-config`: codex's MCP servers
-# live in config.toml, and an empty `-c mcp_servers={}` override does not
-# remove them); cursor-agent gets the same from `--mode ask`. Like
+# servers; `--tools Read,Grep,Glob`, an allowlist, since a denylist left
+# Monitor and Workflow available), codex (`-s read-only --ignore-user-config`:
+# codex's MCP servers live in config.toml, and an empty `-c mcp_servers={}`
+# override does not remove them) and cursor-agent (`--mode ask`). Like
 # `trust_args`, it is its own field so an `extra_args` override keeps it. Set
 # `readonly_args: []` to opt out; the worker warns at startup when you do.
 # agent_cli_reviewers:

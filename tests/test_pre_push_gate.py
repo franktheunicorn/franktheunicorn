@@ -50,6 +50,23 @@ gate = _load()
         'BR=$(git rev-parse --abbrev-ref HEAD); git push -u origin "$BR"',
         "(cd sub && make)&& git push",
         "echo $(date)|| git push",
+        # Nested command lines and wrappers with their own options.
+        'bash -c "git push origin HEAD"',
+        "sh -c 'make check && git push'",
+        'out="$(git push 2>&1)"; echo "$out"',
+        'echo "$(git push)"',
+        "echo `git push`",
+        "env -i PATH=$PATH git push",
+        "env -u X git push",
+        "sudo -u op git push",
+        "nice -n 5 git push",
+        "stdbuf -oL git push",
+        "command -p git push",
+        "time -p git push",
+        "eval git push",
+        # A here-string has no body, and a quoted << opens no heredoc.
+        "cat <<< EOF\ngit push",
+        'git commit -m "a <<EOF b"\ngit push',
     ],
 )
 def test_push_is_gated_however_it_is_spelled(command: str) -> None:
@@ -81,6 +98,9 @@ def test_commit_is_gated(command: str) -> None:
         "# git push later\ngit status",
         'echo "not # a comment"; git log',
         "echo ${#arr}; git diff",
+        'bash -c "git status"',
+        'echo "git push"',
+        "sudo -u op git log",
     ],
 )
 def test_everything_else_passes(command: str) -> None:

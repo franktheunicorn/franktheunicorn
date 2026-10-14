@@ -401,36 +401,50 @@ class AgentCLIReviewerConfig(BaseModel):
         ``subcommand`` mode — a flag before ``exec`` is a flag to the wrong parser.
         """
         model_part = [self.model_flag, self.model] if self.model else []
-        fixed = [*self.trust_args, *self.readonly_args, *self.extra_args]
+        # A config written before readonly_args existed restates the read-only
+        # flags in extra_args (``extra_args: ["--mode", "ask"]``); pass them once.
+        readonly = (
+            [] if _contains_run(self.extra_args, self.readonly_args) else list(self.readonly_args)
+        )
+        fixed = [*self.trust_args, *readonly, *self.extra_args]
         if self.prompt_mode == "subcommand":
             return [self.prompt_arg, *model_part, *fixed, prompt]
         return [*model_part, *fixed, self.prompt_arg, prompt]
 
 
-#: ``claude`` with no MCP servers, no tool that writes, executes or fetches,
-#: and no settings from the checkout it runs in. Read, Grep and Glob remain,
-#: which is what a review needs.
+#: ``claude`` with exactly Read, Grep and Glob, no MCP servers, and no settings
+#: from the checkout it runs in.
 #:
-#: ``--setting-sources user`` is the one that matters most. The reviewer runs
-#: in a checkout of the PR, ``-p`` skips the workspace-trust prompt, and so
-#: without it claude loads the PR's own ``.claude/settings.json``, whose hooks
-#: are shell commands run outside the tool system: ``--disallowedTools`` does
-#: not stop them. Verified with claude 2.1.299: a SessionStart hook in the
-#: checkout ran under the other flags and did not run with this one.
-#: ``--strict-mcp-config`` with no ``--mcp-config`` loads no MCP servers; without
-#: it the reviewer inherits the operator's (mail, chat, forge writes). The tool
-#: list is Apache Magpie's (``CLAUDE_DENIED_TOOLS`` in
-#: ``tools/adversarial-review/src/adversarial_review/backends.py`` at
-#: apache/magpie commit dadb315caa8b881fc1d2195bef03223dac25915a, Apache-2.0).
-#: ``--disallowedTools`` takes a variadic list, which ends at the next
-#: ``-``-flag, so it goes last here.
+#: An allowlist (``--tools``), not a denylist: with claude 2.1.299, Magpie's
+#: ``--disallowedTools Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch,Task``
+#: still left 34 tools in the session's init event, among them ``Monitor``
+#: (runs shell commands under the operator's own ``Bash(...)`` allow rules),
+#: ``Workflow`` and ``SendMessage``; ``--tools Read,Grep,Glob`` left those three
+#: and nothing else. A denylist also misses every tool Claude Code adds later.
+#:
+#: ``--setting-sources user``: the reviewer runs in a checkout of the PR and
+#: ``-p`` skips the workspace-trust prompt, so without it claude loads the PR's
+#: own ``.claude/settings.json``, whose hooks are shell commands run outside
+#: the tool system. Verified: a SessionStart hook in the checkout ran without
+#: this flag and did not run with it. ``--strict-mcp-config`` with no
+#: ``--mcp-config`` loads no MCP servers. ``--tools`` takes a variadic list,
+#: which ends at the next ``-``-flag, so it goes last. The approach started
+#: from Apache Magpie's adapter (``tools/adversarial-review/src/
+#: adversarial_review/backends.py`` at apache/magpie commit
+#: dadb315caa8b881fc1d2195bef03223dac25915a); both changes are worth sending
+#: back.
 CLAUDE_READONLY_ARGS: tuple[str, ...] = (
     "--setting-sources",
     "user",
     "--strict-mcp-config",
-    "--disallowedTools",
-    "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch,Task",
+    "--tools",
+    "Read,Grep,Glob",
 )
+
+#: ``cursor-agent``'s read-only Q&A mode. ``-p`` on its own is documented as
+#: having "access to all tools, including write and shell". It was in the seed's
+#: ``extra_args``, where an operator's ``extra_args`` override replaced it.
+CURSOR_READONLY_ARGS: tuple[str, ...] = ("--mode", "ask")
 
 #: ``codex exec`` in its read-only sandbox, without the operator's
 #: ``$CODEX_HOME/config.toml``. The config file is where codex's MCP servers
@@ -507,9 +521,17 @@ def _default_agent_cli_reviewers() -> list[AgentCLIReviewerConfig]:
             prompt_mode="flag",
             prompt_arg="-p",
             trust_args=["--trust"],
-            extra_args=["--mode", "ask"],
+            readonly_args=list(CURSOR_READONLY_ARGS),
         ),
     ]
+
+
+def _contains_run(haystack: list[str], needle: list[str]) -> bool:
+    """Whether *needle* appears in *haystack* as a contiguous run."""
+    if not needle:
+        return False
+    n = len(needle)
+    return any(haystack[i : i + n] == needle for i in range(len(haystack) - n + 1))
 
 
 def _fill_unset_reviewer_fields(

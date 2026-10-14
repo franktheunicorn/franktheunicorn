@@ -441,10 +441,17 @@ effort. "Done" means it is on this branch with tests.
 ### 4.11 Read-only flags for the claude and codex reviewers (done)
 
 - **What.** A `readonly_args` field on `AgentCLIReviewerConfig`, seeded so the
-  `claude` reviewer runs with `--setting-sources user`, `--strict-mcp-config`
-  and Bash, Edit, Write, NotebookEdit, WebFetch, WebSearch and Task denied,
-  and `codex exec` runs with `-s read-only --ignore-user-config`. Read, Grep
-  and Glob stay. Both lenses scored it 4 or 5.
+  `claude` reviewer runs with `--setting-sources user --strict-mcp-config
+  --tools Read,Grep,Glob`, `codex exec` with `-s read-only
+  --ignore-user-config`, and `cursor-agent` with `--mode ask` (moved out of
+  its `extra_args`, where an override silently dropped it; a config that
+  still restates it there passes it once). Both lenses scored it 4 or 5.
+- **Found in review: a denylist leaks.** The first version used Magpie's
+  `--disallowedTools Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch,Task`.
+  With claude 2.1.299 the session's init event still listed 34 tools,
+  `Monitor` (shell commands under the operator's own `Bash(...)` allow
+  rules), `Workflow` and `SendMessage` among them. `--tools Read,Grep,Glob`
+  leaves those three and nothing else, including tools added later.
 - **Found in review: codex's MCP servers.** The first version passed Magpie's
   `-c mcp_servers={}`. codex deep-merges `-c` overrides into the user config,
   so an empty table removes nothing: with codex-cli 0.162.1 and a throwaway
@@ -493,6 +500,12 @@ effort. "Done" means it is on this branch with tests.
 - **Why.** The hook matched `^\s*git\s+push`, so `cd repo && git push`,
   `git -C repo push` and a push inside a retry loop skipped the test run.
   That is how a failing test reached CI on this PR.
+- **Found in review.** The first version still missed a push after a `#`
+  comment containing an apostrophe, after `)` glued to `;` or `&&`, inside
+  `bash -c`, `eval`, `"$(...)"` or backticks, behind `env -i`, `sudo -u`,
+  `nice -n` and similar wrappers with options, and after a here-string or a
+  quoted `<<` that it mistook for a heredoc. All are handled and tested; a
+  literal `'$(git push)'` in single quotes now errs toward running the checks.
 - **Upstream source.** `tools/agent-guard/src/agent_guard/__init__.py`
   (`split_segments`, `Segment`, `git_subcommand_index`) at the pinned commit.
 - **Remote path.** Developer tooling only; not part of the worker.

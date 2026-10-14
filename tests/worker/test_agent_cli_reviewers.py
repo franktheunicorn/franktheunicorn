@@ -837,7 +837,7 @@ class TestReadOnlyStartupLine:
         with caplog.at_level(logging.INFO):
             _check_agent_cli_reviewers(oc)
         assert (
-            "read-only via --setting-sources user --strict-mcp-config --disallowedTools"
+            "read-only via --setting-sources user --strict-mcp-config --tools Read,Grep,Glob"
             in caplog.text
         )
         assert not any(r.levelno >= logging.WARNING for r in caplog.records)
