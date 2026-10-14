@@ -66,6 +66,11 @@ class Project(models.Model):
         return clause
 
 
+#: The queue key for closed-but-unmerged PRs with a still-open JIRA. A module
+#: constant so the dashboard, the scanner and the templates spell it once.
+ZOMBIE_QUEUE = "zombie"
+
+
 class PullRequest(models.Model):
     """A pull request ingested from GitHub."""
 
@@ -85,6 +90,10 @@ class PullRequest(models.Model):
         ("your-prs", "Your PRs"),
         ("mentioned", "Mentioned"),
         ("wip", "WIP"),
+        # Closed-but-unmerged PRs whose JIRA is still open, surfaced by the
+        # zombie scan (review/zombie.py). The one queue whose members are not
+        # open PRs, so the inbox's state="open" filter steps aside for it.
+        (ZOMBIE_QUEUE, "Zombie Queue"),
     ]
 
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="pull_requests")
@@ -514,6 +523,9 @@ class OperatorAction(models.Model):
         ("merge_pr", "Merged PR"),
         ("dismiss_merge_candidate", "Not Ready to Merge"),
         ("request_rebase", "Asked Author to Rebase"),
+        # Zombie Queue dispositions (review/zombie.py)
+        ("zombie_dismiss", "Dismiss Zombie"),
+        ("zombie_restore", "Restore Zombie"),
     ]
     action_type = models.CharField(max_length=50, choices=ACTION_CHOICES)
     review_draft = models.ForeignKey(
@@ -1883,6 +1895,8 @@ class WorkerCommand(models.Model):
         ("run_agents", "Force-run review agents"),
         ("check_fix_landed", "Check whether one report's fix landed upstream"),
         ("check_fixes_landed", "Sweep: check whether known fixes landed upstream"),
+        ("scan_zombie_prs", "Sweep: closed-unmerged PRs whose JIRA is still open"),
+        ("assess_zombie_pr", "Re-run the zombie assessment on one PR"),
     ]
 
     STATUS_CHOICES = [
@@ -1977,3 +1991,126 @@ class WorkerCommand(models.Model):
         else:
             target = "<no target>"
         return f"{self.command} on {target} [{self.status}]"
+
+
+class ZombieAssessment(models.Model):
+    """What the agent made of one zombie: a closed-unmerged PR for an open JIRA.
+
+    One row per PR, created by the zombie scan the moment a PR qualifies —
+    closed without merging, names a JIRA ticket, and that ticket is not
+    closed. Created *before* the model is asked anything, so the Zombie Queue
+    lists what was found even when no LLM backend is configured or the budget
+    for this run is spent; ``verdict="unassessed"`` is that state, and the next
+    run picks those up newest-first.
+
+    Two questions, answered separately on purpose: a JIRA can still be worth
+    doing while the PR that tried was the wrong approach, and a sound fix can
+    be for a ticket the project has since decided against. ``needed_changes``
+    is the "little TLC" list — what would have to change to land this today.
+
+    ``disposition`` is the operator's, never the machine's: dismissing hides a
+    row from the queue without deleting the evidence, so a re-scan does not
+    resurrect it (the scan skips any PR that already has a row).
+    """
+
+    VERDICT_CHOICES = [
+        ("unassessed", "Not yet assessed"),
+        ("revive", "Revive as-is"),
+        ("revive-with-changes", "Revive with changes"),
+        ("rethink", "JIRA valid, fix needs a new approach"),
+        ("drop", "Not worth reviving"),
+        ("unclear", "Unclear"),
+    ]
+
+    DISPOSITION_CHOICES = [
+        ("pending", "Pending"),
+        ("dismissed", "Dismissed"),
+    ]
+
+    #: Attempts after which the backlog pass stops retrying an unparseable one.
+    MAX_ATTEMPTS = 3
+
+    pull_request = models.OneToOneField(
+        PullRequest, on_delete=models.CASCADE, related_name="zombie_assessment"
+    )
+    jira_ticket_id = models.CharField(max_length=50)
+    jira_status = models.CharField(max_length=100, blank=True, default="")
+    jira_summary = models.CharField(max_length=1000, blank=True, default="")
+    # Stored rather than re-derived from the project config, so the list page
+    # can link a ticket without loading YAML per row.
+    jira_url = models.URLField(max_length=1000, blank=True, default="")
+    pr_closed_at = models.DateTimeField(null=True, blank=True)
+    # The last few conversation comments, formatted — usually the reason the PR
+    # was closed (a stale bot, "superseded by #N", a reviewer's objection).
+    closing_context = models.TextField(blank=True, default="")
+
+    verdict = models.CharField(max_length=30, choices=VERDICT_CHOICES, default="unassessed")
+    jira_makes_sense = models.BooleanField(null=True, blank=True)
+    jira_reasoning = models.TextField(blank=True, default="")
+    fix_makes_sense = models.BooleanField(null=True, blank=True)
+    fix_reasoning = models.TextField(blank=True, default="")
+    needed_changes = models.JSONField(default=list, blank=True)
+    summary = models.TextField(blank=True, default="")
+    confidence = models.FloatField(null=True, blank=True)
+    backend_used = models.CharField(max_length=100, blank=True, default="")
+    attempts = models.IntegerField(default=0)
+    last_error = models.CharField(max_length=500, blank=True, default="")
+    assessed_at = models.DateTimeField(null=True, blank=True)
+
+    disposition = models.CharField(
+        max_length=20, choices=DISPOSITION_CHOICES, default="pending", db_index=True
+    )
+
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    objects: models.Manager[ZombieAssessment] = models.Manager()
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"Zombie {self.jira_ticket_id} / {self.pull_request} [{self.verdict}]"
+
+    @property
+    def is_assessed(self) -> bool:
+        return self.verdict != "unassessed"
+
+    @property
+    def gave_up(self) -> bool:
+        """Whether the backlog pass has stopped retrying this one."""
+        return not self.is_assessed and self.attempts >= self.MAX_ATTEMPTS
+
+
+class ZombieScanState(models.Model):
+    """Where the zombie scan got to in one project's closed-PR history.
+
+    The scan works backwards — newest closed PR first — through a list that on
+    Spark is tens of thousands long, so one run cannot do it and the next run
+    has to pick up where this one stopped. GitHub lists closed PRs by creation
+    date descending, and PR numbers increase with creation, so the lowest
+    number examined so far is a strict frontier: everything above it has been
+    looked at. ``next_page`` is a hint for where that frontier now sits; the
+    list shifts as PRs close, so a page may carry a few already-examined numbers
+    at its top, and the frontier is what makes skipping them safe.
+    """
+
+    project = models.OneToOneField(Project, on_delete=models.CASCADE, related_name="zombie_scan")
+    lowest_number_seen = models.IntegerField(null=True, blank=True)
+    next_page = models.IntegerField(default=1)
+    # Reached the end of the closed-PR list. A later run starts over from page 1
+    # with the frontier intact, so it only examines PRs closed since.
+    exhausted = models.BooleanField(default=False)
+    # PR numbers whose JIRA fetch failed, to re-examine next run. The frontier
+    # has already moved past them, so without this a JIRA outage mid-walk
+    # dropped every zombie in that stretch for good.
+    jira_retry = models.JSONField(default=list, blank=True)
+    prs_examined = models.IntegerField(default=0)
+    candidates_found = models.IntegerField(default=0)
+    last_run_at = models.DateTimeField(null=True, blank=True)
+    last_summary = models.TextField(blank=True, default="")
+
+    objects: models.Manager[ZombieScanState] = models.Manager()
+
+    def __str__(self) -> str:
+        return f"ZombieScanState[{self.project}] frontier=#{self.lowest_number_seen}"

@@ -1,0 +1,79 @@
+{% load static %}
+{% comment %} The Zombie Queue panel on a PR's detail page: what the scan found and what
+   the model made of it. Swapped whole by the Dismiss / Restore / Re-assess buttons.
+   `zombie` is the ZombieAssessment (may be None when the PR is not a zombie at all,
+   in which case nothing renders). {% endcomment %}
+<div id="zombie-panel">
+{% if zombie %}
+<div class="context-panel is-zombie{% if zombie.disposition == 'dismissed' %} is-dismissed{% endif %}">
+    <div class="zombie-head">
+        <img src="{% static 'dashboard/img/zombie-duck.svg' %}" alt="" width="26" height="20">
+        <strong>Zombie:</strong>
+        closed{% if zombie.pr_closed_at %} <span title="{{ zombie.pr_closed_at|date:'Y-m-d H:i' }} UTC">{{ zombie.pr_closed_at|timesince }} ago</span>{% endif %} without merging,
+        JIRA
+        {% if zombie.jira_url %}<a href="{{ zombie.jira_url }}" target="_blank" rel="noopener noreferrer">{{ zombie.jira_ticket_id }} &nearr;</a>{% else %}{{ zombie.jira_ticket_id }}{% endif %}
+        is still <em>{{ zombie.jira_status|default:"open" }}.</em>
+        <span class="zombie-verdict zombie-verdict-{{ zombie.verdict }}">{{ zombie.get_verdict_display }}</span>
+        {% if zombie.confidence is not None %}<span class="faint" style="font-size: 0.75rem;">{{ zombie.confidence|floatformat:2 }} confidence</span>{% endif %}
+        {% if zombie.disposition == 'dismissed' %}<span class="neutral-chip" style="padding: 0.05rem 0.35rem; border-radius: 3px; font-size: 0.75rem;">dismissed</span>{% endif %}
+    </div>
+    {% if zombie.jira_summary %}<div class="faint" style="font-size: 0.85rem; margin-top: 0.2rem;">{{ zombie.jira_ticket_id }}: {{ zombie.jira_summary }}</div>{% endif %}
+
+    {% if zombie.is_assessed %}
+    {% if zombie.summary %}<p class="zombie-summary">{{ zombie.summary }}</p>{% endif %}
+    <dl class="zombie-questions">
+        <dt>Does the JIRA still make sense?</dt>
+        <dd><span class="zombie-answer zombie-answer-{{ zombie.jira_makes_sense|yesno:'yes,no,unclear' }}">{{ zombie.jira_makes_sense|yesno:"Yes,No,Unclear" }}</span>{% if zombie.jira_reasoning %} &mdash; {{ zombie.jira_reasoning }}{% endif %}</dd>
+        <dt>Was the fix the right approach?</dt>
+        <dd><span class="zombie-answer zombie-answer-{{ zombie.fix_makes_sense|yesno:'yes,no,unclear' }}">{{ zombie.fix_makes_sense|yesno:"Yes,No,Unclear" }}</span>{% if zombie.fix_reasoning %} &mdash; {{ zombie.fix_reasoning }}{% endif %}</dd>
+    </dl>
+    {% if zombie.needed_changes %}
+    <div class="zombie-tlc">
+        <strong>What it needs to land today:</strong>
+        <ul>
+            {% for change in zombie.needed_changes %}<li>{{ change }}</li>{% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+    <div class="faint" style="font-size: 0.75rem;">
+        Assessed {% if zombie.assessed_at %}{{ zombie.assessed_at|timesince }} ago{% endif %}{% if zombie.backend_used %} by {{ zombie.backend_used }}{% endif %}.
+        {% if zombie.last_error %}<span class="error-note">A later re-assessment failed ({{ zombie.last_error }}); this is the previous verdict.</span>{% endif %}
+    </div>
+    {% else %}
+    <p class="zombie-summary muted">
+        {% if zombie.gave_up %}
+        Not assessed: the model failed {{ zombie.attempts }} times{% if zombie.last_error %} ({{ zombie.last_error }}){% endif %}. Re-assess to try again.
+        {% elif zombie.last_error %}
+        Not yet assessed &mdash; last attempt: {{ zombie.last_error }}
+        {% else %}
+        Not yet assessed. The next hunt takes unassessed zombies newest-first, or press Re-assess.
+        {% endif %}
+    </p>
+    {% endif %}
+
+    {% if zombie.closing_context %}
+    <details style="margin-top: 0.4rem;">
+        <summary style="cursor: pointer; font-size: 0.8rem; color: var(--accent);">Why it was closed (last comments)</summary>
+        <pre class="zombie-closing">{{ zombie.closing_context }}</pre>
+    </details>
+    {% endif %}
+
+    <div class="zombie-actions">
+        <button class="action-btn" hx-post="{% url 'dashboard:zombie_reassess' zombie_pr.pk %}" hx-target="#zombie-panel" hx-swap="outerHTML" title="Ask the model again — one LLM call, queued at the front of the worker queue">Re-assess</button>
+        {% if zombie.disposition == 'dismissed' %}
+        <button class="action-btn" hx-post="{% url 'dashboard:zombie_dismiss' zombie_pr.pk %}" hx-vals='{"restore": "1"}' hx-target="#zombie-panel" hx-swap="outerHTML">Restore to Zombie Queue</button>
+        {% else %}
+        <button class="action-btn reject" hx-post="{% url 'dashboard:zombie_dismiss' zombie_pr.pk %}" hx-target="#zombie-panel" hx-swap="outerHTML" title="Hide from the Zombie Queue. The assessment is kept and a re-scan will not bring it back.">Dismiss</button>
+        {% endif %}
+        {% if zombie_note %}<span class="queued-note" style="font-size: 0.85rem;">{{ zombie_note }}</span>{% endif %}
+    </div>
+    {% if zombie_last_command and zombie_last_command.status != "completed" %}
+    <div class="faint" style="font-size: 0.75rem; margin-top: 0.3rem;">
+        Last re-assess: <strong>{{ zombie_last_command.status }}</strong>
+        {% if zombie_last_command.created_at %}· queued {{ zombie_last_command.created_at|timesince }} ago{% endif %}
+        {% if zombie_last_command.error %}<div class="error-note">{{ zombie_last_command.error }}</div>{% endif %}
+    </div>
+    {% endif %}
+</div>
+{% endif %}
+</div>

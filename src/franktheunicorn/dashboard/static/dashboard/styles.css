@@ -264,6 +264,39 @@ thead th { border-bottom: 2px solid var(--border); }
    on all of them; the accent is reused for the left rule. */
 .context-panel.is-jira { background: var(--blue-bg); border-color: var(--blue); border-left-width: 3px; }
 .context-panel.is-session { background: var(--blue-bg); border-color: var(--blue); border-left-width: 3px; margin-top: 0.75rem; padding: 0.5rem 0.75rem; }
+/* Zombie Queue: closed-but-unmerged PRs whose JIRA is still open. Green,
+   because zombies. Every colour is a theme token so dark mode follows. */
+.context-panel.is-zombie { background: var(--green-bg); border-color: var(--green); border-left-width: 3px; }
+.context-panel.is-zombie.is-dismissed { opacity: 0.7; }
+.zombie-head { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; }
+.zombie-head img { vertical-align: middle; }
+.zombie-summary { margin: 0.5rem 0 0.25rem; font-size: 0.9rem; }
+.zombie-questions { margin: 0.4rem 0; font-size: 0.85rem; }
+.zombie-questions dt { font-weight: 600; margin-top: 0.3rem; }
+.zombie-questions dd { margin: 0.1rem 0 0 0; }
+.zombie-tlc { font-size: 0.85rem; margin: 0.4rem 0; }
+.zombie-tlc ul { margin: 0.2rem 0 0 1.2rem; padding: 0; }
+.zombie-closing { font-size: 0.75rem; white-space: pre-wrap; max-height: 16rem; overflow: auto; background: var(--code-bg); padding: 0.4rem; border-radius: 3px; }
+.zombie-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; margin-top: 0.5rem; }
+.zombie-verdict { display: inline-block; padding: 0.05rem 0.35rem; border-radius: 3px; font-weight: 600; font-size: 0.75rem; background: var(--code-bg); color: var(--muted); }
+.zombie-verdict-revive { background: var(--green-bg); color: var(--green); }
+.zombie-verdict-revive-with-changes { background: var(--yellow-bg); color: var(--orange); }
+.zombie-verdict-rethink { background: var(--orange-bg); color: var(--orange); }
+.zombie-verdict-drop { background: var(--red-bg); color: var(--red); }
+.zombie-verdict-unclear, .zombie-verdict-unassessed { background: var(--code-bg); color: var(--muted); }
+.zombie-answer { font-weight: 600; }
+.zombie-answer-yes { color: var(--green); }
+.zombie-answer-no { color: var(--red); }
+.zombie-answer-unclear { color: var(--muted); }
+.zombie-row { font-size: 0.8rem; margin-top: 0.35rem; padding-top: 0.35rem; border-top: 1px dashed var(--border); }
+.zombie-row-summary { margin-top: 0.2rem; color: var(--text); }
+.zombie-toolbar { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 0.6rem 0.75rem; margin-bottom: 0.75rem; }
+.zombie-toolbar .zombie-hunt { display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.85rem; padding: 0.3rem 0.6rem; }
+.zombie-toolbar .zombie-hunt:disabled { opacity: 0.6; cursor: default; }
+.zombie-scan-rows { list-style: none; margin: 0.4rem 0 0; padding: 0; font-size: 0.8rem; color: var(--muted); }
+.zombie-scan-rows li { margin: 0.15rem 0; }
+.tab-icon { vertical-align: text-bottom; margin-right: 0.25rem; }
+
 .context-panel.is-vibe { background: var(--yellow-bg); border-color: var(--orange); border-left-width: 3px; margin: 0 0 0.5rem; }
 .context-panel.is-notes { white-space: pre-wrap; font-size: 0.85rem; margin-top: 0.5rem; }
 .context-panel.is-compose { padding: 1rem; }

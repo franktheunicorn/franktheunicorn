@@ -257,6 +257,23 @@ def queue_branch_sweep(
     return queue_targetless(command, priority=priority, agent_scope=agent_scope)
 
 
+def queue_zombie_scan(*, priority: int = PRIORITY_BULK) -> bool:
+    """Queue the closed-PR follow-up sweep unless one is already in flight.
+
+    Targetless like the git sweeps and bulk for the same reason: a run is
+    pages of GitHub listing, a JIRA fetch per candidate and an LLM call per
+    assessment across every JIRA-enabled project, and nobody should have to
+    wait behind that for a button they just pressed.
+    """
+    return queue_targetless("scan_zombie_prs", priority=priority)
+
+
+def queue_zombie_assessment(pr: PullRequest, *, priority: int = PRIORITY_INTERACTIVE) -> bool:
+    """Queue the per-PR zombie re-assessment. Interactive: it is a button on the
+    detail page with somebody watching, and one LLM call."""
+    return queue_command("assess_zombie_pr", pull_request=pr, priority=priority)
+
+
 def cancel_pending_for_reports(report_ids: list[int]) -> int:
     """Drop pending worker jobs for *report_ids* before the reports themselves go.
 

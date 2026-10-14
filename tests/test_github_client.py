@@ -812,3 +812,49 @@ class TestMergeReadinessEndpoints:
 
         sent = _json.loads(httpx_mock.get_requests()[-1].content)
         assert sent == {"body": "please rebase"}
+
+
+class TestListPullRequestsPage:
+    @pytest.fixture
+    def client(self) -> GitHubClient:
+        c = GitHubClient(token="test-token", base_url="https://api.github.test")
+        yield c
+        c.close()
+
+    def test_asks_for_one_page_newest_created_first(
+        self, httpx_mock: HTTPXMock, client: GitHubClient
+    ) -> None:
+        httpx_mock.add_response(
+            url=(
+                "https://api.github.test/repos/apache/spark/pulls"
+                "?state=closed&sort=created&direction=desc&per_page=100&page=3"
+            ),
+            json=[{"number": 7, "merged_at": None}],
+        )
+        result = client.list_pull_requests_page("apache", "spark", page=3)
+        assert result == [{"number": 7, "merged_at": None}]
+
+    def test_updated_sort_and_page_size_cap(
+        self, httpx_mock: HTTPXMock, client: GitHubClient
+    ) -> None:
+        httpx_mock.add_response(
+            url=(
+                "https://api.github.test/repos/apache/spark/pulls"
+                "?state=closed&sort=updated&direction=desc&per_page=100&page=1"
+            ),
+            json=[],
+        )
+        assert client.list_pull_requests_page("apache", "spark", per_page=500, sort="updated") == []
+
+    def test_auth_failure_raises_rather_than_scraping(
+        self, httpx_mock: HTTPXMock, client: GitHubClient
+    ) -> None:
+        httpx_mock.add_response(status_code=401, json={"message": "Bad credentials"})
+        with pytest.raises(httpx.HTTPStatusError):
+            client.list_pull_requests_page("apache", "spark")
+
+    def test_base_default_is_not_implemented(self) -> None:
+        from franktheunicorn.backends.mock import MockForgeClient
+
+        with pytest.raises(NotImplementedError):
+            MockForgeClient("/nonexistent").list_pull_requests_page("a", "b")

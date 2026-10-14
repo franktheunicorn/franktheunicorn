@@ -36,6 +36,7 @@ from django.utils.html import escape
 from django.views.decorators.http import require_POST
 
 from franktheunicorn.core.models import (
+    ZOMBIE_QUEUE,
     AgentFeedback,
     AgentVibe,
     AntiPattern,
@@ -54,6 +55,8 @@ from franktheunicorn.core.models import (
     SecurityTriageGuidance,
     TestRun,
     WorkerCommand,
+    ZombieAssessment,
+    ZombieScanState,
 )
 from franktheunicorn.scoring.merge_readiness import (
     ALMOST_READY_QUEUE,
@@ -83,6 +86,9 @@ QUEUE_TABS: list[dict[str, str]] = [
     {"key": "consider-closing", "label": "Consider Closing"},
     {"key": "needs-triage", "label": "Needs Triage"},
     {"key": "wip", "label": "WIP"},
+    # Closed-but-unmerged PRs whose JIRA is still open (review/zombie.py). The
+    # one tab whose rows are not open PRs; index() knows.
+    {"key": ZOMBIE_QUEUE, "label": "Zombie Queue", "icon": "dashboard/img/zombie-duck.svg"},
 ]
 
 # Valid project type values and their human-readable labels.
@@ -135,6 +141,64 @@ def _parse_project_slug(project: str) -> tuple[str, str] | None:
     return None
 
 
+def _queue_members_q(queue: str, readiness_off: Q | None = None) -> Q:
+    """The rows a queue tab shows.
+
+    Every tab but two is open PRs routed to it. The Zombie Queue holds closed
+    PRs — that is the point of it — minus the ones the operator dismissed,
+    which keep their assessment row so a re-scan does not bring them back.
+    The almost-ready tab is not a routing queue: it filters open PRs on the
+    readiness verdict, leaving out ``readiness_off`` (projects whose config
+    disables it) whatever their stored verdict says.
+    """
+    if queue == ZOMBIE_QUEUE:
+        return Q(queue=ZOMBIE_QUEUE) & ~Q(zombie_assessment__disposition="dismissed")
+    if queue == ALMOST_READY_QUEUE:
+        q = Q(state="open", merge_readiness_verdict__in=LISTED_VERDICTS)
+        if readiness_off is not None:
+            q &= ~readiness_off
+        return q
+    return Q(state="open", queue=queue)
+
+
+def _zombie_tab_context() -> dict[str, object]:
+    """What the Zombie Queue tab shows above its rows: where each scan got to,
+    whether a sweep is in flight, and whether anything can assess what it finds."""
+    from franktheunicorn.config.loader import get_operator_config
+    from franktheunicorn.review.zombie import resolve_backend, zombie_projects
+    from franktheunicorn.security.queue import in_flight_statuses
+
+    eligible = zombie_projects()
+    states = {
+        st.project_id: st
+        for st in ZombieScanState.objects.filter(
+            project_id__in=[project.pk for project, _config in eligible]
+        )
+    }
+    scan_rows = [
+        {"project": project.full_name, "state": states.get(project.pk)}
+        for project, _config in eligible
+    ]
+    scan_in_flight = WorkerCommand.objects.filter(
+        command="scan_zombie_prs", status__in=in_flight_statuses()
+    ).exists()
+    last_scan = (
+        WorkerCommand.objects.filter(command="scan_zombie_prs").order_by("-created_at").first()
+    )
+    backend_configured = True
+    try:
+        backend_configured = resolve_backend(get_operator_config()) is not None
+    except Exception:
+        logger.debug("Could not resolve the zombie assessment backend", exc_info=True)
+    return {
+        "zombie_scan_rows": scan_rows,
+        "zombie_scan_in_flight": scan_in_flight,
+        "zombie_last_scan": last_scan,
+        "zombie_backend_configured": backend_configured,
+        "zombie_dismissed_count": ZombieAssessment.objects.filter(disposition="dismissed").count(),
+    }
+
+
 def index(request: HttpRequest) -> HttpResponse:
     """Main dashboard: list of PRs sorted by interest score with queue tabs.
 
@@ -153,7 +217,7 @@ def index(request: HttpRequest) -> HttpResponse:
     readiness_off = _merge_readiness_disabled_q()
     prs = (
         PullRequest.objects.select_related("project")
-        .filter(_queue_q(queue, readiness_off), state="open", project__enabled=True)
+        .filter(_queue_members_q(queue, readiness_off), project__enabled=True)
         .filter(Project.configured_q(lookup="project"))
         .annotate(last_local_action_at=Max("actions__created_at"))
         .order_by(*_queue_ordering(queue))
@@ -200,9 +264,16 @@ def index(request: HttpRequest) -> HttpResponse:
         ):
             if run_pr_id not in latest_verdicts and verdict is not None:
                 latest_verdicts[run_pr_id] = verdict
+        zombies: dict[int, ZombieAssessment] = {}
+        if queue == ZOMBIE_QUEUE:
+            zombies = {
+                a.pull_request_id: a
+                for a in ZombieAssessment.objects.filter(pull_request_id__in=pr_ids)
+            }
         for pr in pr_list:
             pr.findings_count = finding_counts.get(pr.pk, 0)  # type: ignore[attr-defined]
             pr.latest_test_verdict = latest_verdicts.get(pr.pk)  # type: ignore[attr-defined]
+            pr.zombie = zombies.get(pr.pk)  # type: ignore[attr-defined]
 
     # The almost-ready tab carries its own per-PR panel (verdict, reasons,
     # buttons) and a header of what the queue has learned from past verdicts.
@@ -220,7 +291,9 @@ def index(request: HttpRequest) -> HttpResponse:
             )
 
     # Count PRs per queue for tab badges (respects the same project/type filters).
-    base_qs = PullRequest.objects.filter(state="open", project__enabled=True).filter(
+    # No state filter here: each tab adds its own, because the zombie tab's rows
+    # are closed PRs and every other tab's are open ones.
+    base_qs = PullRequest.objects.filter(project__enabled=True).filter(
         Project.configured_q(lookup="project")
     )
     if workspace_projects is not None:
@@ -230,7 +303,7 @@ def index(request: HttpRequest) -> HttpResponse:
     if parsed_project is not None:
         base_qs = base_qs.filter(project__owner=parsed_project[0], project__repo=parsed_project[1])
     queue_counts: dict[str, int] = {
-        tab["key"]: base_qs.filter(_queue_q(tab["key"], readiness_off)).count()
+        tab["key"]: base_qs.filter(_queue_members_q(tab["key"], readiness_off)).count()
         for tab in QUEUE_TABS
     }
     queue_tabs_with_counts = [
@@ -252,10 +325,15 @@ def index(request: HttpRequest) -> HttpResponse:
         projects_qs = projects_qs.filter(project_type=active_project_type)
     available_projects = list(projects_qs.values("owner", "repo"))
 
+    zombie_context: dict[str, object] = {}
+    if queue == ZOMBIE_QUEUE:
+        zombie_context = _zombie_tab_context()
+
     return render(
         request,
         "dashboard/pr_list.html",
         {
+            **zombie_context,
             "pull_requests": pr_list,
             "queue_tabs": queue_tabs_with_counts,
             "active_queue": queue,
@@ -268,21 +346,6 @@ def index(request: HttpRequest) -> HttpResponse:
             "almost_ready_queue": ALMOST_READY_QUEUE,
         },
     )
-
-
-def _queue_q(queue: str, readiness_off: Q | None = None) -> Q:
-    """The filter behind one tab: a routing queue, or the readiness verdict.
-
-    ``readiness_off`` names the projects whose config disables merge
-    readiness; their rows are left out of the almost-ready tab even when a
-    stored verdict says otherwise.
-    """
-    if queue == ALMOST_READY_QUEUE:
-        q = Q(merge_readiness_verdict__in=LISTED_VERDICTS)
-        if readiness_off is not None:
-            q &= ~readiness_off
-        return q
-    return Q(queue=queue)
 
 
 def _merge_readiness_disabled_q() -> Q | None:
@@ -303,6 +366,11 @@ def _merge_readiness_disabled_q() -> Q | None:
 def _queue_ordering(queue: str) -> tuple[str | OrderBy, ...]:
     if queue == ALMOST_READY_QUEUE:
         return ("-merge_readiness_score", "-interest_score", "-github_updated_at")
+    if queue == ZOMBIE_QUEUE:
+        # Newest zombie first — the scan works backwards through closed PRs,
+        # so this is also "most recently closed first", which is the order a
+        # revival is cheap in. Interest scores are 0 on closed rows anyway.
+        return ("-zombie_assessment__created_at", "-number")
     if queue == "intending-to-merge":
         # A follow-up list, not a triage list: the approval that has waited
         # longest is the one to act on first, whatever it scored.
@@ -600,11 +668,15 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
     # the detail page is where "why isn't this in the almost-ready tab" gets
     # answered.
     candidate = _merge_candidate_context(pr, project_config, operator_config.github_username)
+    # The zombie panel: present for any PR the scan put in the queue (or that
+    # the operator asked to assess), whatever tab the PR is on now.
+    zombie = ZombieAssessment.objects.filter(pull_request=pr).first()
 
     return render(
         request,
         "dashboard/pr_detail.html",
         {
+            **_zombie_panel_context(pr, zombie),
             "pr": pr,
             "candidate": candidate,
             "drafts": drafts,
@@ -622,6 +694,108 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
             "next_pr": next_pr,
         },
     )
+
+
+# --- Zombie Queue (closed-PR follow-up) ---
+
+
+def _zombie_panel_context(pr: PullRequest, zombie: ZombieAssessment | None) -> dict[str, object]:
+    """Context for ``_zombie_panel.html``: the assessment plus the last re-assess
+    command, whose status and error are the only feedback the button has."""
+    last = (
+        WorkerCommand.objects.filter(pull_request=pr, command="assess_zombie_pr")
+        .order_by("-created_at")
+        .first()
+    )
+    return {"zombie": zombie, "zombie_last_command": last, "zombie_pr": pr}
+
+
+def _render_zombie_panel(request: HttpRequest, pr: PullRequest, *, note: str = "") -> HttpResponse:
+    zombie = ZombieAssessment.objects.filter(pull_request=pr).first()
+    return render(
+        request,
+        "dashboard/_zombie_panel.html",
+        {**_zombie_panel_context(pr, zombie), "zombie_note": note},
+    )
+
+
+@require_POST
+def zombie_scan(request: HttpRequest) -> HttpResponse:
+    """The "Hunt for zombies" button: queue the closed-PR follow-up sweep.
+
+    Worker work at bulk priority — pages of GitHub listing, a JIRA fetch per
+    candidate and an LLM call per assessment — so the flash says what to
+    expect and where to look, and a second press while one is queued says so
+    rather than queueing another.
+    """
+    from franktheunicorn.config.loader import get_operator_config
+    from franktheunicorn.review.zombie import resolve_backend, zombie_projects
+    from franktheunicorn.security.queue import queue_zombie_scan
+
+    if not zombie_projects():
+        messages.error(
+            request,
+            "No enabled project has jira.enabled and jira.server set in its project YAML, "
+            "so there is no ticket to check a closed PR against. The scan needs JIRA to "
+            "tell an open ticket from a closed one.",
+        )
+        return redirect(f"{reverse('dashboard:index')}?queue={ZOMBIE_QUEUE}")
+
+    if queue_zombie_scan():
+        operator_config = get_operator_config()
+        cfg = operator_config.zombie_queue
+        messages.success(
+            request,
+            f"Queued the zombie hunt: frank will walk up to {cfg.max_prs_per_run} closed PRs "
+            f"per project (newest first, resuming where the last hunt stopped), keep the "
+            f"unmerged ones whose JIRA is still open, and ask the model about up to "
+            f"{cfg.max_assessments_per_run} of them. Bulk priority, so it waits behind "
+            "nothing but other bulk work. Reload this tab in a few minutes.",
+        )
+        if resolve_backend(operator_config) is None:
+            messages.warning(
+                request,
+                "No LLM backend is configured (zombie_queue.llm_backend / llm_backends in "
+                "operator.yaml), so zombies will be found but not assessed.",
+            )
+    else:
+        messages.info(request, "A zombie hunt is already queued or running.")
+    return redirect(f"{reverse('dashboard:index')}?queue={ZOMBIE_QUEUE}")
+
+
+@require_POST
+def zombie_dismiss(request: HttpRequest, pr_id: int) -> HttpResponse:
+    """Hide a zombie from the queue (or bring it back). The row stays, so a
+    re-scan does not resurrect it; the assessment stays, so the reasoning does."""
+    pr = get_object_or_404(PullRequest.objects.select_related("project"), pk=pr_id)
+    zombie = get_object_or_404(ZombieAssessment, pull_request=pr)
+    restore = request.POST.get("restore") == "1"
+    zombie.disposition = "pending" if restore else "dismissed"
+    zombie.save(update_fields=["disposition", "updated_at"])
+    OperatorAction.objects.create(
+        action_type="zombie_restore" if restore else "zombie_dismiss",
+        pull_request=pr,
+        notes=f"{zombie.jira_ticket_id} verdict={zombie.verdict}",
+    )
+    return _render_zombie_panel(request, pr)
+
+
+@require_POST
+def zombie_reassess(request: HttpRequest, pr_id: int) -> HttpResponse:
+    """Queue a fresh assessment of one PR for the worker (htmx)."""
+    pr = get_object_or_404(PullRequest.objects.select_related("project"), pk=pr_id)
+    from franktheunicorn.config.loader import get_project_config
+    from franktheunicorn.review.zombie import zombie_gate_reason
+    from franktheunicorn.security.queue import queue_zombie_assessment
+
+    reason = zombie_gate_reason(get_project_config(pr.project.full_name), pr.project.full_name)
+    if reason:
+        return _render_zombie_panel(request, pr, note=f"Cannot assess: {reason}")
+    if queue_zombie_assessment(pr):
+        note = "Assessment queued at the front of the worker queue; reload in a minute."
+    else:
+        note = "An assessment for this PR is already queued or running."
+    return _render_zombie_panel(request, pr, note=note)
 
 
 # --- Finding actions (htmx) ---
