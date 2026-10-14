@@ -37,7 +37,7 @@ from franktheunicorn.config.models import (
     RemoteExecutionConfig,
 )
 from franktheunicorn.core.models import PullRequest
-from franktheunicorn.review.agent_cli import run_agent_cli_review
+from franktheunicorn.review.agent_cli import AgentCLIRunError, run_agent_cli_review
 from franktheunicorn.review.tool_executor import ExecResult, RemoteSSHExecutor
 from franktheunicorn.worker.runner import (
     _check_agent_cli_reviewers,
@@ -191,10 +191,9 @@ class TestFailuresAreLogged:
             None,
         ]
 
-        with caplog.at_level(logging.INFO):
-            findings = run_agent_cli_review("/w", "base", _ssh_reviewer(), executor=executor)
+        with caplog.at_level(logging.INFO), pytest.raises(AgentCLIRunError):
+            run_agent_cli_review("/w", "base", _ssh_reviewer(), executor=executor)
 
-        assert findings == []
         errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
         assert errors, "a reviewer that could not be reached must say so"
         assert "ssh_command" in errors[0].getMessage()
@@ -203,10 +202,9 @@ class TestFailuresAreLogged:
         executor = MagicMock()
         executor.run.return_value = ExecResult(returncode=128, stdout="", stderr="bad revision")
 
-        with caplog.at_level(logging.INFO):
-            findings = run_agent_cli_review("/w", "base", _ssh_reviewer(), executor=executor)
+        with caplog.at_level(logging.INFO), pytest.raises(AgentCLIRunError):
+            run_agent_cli_review("/w", "base", _ssh_reviewer(), executor=executor)
 
-        assert findings == []
         assert any(r.levelno >= logging.WARNING for r in caplog.records)
         assert "bad revision" in caplog.text
 
@@ -242,7 +240,7 @@ class TestFailuresAreLogged:
             ExecResult(returncode=127, stdout="", stderr="claude: command not found"),
         ]
 
-        with caplog.at_level(logging.INFO):
+        with caplog.at_level(logging.INFO), pytest.raises(AgentCLIRunError):
             run_agent_cli_review("/w", "base", _ssh_reviewer(), executor=executor)
 
         assert "command not found" in caplog.text

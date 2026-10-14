@@ -17,6 +17,7 @@ from franktheunicorn.config.models import (
 from franktheunicorn.core.models import Project, PullRequest
 from franktheunicorn.review.agent_cli import (
     AgentCLIFinding,
+    AgentCLIRunError,
     build_review_prompt,
     create_drafts_from_agent_cli,
     run_agent_cli_review,
@@ -174,36 +175,30 @@ class TestRunAgentCLIReview:
         assert findings == []
         assert executor.run.call_count == 1
 
-    def test_diff_failure_returns_empty(self) -> None:
+    def test_diff_failure_raises(self) -> None:
         executor = _executor_returning(ExecResult(returncode=128, stdout="", stderr="not a repo"))
-        assert (
+        with pytest.raises(AgentCLIRunError):
             run_agent_cli_review(
                 cwd="/tmp/repo", base_commit="origin/main", config=self._config(), executor=executor
             )
-            == []
-        )
 
-    def test_missing_binary_returns_empty(self) -> None:
+    def test_missing_binary_raises(self) -> None:
         # LocalExecutor.run returns None when the binary is absent (FileNotFoundError).
         diff_result = ExecResult(returncode=0, stdout="diff --git a/x b/x\n", stderr="")
         executor = _executor_returning(diff_result, None)
-        assert (
+        with pytest.raises(AgentCLIRunError):
             run_agent_cli_review(
                 cwd="/tmp/repo", base_commit="origin/main", config=self._config(), executor=executor
             )
-            == []
-        )
 
-    def test_cli_nonzero_exit_returns_empty(self) -> None:
+    def test_cli_nonzero_exit_raises(self) -> None:
         diff_result = ExecResult(returncode=0, stdout="diff --git a/x b/x\n", stderr="")
         cli_result = ExecResult(returncode=1, stdout="", stderr="rate limit")
         executor = _executor_returning(diff_result, cli_result)
-        assert (
+        with pytest.raises(AgentCLIRunError):
             run_agent_cli_review(
                 cwd="/tmp/repo", base_commit="origin/main", config=self._config(), executor=executor
             )
-            == []
-        )
 
     def test_unparseable_output_returns_empty(self) -> None:
         diff_result = ExecResult(returncode=0, stdout="diff --git a/x b/x\n", stderr="")
@@ -714,3 +709,37 @@ class TestTwoModelsOneCommand:
         bare = next(r for r in oc.agent_cli_reviewers if r.name == "cursor-bare")
         assert bare.extra_args == []
         assert bare.trust_args == ["--trust"]
+
+
+def test_an_exit_0_refusal_is_a_failure_not_a_clean_review() -> None:
+    """cursor-agent exits 0 on an unknown --model; that read as 0 findings."""
+    diff_result = ExecResult(returncode=0, stdout="diff --git a/x b/x\n", stderr="")
+    cli_result = ExecResult(
+        returncode=0,
+        stdout="Cannot use this model: cursor-grok-4.7-high. Available models: auto",
+        stderr="",
+    )
+    executor = MagicMock()
+    executor.run.side_effect = [diff_result, cli_result]
+    with pytest.raises(AgentCLIRunError, match="refused"):
+        run_agent_cli_review(
+            cwd="/r",
+            base_commit="b",
+            config=AgentCLIReviewerConfig(name="cursor-agent"),
+            executor=executor,
+        )
+
+
+def test_a_review_that_quotes_trust_is_still_a_review() -> None:
+    """The refusal check reads the head of the output, not the review's prose."""
+    diff_result = ExecResult(returncode=0, stdout="diff --git a/x b/x\n", stderr="")
+    review = "The new code path looks fine overall. " * 20 + "Consider documenting --trust."
+    executor = MagicMock()
+    executor.run.side_effect = [diff_result, ExecResult(returncode=0, stdout=review, stderr="")]
+    findings = run_agent_cli_review(
+        cwd="/r",
+        base_commit="b",
+        config=AgentCLIReviewerConfig(name="cursor-agent"),
+        executor=executor,
+    )
+    assert findings

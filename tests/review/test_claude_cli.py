@@ -10,6 +10,7 @@ import pytest
 
 from franktheunicorn.config.models import ClaudeCLIConfig
 from franktheunicorn.core.models import Project, PullRequest
+from franktheunicorn.review.agent_cli import AgentCLIRunError
 from franktheunicorn.review.claude_cli import (
     ClaudeCLIFinding,
     create_drafts_from_claude_cli,
@@ -71,45 +72,39 @@ class TestRunClaudeCLIReview:
         # Only git diff was attempted; the CLI itself was never invoked.
         assert executor.run.call_count == 1
 
-    def test_diff_failure_returns_empty(self) -> None:
+    def test_diff_failure_raises(self) -> None:
         diff_result = ExecResult(returncode=128, stdout="", stderr="not a git repo")
         executor = _executor_returning(diff_result)
-        assert (
+        with pytest.raises(AgentCLIRunError):
             run_claude_cli_review(
                 cwd="/tmp/repo",
                 base_commit="origin/main",
                 config=self._config(),
                 executor=executor,
             )
-            == []
-        )
 
-    def test_cli_not_available_returns_empty(self) -> None:
+    def test_cli_not_available_raises(self) -> None:
         diff_result = ExecResult(returncode=0, stdout="diff --git a/x b/x\n", stderr="")
         executor = _executor_returning(diff_result, None)
-        assert (
+        with pytest.raises(AgentCLIRunError):
             run_claude_cli_review(
                 cwd="/tmp/repo",
                 base_commit="origin/main",
                 config=self._config(),
                 executor=executor,
             )
-            == []
-        )
 
-    def test_cli_nonzero_exit_returns_empty(self) -> None:
+    def test_cli_nonzero_exit_raises(self) -> None:
         diff_result = ExecResult(returncode=0, stdout="diff --git a/x b/x\n", stderr="")
         cli_result = ExecResult(returncode=1, stdout="", stderr="rate limit")
         executor = _executor_returning(diff_result, cli_result)
-        assert (
+        with pytest.raises(AgentCLIRunError):
             run_claude_cli_review(
                 cwd="/tmp/repo",
                 base_commit="origin/main",
                 config=self._config(),
                 executor=executor,
             )
-            == []
-        )
 
     def test_diff_truncated_when_oversize(self) -> None:
         big_diff = "+x\n" * 50_000  # 150_000 chars

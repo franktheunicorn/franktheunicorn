@@ -228,6 +228,15 @@ def build_review_prompt(
     )
 
 
+class AgentCLIRunError(RuntimeError):
+    """The CLI didn't produce a review. Distinct from a clean one, which is ``[]``."""
+
+
+#: Exit-0 output that is the CLI refusing, not reviewing. cursor-agent exits 0
+#: on both an unknown --model and an untrusted workspace.
+_REFUSAL_MARKERS = ("cannot use this model",)
+
+
 def run_agent_cli_review(
     cwd: str,
     base_commit: str,
@@ -244,9 +253,11 @@ def run_agent_cli_review(
 
     ``cwd`` must be a directory containing the project's git checkout —
     either a local path (for ``LocalExecutor``) or a remote path returned
-    by ``RemoteSSHExecutor.prepare_repo``. Returns an empty list (never
-    raises) when the diff is empty, the CLI is missing, the call times
-    out, or the model emits unparseable output.
+    by ``RemoteSSHExecutor.prepare_repo``. Returns an empty list when the
+    diff is empty or the review found nothing; raises ``AgentCLIRunError``
+    when the CLI didn't review at all (git diff failed, CLI missing, timed
+    out, non-zero exit, or an exit-0 refusal), so the caller records a
+    failure rather than a clean run.
 
     Argv assembly is delegated to ``config.build_invocation`` so the same
     body serves flag-style agents (claude, pi) and subcommand-style agents
@@ -281,7 +292,7 @@ def run_agent_cli_review(
             if diff_result is not None
             else " — the executor returned nothing (SSH command failed or timed out)",
         )
-        return []
+        raise AgentCLIRunError(f"git diff {base_commit}..HEAD failed")
 
     diff = diff_result.stdout
     if not diff.strip():
@@ -368,7 +379,7 @@ def run_agent_cli_review(
                 cwd,
                 config.name,
             )
-        return []
+        raise AgentCLIRunError(f"{cmd[0]} returned nothing after {elapsed:.0f}s")
     if not result.ok:
         from franktheunicorn.review.tool_executor import (
             looks_like_workspace_trust_refusal,
@@ -389,9 +400,27 @@ def run_agent_cli_review(
             (result.stderr or "")[:500] or "(no stderr)",
             trust,
         )
-        return []
+        raise AgentCLIRunError(f"{cmd[0]} exited with code {result.returncode}")
 
     blocks = parse_prompt_only_output(result.stdout)
+    # The parser makes a file-less "finding" out of any text, refusals included.
+    if not any(b.file_path for b in blocks):
+        from franktheunicorn.review.tool_executor import (
+            looks_like_workspace_trust_refusal,
+            workspace_trust_advice,
+        )
+
+        # Head only: the review itself may quote "--trust" or "cannot use this model".
+        output = f"{(result.stdout or '').strip()[:300]} {(result.stderr or '')[:300]}"
+        untrusted = looks_like_workspace_trust_refusal(output)
+        if untrusted or any(m in output.lower() for m in _REFUSAL_MARKERS):
+            logger.error(
+                "%s CLI exited 0 but refused to review: %s%s",
+                config.name,
+                output.strip()[:300],
+                " " + workspace_trust_advice(config.name) if untrusted else "",
+            )
+            raise AgentCLIRunError(f"{cmd[0]} refused: {output.strip()[:120]}")
     if not blocks:
         # Ran fine, said nothing parseable. Distinguishing "clean review" from
         # "the model ignored the output format" needs the raw head of stdout.

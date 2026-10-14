@@ -2516,6 +2516,7 @@ def _run_review_tool_for_pr(
     returned outcome the per-reviewer result lived only in the worker log —
     so there a skipped reviewer read exactly like a clean one.
     """
+    from franktheunicorn.review.agent_cli import AgentCLIRunError
     from franktheunicorn.review.tool_executor import make_executor
 
     mode = getattr(remote_config, "mode", "local")
@@ -2575,6 +2576,10 @@ def _run_review_tool_for_pr(
         # two states the rescan has to tell apart.
         record_agent_run(pr, source, status="ok", findings=len(findings))
         return f"{len(findings)} finding(s) → {len(drafts)} draft(s)"
+    except AgentCLIRunError as exc:
+        # Already logged with the detail where it happened; no traceback needed.
+        record_agent_run(pr, source, status="failed")
+        return f"failed — {exc}"
     except Exception:
         logger.exception("%s failed for PR #%d; continuing.", tool_name, pr.number)
         record_agent_run(pr, source, status="failed")
