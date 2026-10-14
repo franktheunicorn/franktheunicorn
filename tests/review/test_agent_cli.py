@@ -802,6 +802,10 @@ class TestReadOnlyFlags:
         argv = [*codex.cli_argv, *codex.build_invocation("REVIEW")]
         assert argv == ["codex", "exec", *CODEX_READONLY_ARGS, "REVIEW"]
         assert argv[argv.index("-s") + 1] == "read-only"
+        # An empty mcp_servers override is a no-op (codex deep-merges it); only
+        # skipping the user config keeps the operator's MCP servers away.
+        assert "--ignore-user-config" in argv
+        assert "mcp_servers={}" not in argv
 
     def test_cursor_agent_is_unchanged(self) -> None:
         cursor = self._by_name(OperatorConfig())["cursor-agent"]

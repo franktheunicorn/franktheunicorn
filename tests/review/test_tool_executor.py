@@ -932,9 +932,9 @@ class TestRemoteCommandDelivery:
 
     @patch("franktheunicorn.review.tool_executor.subprocess.run")
     def test_the_read_only_flags_reach_the_remote_shell_intact(self, mock_run: Any) -> None:
-        """``mcp_servers={}`` and the comma-joined tool list are the two argv
-        elements a quoting slip would mangle. Staged over stdin and run by a
-        real shell, they must come out as the same argv elements."""
+        """The comma-joined tool list is the argv element a quoting slip would
+        mangle. Staged over stdin and run by a real shell, every read-only flag
+        must come out as the same argv element."""
         from franktheunicorn.config.models import CLAUDE_READONLY_ARGS, CODEX_READONLY_ARGS
 
         mock_run.side_effect = self._fake_sf

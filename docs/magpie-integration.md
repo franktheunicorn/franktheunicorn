@@ -443,8 +443,16 @@ effort. "Done" means it is on this branch with tests.
 - **What.** A `readonly_args` field on `AgentCLIReviewerConfig`, seeded so the
   `claude` reviewer runs with `--setting-sources user`, `--strict-mcp-config`
   and Bash, Edit, Write, NotebookEdit, WebFetch, WebSearch and Task denied,
-  and `codex exec` runs with `-s read-only -c mcp_servers={}`. Read, Grep and
-  Glob stay. Both lenses scored it 4 or 5.
+  and `codex exec` runs with `-s read-only --ignore-user-config`. Read, Grep
+  and Glob stay. Both lenses scored it 4 or 5.
+- **Found in review: codex's MCP servers.** The first version passed Magpie's
+  `-c mcp_servers={}`. codex deep-merges `-c` overrides into the user config,
+  so an empty table removes nothing: with codex-cli 0.162.1 and a throwaway
+  CODEX_HOME holding one fake server, the override still spawned it, and
+  `--ignore-user-config` did not. Auth still comes from CODEX_HOME; a model
+  provider or profile in `config.toml` is not loaded either, which is the
+  trade, and `readonly_args: ["-s", "read-only"]` restores the config at the
+  cost of MCP exposure. Worth reporting to Magpie (section 7).
 - **Found in review: the checkout's own settings.** `claude -p` skips the
   workspace-trust prompt, so without `--setting-sources user` it loaded the
   PR's `.claude/settings.json`, and a hook there is a shell command run
@@ -466,8 +474,7 @@ effort. "Done" means it is on this branch with tests.
   `extra_args` override keeps it; `readonly_args: []` is the opt-out. The
   verifier and the `agent-cli` LLM backend borrow reviewer entries through
   `build_invocation`, so they inherit it. Magpie's `--ephemeral` and
-  `--skip-git-repo-check` for codex are left out: neither contains anything,
-  and neither could be checked against an installed codex here.
+  `--skip-git-repo-check` for codex are left out: neither contains anything.
 - **Upstream source.** `tools/adversarial-review/src/adversarial_review/backends.py`
   (`CLAUDE_DENIED_TOOLS`, `_codex`, `_claude`) at the pinned commit; not at
   0.1.0.

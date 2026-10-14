@@ -432,12 +432,20 @@ CLAUDE_READONLY_ARGS: tuple[str, ...] = (
     "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch,Task",
 )
 
-#: ``codex exec`` in its read-only sandbox with an empty MCP server table, the
-#: two containment flags from the same Magpie adapter (``_codex``). Magpie also
-#: passes ``--ephemeral`` and ``--skip-git-repo-check``; neither contains
-#: anything and frank always runs codex in a git checkout, so they are left out
-#: rather than shipped unverified against an installed codex.
-CODEX_READONLY_ARGS: tuple[str, ...] = ("-s", "read-only", "-c", "mcp_servers={}")
+#: ``codex exec`` in its read-only sandbox, without the operator's
+#: ``$CODEX_HOME/config.toml``. The config file is where codex's MCP servers
+#: live, and an empty-table override does not remove them: codex deep-merges
+#: ``-c mcp_servers={}`` into the user layer and every server stays enabled.
+#: Verified with codex-cli 0.162.1 and a throwaway CODEX_HOME holding one fake
+#: server: ``-c mcp_servers={}`` spawned it, ``--ignore-user-config`` did not.
+#: (Apache Magpie's adapter, which these flags started from, uses the empty
+#: override; the finding is worth sending upstream.) Auth still comes from
+#: CODEX_HOME. The cost is that a model provider or profile set in
+#: config.toml is not loaded either; frank's ``model`` field still passes
+#: ``--model``, and an operator who needs their config.toml can set
+#: ``readonly_args: ["-s", "read-only"]`` and accept the MCP exposure.
+#: Project hooks need persisted trust in codex, which frank never grants.
+CODEX_READONLY_ARGS: tuple[str, ...] = ("-s", "read-only", "--ignore-user-config")
 
 
 def _default_agent_cli_reviewers() -> list[AgentCLIReviewerConfig]:
