@@ -509,3 +509,14 @@ class TestAuthorAwaitingMaintainer:
 
     def test_no_comments_no_signal(self) -> None:
         assert self._score([]) is None
+
+
+class TestNewContributorBumpRespectsAssociation:
+    def test_a_forge_known_contributor_gets_no_bump(self) -> None:
+        from franktheunicorn.scoring.signals import score_new_human_contributor
+
+        assert (
+            score_new_human_contributor("ret", "op", [], author_association="CONTRIBUTOR") is None
+        )
+        assert score_new_human_contributor("new", "op", [], author_association="FIRST_TIMER") == 10
+        assert score_new_human_contributor("new", "op", [], author_association="") == 10

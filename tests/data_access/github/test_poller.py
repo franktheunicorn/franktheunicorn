@@ -1508,3 +1508,28 @@ class TestCommentEventsReachTheScorer:
         events = seen["comment_events"]
         assert [e["author"] for e in events] == ["alice", "holdenk", "alice"]
         assert events[-1]["body"] == "@holdenk ?"
+
+
+@pytest.mark.django_db
+class TestAuthorAssociationIsStored:
+    def test_the_api_value_lands_on_the_row_and_decides_new_contributor(
+        self, tmp_path: Path
+    ) -> None:
+        client = _CountingMockClient(tmp_path, [_listed_pr(99, author_association="CONTRIBUTOR")])
+        poll_project(
+            client,
+            ProjectConfig(owner="apache", repo="spark", poll_refresh_hours=24),
+            operator_username="nobody",
+        )
+        pr = PullRequest.objects.get(number=99)
+        assert pr.author_association == "CONTRIBUTOR"
+        assert pr.is_new_contributor is False
+
+    def test_a_missing_value_is_blank(self, tmp_path: Path) -> None:
+        client = _CountingMockClient(tmp_path, [_listed_pr(98)])
+        poll_project(
+            client,
+            ProjectConfig(owner="apache", repo="spark", poll_refresh_hours=24),
+            operator_username="nobody",
+        )
+        assert PullRequest.objects.get(number=98).author_association in ("", "NONE")

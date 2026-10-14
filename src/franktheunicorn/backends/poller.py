@@ -847,6 +847,7 @@ def _route_pr_to_queue(
         "changed_files": pr_obj.changed_files,
         "requested_reviewers": pr_obj.requested_reviewers,
         "assignees": pr_obj.assignees,
+        "author_association": pr_obj.author_association,
     }
     if pr_obj.github_created_at:
         from datetime import UTC, datetime
@@ -1053,6 +1054,10 @@ def _upsert_pull_request(
                 "is_draft": pr_data.get("draft", False),
                 "github_created_at": _parse_github_datetime(pr_data.get("created_at")),
                 "github_updated_at": _parse_github_datetime(pr_data.get("updated_at")),
+                # GitHub's own answer to "has this author committed here"; ""
+                # from Gitea, GitLab and the scrape path, where the known-authors
+                # rule decides as before.
+                "author_association": str(pr_data.get("author_association", "") or "")[:32],
             }
         )
 

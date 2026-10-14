@@ -576,6 +576,27 @@ effort. "Done" means it is on this branch with tests.
   at the pinned commit; the principle exists at 0.1.0.
 - **Remote path.** Worker host only.
 
+### 4.17 GitHub's author association decides "new contributor" (done)
+
+- **What.** `PullRequest.author_association` (migration 0063) stores GitHub's
+  own answer to "has this author committed here". CONTRIBUTOR, COLLABORATOR,
+  MEMBER and OWNER are never new; FIRST_TIME_CONTRIBUTOR and FIRST_TIMER are
+  new even when the contributors fetch failed (unless frank already has a PR
+  from them); blank (Gitea, GitLab, scrape rows) and NONE fall back to the
+  old rule. The routing flag and the score bump use the same helper. Two
+  areas proposed it independently; both scored it 4.
+- **Why.** frank's known-authors set is the PRs it has ingested plus GitHub's
+  contributors listing, which stops at 500 logins. On Spark, a returning
+  contributor outside the top 500 with no PR in frank's database read as new
+  and went to the new-contributor queue.
+- **Where.** `scoring/signals.py` (`association_says_new`, the bump),
+  `scoring/moderation.py`, `scoring/scorer.py`, `backends/poller.py` (read off
+  the PR payload it already has).
+- **Upstream source.** `plugins/magpie-mentoring/skills/mentoring-welcome/first-time-detection.md`
+  and `tools/contributor-metrics` (`MAINTAINER_ASSOC`) at the pinned commit;
+  the detection table exists at 0.1.0.
+- **Remote path.** Worker host only.
+
 ---
 
 ## 5. Tier 2: Adopt Later

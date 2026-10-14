@@ -114,6 +114,10 @@ class PullRequest(models.Model):
     likely_ai_generated = models.BooleanField(default=False)
     is_operator_pr = models.BooleanField(default=False)
     is_new_contributor = models.BooleanField(default=False)
+    #: GitHub's ``author_association`` for the PR author (CONTRIBUTOR, MEMBER,
+    #: FIRST_TIME_CONTRIBUTOR, ...). Decides ``is_new_contributor`` when present;
+    #: blank for forges and scrape rows that do not supply it.
+    author_association = models.CharField(max_length=32, blank=True, default="")
     is_mentioned = models.BooleanField(default=False)
     is_low_context = models.BooleanField(default=False)
     is_likely_unowned = models.BooleanField(default=False)

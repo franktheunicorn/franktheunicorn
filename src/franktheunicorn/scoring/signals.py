@@ -73,6 +73,32 @@ def _matches_identity(raw: str, wanted: set[str]) -> bool:
     return any(variant in wanted for variant in _identity_variants(raw))
 
 
+#: GitHub ``author_association`` values that mean "has committed here before".
+#: The forge computes this per repository, so it is right where frank's own
+#: known-authors list is not: GitHub's contributors listing stops at 500
+#: logins, and on a Spark-sized repo everyone past that with no PR in frank's
+#: database used to read as new. Apache Magpie's mentoring-welcome
+#: first-time detection reads the same field (``first-time-detection.md`` and
+#: ``tools/contributor-metrics`` at apache/magpie commit
+#: dadb315caa8b881fc1d2195bef03223dac25915a).
+KNOWN_ASSOCIATIONS: frozenset[str] = frozenset({"CONTRIBUTOR", "COLLABORATOR", "MEMBER", "OWNER"})
+#: Values that mean "has not committed here", which is positive evidence of a
+#: newcomer even when the contributors listing could not be fetched.
+FIRST_TIME_ASSOCIATIONS: frozenset[str] = frozenset({"FIRST_TIME_CONTRIBUTOR", "FIRST_TIMER"})
+
+
+def association_says_new(association: str) -> bool | None:
+    """True / False when the forge's author association decides it; None when it
+    does not (empty: Gitea, GitLab, a scraped row; ``NONE``; anything unknown),
+    which leaves the decision to frank's known-authors rule."""
+    value = (association or "").upper()
+    if value in KNOWN_ASSOCIATIONS:
+        return False
+    if value in FIRST_TIME_ASSOCIATIONS:
+        return True
+    return None
+
+
 def is_likely_bot(author: str) -> bool:
     """Check if an author looks like a bot account."""
     return any(re.match(p, author.lower()) for p in BOT_PATTERNS)
@@ -194,13 +220,16 @@ def score_new_human_contributor(
     operator_username: str,
     known_authors: list[str],
     ai_agents: list[str] | None = None,
+    author_association: str = "",
 ) -> int | None:
-    """New contributor bump. Excludes bots, AI agents, known authors, and operator."""
+    """New contributor bump. Excludes bots, AI agents, known authors, the
+    operator, and anyone the forge says has committed here before."""
     author_lower = author.lower()
     if (
         is_ai_agent(author, ai_agents or [])
         or author_lower == operator_username.lower()
         or author_lower in _lowered(known_authors)
+        or association_says_new(author_association) is False
     ):
         return None
     return WEIGHTS["new_human_contributor"]

@@ -122,6 +122,7 @@ def score_pull_request(
             operator_username,
             known_authors or [],
             ai_agents or None,
+            str(pr_dict.get("author_association", "") or ""),
         ),
     )
     _add("keyword_match", score_keyword_match(title, body, keywords))
@@ -280,6 +281,7 @@ def score_pull_request_from_model(
         "body": pr.body,
         "assignees": pr.assignees,
         "jira_cache": pr.jira_cache,
+        "author_association": pr.author_association,
     }
     if pr.github_created_at:
         age = (datetime.now(tz=UTC) - pr.github_created_at).days
