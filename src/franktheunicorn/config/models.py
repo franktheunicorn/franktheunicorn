@@ -2260,6 +2260,24 @@ class TestExecutionConfig(BaseModel):
     test_command: str = "python -m pytest {tests} --tb=short -q"
     workdir: str = "/workspace"
     env: dict[str, str] = Field(default_factory=dict)
+    #: Only identified tests matching one of these fnmatch globs are passed to
+    #: test_command (Spark's src/test/ Scala files mean nothing to pytest).
+    #: Empty runs every identified test.
+    test_globs: list[str] = Field(default_factory=list)
+    #: Named build contexts for ``dockerfile`` (``COPY --from=<name>``), as
+    #: repo-relative paths. Set, the image is built with ``docker buildx``.
+    build_contexts: dict[str, str] = Field(default_factory=dict)
+    #: Runs in the checkout before test_command, offline, as the operator's uid.
+    #: Dependencies come from a cache warm_command filled from the *base*
+    #: checkout with network on, mounted read-only and copied into $HOME, so PR
+    #: code never gets network. A PR adding a dependency fails the build.
+    build_command: str | None = None
+    #: Defaults to build_command. Re-run when warm_key_files' content changes.
+    warm_command: str | None = None
+    warm_key_files: list[str] = Field(default_factory=list)
+    #: Extra env for the offline build/test container only.
+    offline_env: dict[str, str] = Field(default_factory=dict)
+    build_timeout_seconds: int = 90 * 60
 
     @field_validator("resource_tier")
     @classmethod
@@ -2277,6 +2295,15 @@ class TestExecutionConfig(BaseModel):
             msg = "workdir must be an absolute path"
             raise ValueError(msg)
         return v
+
+    @model_validator(mode="after")
+    def build_needs_a_warm_key(self) -> TestExecutionConfig:
+        # With no key files the key never changes, so the cache never re-warms and
+        # every dependency bump after the first warm fails offline as "infra".
+        if self.build_command and not self.warm_key_files:
+            msg = "tests: build_command needs warm_key_files (the build files to key the cache on)"
+            raise ValueError(msg)
+        return self
 
     @model_validator(mode="after")
     def exactly_one_image_source(self) -> TestExecutionConfig:
