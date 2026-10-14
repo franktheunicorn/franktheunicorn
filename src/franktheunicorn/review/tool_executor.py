@@ -314,21 +314,25 @@ _GUARD_NAME = "frank-guard"
 # in the stash, move the entries out, run the agent, move them back, release.
 #
 # The lock is defence in depth: the worker's lanes already keep two runs out
-# of one tree, and if two ever met, the second's recovery would hand the
-# first's agent its hooks back. A lock whose pid is gone is stale and taken
+# of one tree locally, and if two ever met, the second's recovery would hand
+# the first's agent its hooks back. A lock whose pid is gone is stale and taken
 # over; an empty one is held (its owner is between mkdir and writing it).
 #
-# On a killed run's leftovers: an entry the tree no longer has goes straight
-# back. One the tree has again (the next PR's checkout wrote it) wins, and the
-# stashed copy moves beside the stash rather than being deleted, because it
-# may hold the operator's own untracked file. A killed run never blocks that
-# checkout: git treats a missing tracked file as up to date when it switches
-# commits. Each loop has its own variable because sh functions share them.
+# The stash records the commit it was taken from (``.head``), and is only put
+# back into that commit. HEAD can move under a stash two ways: a killed run is
+# followed by the next PR's checkout, or, remotely, a timed-out run keeps going
+# on the host while the runner checks out the next PR. Putting a PR's config
+# into another commit's tree would plant it there for good, wedging every
+# later checkout of a commit that tracks those paths. So on a different HEAD
+# the stashed copy moves beside the stash, never deleted, and git restores
+# the current commit's own tracked copy. Each loop has its own variable
+# because sh functions share them.
 _GUARD_SCRIPT = r"""
 have() { [ -e "$1" ] || [ -L "$1" ]; }
 if ! g=$(git rev-parse --absolute-git-dir); then
   echo "frank: $PWD is not a git checkout; not running the agent" >&2; exit @REFUSED@
 fi
+h=$(git rev-parse -q --verify HEAD 2>/dev/null) || h=
 s="$g/@STASH@"
 l="$s.lock"
 if ! mkdir "$l" 2>/dev/null; then
@@ -338,26 +342,46 @@ if ! mkdir "$l" 2>/dev/null; then
     exit @REFUSED@
   fi
 fi
-echo "$$" > "$l/pid" || { echo "frank: cannot write $l; not running the agent" >&2; exit @REFUSED@; }
+if ! echo "$$" > "$l/pid"; then
+  rm -rf -- "$l"; echo "frank: cannot write $l; not running the agent" >&2; exit @REFUSED@
+fi
 refuse() { echo "frank: $1; not running the agent" >&2; rm -rf -- "$l"; exit "${2:-@REFUSED@}"; }
+# Put a stashed entry back only into the commit it came from; anywhere else it
+# would be one PR's config planted in another's tree. Otherwise the stashed
+# copy is kept beside the stash (it may hold the operator's untracked file)
+# and the current commit's own tracked copy, if any, comes from git.
+put_back() {
+  if [ "$2" = "$3" ]; then
+    have "$1" && rm -rf -- "./$1"
+    mv -- "$s/$1" "./$1"
+    return
+  fi
+  k="$s.displaced/$(date +%Y%m%d%H%M%S)-$$"
+  { mkdir -p "$k" && mv -- "$s/$1" "$k/"; } || return 1
+  echo "frank: $1 from an agent run on ${2:-an unknown commit} is in $k" >&2
+  have "$1" || git checkout -q HEAD -- "$1" 2>/dev/null
+  return 0
+}
+w=$(cat "$s/.head" 2>/dev/null) || w=
 for r in @ENTRIES@; do
   have "$s/$r" || continue
-  if have "$r"; then
-    k="$s.displaced/$(date +%Y%m%d%H%M%S)-$$"
-    { mkdir -p "$k" && mv -- "$s/$r" "$k/"; } || refuse "cannot clear $s/$r"
-    echo "frank: $r from an interrupted agent run is in $k" >&2
+  if [ "$w" = "$h" ] && have "$r"; then
+    # Same commit, but the tree has it again: the tree's copy wins.
+    put_back "$r" "$w" "~" || refuse "cannot clear $s/$r"
   else
-    mv -- "$s/$r" "./$r" || refuse "cannot put back $s/$r"
+    put_back "$r" "$w" "$h" || refuse "cannot put back $s/$r"
   fi
 done
 command -v "$1" >/dev/null 2>&1 || refuse "$1: command not found" 127
 mkdir -p "$s" || refuse "cannot create $s"
+echo "$h" > "$s/.head" || refuse "cannot write $s/.head"
 restore() {
+  n=$(git rev-parse -q --verify HEAD 2>/dev/null) || n=
   for e in @ENTRIES@; do
     have "$s/$e" || continue
-    have "$e" && rm -rf -- "./$e"
-    mv -- "$s/$e" "./$e"
+    put_back "$e" "$h" "$n"
   done
+  rm -f -- "$s/.head"
   rm -rf -- "$l"
 }
 p=
@@ -463,11 +487,29 @@ def _group_alive(pgid: int) -> bool:
 _LIVE_GROUPS: set[int] = set()
 _LIVE_GROUPS_LOCK = threading.Lock()
 
+#: Set once the process is stopping: by ``stop_local_children``, or by Ctrl-C
+#: (a KeyboardInterrupt, which is also how the worker receives TERM and HUP)
+#: landing inside a local run. From then on ``_run_local`` starts nothing and
+#: answers with :class:`WorkerShutdown` rather than a result.
+_SHUTTING_DOWN = threading.Event()
+
+
+class WorkerShutdown(KeyboardInterrupt):
+    """A local run the worker's shutdown stopped, or refused to start.
+
+    A KeyboardInterrupt, so the paths that already treat one as "interrupted by
+    worker shutdown" (``process_pending_commands`` marks the command so) do the
+    same here, and no caller's ``except Exception`` mistakes a stopped agent
+    for one that failed and goes on to start the next.
+    """
+
 
 def stop_local_children(grace: float = _TERM_GRACE_SECONDS) -> int:
     """TERM every process group ``_run_local`` still has running, allow *grace*
     seconds (the agent guard puts the checkout back in that window), then KILL
-    what is left. Returns how many groups there were."""
+    what is left. Returns how many groups there were. Also marks the process
+    as stopping, so the threads that owned those groups start nothing new."""
+    _SHUTTING_DOWN.set()
     with _LIVE_GROUPS_LOCK:
         groups = sorted(_LIVE_GROUPS)
     for pgid in groups:
@@ -506,6 +548,8 @@ def _run_local(
     Where ``os.killpg`` does not exist (not POSIX), falls back to plain
     ``subprocess.run``.
     """
+    if _SHUTTING_DOWN.is_set():
+        raise WorkerShutdown("the worker is shutting down; not starting " + (cmd[0] if cmd else ""))
     if not hasattr(os, "killpg"):
         return subprocess.run(
             cmd, capture_output=True, text=True, cwd=cwd, timeout=timeout, input=stdin
@@ -525,10 +569,20 @@ def _run_local(
                 _LIVE_GROUPS.add(proc.pid)
             try:
                 proc.wait(timeout=timeout)
-            except BaseException:
-                # The timeout, or Ctrl-C landing in this thread. A second Ctrl-C
-                # during the grace period skips straight to the KILL below.
-                _kill_group(proc.pid, signal.SIGTERM)
+            except BaseException as exc:
+                # The timeout, or Ctrl-C landing in this thread. Ctrl-C means the
+                # whole process is stopping, so every local run gets its TERM
+                # now rather than after this one's grace period: the launcher's
+                # SIGKILL may come before the worker reaches its own cleanup.
+                # A second Ctrl-C during the grace skips to the KILL below.
+                if isinstance(exc, KeyboardInterrupt):
+                    _SHUTTING_DOWN.set()
+                    with _LIVE_GROUPS_LOCK:
+                        everyone = sorted(_LIVE_GROUPS)
+                    for pgid in everyone:
+                        _kill_group(pgid, signal.SIGTERM)
+                else:
+                    _kill_group(proc.pid, signal.SIGTERM)
                 with contextlib.suppress(subprocess.TimeoutExpired):
                     proc.wait(timeout=_TERM_GRACE_SECONDS)
                 raise
@@ -538,6 +592,9 @@ def _run_local(
                     proc.wait(timeout=5)
                 with _LIVE_GROUPS_LOCK:
                     _LIVE_GROUPS.discard(proc.pid)
+        if _SHUTTING_DOWN.is_set():
+            # Stopped by the shutdown, not a CLI that failed on its own.
+            raise WorkerShutdown("stopped by the worker's shutdown: " + (cmd[0] if cmd else ""))
         out = (io_dir / "stdout").read_text(encoding="utf-8", errors="replace")
         err = (io_dir / "stderr").read_text(encoding="utf-8", errors="replace")
     return subprocess.CompletedProcess(cmd, proc.returncode, out, err)

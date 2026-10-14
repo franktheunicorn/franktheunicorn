@@ -510,6 +510,15 @@ class TestAuthorAwaitingMaintainer:
     def test_no_comments_no_signal(self) -> None:
         assert self._score([]) is None
 
+    def test_an_npm_scope_is_not_a_team_once_the_org_is_known(self) -> None:
+        """Found in review: "bumped @types/node" read as a team mention."""
+        from franktheunicorn.scoring.signals import score_author_awaiting_maintainer
+
+        bump = [self._c("alice", "Bumped @types/node to 20, ready for another look")]
+        team = [self._c("alice", "cc @apache/spark-committers")]
+        assert score_author_awaiting_maintainer(bump, "alice", "holdenk", [], org="apache") is None
+        assert score_author_awaiting_maintainer(team, "alice", "holdenk", [], org="apache") == 20
+
 
 class TestNewContributorBumpRespectsAssociation:
     def test_a_forge_known_contributor_gets_no_bump(self) -> None:

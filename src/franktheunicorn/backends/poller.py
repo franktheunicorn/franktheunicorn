@@ -441,19 +441,7 @@ def _refresh_pull_request(
         )
         fetched_comments = all_comments
         comment_bodies = [str(c.get("body", "")) for c in all_comments if c.get("body")]
-        # Who said what, when, in posting order: the "whose court is the ball
-        # in" signal needs the last human speaker, not just the words.
-        comment_events = sorted(
-            (
-                {
-                    "author": str((c.get("user") or {}).get("login", "")),
-                    "body": str(c.get("body", "") or ""),
-                    "created_at": str(c.get("created_at", "") or ""),
-                }
-                for c in all_comments
-            ),
-            key=lambda e: e["created_at"],
-        )
+        comment_events = _comment_events(all_comments)
 
         latest_posted_at = (
             ReviewDraft.objects.filter(
@@ -714,6 +702,22 @@ def _mark_reviews_stale(pr_obj: PullRequest) -> None:
     pr_obj.agent_runs = updated
     if pr_obj.pk:
         PullRequest.objects.filter(pk=pr_obj.pk).update(agent_runs=updated)
+
+
+def _comment_events(comments: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """Who said what, when, in posting order: the "whose court is the ball in"
+    signal needs the last human speaker, not just the words."""
+    return sorted(
+        (
+            {
+                "author": str((c.get("user") or {}).get("login", "")),
+                "body": str(c.get("body", "") or ""),
+                "created_at": str(c.get("created_at", "") or ""),
+            }
+            for c in comments
+        ),
+        key=lambda e: e["created_at"],
+    )
 
 
 def _sync_merge_intent(
@@ -1174,6 +1178,20 @@ def ingest_single_pr(
             if side_data.get("ref"):
                 setattr(pr_obj, ref_field, side_data["ref"])
 
+    # One comments read for scoring and the merge-intent sync below. Scoring
+    # without them wrote over the poll's mention bonus and "ball in our court"
+    # bump on every own-PR scan, which is every cycle for exactly the PRs the
+    # operator is engaged in.
+    fetched_comments: list[dict[str, Any]] | None = None
+    comment_bodies: list[str] | None = None
+    comment_events: list[dict[str, str]] | None = None
+    try:
+        fetched_comments = client.get_issue_comments(owner, repo, pr_number)
+        comment_bodies = [str(c.get("body", "")) for c in fetched_comments if c.get("body")]
+        comment_events = _comment_events(fetched_comments)
+    except Exception:
+        logger.debug("Could not fetch comments for PR #%d during on-demand ingest", pr_number)
+
     if project_config:
         try:
             from franktheunicorn.data_access.context_orchestrator import fetch_jira_context
@@ -1189,6 +1207,8 @@ def ingest_single_pr(
             pr=pr_obj,
             project_config=project_config,
             operator_username=operator_config.github_username or "",
+            comment_bodies=comment_bodies,
+            comment_events=comment_events,
         )
         pr_obj.interest_score = score
         pr_obj.score_breakdown = breakdown
@@ -1209,6 +1229,7 @@ def ingest_single_pr(
         pr_obj,
         operator_config.github_username or "",
         operator_config.merge_intent,
+        comments=fetched_comments,
     )
 
     _route_pr_to_queue(

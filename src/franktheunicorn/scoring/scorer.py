@@ -205,6 +205,7 @@ def score_pull_request(
                 author,
                 operator_username,
                 _get_list(project_config_dict, "committers"),
+                org=str(project_config_dict.get("owner", "") or ""),
             ),
         )
 

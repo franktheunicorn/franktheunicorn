@@ -306,6 +306,18 @@ class TestIngestSinglePRMergeIntent:
         assert fresh.merge_intent == "approved"
         assert fresh.ci_status == "pending"
 
+    def test_single_ingest_scores_with_the_comments(self, tmp_path: Path) -> None:
+        """The own-PR scan lands here every cycle. Scoring without comments wrote
+        over the poll's "ball in our court" bump on exactly those PRs."""
+        ProjectFactory(owner="apache", repo="spark")
+        client = _ReviewsClient(tmp_path)
+        author = self._run(client, OperatorConfig(github_username="holdenk")).author
+        client.comments[42] = [_comment(author, "@holdenk could you take another look?")]
+
+        pr = self._run(client, OperatorConfig(github_username="holdenk"))
+
+        assert pr.score_breakdown.get("author_awaiting_maintainer") == 20
+
     def test_single_ingest_respects_disabled(self, tmp_path: Path) -> None:
         ProjectFactory(owner="apache", repo="spark")
         client = _ReviewsClient(tmp_path)

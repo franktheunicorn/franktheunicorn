@@ -2242,10 +2242,73 @@ class TestAgentConfigGuard:
         done = _REAL_RUN(guard_agent_argv(_LIST_ENTRIES), cwd=repo, capture_output=True, text=True)
 
         assert done.returncode == 3
-        assert "from an interrupted agent run is in" in done.stderr
+        assert "from an agent run on an unknown commit is in" in done.stderr
         kept = list((git_dir / f"{GUARD_STASH}.displaced").glob("*/.claude/settings.local.json"))
         assert [p.read_text() for p in kept] == ["operator's own\n"]
         assert not (stash / ".claude").exists()
+
+    def test_a_killed_runs_stash_is_not_planted_in_another_commit(self, tmp_path: Path) -> None:
+        """PR A adds .claude; its run is killed; PR B (no .claude) is checked
+        out. Putting A's .claude into B's tree would leave untracked files that
+        refuse every later checkout of A."""
+        import signal
+
+        from franktheunicorn.review.tool_executor import GUARD_STASH, guard_agent_argv
+
+        repo = tmp_path / "checkout"
+        repo.mkdir()
+        _git(repo, "init", "-q")
+        (repo / "README").write_text("base\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "base")
+        base = _git(repo, "rev-parse", "HEAD").strip()
+        (repo / ".claude").mkdir()
+        (repo / ".claude" / "settings.json").write_text('{"hooks": {"SessionStart": "x"}}\n')
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "PR A")
+        pr_a = _git(repo, "rev-parse", "HEAD").strip()
+        proc = subprocess.Popen(guard_agent_argv(["sleep", "30"]), cwd=repo, start_new_session=True)
+        deadline = time.monotonic() + 10
+        while (repo / ".claude").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+        _git(repo, "checkout", "-q", "--detach", base)  # PR B
+
+        done = _REAL_RUN(guard_agent_argv(_LIST_ENTRIES), cwd=repo, capture_output=True, text=True)
+
+        assert done.returncode == 3
+        assert f"from an agent run on {pr_a} is in" in done.stderr
+        assert not (repo / ".claude").exists()
+        assert _git(repo, "status", "--porcelain") == ""
+        _git(repo, "checkout", "-q", "--detach", pr_a)  # not wedged
+        displaced = list((repo / ".git" / f"{GUARD_STASH}.displaced").glob("*/.claude"))
+        assert len(displaced) == 1
+
+    def test_a_head_moved_during_the_run_is_left_alone_at_restore(self, tmp_path: Path) -> None:
+        """Remotely, a run that timed out locally keeps going on the host while
+        the runner checks out the next PR. Its restore must not overwrite the
+        new commit's tracked copy with the old PR's."""
+        from franktheunicorn.review.tool_executor import guard_agent_argv
+
+        repo = tmp_path / "checkout"
+        repo.mkdir()
+        _git(repo, "init", "-q")
+        (repo / ".claude").mkdir()
+        (repo / ".claude" / "settings.json").write_text('{"pr": "B"}\n')
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "PR B")
+        pr_b = _git(repo, "rev-parse", "HEAD").strip()
+        (repo / ".claude" / "settings.json").write_text('{"pr": "A", "hooks": "evil"}\n')
+        _git(repo, "commit", "-qam", "PR A")
+        # The "agent" is the runner moving on underneath it.
+        agent = ["sh", "-c", f"git checkout -q --detach {pr_b}"]
+
+        done = _REAL_RUN(guard_agent_argv(agent), cwd=repo, capture_output=True, text=True)
+
+        assert done.returncode == 0
+        assert (repo / ".claude" / "settings.json").read_text() == '{"pr": "B"}\n'
+        assert _git(repo, "status", "--porcelain") == ""
 
     def test_a_live_run_holding_the_checkout_refuses_a_second(self, tmp_path: Path) -> None:
         """Two runs in one tree would have the second's recovery hand the
@@ -2358,20 +2421,33 @@ class TestLocalChildrenAtShutdown:
     """Local agents run in their own session, so a Ctrl-C or hangup at the
     worker's terminal no longer reaches them; the worker has to stop them."""
 
+    @pytest.fixture(autouse=True)
+    def _not_shutting_down_afterwards(self) -> Any:
+        from franktheunicorn.review import tool_executor
+
+        yield
+        tool_executor._SHUTTING_DOWN.clear()
+
     def test_stop_local_children_ends_a_run_on_another_thread(self, tmp_path: Path) -> None:
         import threading
 
-        from franktheunicorn.review.tool_executor import guard_agent_argv, stop_local_children
+        from franktheunicorn.review.tool_executor import (
+            WorkerShutdown,
+            guard_agent_argv,
+            stop_local_children,
+        )
 
         repo = _pr_checkout(tmp_path)
         before = _snapshot(repo)
-        results: list[Any] = []
-        worker = threading.Thread(
-            target=lambda: results.append(
+        raised: list[BaseException] = []
+
+        def _run() -> None:
+            try:
                 LocalExecutor().run(guard_agent_argv(["sleep", "60"]), cwd=str(repo), timeout=120)
-            ),
-            daemon=True,
-        )
+            except BaseException as exc:
+                raised.append(exc)
+
+        worker = threading.Thread(target=_run, daemon=True)
         started = time.monotonic()
         worker.start()
         deadline = time.monotonic() + 10
@@ -2383,9 +2459,24 @@ class TestLocalChildrenAtShutdown:
 
         assert not worker.is_alive()
         assert time.monotonic() - started < 30
-        assert results and results[0] is not None and results[0].returncode == 143
+        # Not an ordinary CLI failure: the caller must not go on to the next run.
+        assert len(raised) == 1 and isinstance(raised[0], WorkerShutdown)
         assert _snapshot(repo) == before  # TERM first, so the guard put it back
         assert stop_local_children() == 0
+
+    def test_nothing_new_starts_once_shutdown_began(self, tmp_path: Path) -> None:
+        from franktheunicorn.review.tool_executor import (
+            WorkerShutdown,
+            _run_local,
+            stop_local_children,
+        )
+
+        stop_local_children()
+        marker = tmp_path / "ran"
+
+        with pytest.raises(WorkerShutdown):
+            _run_local(["touch", str(marker)], str(tmp_path), 10, None)
+        assert not marker.exists()
 
     def test_ctrl_c_in_the_running_thread_terms_before_it_kills(self, tmp_path: Path) -> None:
         import _thread

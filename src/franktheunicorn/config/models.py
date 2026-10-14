@@ -250,15 +250,25 @@ class ClaudeCLIConfig(BaseModel):
         return _parse_cli_path(self.cli_path)
 
 
+#: npm packages that install a seeded binary under another name, so an
+#: ``npx`` launcher (``npx -y @anthropic-ai/claude-code``) is recognised.
+_PACKAGE_BINARIES = {"claude-code": "claude", "pi-coding-agent": "pi"}
+
+
 def agent_binary_in(argv: list[str], binaries: Collection[str]) -> str:
     """The first of *binaries* that *argv* runs, by basename; ``""`` if none.
 
     The whole argv, not just its head: ``uv run claude``, ``npx codex`` and
     ``corp-wrap claude --headless`` are the launcher shapes operator.yaml
-    documents, and each still runs the binary the seed's flags are for.
+    documents, and each still runs the binary the seed's flags are for. An npm
+    package spec counts as the binary it installs, with any ``@version`` pin
+    dropped: ``@anthropic-ai/claude-code@2.1.0``, ``@openai/codex@0.162.1``.
     """
     for part in argv:
         name = PurePath(part).name
+        if "@" in name[1:]:
+            name = name[: name.index("@", 1)]
+        name = _PACKAGE_BINARIES.get(name, name)
         if name in binaries:
             return name
     return ""

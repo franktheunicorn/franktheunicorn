@@ -489,6 +489,19 @@ effort. "Done" means it is on this branch with tests.
   `build_invocation`, so they inherit it. An extra entry inherits a seed's
   flags when its argv runs the seed's binary anywhere, by basename, so
   `/home/op/.local/bin/claude`, `uv run claude` and `npx codex` are covered.
+  So are npm package specs with or without a version pin:
+  `npx -y @anthropic-ai/claude-code@2.1.299`, `@openai/codex@0.162.1` and
+  `@mariozechner/pi-coding-agent`. An enabled reviewer whose binary frank
+  has no flags for, and which sets none of its own, gets a startup WARNING
+  saying it runs with that CLI's default tools.
+- **Found in review: the `claude-code` LLM backend.** That backend is the
+  documented no-API-key option, and with no triage backend set it also serves
+  triage, so it reads contributor diffs and emailed reports. It still ran
+  claude with the old denylist, loaded the operator's MCP servers, and ran
+  in the shared temp root, where any local user could plant a `.claude/`.
+  It now passes `--setting-sources user --strict-mcp-config --tools ""`
+  (checked with claude 2.1.299: the init event lists no tools and no MCP
+  servers) and runs in a fresh private directory per call.
   The legacy `claude_cli:` block takes `readonly_args` too, for a wrapper
   that rejects unknown flags. Magpie's `--ephemeral` and
   `--skip-git-repo-check` for codex are left out: neither contains anything.
@@ -549,6 +562,18 @@ effort. "Done" means it is on this branch with tests.
   worker's shutdown stops whatever is still recorded
   (`stop_local_children`), and a hangup now runs that shutdown unless
   SIGHUP is ignored (`nohup`).
+- **Found in review, second round.** The worker stopped those children only
+  after the 30-second join of the interactive thread. A second signal during
+  that join, or `make down`'s SIGKILL a few seconds after its TERM, skipped
+  the stop, and the stopped run looked like an ordinary CLI failure, so the
+  thread went on to start the next one.
+  - The shutdown now ignores further signals, stops local children first,
+    and then joins.
+  - Once stopping, `_run_local` raises `WorkerShutdown`, a KeyboardInterrupt,
+    so the command is marked "interrupted by worker shutdown". It starts
+    nothing new after that.
+  - A Ctrl-C that lands inside any local run sends TERM to every group at
+    once.
 - **Upstream source.** `tools/adversarial-review/src/adversarial_review/runner.py`
   (`_execute`, `_AUTH_ERRORS`) at the pinned commit; not at 0.1.0.
 - **Remote path.** The process-group change is local only: on the remote the
@@ -571,8 +596,17 @@ effort. "Done" means it is on this branch with tests.
   review" followed by a second click put a duplicate on a contributor's PR.
   The view also used to say "Posted" whatever the poster returned.
 - **Where.** `backends/poster.py` (`_find_landed_review`, `PostUnverifiedError`),
-  the `post_review` view. Correlation keys cannot identify the review: they
-  never reach the forge, so the marker plus recency does.
+  the `post_review` view. Correlation keys never reach the forge, so each
+  attempt writes its own `<!-- franktheunicorn-attempt:<nonce>:<draft pk> -->`
+  into every comment it sends, and the read-back looks for that.
+- **Found in review.** The first version matched frank's `MANAGED_MARKER`
+  plus a two-minute window, so an earlier frank review on the same PR (the
+  operator's previous Post moments before) read as this attempt landing.
+  The failed batch was then recorded as posted, with no comment ids, so it
+  could not be recalled either. The per-attempt marker fixes both: the
+  read-back matches only this attempt, and it maps each landed comment back
+  to its draft. There is deliberately no shortcut on a 4xx: GitLab posts
+  notes one by one, so a 4xx can follow a partial landing.
 - **Upstream source.** `plugins/magpie-pr-management/skills/code-review/posting.md`
   ("verify the post-condition instead of retrying") at the pinned commit.
 - **Remote path.** Web process only; one or two forge reads on the failure
@@ -616,6 +650,12 @@ effort. "Done" means it is on this branch with tests.
   fetched every issue comment and now passes author, body and time in
   posting order rather than the bodies alone. A failed comment fetch leaves
   the signal off. Weight overridable per project like any other.
+- **Found in review.** `ingest_single_pr`, where the own-PR scan lands every
+  cycle, re-scored without comments. That wiped this bump, and the mention
+  bonus, on exactly the PRs the operator is engaged in. It now fetches the
+  comments once and shares them with the merge-intent sync, which already
+  took them. Also, `@types/node` in a dependency bump read as a team mention.
+  A team now counts only under the project's own org.
 - **Differences from Magpie.** frank's maintainers are the operator plus
   `committers`, so an unknown mentioned login does not count; and it reads
   issue comments only, so a maintainer who answered with a formal review is
@@ -693,7 +733,20 @@ effort. "Done" means it is on this branch with tests.
   the stashed one moves to `.git/frank-agent-guard.displaced/`, never
   deleted, with a WARNING naming where. A killed run does not block the next
   checkout, because git treats a missing tracked file as up to date when it
-  switches commits; a test pins that. A lock directory beside the stash,
+  switches commits; a test pins that.
+- **Found in review: the stash is tied to its commit.** The first version
+  put a stash back into whatever was checked out, which planted one PR's
+  config in another PR's tree in two cases:
+  - after a killed run;
+  - remotely, when a run that timed out locally kept going on the host while
+    the runner checked out the next PR.
+
+  The planted files then refused every later checkout of a commit that
+  tracks those paths. The stash now records the commit it came from and is
+  put back only into that commit. Anywhere else it moves aside, and git
+  restores the current commit's own tracked copy, so the tree stays clean
+  whichever way HEAD moved. Separately, a lock whose pid could not be
+  written is removed instead of being left empty forever. A lock directory beside the stash,
   holding the run's pid, refuses a second run in the same checkout while the
   first is alive. The worker's lanes already prevent that, but if two ever
   met, the second's recovery would hand the first agent its hooks back. A

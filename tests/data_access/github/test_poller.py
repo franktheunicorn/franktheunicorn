@@ -1512,18 +1512,23 @@ class TestCommentEventsReachTheScorer:
 
 @pytest.mark.django_db
 class TestAuthorAssociationIsStored:
+    @pytest.mark.parametrize(
+        ("association", "is_new"),
+        [("CONTRIBUTOR", False), ("FIRST_TIME_CONTRIBUTOR", True)],
+    )
     def test_the_api_value_lands_on_the_row_and_decides_new_contributor(
-        self, tmp_path: Path
+        self, tmp_path: Path, association: str, is_new: bool
     ) -> None:
-        client = _CountingMockClient(tmp_path, [_listed_pr(99, author_association="CONTRIBUTOR")])
+        """Both directions, so the assertion cannot pass whatever the value is."""
+        client = _CountingMockClient(tmp_path, [_listed_pr(99, author_association=association)])
         poll_project(
             client,
             ProjectConfig(owner="apache", repo="spark", poll_refresh_hours=24),
             operator_username="nobody",
         )
         pr = PullRequest.objects.get(number=99)
-        assert pr.author_association == "CONTRIBUTOR"
-        assert pr.is_new_contributor is False
+        assert pr.author_association == association
+        assert pr.is_new_contributor is is_new
 
     def test_a_missing_value_is_blank(self, tmp_path: Path) -> None:
         client = _CountingMockClient(tmp_path, [_listed_pr(98)])

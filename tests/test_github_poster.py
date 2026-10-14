@@ -333,26 +333,37 @@ class TestMovedHeadGuard:
 @pytest.mark.django_db
 class TestVerifyAfterAFailedPost:
     """A forge can accept a review and still fail the request, and a submitted
-    review cannot be deleted. So a failure is checked, never blindly retried."""
+    review cannot be deleted. So a failure is checked, never blindly retried,
+    and the check looks for this attempt, not for any review of frank's."""
 
     MARKER_BODY = "x\n<!-- franktheunicorn-managed -->"
 
-    def _setup(self) -> tuple[Any, Any, MagicMock]:
+    def _setup(self) -> tuple[Any, Any, MagicMock, list[Any]]:
+        """A forge that times out on the post; ``sent`` captures what went out."""
         pr = PullRequestFactory()
         draft = ReviewDraftFactory(
             pull_request=pr, file_path="a.py", line_number=1, status="accepted"
         )
         client = MagicMock()
-        client.create_review.side_effect = TimeoutError("read timed out")
-        return pr, draft, client
+        client.get_pull_request_diff.return_value = ""
+        sent: list[Any] = []
+
+        def _create(owner: str, repo: str, number: int, review: Any) -> Any:
+            sent.append(review)
+            raise TimeoutError("read timed out")
+
+        client.create_review.side_effect = _create
+        return pr, draft, client, sent
 
     def test_a_review_that_landed_anyway_is_recorded_as_posted(self) -> None:
-        pr, draft, client = self._setup()
+        pr, draft, client, sent = self._setup()
         now = datetime.now(tz=UTC).isoformat()
         client.list_pull_request_reviews.return_value = [
             {"id": 77, "body": "", "submitted_at": now}
         ]
-        client.get_review_comments.return_value = [{"id": 5, "body": self.MARKER_BODY}]
+        client.get_review_comments.side_effect = lambda *a: [
+            {"id": 5, "body": c.body} for c in sent[0].comments
+        ]
 
         result = GitHubPoster(client).post_review(pr, [draft])
 
@@ -361,37 +372,61 @@ class TestVerifyAfterAFailedPost:
         assert result["verified_after_error"] is True
         draft.refresh_from_db()
         assert draft.status == "posted"
+        # The comment id came back with it, so the operator can still recall it.
+        assert draft.forge_comment_id == 5
 
-    def test_a_marker_in_the_review_body_is_enough(self) -> None:
-        pr, draft, client = self._setup()
-        client.list_pull_request_reviews.return_value = [
-            {"id": 78, "body": self.MARKER_BODY, "submitted_at": "2999-01-01T00:00:00Z"}
+    def test_this_attempts_marker_in_the_review_body_is_enough(self) -> None:
+        pr, draft, client, sent = self._setup()
+        client.get_review_comments.return_value = []
+        client.list_pull_request_reviews.side_effect = lambda *a: [
+            {
+                "id": 78,
+                "body": "\n".join(c.body for c in sent[0].comments),
+                "submitted_at": "2999-01-01T00:00:00Z",
+            }
         ]
         assert GitHubPoster(client).post_review(pr, [draft]) is not None
-        client.get_review_comments.assert_not_called()
 
-    def test_an_older_review_of_ours_does_not_count(self) -> None:
-        pr, draft, client = self._setup()
-        old = (datetime.now(tz=UTC) - timedelta(hours=3)).isoformat()
+    def test_an_earlier_review_of_ours_in_the_same_minute_does_not_count(self) -> None:
+        """Found in review: the operator's previous Post moments earlier carries
+        frank's marker too, and used to be read as this attempt landing."""
+        pr, draft, client, _sent = self._setup()
         client.list_pull_request_reviews.return_value = [
-            {"id": 1, "body": self.MARKER_BODY, "submitted_at": old}
+            {"id": 1, "body": self.MARKER_BODY, "submitted_at": datetime.now(tz=UTC).isoformat()}
         ]
+        client.get_review_comments.return_value = [{"id": 9, "body": self.MARKER_BODY}]
+
         assert GitHubPoster(client).post_review(pr, [draft]) is None
         draft.refresh_from_db()
         assert draft.status == "accepted"
 
     def test_someone_elses_review_does_not_count(self) -> None:
-        pr, draft, client = self._setup()
+        pr, draft, client, _sent = self._setup()
         client.list_pull_request_reviews.return_value = [
             {"id": 2, "body": "LGTM", "submitted_at": datetime.now(tz=UTC).isoformat()}
         ]
         client.get_review_comments.return_value = [{"body": "nice"}]
         assert GitHubPoster(client).post_review(pr, [draft]) is None
 
+    def test_each_attempt_carries_its_own_marker(self) -> None:
+        pr, draft, client, sent = self._setup()
+        client.list_pull_request_reviews.return_value = []
+        poster = GitHubPoster(client)
+        poster.post_review(pr, [draft])
+        poster.post_review(pr, [draft])
+
+        first, second = (review.comments[0].body for review in sent)
+        assert "franktheunicorn-attempt:" in first
+        assert (
+            first.rsplit("franktheunicorn-attempt:", 1)[1]
+            != second.rsplit("franktheunicorn-attempt:", 1)[1]
+        )
+        assert f":{draft.pk} -->" in first
+
     def test_an_unreadable_pr_is_unknown_not_absent(self) -> None:
         from franktheunicorn.backends.poster import PostUnverifiedError
 
-        pr, draft, client = self._setup()
+        pr, draft, client, _sent = self._setup()
         client.list_pull_request_reviews.side_effect = RuntimeError("502")
         with pytest.raises(PostUnverifiedError):
             GitHubPoster(client).post_review(pr, [draft])

@@ -308,27 +308,38 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
     except KeyboardInterrupt:
         logger.info("Worker shutting down.")
     finally:
-        # Asked to stop, then given a moment. A *short* command finishes; a long
-        # one does not, and cannot — an agent CLI has a 1500s budget and nobody
-        # wants Ctrl-C to take 25 minutes. Anything still running is abandoned in
-        # `running` and recovered by requeue_interrupted_commands at next startup,
-        # which is why that sweep exists.
-        stop_interactive.set()
-        interactive.join(timeout=INTERACTIVE_SHUTDOWN_SECONDS)
-        if interactive.is_alive():
-            logger.info(
-                "Interactive command still running at shutdown; leaving it to the "
-                "next worker's stuck-command sweep."
-            )
+        # A second signal (Ctrl-C again, or `make down`'s follow-up) would raise
+        # in the middle of this cleanup and skip the rest of it, leaving agents
+        # running after the worker. The shutdown is already under way.
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            signal.signal(sig, signal.SIG_IGN)
         from franktheunicorn.review.tool_executor import stop_local_children
 
-        stopped = stop_local_children()
-        if stopped:
-            logger.info(
-                "Stopped %d local agent run(s) still going at shutdown, so none keeps "
-                "running (and billing) after the worker.",
-                stopped,
-            )
+        # Local agents first, not after the join: they run in their own
+        # sessions, so nothing else stops them, and a launcher's SIGKILL can
+        # come seconds after its TERM. Stopped, the interactive thread's run
+        # ends as "interrupted by worker shutdown" and the join is short.
+        try:
+            stopped = stop_local_children()
+            if stopped:
+                logger.info(
+                    "Stopped %d local agent run(s) still going at shutdown, so none keeps "
+                    "running (and billing) after the worker.",
+                    stopped,
+                )
+        finally:
+            # Asked to stop, then given a moment. A *short* command finishes; a
+            # long one does not, and cannot — an agent CLI has a 1500s budget and
+            # nobody wants Ctrl-C to take 25 minutes. Anything still running is
+            # abandoned in `running` and recovered by requeue_interrupted_commands
+            # at next startup, which is why that sweep exists.
+            stop_interactive.set()
+            interactive.join(timeout=INTERACTIVE_SHUTDOWN_SECONDS)
+            if interactive.is_alive():
+                logger.info(
+                    "Interactive command still running at shutdown; leaving it to the "
+                    "next worker's stuck-command sweep."
+                )
         # Close each unique client exactly once (mock mode reuses one instance).
         for c in {id(v): v for v in clients.values()}.values():
             try:
@@ -623,6 +634,18 @@ def _check_agent_cli_reviewers(operator_config: OperatorConfig) -> None:
             f", read-only via {' '.join(rc.readonly_args)}" if rc.readonly_args else "",
         )
         binary = agent_binary_in(rc.cli_argv, _READONLY_SEEDED_BINARIES)
+        if not binary and not rc.readonly_args:
+            # An agent frank ships no flags for, or one behind a launcher it does
+            # not recognise. Not an error, and the checkout guard still keeps the
+            # PR's own agent config away from it, but what the agent itself may
+            # do in that checkout is now the operator's call to make visibly.
+            logger.warning(
+                "Agent CLI %r: frank has no read-only flags for %s, so it runs with "
+                "that CLI's default tools in the checkout of the PR it reviews. Set "
+                "readonly_args to its own read-only options to contain it.",
+                rc.name,
+                " ".join(rc.cli_argv),
+            )
         if binary and not rc.readonly_args:
             # The seed's read-only flags were overridden away. Not an error (an
             # operator may want an agent that edits), but a reviewer that can run

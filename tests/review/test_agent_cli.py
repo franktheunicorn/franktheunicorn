@@ -932,6 +932,31 @@ class TestReadOnlyFlags:
         assert agent_binary_in(["corp-wrap", "--config", "claude.yaml"], known) == ""
         assert agent_binary_in([], known) == ""
 
+    @pytest.mark.parametrize(
+        ("argv", "binary"),
+        [
+            (["npx", "-y", "@anthropic-ai/claude-code"], "claude"),
+            (["npx", "-y", "@anthropic-ai/claude-code@2.1.299"], "claude"),
+            (["npx", "@openai/codex@0.162.1"], "codex"),
+            (["npx", "-y", "@mariozechner/pi-coding-agent@0.73.1"], "pi"),
+            (["bunx", "claude-code@latest"], "claude"),
+        ],
+    )
+    def test_npm_package_specs_name_their_binary(self, argv: list[str], binary: str) -> None:
+        from franktheunicorn.config.models import agent_binary_in
+
+        assert agent_binary_in(argv, {"claude", "codex", "pi"}) == binary
+
+    def test_an_npx_launched_pi_inherits_its_tool_allowlist(self) -> None:
+        oc = OperatorConfig(
+            agent_cli_reviewers=[
+                AgentCLIReviewerConfig(
+                    name="pi-pinned", cli_path="npx -y @mariozechner/pi-coding-agent@0.73.1"
+                )
+            ]
+        )
+        assert self._by_name(oc)["pi-pinned"].readonly_args == list(PI_READONLY_ARGS)
+
     def test_the_legacy_block_can_opt_out(self) -> None:
         """A strict wrapper under the old ``claude_cli:`` block that rejects
         unknown flags had no way to drop them."""

@@ -405,6 +405,7 @@ def score_author_awaiting_maintainer(
     pr_author: str,
     operator_username: str,
     committers: list[str],
+    org: str = "",
 ) -> int | None:
     """Boost when the ball is in the maintainers' court.
 
@@ -424,6 +425,8 @@ def score_author_awaiting_maintainer(
 
     ``comments`` are ``{"author", "body", "created_at"}`` in posting order.
     The operator's own PRs never fire: there the operator is the one waiting.
+    A team mention counts only for the project's own ``org`` when it is known:
+    ``@types/node`` in a dependency bump is an npm scope, not a team.
     """
     from franktheunicorn.backends.mentions import mention_scan
 
@@ -437,9 +440,11 @@ def score_author_awaiting_maintainer(
     maintainers = _lowered(committers)
     if op:
         maintainers.add(op)
+    team_prefix = f"{org.lower()}/" if org else "/"
     for hit in mention_scan(human[-1].get("body", "")):
         handle = hit.handle.lower()
-        if "/" in handle or handle in maintainers:
+        is_team = handle.startswith(team_prefix) if org else "/" in handle
+        if is_team or handle in maintainers:
             return WEIGHTS["author_awaiting_maintainer"]
     return None
 

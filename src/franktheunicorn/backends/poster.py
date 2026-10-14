@@ -10,7 +10,10 @@ and comment recall within a configurable window.
 from __future__ import annotations
 
 import logging
+import re
+import uuid
 from collections.abc import Iterable
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -24,6 +27,18 @@ logger = logging.getLogger(__name__)
 MANAGED_MARKER = "<!-- franktheunicorn-managed -->"
 DEFAULT_ATTRIBUTION = "Generated with assistance of franktheunicorn"
 RECALL_WINDOW_HOURS = 24
+
+#: One per post attempt, on every comment it sends, with the draft's pk: the
+#: read-back after a failed post looks for *this* attempt, so an earlier frank
+#: review on the same PR cannot be mistaken for it, and it recovers each
+#: draft's comment id so a review that landed anyway can still be recalled.
+#: An HTML comment, so nothing renders.
+_ATTEMPT_MARKER_RE = re.compile(r"<!-- franktheunicorn-attempt:([0-9a-f]+):([^ ]*) -->")
+
+
+def _attempt_marker(attempt: str, key: str) -> str:
+    return f"<!-- franktheunicorn-attempt:{attempt}:{key} -->"
+
 
 #: What ``post_review`` does when the PR's head moved since the drafts were
 #: made: refuse (the default; the view offers the other two), post as drafted,
@@ -275,6 +290,11 @@ class GitHubPoster:
             logger.info(
                 "Folded %d inline comment(s) into the review body for PR #%d", folded, pr.number
             )
+        attempt = uuid.uuid4().hex
+        comments = [
+            replace(c, body=f"{c.body}\n{_attempt_marker(attempt, c.correlation_key)}")
+            for c in comments
+        ]
         review = ReviewBody(event=event, comments=comments)
 
         attempt_started = datetime.now(tz=UTC)
@@ -287,7 +307,7 @@ class GitHubPoster:
             )
         except Exception:
             logger.exception("Failed to post review for PR #%d", pr.number)
-            outcome, landed = self._find_landed_review(pr, attempt_started)
+            outcome, landed, landed_ids = self._find_landed_review(pr, attempt_started, attempt)
             if outcome == "absent":
                 logger.info(
                     "Checked PR #%d after the failed post: no review of ours landed, so "
@@ -306,7 +326,11 @@ class GitHubPoster:
                 pr.number,
                 landed.get("id"),
             )
-            result = {"id": landed.get("id"), "verified_after_error": True}
+            result = {
+                "id": landed.get("id"),
+                "verified_after_error": True,
+                "comment_ids_by_key": landed_ids,
+            }
 
         now = datetime.now(tz=UTC)
 
@@ -336,45 +360,51 @@ class GitHubPoster:
         return result
 
     def _find_landed_review(
-        self, pr: PullRequest, since: datetime
-    ) -> tuple[str, dict[str, Any] | None]:
-        """After a failed post: ``("landed", review)``, ``("absent", None)`` or
-        ``("unknown", None)``.
+        self, pr: PullRequest, since: datetime, attempt: str
+    ) -> tuple[str, dict[str, Any] | None, dict[str, int]]:
+        """After a failed post: ``("landed", review, ids)``, ``("absent", None, {})``
+        or ``("unknown", None, {})``.
 
-        A review counts as ours when its body or one of its comments carries
-        ``MANAGED_MARKER`` and it was submitted no earlier than two minutes
-        before the attempt (clock skew between here and the forge). The
-        correlation keys cannot be used: they never reach the forge.
+        A review is this attempt's when its body or one of its comments carries
+        this attempt's marker (``_attempt_marker``); ``ids`` maps each draft's
+        correlation key to the comment id the forge gave it. Reviews submitted
+        well before the attempt are skipped to save calls; the marker, not the
+        time, is what decides.
         """
         owner, repo, number = pr.project.owner, pr.project.repo, pr.number
         try:
             reviews = self._client.list_pull_request_reviews(owner, repo, number)
         except Exception:
             logger.warning("Could not list PR #%d's reviews to verify the post", number)
-            return "unknown", None
-        floor = since - timedelta(minutes=2)
+            return "unknown", None, {}
+        floor = since - timedelta(minutes=10)
         for review in reversed(list(reviews)):
             submitted = _parse_timestamp(review.get("submitted_at"))
             if submitted is not None and submitted < floor:
                 continue
-            if MANAGED_MARKER in str(review.get("body") or ""):
-                return "landed", review
+            ours_in_body = any(
+                found == attempt
+                for found, _ in _ATTEMPT_MARKER_RE.findall(str(review.get("body") or ""))
+            )
+            ids: dict[str, int] = {}
             review_id = review.get("id")
-            if not isinstance(review_id, int):
-                continue
-            try:
-                comments = self._client.get_review_comments(owner, repo, number, review_id)
-            except Exception:
-                logger.warning(
-                    "Could not read review %s on PR #%d to verify the post", review_id, number
-                )
-                return "unknown", None
-            if any(
-                isinstance(c, dict) and MANAGED_MARKER in str(c.get("body") or "")
-                for c in comments or []
-            ):
-                return "landed", review
-        return "absent", None
+            if isinstance(review_id, int):
+                try:
+                    comments = self._client.get_review_comments(owner, repo, number, review_id)
+                except Exception:
+                    logger.warning(
+                        "Could not read review %s on PR #%d to verify the post", review_id, number
+                    )
+                    return "unknown", None, {}
+                for comment in comments or []:
+                    if not isinstance(comment, dict) or not isinstance(comment.get("id"), int):
+                        continue
+                    for found, key in _ATTEMPT_MARKER_RE.findall(str(comment.get("body") or "")):
+                        if found == attempt:
+                            ids[key] = comment["id"]
+            if ours_in_body or ids:
+                return "landed", review, ids
+        return "absent", None, {}
 
     def _live_head_sha(self, pr: PullRequest) -> str:
         """The PR's head sha as the forge sees it now; "" when it cannot be read.
