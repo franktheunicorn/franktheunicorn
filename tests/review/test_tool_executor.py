@@ -2439,12 +2439,12 @@ class TestLocalChildrenAtShutdown:
 
         repo = _pr_checkout(tmp_path)
         before = _snapshot(repo)
-        raised: list[BaseException] = []
+        raised: list[KeyboardInterrupt] = []
 
         def _run() -> None:
             try:
                 LocalExecutor().run(guard_agent_argv(["sleep", "60"]), cwd=str(repo), timeout=120)
-            except BaseException as exc:
+            except KeyboardInterrupt as exc:  # WorkerShutdown is one
                 raised.append(exc)
 
         worker = threading.Thread(target=_run, daemon=True)
