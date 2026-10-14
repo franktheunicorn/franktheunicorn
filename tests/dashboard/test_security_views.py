@@ -1123,12 +1123,14 @@ class TestSecurityReportTriage:
     def test_a_severity_only_run_says_what_it_got_and_what_it_didnt(
         self, client: Client, db: Any
     ) -> None:
-        """_parse_report writes the severity two LLM calls before any verdict.
+        """_parse_report reads the reporter's severity claim two LLM calls before
+        any verdict.
 
         So this is the commonest partial failure, and both halves have to show:
-        blanket "produced no assessment" contradicts the badge on the page, while
-        counting severity as a result rendered the result partial — which gates
-        every block on the other fields — as an empty heading.
+        blanket "produced no assessment" would deny the parse happened, while
+        counting the claim as a result rendered the result partial — which gates
+        every block on the other fields — as an empty heading. The claim is
+        named as the reporter's, not as a rating frank made.
         """
         from franktheunicorn.core.models import WorkerCommand
 
@@ -1138,7 +1140,7 @@ class TestSecurityReportTriage:
             expected_behavior_explanation="",
             is_expected_behavior=False,
             poc_plausible=None,
-            assessed_severity="high",
+            claimed_severity="high",
         )
         cmd = WorkerCommand.objects.create(command="run_security_triage", security_report=report)
         WorkerCommand.objects.filter(pk=cmd.pk).update(status="completed")
@@ -1147,7 +1149,8 @@ class TestSecurityReportTriage:
 
         # Contiguous phrases only — the template wraps mid-sentence.
         assert "came back empty" in body
-        assert "rated this" in body
+        assert "the reporter claims" in body
+        assert "rated this" not in body
         assert "High" in body
         # The empty-card path: the result partial must not be rendered at all.
         assert "Triage Analysis" not in body
@@ -4164,3 +4167,28 @@ class TestAttachmentManifestOnThePage:
         report = SecurityReportFactory()
         page = client.get(f"/security/{report.pk}/")
         assert b"Attachments (" not in page.content
+
+
+class TestReporterClaimedSeverity:
+    """The reporter's severity is their claim, shown as theirs; frank's badge
+    is its own assessment and nothing else."""
+
+    def test_the_claim_is_labelled_and_not_badged(self, client: Client, db: Any) -> None:
+        report = SecurityReportFactory(claimed_severity="critical", assessed_severity="unknown")
+        body = client.get(f"/security/{report.pk}/").content.decode()
+        assert "reporter claims critical" in body
+        assert "sev-critical" not in body
+
+    def test_a_claim_matching_the_assessment_is_not_repeated(self, client: Client, db: Any) -> None:
+        report = SecurityReportFactory(claimed_severity="high", assessed_severity="high")
+        body = client.get(f"/security/{report.pk}/").content.decode()
+        assert "sev-high" in body
+        assert "reporter claims" not in body
+
+    def test_the_verifier_is_told_the_claim_not_the_rating(self, db: Any) -> None:
+        from franktheunicorn.config.models import SecurityVerifierConfig
+        from franktheunicorn.security.verifier import _build_prompt
+
+        report = SecurityReportFactory(claimed_severity="critical", assessed_severity="low")
+        prompt = _build_prompt(report, "master", SecurityVerifierConfig())
+        assert "Reported severity: critical" in prompt

@@ -324,9 +324,9 @@ def triage_report(
             logger.info("Parsing report #%d via LLM (%s)", report.pk, backend.label)
             parsed = _parse_report(report, backend)
             logger.info(
-                "Parse complete for report #%d: severity=%r component=%r",
+                "Parse complete for report #%d: reporter claims severity=%r component=%r",
                 report.pk,
-                report.assessed_severity,
+                report.claimed_severity,
                 report.parsed_component[:60] if report.parsed_component else "",
             )
 
@@ -1017,8 +1017,11 @@ def _parse_report(report: SecurityReport, backend: BaseLLMBackend) -> bool:
         report.parsed_component = str(parsed.get("component", ""))[:500]
         report.parsed_poc = str(parsed.get("poc", ""))
         report.parsed_impact = str(parsed.get("impact", ""))
+        # The reporter's claim, not a rating: it goes to claimed_severity and
+        # never to assessed_severity, which is the analysis step's and the
+        # operator's alone.
         severity = str(parsed.get("severity", "unknown")).lower()
-        report.assessed_severity = severity if severity in _VALID_SEVERITIES else "unknown"
+        report.claimed_severity = severity if severity in _VALID_SEVERITIES else "unknown"
 
         if not report.reporter_name and parsed.get("reporter_name"):
             report.reporter_name = str(parsed["reporter_name"])[:255]
@@ -1031,7 +1034,7 @@ def _parse_report(report: SecurityReport, backend: BaseLLMBackend) -> bool:
                 "parsed_component",
                 "parsed_poc",
                 "parsed_impact",
-                "assessed_severity",
+                "claimed_severity",
                 "reporter_name",
                 "reporter_email",
                 "updated_at",

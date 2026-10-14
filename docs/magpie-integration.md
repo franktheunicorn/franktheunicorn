@@ -529,6 +529,29 @@ effort. "Done" means it is on this branch with tests.
 - **Remote path.** Web process only; one or two forge reads on the failure
   path.
 
+### 4.15 The reporter's severity is a claim, not frank's rating (done)
+
+- **What.** A `claimed_severity` field holds the severity the reporter
+  states, as the parse step reads it; `assessed_severity` is written only by
+  the analysis step, the verdict form and the sheet import. The page shows
+  the claim as "reporter claims ..." when it differs from frank's badge, and
+  the verifier's "Reported severity" line now carries the claim, which is
+  what it always said it was. Scored 3/4.
+- **Why.** The parse step wrote the reporter's own rating straight into
+  `assessed_severity`, so until the analysis ran (and whenever it failed,
+  the commonest partial outcome) the badge on the page was the attacker's
+  number presented as frank's.
+- **Where.** `core/models.py` and migration 0062 (adds the field, copies the
+  old value across for rows the analysis never reached, clears nothing:
+  those rows cannot be told apart from an operator's ruling),
+  `security/prompt.py`, `security/triage.py`, `security/verifier.py`, the
+  `_has_triage_severity` helper and two templates.
+- **Upstream source.** `AGENTS.md` ("treat every reporter-supplied CVSS score
+  as informational background only") and the issue-import skill's
+  Severity/CWE rule at the pinned commit; the rule exists at 0.1.0 too.
+- **Remote path.** Worker and web processes only; the verifier prompt is
+  built on the worker before it reaches the agent host.
+
 ---
 
 ## 5. Tier 2: Adopt Later

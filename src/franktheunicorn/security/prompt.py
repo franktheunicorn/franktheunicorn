@@ -52,7 +52,8 @@ def build_parse_prompt(raw_text: str, nonce: str = "") -> tuple[str, str]:
         '  "component": the affected component/module/file,\n'
         '  "poc": the proof-of-concept steps (verbatim from the report),\n'
         '  "impact": the claimed impact or consequence,\n'
-        '  "severity": one of "critical", "high", "medium", "low", "informational",\n'
+        '  "severity": the severity the REPORTER claims, in their words mapped to one of '
+        '"critical", "high", "medium", "low", "informational",\n'
         '  "reporter_name": reporter name if present (empty string if not),\n'
         '  "reporter_email": reporter email if present (empty string if not).\n'
         "Return ONLY the JSON object, no markdown fences or extra text.\n\n"

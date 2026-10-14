@@ -890,6 +890,18 @@ class SecurityReport(models.Model):
     parsed_component = models.CharField(max_length=500, blank=True, default="")
     parsed_poc = models.TextField(blank=True, default="")
     parsed_impact = models.TextField(blank=True, default="")
+    #: The severity the *reporter* claims, as the parse step read it off the
+    #: report. Attacker-supplied and routinely inflated, so it is context and
+    #: never a rating: it goes to the verifier labelled as the reporter's, and
+    #: the page shows it as "reporter claims". ``assessed_severity`` below is
+    #: frank's analysis or the operator's ruling and nothing else. Apache
+    #: Magpie's rule, "treat every reporter-supplied CVSS score as informational
+    #: background only" (``AGENTS.md`` at apache/magpie commit
+    #: dadb315caa8b881fc1d2195bef03223dac25915a).
+    claimed_severity = models.CharField(max_length=20, choices=SEVERITY_CHOICES, default="unknown")
+    #: frank's rating: written by the triage analysis step, the verdict form or
+    #: the sheet import. Until migration 0062 the parse step wrote the reporter's
+    #: claim here too; rows from before that keep whatever they had.
     assessed_severity = models.CharField(max_length=20, choices=SEVERITY_CHOICES, default="unknown")
 
     # LLM triage analysis

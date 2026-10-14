@@ -2417,7 +2417,8 @@ def _has_triage_assessment(report: SecurityReport) -> bool:
 
 
 def _has_triage_severity(report: SecurityReport) -> bool:
-    """Whether the parse step rated the report, which happens two LLM calls earlier.
+    """Whether the parse step got as far as reading the reporter's severity claim,
+    which happens two LLM calls before the assessment.
 
     Kept apart from the assessment because it can be true on its own — that's the
     commonest partial failure, parse fine and the analysis model unreachable — and
@@ -2426,7 +2427,7 @@ def _has_triage_severity(report: SecurityReport) -> bool:
     Analysis" heading, with the "produced no assessment" explanation suppressed
     because something counted as a result.
     """
-    return bool(report.assessed_severity and report.assessed_severity != "unknown")
+    return bool(report.claimed_severity and report.claimed_severity != "unknown")
 
 
 @require_POST

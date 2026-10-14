@@ -634,7 +634,9 @@ def _build_prompt(report: SecurityReport, branch: str, verifier: SecurityVerifie
         branch=branch,
         title=report.title or "(untitled)",
         component=report.parsed_component or "(not stated)",
-        severity=report.assessed_severity or "unknown",
+        # The reporter's claim, which is what the template's "Reported severity"
+        # line has always meant; frank's own rating would steer the verifier.
+        severity=report.claimed_severity or "unknown",
         body=body,
         addendum=_ADDENDUM_TEMPLATE.format(addendum=addendum) if addendum else "",
     )

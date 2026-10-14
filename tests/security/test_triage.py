@@ -289,7 +289,9 @@ class TestTriageReport:
         assert report.parsed_component == "src/parser.c"
         assert report.parsed_poc == "Run: ./exploit --target parser"
         assert report.parsed_impact == "Remote code execution"
-        assert report.assessed_severity == "high"
+        # The reporter's claim is recorded as theirs; frank has not rated it yet.
+        assert report.claimed_severity == "high"
+        assert report.assessed_severity == "unknown"
         assert report.reporter_name == "Alice"
 
     def test_analyze_report_expected_behavior(self, db: Any) -> None:
@@ -1629,3 +1631,30 @@ class TestInjectionRescanAfterParse:
 
         report.refresh_from_db()
         assert report.injection_hits
+
+
+class TestClaimedSeverityBackfill:
+    """Migration 0062 moves the parse step's old output into the field it
+    belongs in, and never clears what might be an operator's ruling."""
+
+    def test_only_unanalysed_rows_are_copied_and_nothing_is_cleared(self, db: Any) -> None:
+        import importlib
+
+        from django.apps import apps
+
+        from tests.factories import SecurityReportFactory
+
+        migration = importlib.import_module(
+            "franktheunicorn.core.migrations.0062_securityreport_claimed_severity"
+        )
+        parse_only = SecurityReportFactory(assessed_severity="high", triage_summary="")
+        analysed = SecurityReportFactory(assessed_severity="low", triage_summary="Looked at it.")
+        unrated = SecurityReportFactory(assessed_severity="unknown", triage_summary="")
+
+        migration.backfill_claimed_severity(apps, None)
+
+        for row in (parse_only, analysed, unrated):
+            row.refresh_from_db()
+        assert (parse_only.claimed_severity, parse_only.assessed_severity) == ("high", "high")
+        assert (analysed.claimed_severity, analysed.assessed_severity) == ("unknown", "low")
+        assert unrated.claimed_severity == "unknown"

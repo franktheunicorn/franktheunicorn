@@ -12,6 +12,11 @@
     {% if report.assessed_severity != "unknown" %}
     <span class="severity-badge sev-{{ report.assessed_severity }}">{{ report.get_assessed_severity_display }}</span>
     {% endif %}
+    {# The reporter's own rating, shown as theirs and only when it differs: #}
+    {# context for the operator, never a badge frank vouches for. #}
+    {% if report.claimed_severity != "unknown" and report.claimed_severity != report.assessed_severity %}
+    <span class="muted" style="font-size: 0.8rem; margin-left: 0.5rem;">reporter claims {{ report.get_claimed_severity_display|lower }}</span>
+    {% endif %}
 </div>
 
 <div class="breakdown" style="margin-bottom: 1rem;">
