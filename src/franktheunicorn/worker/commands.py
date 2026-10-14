@@ -35,6 +35,7 @@ Commands supported:
 
 from __future__ import annotations
 
+import functools
 import logging
 import time
 from datetime import datetime, timedelta
@@ -599,6 +600,38 @@ def _sweep_log(
     return "\n".join(lines)
 
 
+def _sweep_scope(cmd: WorkerCommand) -> str | None:
+    """The agent scope a sweep was queued with (``kwargs["agent_scope"]``).
+
+    None for one that doesn't parse, which the handler refuses rather than
+    widening: a sweep queued for one agent's reports must not run over the whole
+    backlog because its row was hand-edited or written by a newer version.
+    """
+    from franktheunicorn.security.agent_source import SCOPE_ALL, parse_scope
+
+    raw = (cmd.kwargs or {}).get("agent_scope", SCOPE_ALL)
+    return parse_scope(raw) if isinstance(raw, str) else None
+
+
+def _scoped_projects(cmd: WorkerCommand, label: str) -> tuple[str, list[Project]] | None:
+    """The scope and the projects a sweep covers, or None after logging why none."""
+    from franktheunicorn.security.agent_source import scope_suffix
+    from franktheunicorn.security.branch_scan import projects_with_open_reports
+
+    scope = _sweep_scope(cmd)
+    if scope is None:
+        cmd.log = (
+            f"{label}: agent_scope {cmd.kwargs.get('agent_scope')!r} doesn't parse; nothing swept"
+        )
+        logger.warning("%s (command #%s)", cmd.log, cmd.pk)
+        return None
+    projects = projects_with_open_reports(scope)
+    if not projects:
+        cmd.log = f"{label}: no project has an open security report{scope_suffix(scope)}"
+        return None
+    return scope, projects
+
+
 def _match_security_branches(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
     """Fetch origin and tie a fix branch to every report that hasn't got one.
 
@@ -606,24 +639,26 @@ def _match_security_branches(cmd: WorkerCommand, operator_config: OperatorConfig
     expensive part (the fetch, the branch walk) is per project and doing it once
     per report would be the same work several hundred times.
     """
-    from franktheunicorn.security.branch_scan import match_fix_branches, projects_with_open_reports
+    from franktheunicorn.security.branch_scan import match_fix_branches
 
-    projects = projects_with_open_reports()
-    if not projects:
-        cmd.log = "branch match: no project has an open security report"
+    scoped = _scoped_projects(cmd, "branch match")
+    if scoped is None:
         return
-    cmd.log = _sweep_log(cmd, projects, match_fix_branches, operator_config)
+    scope, projects = scoped
+    sweep = functools.partial(match_fix_branches, agent_scope=scope)
+    cmd.log = _sweep_log(cmd, projects, sweep, operator_config)
 
 
 def _scan_security_fixed(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
     """Reverse-apply proposed patches to find the reports a fix already landed for."""
-    from franktheunicorn.security.branch_scan import projects_with_open_reports, scan_already_fixed
+    from franktheunicorn.security.branch_scan import scan_already_fixed
 
-    projects = projects_with_open_reports()
-    if not projects:
-        cmd.log = "fixed-scan: no project has an open security report"
+    scoped = _scoped_projects(cmd, "fixed-scan")
+    if scoped is None:
         return
-    cmd.log = _sweep_log(cmd, projects, scan_already_fixed, operator_config)
+    scope, projects = scoped
+    sweep = functools.partial(scan_already_fixed, agent_scope=scope)
+    cmd.log = _sweep_log(cmd, projects, sweep, operator_config)
 
 
 def _check_fix_landed(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
@@ -644,14 +679,14 @@ def _check_fixes_landed(cmd: WorkerCommand, operator_config: OperatorConfig) -> 
     Targetless for the same reason the other sweeps are — the fetch is per
     project, and per report it would be the same fetch several hundred times.
     """
-    from franktheunicorn.security.branch_scan import projects_with_open_reports
     from franktheunicorn.security.fix_landed import check_project_fixes
 
-    projects = projects_with_open_reports()
-    if not projects:
-        cmd.log = "fix-landed check: no project has an open security report"
+    scoped = _scoped_projects(cmd, "fix-landed check")
+    if scoped is None:
         return
-    cmd.log = _sweep_log(cmd, projects, check_project_fixes, operator_config)
+    scope, projects = scoped
+    sweep = functools.partial(check_project_fixes, agent_scope=scope)
+    cmd.log = _sweep_log(cmd, projects, sweep, operator_config)
 
 
 def _check_cve_fixes_landed(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
@@ -661,14 +696,14 @@ def _check_cve_fixes_landed(cmd: WorkerCommand, operator_config: OperatorConfig)
     gives the landed check a ref to test for a CVE-carrying report that had
     no branch recorded.
     """
-    from franktheunicorn.security.branch_scan import projects_with_open_reports
     from franktheunicorn.security.fix_landed import check_cve_fixes
 
-    projects = projects_with_open_reports()
-    if not projects:
-        cmd.log = "cve fix-landed check: no project has an open security report"
+    scoped = _scoped_projects(cmd, "cve fix-landed check")
+    if scoped is None:
         return
-    cmd.log = _sweep_log(cmd, projects, check_cve_fixes, operator_config)
+    scope, projects = scoped
+    sweep = functools.partial(check_cve_fixes, agent_scope=scope)
+    cmd.log = _sweep_log(cmd, projects, sweep, operator_config)
 
 
 def _run_agents(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:

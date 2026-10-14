@@ -97,6 +97,9 @@ urlpatterns = [
     # The two git-only backlog sweeps: which branch carries each fix, and which
     # reports a fix already landed for. Both fetch origin first; both are worker
     # commands because both are minutes of git per project.
+    # Confirm / re-verify open reports against the code: git check for all,
+    # optionally the coding agent for a capped batch. Scoped by the agent field.
+    path("security/reverify/", views.security_reverify, name="security_reverify"),
     path(
         "security/match-branches/",
         views.security_match_branches,
@@ -141,6 +144,12 @@ urlpatterns = [
     path("security/upload/", views.security_report_upload, name="security_upload"),
     # The undo for one: delete every report that came from a named archive.
     path("security/drop-archive/", views.security_archive_drop, name="security_archive_drop"),
+    # Relabel an archive's reports with the agent that produced them (backfill).
+    path(
+        "security/archive-agent/",
+        views.security_archive_set_agent,
+        name="security_archive_set_agent",
+    ),
     # Round-trip through a shared spreadsheet, for a backlog other people rule on.
     # ".csv" in the path so a browser and a shell both name the download sensibly.
     path("security/export.csv", views.security_report_export_csv, name="security_export_csv"),
@@ -160,6 +169,13 @@ urlpatterns = [
         "security/<int:report_id>/",
         views.security_report_detail,
         name="security_detail",
+    ),
+    # One report's agent label: the relabel for pasted/emailed reports, which
+    # have no archive for the bulk relabel to reach.
+    path(
+        "security/<int:report_id>/agent/",
+        views.security_report_set_agent,
+        name="security_set_agent",
     ),
     path(
         "security/<int:report_id>/triage/",

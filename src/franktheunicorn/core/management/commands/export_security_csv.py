@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from django.core.management.base import BaseCommand, CommandError
 
 from franktheunicorn.core.models import Project, SecurityReport
+from franktheunicorn.security import agent_source
 from franktheunicorn.security.sheet_sync import (
     WRITABLE_COLUMNS,
     export_filename,
@@ -46,6 +47,13 @@ class Command(BaseCommand):
                 "are the cross-cutting ones."
             ),
         )
+        parser.add_argument(
+            "--agent",
+            help=(
+                "Only reports from this agent. 'any' for every agent's, 'none' for "
+                "the ones people sent."
+            ),
+        )
         parser.add_argument("--limit", type=int, help="Only the top N by priority")
         parser.add_argument(
             "--full",
@@ -73,8 +81,12 @@ class Command(BaseCommand):
         if limit is not None and limit < 1:
             raise CommandError("--limit must be at least 1")
 
+        agent = agent_source.parse_scope(str(options.get("agent") or ""))
+        if agent is None:
+            raise CommandError(f"--agent {options.get('agent')!r} isn't an agent name")
+
         full = bool(options.get("full"))
-        reports = reports_for_export(status=status, project=project, limit=limit)
+        reports = reports_for_export(status=status, project=project, limit=limit, agent=agent)
 
         destination = options.get("out")
         if destination is None:
@@ -97,7 +109,7 @@ class Command(BaseCommand):
         # ``status`` too: without it two differently-scoped exports on the same day
         # are the same filename, which is the collision export_filename's own
         # docstring says the scope exists to prevent.
-        path = Path(str(destination) or export_filename(full=full, status=status))
+        path = Path(str(destination) or export_filename(full=full, status=status, agent=agent))
         with path.open("w", encoding="utf-8", newline="") as handle:
             count = export_reports_csv(reports.iterator(chunk_size=200), handle, full=full)
 

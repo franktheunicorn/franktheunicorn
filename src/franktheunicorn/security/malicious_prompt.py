@@ -342,6 +342,13 @@ def _format_report_text(pr: PullRequest, diff: str, verdict: MaliciousPromptVerd
     return "\n".join(lines)
 
 
+#: The ``source_agent`` this pre-filter's own reports carry. frank is an agent
+#: too: without a label its reports sat under "Not from an agent", counted in the
+#: people-sent breakdown and picked up by every bulk button scoped to people.
+#: Spelled out in migration 0057's backfill as well, which can't import it.
+PREFILTER_AGENT = "franktheunicorn-prefilter"
+
+
 def file_security_report(
     pr: PullRequest, diff: str, verdict: MaliciousPromptVerdict
 ) -> SecurityReport | None:
@@ -363,6 +370,7 @@ def file_security_report(
         title=f"Malicious prompt detected in PR #{pr.number}"[:500],
         raw_text=_format_report_text(pr, diff, verdict),
         source="paste",
+        source_agent=PREFILTER_AGENT,
         reporter_name="franktheunicorn (auto pre-filter)",
         status="new",
         assessed_severity="high" if verdict.verdict == "yes" else "medium",

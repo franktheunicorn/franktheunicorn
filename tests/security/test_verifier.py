@@ -1577,3 +1577,60 @@ class TestPromptAddendumOrderingIsNotAccidental:
         # And the agent is told which is which, or the label does no work.
         assert prompt.index("UNTRUSTED DATA") < body
         assert "FROM YOUR OPERATOR" in prompt[end:operator]
+
+
+@pytest.mark.django_db
+class TestReverifyCandidates:
+    """What the bulk Confirm / Re-verify button sends to the verifier, in what order."""
+
+    def test_open_reports_with_a_project_and_no_confirmed_branch(self) -> None:
+        from franktheunicorn.security.verifier import reverify_candidates
+
+        included = SecurityReportFactory(status="new")
+        valid = SecurityReportFactory(status="valid")
+        SecurityReportFactory(status="invalid")  # the operator said no
+        SecurityReportFactory(status="duplicate")
+        SecurityReportFactory(project=None)  # no repo to read
+        SecurityReportFactory(status="valid", fixed_in_branch="branch-3.5")  # answered
+        # A machine tie is not an answer — still worth confirming.
+        tied = SecurityReportFactory(fixed_in_branch="fix-cve-1", branch_match_applied=True)
+
+        assert set(reverify_candidates()) == {included, valid, tied}
+
+    def test_scoped_to_one_agent(self) -> None:
+        from franktheunicorn.security.verifier import reverify_candidates
+
+        agents = SecurityReportFactory(source_agent="xbow")
+        SecurityReportFactory(source_agent="")
+
+        assert list(reverify_candidates("xbow")) == [agents]
+
+    def test_never_sent_first_then_least_recently_sent_then_priority(self) -> None:
+        """Ordered on the attempt, so a press after a capped press carries on
+        instead of re-spending the cap on the same rows."""
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        from franktheunicorn.security.verifier import reverify_candidates
+        from tests.factories import WorkerCommandFactory
+
+        recent = SecurityReportFactory(priority=90.0)
+        older = SecurityReportFactory(priority=10.0)
+        never_low = SecurityReportFactory(priority=1.0)
+        never_high = SecurityReportFactory(priority=50.0)
+        now = timezone.now()
+        WorkerCommandFactory(
+            command="verify_security_report",
+            security_report=recent,
+            status="completed",
+            created_at=now,
+        )
+        WorkerCommandFactory(
+            command="verify_security_report",
+            security_report=older,
+            status="completed",
+            created_at=now - timedelta(days=3),
+        )
+
+        assert list(reverify_candidates()) == [never_high, never_low, older, recent]
