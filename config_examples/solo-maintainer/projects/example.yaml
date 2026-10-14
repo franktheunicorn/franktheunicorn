@@ -52,6 +52,7 @@ copypasta_scan_extensions: [".py"]
 #   enabled: false
 #   server: ""
 #   project_prefix: ""
+#   priority_authors: ["Your Name", "your-jira-username"]
 # community_sources: []
 
 # v2+ merge queue and migration restack automation:

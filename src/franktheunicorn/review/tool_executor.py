@@ -13,11 +13,16 @@ from __future__ import annotations
 
 import base64
 import binascii
+import contextlib
 import logging
+import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
+import tempfile
+import threading
 import time
 import uuid
 from collections.abc import Iterator
@@ -213,6 +218,414 @@ def workspace_trust_advice(reviewer_name: str) -> str:
         "not `extra_args`: the seeded entries already set it, and overriding "
         "`extra_args` replaces the seed rather than merging with it."
     )
+
+
+#: A CLI that is not logged in, by what it prints on stderr. Matched against
+#: stderr only: stdout is the review, and a review of login code talks about
+#: logins. Apache Magpie's adversarial-review classifier (``_AUTH_ERRORS`` in
+#: ``tools/adversarial-review/src/adversarial_review/runner.py`` at apache/magpie
+#: commit dadb315caa8b881fc1d2195bef03223dac25915a, Apache-2.0).
+_AUTH_FAILURE_RE = re.compile(
+    r"not logged in|please (?:log ?in|sign ?in|authenticate)|(?:login|authentication) required"
+    r"|unauthori[sz]ed|invalid api key|set an auth method|re-?authenticate",
+    re.IGNORECASE,
+)
+
+
+#: How much of stderr's end the auth check reads. A CLI's own error is the last
+#: thing it prints; ``codex exec`` echoes the whole prompt (the diff, or the
+#: security report) to stderr first, and a report titled "Unauthorized access
+#: to the admin API" must not read as a login failure.
+_AUTH_TAIL_LINES = 5
+
+
+def looks_like_auth_failure(stderr: str) -> bool:
+    """Whether a failed CLI's last stderr lines say it has no usable login."""
+    tail = "\n".join((stderr or "").strip().splitlines()[-_AUTH_TAIL_LINES:])
+    return bool(_AUTH_FAILURE_RE.search(tail))
+
+
+def auth_failure_advice(reviewer_name: str, binary: str, *, remote: bool) -> str:
+    """One sentence naming the fix, for appending to whatever error we log.
+
+    frank drives these CLIs with their own login, not an API key it holds, so
+    "exited 1" is most often "nobody has logged this binary in where it runs".
+    """
+    where = (
+        "on the remote host it runs on"
+        if remote
+        else "on this machine, as the user the worker runs as"
+    )
+    return (
+        f"This looks like {reviewer_name} is not logged in {where}. frank uses the "
+        f"CLI's own login rather than an API key, so log {binary} in there once, "
+        "interactively; nothing in operator.yaml can do it for you."
+    )
+
+
+#: Top-level entries of a checkout that an agent CLI reads as its *own*
+#: configuration, through which whoever wrote the checkout can make it run
+#: code. The reviewer runs in a checkout of a stranger's PR, so none of these
+#: may be there while it runs. Found in review, each against the build named:
+#:
+#: - ``claude -p`` loads ``.claude/settings.json``, whose hooks are shell
+#:   commands outside the tool system (claude 2.1.299; ``--setting-sources
+#:   user`` now stops it too).
+#: - cursor-agent's hook loader reads ``.cursor/hooks.json`` *and* the
+#:   Claude-format ``.claude/settings.json`` / ``settings.local.json``, with
+#:   project hooks on by default and ``--trust`` clearing the workspace gate
+#:   (build 2026.10.12-d47ca18). No flag turns project hooks off.
+#: - pi executes ``.pi/extensions/*.ts`` at startup, logged in or not, and
+#:   installs every package ``.pi/settings.json`` lists (``git clone``, or
+#:   ``npm install`` with its lifecycle scripts) even under
+#:   ``--no-extensions`` (0.73.1, both run here). There is no trust gate.
+#: - codex reads ``.codex/config.toml`` and project hooks only for a project
+#:   its config marks trusted, which frank never does; listed so an operator's
+#:   own trust entry can't turn that on behind frank's back.
+#:
+#: Whole directories rather than the files known today: each CLI has added a
+#: project-config file in the last year (``.cursor/cli.json`` permissions,
+#: codex hooks), and the guard should not need a release to keep up. The
+#: ``.gemini``/``.opencode`` entries cover the two agents operators most often
+#: add by hand. The MCP files are here because a server a PR adds is a command
+#: the agent would spawn.
+AGENT_CONFIG_ENTRIES: tuple[str, ...] = (
+    ".claude",
+    ".cursor",
+    ".codex",
+    ".pi",
+    ".gemini",
+    ".opencode",
+    ".mcp.json",
+    "opencode.json",
+    "opencode.jsonc",
+)
+
+#: Exit status of the guard when it could not clear the checkout; the agent did
+#: not run.
+GUARD_REFUSED_EXIT = 97
+#: Where the guard parks the entries, inside the checkout's git dir: git never
+#: tracks it, a linked worktree gets its own, and it sits on the same
+#: filesystem as the tree so the moves are renames.
+GUARD_STASH = "frank-agent-guard"
+_GUARD_NAME = "frank-guard"
+
+# Find the git dir, take the checkout's lock, put back what a killed run left
+# in the stash, move the entries out, run the agent, move them back, release.
+#
+# The lock is defence in depth: the worker's lanes already keep two runs out
+# of one tree locally, and if two ever met, the second's recovery would hand
+# the first's agent its hooks back. A lock whose pid is gone is stale and taken
+# over; an empty one is held (its owner is between mkdir and writing it).
+#
+# The stash records the commit it was taken from (``.head``), and is only put
+# back into that commit. HEAD can move under a stash two ways: a killed run is
+# followed by the next PR's checkout, or, remotely, a timed-out run keeps going
+# on the host while the runner checks out the next PR. Putting a PR's config
+# into another commit's tree would plant it there for good, wedging every
+# later checkout of a commit that tracks those paths. So on a different HEAD
+# the stashed copy moves beside the stash, never deleted, and git restores
+# the current commit's own tracked copy. Each loop has its own variable
+# because sh functions share them.
+_GUARD_SCRIPT = r"""
+have() { [ -e "$1" ] || [ -L "$1" ]; }
+if ! g=$(git rev-parse --absolute-git-dir); then
+  echo "frank: $PWD is not a git checkout; not running the agent" >&2; exit @REFUSED@
+fi
+h=$(git rev-parse -q --verify HEAD 2>/dev/null) || h=
+s="$g/@STASH@"
+l="$s.lock"
+if ! mkdir "$l" 2>/dev/null; then
+  o=$(cat "$l/pid" 2>/dev/null)
+  if [ -z "$o" ] || kill -0 "$o" 2>/dev/null; then
+    echo "frank: agent run ${o:-?} holds $l; not running the agent (remove it if that run is gone)" >&2
+    exit @REFUSED@
+  fi
+fi
+if ! echo "$$" > "$l/pid"; then
+  rm -rf -- "$l"; echo "frank: cannot write $l; not running the agent" >&2; exit @REFUSED@
+fi
+refuse() { echo "frank: $1; not running the agent" >&2; rm -rf -- "$l"; exit "${2:-@REFUSED@}"; }
+# Put a stashed entry back only into the commit it came from; anywhere else it
+# would be one PR's config planted in another's tree. Otherwise the stashed
+# copy is kept beside the stash (it may hold the operator's untracked file)
+# and the current commit's own tracked copy, if any, comes from git.
+put_back() {
+  if [ "$2" = "$3" ]; then
+    have "$1" && rm -rf -- "./$1"
+    mv -- "$s/$1" "./$1"
+    return
+  fi
+  k="$s.displaced/$(date +%Y%m%d%H%M%S)-$$"
+  { mkdir -p "$k" && mv -- "$s/$1" "$k/"; } || return 1
+  echo "frank: $1 from an agent run on ${2:-an unknown commit} is in $k" >&2
+  have "$1" || git checkout -q HEAD -- "$1" 2>/dev/null
+  return 0
+}
+w=$(cat "$s/.head" 2>/dev/null) || w=
+for r in @ENTRIES@; do
+  have "$s/$r" || continue
+  if [ "$w" = "$h" ] && have "$r"; then
+    # Same commit, but the tree has it again: the tree's copy wins.
+    put_back "$r" "$w" "~" || refuse "cannot clear $s/$r"
+  else
+    put_back "$r" "$w" "$h" || refuse "cannot put back $s/$r"
+  fi
+done
+command -v "$1" >/dev/null 2>&1 || refuse "$1: command not found" 127
+mkdir -p "$s" || refuse "cannot create $s"
+echo "$h" > "$s/.head" || refuse "cannot write $s/.head"
+restore() {
+  n=$(git rev-parse -q --verify HEAD 2>/dev/null) || n=
+  for e in @ENTRIES@; do
+    have "$s/$e" || continue
+    put_back "$e" "$h" "$n"
+  done
+  rm -f -- "$s/.head"
+  rm -rf -- "$l"
+}
+p=
+stop() { [ -n "$p" ] && kill -TERM "$p" 2>/dev/null && wait "$p"; restore; exit "$1"; }
+trap 'stop 129' HUP
+trap 'stop 130' INT
+trap 'stop 143' TERM
+for f in @ENTRIES@; do
+  have "$f" || continue
+  if ! mv -- "./$f" "$s/$f" || have "$f"; then
+    echo "frank: could not move $f out of the checkout; not running the agent" >&2
+    restore; exit @REFUSED@
+  fi
+done
+"$@" &
+p=$!
+wait "$p"
+rc=$?
+restore
+exit "$rc"
+"""
+
+
+def _guard_script() -> str:
+    entries = " ".join(shlex.quote(e) for e in AGENT_CONFIG_ENTRIES)
+    script = _GUARD_SCRIPT
+    for placeholder, value in (
+        ("@ENTRIES@", entries),
+        ("@REFUSED@", str(GUARD_REFUSED_EXIT)),
+        ("@STASH@", GUARD_STASH),
+    ):
+        script = script.replace(placeholder, value)
+    return script.strip() + "\n"
+
+
+def guard_agent_argv(argv: list[str]) -> list[str]:
+    """*argv* wrapped so ``AGENT_CONFIG_ENTRIES`` are absent while it runs.
+
+    One ``sh -c`` call that moves the entries into the checkout's git dir, runs
+    the agent, and moves them back, so the tree afterwards is exactly what it
+    was before: tracked files, the PR's edits to them, and anything untracked
+    the operator keeps there. The agent never starts with an entry in place;
+    if one cannot be moved the status is ``GUARD_REFUSED_EXIT`` and nothing
+    ran. A missing agent binary is 127, checked before anything moves.
+
+    Put back only once the agent has exited. A trapped HUP/INT/TERM forwards
+    TERM to the agent, waits for it, then restores; ``_run_local`` sends TERM
+    and a grace period before its SIGKILL for exactly this. An agent killed
+    outright leaves the entries in the stash, and the next guarded run puts
+    them back first. Lines it writes to stderr start with ``frank:``
+    (``guard_notes``, ``agent_stderr``); ``guard_refusal`` tells a run it
+    declined from the agent exiting 97 or 127 itself.
+
+    One argv, no stdin, so it goes through ``RemoteSSHExecutor`` in either
+    delivery shape and needs only a POSIX ``sh``, ``mv`` and ``git`` on the
+    agent host, which the executor already assumes. The agent's stdin is
+    ``/dev/null``: none of these CLIs is given a prompt on stdin, and on the
+    remote the shell's stdin is the delivery stream.
+    """
+    return ["sh", "-c", _guard_script(), _GUARD_NAME, *argv]
+
+
+def unwrap_guarded(argv: list[str]) -> list[str]:
+    """The agent argv inside a ``guard_agent_argv`` wrapper; *argv* otherwise."""
+    if len(argv) >= 4 and argv[:2] == ["sh", "-c"] and argv[3] == _GUARD_NAME:
+        return argv[4:]
+    return argv
+
+
+def guard_notes(stderr: str) -> list[str]:
+    """What the guard said on *stderr*: refusals, and where it moved a stashed
+    entry it found the tree had again. The latter comes from a run that
+    succeeded, so nothing else would surface it."""
+    return [line for line in (stderr or "").splitlines() if line.startswith("frank: ")]
+
+
+def agent_stderr(stderr: str) -> str:
+    """*stderr* without the guard's own lines: what the agent itself said.
+
+    Anything that reads a CLI's stderr for meaning (a refusal, a login failure)
+    reads this, so a guard note can't stand in for the agent or push the
+    agent's first line out of a head-of-output window."""
+    return "\n".join(line for line in (stderr or "").splitlines() if not line.startswith("frank: "))
+
+
+def guard_refusal(returncode: int, stderr: str) -> str:
+    """The guard's reason for not starting the agent, or ``""`` if it started it.
+
+    Both the exit status and the note are required: 127 is also what a shell
+    inside the agent returns for a missing command, and a run that started
+    can still have left a displacement note."""
+    if returncode not in (GUARD_REFUSED_EXIT, 127):
+        return ""
+    return next(
+        (
+            note[len("frank: ") :]
+            for note in guard_notes(stderr)
+            if "; not running the agent" in note
+        ),
+        "",
+    )
+
+
+#: How long a timed-out command gets between TERM and KILL. The agent guard
+#: needs it: its TERM trap waits for the agent to exit and then puts the
+#: checkout's config entries back, which a straight SIGKILL would skip.
+_TERM_GRACE_SECONDS = 10
+
+
+def _kill_group(pgid: int, sig: signal.Signals = signal.SIGKILL) -> None:
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(pgid, sig)
+
+
+def _group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+#: Process groups ``_run_local`` has started and not yet reaped. Each child
+#: gets its own session so its helpers die with it, which also puts it out of
+#: reach of the terminal's Ctrl-C and hangup. A run on the worker's daemon
+#: interactive thread is abandoned at shutdown without its ``finally``, so the
+#: worker stops these itself (``stop_local_children``) rather than leave an
+#: agent billing, and holding a lane's worktree, after it has gone.
+_LIVE_GROUPS: set[int] = set()
+_LIVE_GROUPS_LOCK = threading.Lock()
+
+#: Set once the process is stopping: by ``stop_local_children``, or by Ctrl-C
+#: (a KeyboardInterrupt, which is also how the worker receives TERM and HUP)
+#: landing inside a local run. From then on ``_run_local`` starts nothing and
+#: answers with :class:`WorkerShutdown` rather than a result.
+_SHUTTING_DOWN = threading.Event()
+
+
+class WorkerShutdown(KeyboardInterrupt):
+    """A local run the worker's shutdown stopped, or refused to start.
+
+    A KeyboardInterrupt, so the paths that already treat one as "interrupted by
+    worker shutdown" (``process_pending_commands`` marks the command so) do the
+    same here, and no caller's ``except Exception`` mistakes a stopped agent
+    for one that failed and goes on to start the next.
+    """
+
+
+def stop_local_children(grace: float = _TERM_GRACE_SECONDS) -> int:
+    """TERM every process group ``_run_local`` still has running, allow *grace*
+    seconds (the agent guard puts the checkout back in that window), then KILL
+    what is left. Returns how many groups there were. Also marks the process
+    as stopping, so the threads that owned those groups start nothing new."""
+    _SHUTTING_DOWN.set()
+    with _LIVE_GROUPS_LOCK:
+        groups = sorted(_LIVE_GROUPS)
+    for pgid in groups:
+        _kill_group(pgid, signal.SIGTERM)
+    alive = groups
+    deadline = time.monotonic() + grace
+    while alive and time.monotonic() < deadline:
+        time.sleep(0.05)
+        alive = [pgid for pgid in alive if _group_alive(pgid)]
+    for pgid in alive:
+        _kill_group(pgid)
+    return len(groups)
+
+
+def _run_local(
+    cmd: list[str], cwd: str, timeout: int, stdin: str | None
+) -> subprocess.CompletedProcess[str]:
+    """``subprocess.run`` with captured text output, minus two ways it fails an
+    agent CLI. Same contract: raises ``FileNotFoundError`` for a missing binary
+    and ``subprocess.TimeoutExpired`` past *timeout*.
+
+    The child runs in its own session, writes to files rather than pipes, and
+    its whole process group is killed when it returns, finished or not. With
+    pipes, reading to EOF waits for the last process holding them, so a helper
+    the agent spawned (a language server, a sandbox, a background ``git``)
+    could hold a finished review past the budget; and ``subprocess.run`` kills
+    only the direct child on timeout, so the helpers outlived it, some of them
+    still billing. Apache Magpie's adversarial-review runner learned both the
+    hard way (``runner.py``, ``_execute``, at the pinned commit) and this is
+    its shape. Process stdin is a file too: empty when there is no *stdin*,
+    rather than whatever the worker's own stdin happens to be. Past *timeout*,
+    or on Ctrl-C, the group gets TERM and ``_TERM_GRACE_SECONDS`` to act on it
+    before the KILL; ``stop_local_children`` does the same at shutdown for runs
+    on other threads.
+
+    Where ``os.killpg`` does not exist (not POSIX), falls back to plain
+    ``subprocess.run``.
+    """
+    if _SHUTTING_DOWN.is_set():
+        raise WorkerShutdown("the worker is shutting down; not starting " + (cmd[0] if cmd else ""))
+    if not hasattr(os, "killpg"):
+        return subprocess.run(
+            cmd, capture_output=True, text=True, cwd=cwd, timeout=timeout, input=stdin
+        )
+    with tempfile.TemporaryDirectory(prefix="frank-exec-") as tmp:
+        io_dir = Path(tmp)
+        (io_dir / "stdin").write_text(stdin or "", encoding="utf-8")
+        with (
+            open(io_dir / "stdin", encoding="utf-8") as fin,
+            open(io_dir / "stdout", "w", encoding="utf-8") as fout,
+            open(io_dir / "stderr", "w", encoding="utf-8") as ferr,
+        ):
+            proc = subprocess.Popen(
+                cmd, stdin=fin, stdout=fout, stderr=ferr, cwd=cwd, start_new_session=True
+            )
+            with _LIVE_GROUPS_LOCK:
+                _LIVE_GROUPS.add(proc.pid)
+            try:
+                proc.wait(timeout=timeout)
+            except BaseException as exc:
+                # The timeout, or Ctrl-C landing in this thread. Ctrl-C means the
+                # whole process is stopping, so every local run gets its TERM
+                # now rather than after this one's grace period: the launcher's
+                # SIGKILL may come before the worker reaches its own cleanup.
+                # A second Ctrl-C during the grace skips to the KILL below.
+                if isinstance(exc, KeyboardInterrupt):
+                    _SHUTTING_DOWN.set()
+                    with _LIVE_GROUPS_LOCK:
+                        everyone = sorted(_LIVE_GROUPS)
+                    for pgid in everyone:
+                        _kill_group(pgid, signal.SIGTERM)
+                else:
+                    _kill_group(proc.pid, signal.SIGTERM)
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    proc.wait(timeout=_TERM_GRACE_SECONDS)
+                raise
+            finally:
+                _kill_group(proc.pid)
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    proc.wait(timeout=5)
+                with _LIVE_GROUPS_LOCK:
+                    _LIVE_GROUPS.discard(proc.pid)
+        if _SHUTTING_DOWN.is_set():
+            # Stopped by the shutdown, not a CLI that failed on its own.
+            raise WorkerShutdown("stopped by the worker's shutdown: " + (cmd[0] if cmd else ""))
+        out = (io_dir / "stdout").read_text(encoding="utf-8", errors="replace")
+        err = (io_dir / "stderr").read_text(encoding="utf-8", errors="replace")
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 
 
 class ToolExecutor(Protocol):
@@ -446,22 +859,16 @@ class LocalExecutor:
         stdin: str | None = None,
     ) -> ExecResult | None:
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                cwd=cwd,
-                timeout=timeout,
-                input=stdin,
-            )
+            result = _run_local(cmd, cwd, timeout, stdin)
         except FileNotFoundError:
             logger.warning("CLI not found on PATH: %s", cmd[0] if cmd else "(empty)")
             return None
         except subprocess.TimeoutExpired:
+            agent = unwrap_guarded(cmd)
             logger.warning(
                 "CLI timed out after %ds: %s",
                 timeout,
-                cmd[0] if cmd else "(empty)",
+                agent[0] if agent else "(empty)",
             )
             return None
         return ExecResult(

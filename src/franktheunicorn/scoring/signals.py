@@ -26,10 +26,14 @@ WEIGHTS: dict[str, int] = {
     "committer_is_on_it": -25,
     "updated_since_operator_review": 25,
     "pending_response": 20,
+    "author_awaiting_maintainer": 20,
     "downstream_impact": 20,
     "sentry_errors": 15,
     "cve_file_history": 25,
     "draft_findings": 5,
+    "jira_linked": 5,
+    "jira_priority_author_created": 15,
+    "jira_priority_author_commented": 3,
     "mailing_list_mention": 15,
     "mailing_list_blame_author": 10,
 }
@@ -48,6 +52,51 @@ LARGE_PR_THRESHOLD: int = 500
 
 def _lowered(items: list[str]) -> set[str]:
     return {s.lower() for s in items}
+
+
+def _identity_variants(raw: str) -> set[str]:
+    """Build comparable identity forms from a display name or username."""
+    folded = " ".join(raw.lower().split())
+    if not folded:
+        return set()
+    compact = re.sub(r"[^a-z0-9]+", "", folded)
+    out = {folded}
+    if compact:
+        out.add(compact)
+    return out
+
+
+def _matches_identity(raw: str, wanted: set[str]) -> bool:
+    """Check whether *raw* matches one of the normalized wanted identities."""
+    if not raw or not wanted:
+        return False
+    return any(variant in wanted for variant in _identity_variants(raw))
+
+
+#: GitHub ``author_association`` values that mean "has committed here before".
+#: The forge computes this per repository, so it is right where frank's own
+#: known-authors list is not: GitHub's contributors listing stops at 500
+#: logins, and on a Spark-sized repo everyone past that with no PR in frank's
+#: database used to read as new. Apache Magpie's mentoring-welcome
+#: first-time detection reads the same field (``first-time-detection.md`` and
+#: ``tools/contributor-metrics`` at apache/magpie commit
+#: dadb315caa8b881fc1d2195bef03223dac25915a).
+KNOWN_ASSOCIATIONS: frozenset[str] = frozenset({"CONTRIBUTOR", "COLLABORATOR", "MEMBER", "OWNER"})
+#: Values that mean "has not committed here", which is positive evidence of a
+#: newcomer even when the contributors listing could not be fetched.
+FIRST_TIME_ASSOCIATIONS: frozenset[str] = frozenset({"FIRST_TIME_CONTRIBUTOR", "FIRST_TIMER"})
+
+
+def association_says_new(association: str) -> bool | None:
+    """True / False when the forge's author association decides it; None when it
+    does not (empty: Gitea, GitLab, a scraped row; ``NONE``; anything unknown),
+    which leaves the decision to frank's known-authors rule."""
+    value = (association or "").upper()
+    if value in KNOWN_ASSOCIATIONS:
+        return False
+    if value in FIRST_TIME_ASSOCIATIONS:
+        return True
+    return None
 
 
 def is_likely_bot(author: str) -> bool:
@@ -171,13 +220,16 @@ def score_new_human_contributor(
     operator_username: str,
     known_authors: list[str],
     ai_agents: list[str] | None = None,
+    author_association: str = "",
 ) -> int | None:
-    """New contributor bump. Excludes bots, AI agents, known authors, and operator."""
+    """New contributor bump. Excludes bots, AI agents, known authors, the
+    operator, and anyone the forge says has committed here before."""
     author_lower = author.lower()
     if (
         is_ai_agent(author, ai_agents or [])
         or author_lower == operator_username.lower()
         or author_lower in _lowered(known_authors)
+        or association_says_new(author_association) is False
     ):
         return None
     return WEIGHTS["new_human_contributor"]
@@ -348,6 +400,55 @@ def score_pending_response(
     return WEIGHTS["pending_response"]
 
 
+def score_author_awaiting_maintainer(
+    comments: list[dict[str, str]],
+    pr_author: str,
+    operator_username: str,
+    committers: list[str],
+    org: str = "",
+) -> int | None:
+    """Boost when the ball is in the maintainers' court.
+
+    The last human comment on the PR is the author's, and it @-mentions the
+    operator, a committer or a team (``org/team``). Nobody with merge rights
+    has spoken since, by construction, so the author is waiting on us; a stale
+    sweep or a low score would read that silence as theirs. This is Apache
+    Magpie's pr-triage pre-filter F5c ("author question to a maintainer: ball
+    in our court", ``tools/pr-management/src/pr_management/triage/signals.py``
+    and ``plugins/magpie-pr-management/skills/pr-triage/design-notes.md`` at
+    apache/magpie commit dadb315caa8b881fc1d2195bef03223dac25915a), rewritten
+    on frank's data rather than ported. Two differences: frank knows its
+    maintainers as the operator plus ``committers``, so an unknown mentioned
+    login does not count (Magpie counts it and resolves later); and it sees
+    issue comments only, so a maintainer who answered with a formal review
+    rather than a comment is not seen.
+
+    ``comments`` are ``{"author", "body", "created_at"}`` in posting order.
+    The operator's own PRs never fire: there the operator is the one waiting.
+    A team mention counts only for the project's own ``org`` when it is known:
+    ``@types/node`` in a dependency bump is an npm scope, not a team.
+    """
+    from franktheunicorn.backends.mentions import mention_scan
+
+    op = operator_username.lower()
+    author = pr_author.lower()
+    if not author or author == op:
+        return None
+    human = [c for c in comments if c.get("author") and not is_likely_bot(c["author"])]
+    if not human or human[-1]["author"].lower() != author:
+        return None
+    maintainers = _lowered(committers)
+    if op:
+        maintainers.add(op)
+    team_prefix = f"{org.lower()}/" if org else "/"
+    for hit in mention_scan(human[-1].get("body", "")):
+        handle = hit.handle.lower()
+        is_team = handle.startswith(team_prefix) if org else "/" in handle
+        if is_team or handle in maintainers:
+            return WEIGHTS["author_awaiting_maintainer"]
+    return None
+
+
 def score_draft_findings(draft_findings_count: int | None) -> int | None:
     """Light boost when the agent found possible line-level review concerns.
 
@@ -357,6 +458,79 @@ def score_draft_findings(draft_findings_count: int | None) -> int | None:
     if not draft_findings_count or draft_findings_count <= 0:
         return None
     return WEIGHTS["draft_findings"]
+
+
+def _jira_has_ticket(jira_cache: dict[str, object] | None) -> bool:
+    if not jira_cache:
+        return False
+    ticket_id = jira_cache.get("ticket_id")
+    return isinstance(ticket_id, str) and bool(ticket_id.strip())
+
+
+def _jira_priority_author_set(priority_authors: list[str]) -> set[str]:
+    out: set[str] = set()
+    for author in priority_authors:
+        out.update(_identity_variants(author))
+    return out
+
+
+def _jira_creator_matches(jira_cache: dict[str, object] | None, wanted: set[str]) -> bool:
+    if not jira_cache or not wanted:
+        return False
+    for key in ("creator", "creator_username", "reporter", "reporter_username"):
+        raw = jira_cache.get(key)
+        if isinstance(raw, str) and _matches_identity(raw, wanted):
+            return True
+    return False
+
+
+def score_jira_linked(jira_cache: dict[str, object] | None) -> int | None:
+    """Small bump when a PR is linked to a JIRA issue."""
+    if not _jira_has_ticket(jira_cache):
+        return None
+    return WEIGHTS["jira_linked"]
+
+
+def score_jira_priority_author_created(
+    jira_cache: dict[str, object] | None,
+    priority_authors: list[str],
+) -> int | None:
+    """Large bump when a tracked person created/reported the linked JIRA issue."""
+    if not _jira_has_ticket(jira_cache):
+        return None
+    wanted = _jira_priority_author_set(priority_authors)
+    if not wanted:
+        return None
+    return (
+        WEIGHTS["jira_priority_author_created"]
+        if _jira_creator_matches(jira_cache, wanted)
+        else None
+    )
+
+
+def score_jira_priority_author_commented(
+    jira_cache: dict[str, object] | None,
+    priority_authors: list[str],
+) -> int | None:
+    """Small bump when a tracked person commented on the linked JIRA issue."""
+    if not _jira_has_ticket(jira_cache):
+        return None
+    if jira_cache is None:
+        return None
+    wanted = _jira_priority_author_set(priority_authors)
+    if not wanted or _jira_creator_matches(jira_cache, wanted):
+        return None
+    raw_comments = jira_cache.get("recent_comments", [])
+    if not isinstance(raw_comments, list):
+        return None
+    for raw_comment in raw_comments:
+        if not isinstance(raw_comment, dict):
+            continue
+        for key in ("author", "author_username"):
+            raw = raw_comment.get(key)
+            if isinstance(raw, str) and _matches_identity(raw, wanted):
+                return WEIGHTS["jira_priority_author_commented"]
+    return None
 
 
 def score_mailing_list_mention(

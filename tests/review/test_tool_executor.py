@@ -47,38 +47,105 @@ class TestLocalExecutorPrepareRepo:
 
 
 class TestLocalExecutorRun:
-    @patch("franktheunicorn.review.tool_executor.subprocess.run")
-    def test_run_passes_through_subprocess(self, mock_run: Any) -> None:
+    """Real processes, not a mocked ``subprocess.run``: the point of the local
+    runner is how it behaves with real children, helpers and timeouts."""
+
+    @patch("franktheunicorn.review.tool_executor._run_local")
+    def test_run_goes_through_the_process_group_runner(self, mock_run: Any) -> None:
         mock_run.return_value = subprocess.CompletedProcess(
             args=[], returncode=0, stdout="hi\n", stderr=""
         )
-        result = LocalExecutor().run(["echo", "hi"], cwd="/tmp")
+        result = LocalExecutor().run(["echo", "hi"], cwd="/tmp", timeout=7, stdin="in")
         assert result is not None
         assert result.ok
         assert result.stdout == "hi\n"
-        mock_run.assert_called_once()
-        kwargs = mock_run.call_args.kwargs
-        assert kwargs["cwd"] == "/tmp"
-        assert kwargs["capture_output"] is True
-        assert kwargs["text"] is True
+        mock_run.assert_called_once_with(["echo", "hi"], "/tmp", 7, "in")
 
-    @patch("franktheunicorn.review.tool_executor.subprocess.run")
-    def test_run_forwards_stdin(self, mock_run: Any) -> None:
-        mock_run.return_value = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="", stderr=""
-        )
-        LocalExecutor().run(["cat"], cwd="/tmp", stdin="hello")
-        assert mock_run.call_args.kwargs["input"] == "hello"
+    def test_output_and_exit_code_come_back(self) -> None:
+        result = LocalExecutor().run(["sh", "-c", "echo out; echo err >&2; exit 3"], cwd="/tmp")
+        assert result is not None
+        assert (result.returncode, result.stdout, result.stderr) == (3, "out\n", "err\n")
 
-    @patch("franktheunicorn.review.tool_executor.subprocess.run")
-    def test_run_returns_none_on_file_not_found(self, mock_run: Any) -> None:
-        mock_run.side_effect = FileNotFoundError("no such binary")
-        assert LocalExecutor().run(["nope"], cwd="/tmp") is None
+    def test_stdin_is_delivered(self) -> None:
+        result = LocalExecutor().run(["cat"], cwd="/tmp", stdin="hello")
+        assert result is not None
+        assert result.stdout == "hello"
 
-    @patch("franktheunicorn.review.tool_executor.subprocess.run")
-    def test_run_returns_none_on_timeout(self, mock_run: Any) -> None:
-        mock_run.side_effect = subprocess.TimeoutExpired(cmd="x", timeout=1)
-        assert LocalExecutor().run(["x"], cwd="/tmp", timeout=1) is None
+    def test_no_stdin_means_end_of_file_not_the_workers_stdin(self) -> None:
+        """``cat`` with nothing to read must return at once, not wait on whatever
+        the worker process was started with."""
+        started = time.monotonic()
+        result = LocalExecutor().run(["cat"], cwd="/tmp", timeout=20)
+        assert result is not None
+        assert result.stdout == ""
+        assert time.monotonic() - started < 10
+
+    def test_a_missing_binary_is_none(self) -> None:
+        assert LocalExecutor().run(["frank-no-such-binary-xyz"], cwd="/tmp") is None
+
+    def test_a_timeout_is_none_and_does_not_wait_out_the_child(self) -> None:
+        started = time.monotonic()
+        assert LocalExecutor().run(["sh", "-c", "sleep 30"], cwd="/tmp", timeout=1) is None
+        assert time.monotonic() - started < 10
+
+    def test_a_helper_holding_stdout_neither_delays_the_answer_nor_survives(
+        self, tmp_path: Path
+    ) -> None:
+        """The agent exits with its answer while a helper it spawned still holds
+        the output stream. With pipes the read waited for the helper; here the
+        answer comes back at once and the helper is killed with the group."""
+        pidfile = tmp_path / "helper.pid"
+        script = f"sleep 30 & echo $! > {pidfile}; echo done"
+        started = time.monotonic()
+
+        result = LocalExecutor().run(["sh", "-c", script], cwd="/tmp", timeout=60)
+
+        assert result is not None
+        assert result.stdout == "done\n"
+        assert time.monotonic() - started < 10
+        status = Path(f"/proc/{pidfile.read_text().strip()}/status")
+        if status.exists():  # killed but not yet reaped is fine; running is not
+            state = next(
+                line for line in status.read_text().splitlines() if line.startswith("State:")
+            )
+            assert "Z" in state
+
+
+class TestAuthFailure:
+    def test_a_login_complaint_on_stderr_is_recognised(self) -> None:
+        from franktheunicorn.review.tool_executor import looks_like_auth_failure
+
+        for line in (
+            "Error: Not logged in. Please run /login",
+            "Authentication required",
+            "401 Unauthorized",
+            "Invalid API key",
+        ):
+            assert looks_like_auth_failure(line), line
+
+    def test_a_prompt_echoed_to_stderr_does_not_count(self) -> None:
+        """codex prints the whole prompt to stderr before its own error; a
+        report about unauthorized access is not a login failure."""
+        from franktheunicorn.review.tool_executor import looks_like_auth_failure
+
+        lines = ["user", "Report: Unauthorized access to the admin API", *(["..."] * 10)]
+        stderr = "\n".join([*lines, "error: stream disconnected before completion"])
+        assert not looks_like_auth_failure(stderr)
+        assert looks_like_auth_failure(stderr + "\nError: Not logged in")
+
+    def test_an_ordinary_failure_is_not(self) -> None:
+        from franktheunicorn.review.tool_executor import looks_like_auth_failure
+
+        assert not looks_like_auth_failure("error: model overloaded")
+        assert not looks_like_auth_failure("")
+
+    def test_the_advice_says_where_to_log_in(self) -> None:
+        from franktheunicorn.review.tool_executor import auth_failure_advice
+
+        remote = auth_failure_advice("cursor-agent", "cursor-agent", remote=True)
+        local = auth_failure_advice("claude", "claude", remote=False)
+        assert "remote host" in remote and "cursor-agent" in remote
+        assert "this machine" in local and "log claude in" in local
 
 
 # ---------------------------------------------------------------------------
@@ -862,6 +929,22 @@ class TestRemoteCommandDelivery:
         assert result is not None
         assert result.ok
         assert result.stdout.strip() == "hello-from-remote"
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_the_read_only_flags_reach_the_remote_shell_intact(self, mock_run: Any) -> None:
+        """The comma-joined tool list is the argv element a quoting slip would
+        mangle. Staged over stdin and run by a real shell, every read-only flag
+        must come out as the same argv element."""
+        from franktheunicorn.config.models import CLAUDE_READONLY_ARGS, CODEX_READONLY_ARGS
+
+        mock_run.side_effect = self._fake_sf
+        executor = RemoteSSHExecutor(config=self._wrapper_config())
+        flags = [*CLAUDE_READONLY_ARGS, *CODEX_READONLY_ARGS]
+
+        result = executor.run(["printf", "%s\\n", *flags], cwd="/tmp")
+
+        assert result is not None and result.ok
+        assert result.stdout.splitlines()[-len(flags) :] == flags
 
     @patch("franktheunicorn.review.tool_executor.subprocess.run")
     def test_the_wrappers_banner_is_stripped_from_the_output(self, mock_run: Any) -> None:
@@ -1879,3 +1962,539 @@ class TestRemoteLaneUsesAWorktree:
         scripts = "\n".join(str(call.args[0][-1]) for call in mock_run.call_args_list)
         # Hung off the verifier's own clone, not the review pipeline's.
         assert "/srv/frank/security-verify/acme/widget" in scripts
+
+
+# ---------------------------------------------------------------------------
+# The checkout-config guard around agent runs
+# ---------------------------------------------------------------------------
+
+
+_GIT_ENV = {
+    "GIT_AUTHOR_NAME": "t",
+    "GIT_AUTHOR_EMAIL": "t@e",
+    "GIT_COMMITTER_NAME": "t",
+    "GIT_COMMITTER_EMAIL": "t@e",
+    "GIT_CONFIG_GLOBAL": os.devnull,
+}
+
+#: dash is what ``sh`` is on Debian and Ubuntu; bash in POSIX mode is what it is
+#: on macOS, the other likely remote.
+_SHELLS = [pytest.param(["sh"], id="sh")] + (
+    [pytest.param(["bash", "--posix"], id="bash-posix")] if shutil.which("bash") else []
+)
+
+
+def _git(repo: Path, *args: str) -> str:
+    done = _REAL_RUN(
+        ["git", *args],
+        cwd=repo,
+        env={**os.environ, **_GIT_ENV},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return done.stdout
+
+
+def _pr_checkout(tmp_path: Path) -> Path:
+    """A checkout carrying every kind of entry the guard has to move: tracked
+    config the PR wrote, a tracked file the PR edited, and an untracked file the
+    operator keeps there."""
+    repo = tmp_path / "checkout"
+    (repo / ".claude").mkdir(parents=True)
+    (repo / ".pi" / "extensions").mkdir(parents=True)
+    (repo / ".cursor").mkdir()
+    (repo / "src").mkdir()
+    (repo / ".claude" / "settings.json").write_text('{"hooks": {}}\n')
+    (repo / ".pi" / "extensions" / "x.ts").write_text("export default () => {}\n")
+    (repo / ".cursor" / "hooks.json").write_text("{}\n")
+    (repo / ".mcp.json").write_text("{}\n")
+    (repo / "src" / "a.py").write_text("x = 1\n")
+    _git(repo, "init", "-q")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "pr")
+    (repo / ".claude" / "settings.local.json").write_text("operator's own\n")
+    (repo / ".mcp.json").write_text('{"edited": true}\n')
+    return repo
+
+
+def _snapshot(repo: Path) -> dict[str, str]:
+    return {
+        str(p.relative_to(repo)): p.read_text()
+        for p in sorted(repo.rglob("*"))
+        if p.is_file() and ".git" not in p.relative_to(repo).parts
+    }
+
+
+def _with_shell(argv: list[str], shell: list[str]) -> list[str]:
+    assert argv[0] == "sh"
+    return [*shell, *argv[1:]]
+
+
+_LIST_ENTRIES = ["sh", "-c", "ls -A; exit 3"]
+
+
+class TestAgentConfigGuard:
+    """A PR can ship config that an agent CLI executes on startup: claude and
+    cursor-agent hooks, pi extensions and package installs, MCP servers. The
+    guard has to keep all of it out of the agent's sight and then hand the tree
+    back exactly as it was, because some of it is the operator's own."""
+
+    @pytest.mark.parametrize("shell", _SHELLS)
+    def test_the_agent_sees_none_of_it_and_the_tree_comes_back(
+        self, tmp_path: Path, shell: list[str]
+    ) -> None:
+        from franktheunicorn.review.tool_executor import guard_agent_argv
+
+        repo = _pr_checkout(tmp_path)
+        before, status = _snapshot(repo), _git(repo, "status", "--porcelain")
+
+        done = _REAL_RUN(
+            _with_shell(guard_agent_argv(_LIST_ENTRIES), shell),
+            cwd=repo,
+            capture_output=True,
+            text=True,
+        )
+
+        assert done.stdout.split() == [".git", "src"]
+        assert done.returncode == 3
+        assert _snapshot(repo) == before
+        assert _git(repo, "status", "--porcelain") == status
+
+    def test_every_listed_entry_is_moved(self, tmp_path: Path) -> None:
+        from franktheunicorn.review.tool_executor import AGENT_CONFIG_ENTRIES, guard_agent_argv
+
+        repo = tmp_path / "checkout"
+        repo.mkdir()
+        _git(repo, "init", "-q")
+        for entry in AGENT_CONFIG_ENTRIES:
+            (repo / entry).write_text("x\n")
+
+        done = _REAL_RUN(guard_agent_argv(_LIST_ENTRIES), cwd=repo, capture_output=True, text=True)
+
+        assert done.stdout.split() == [".git"]
+        assert sorted(os.listdir(repo)) == sorted([".git", *AGENT_CONFIG_ENTRIES])
+
+    def test_a_symlinked_entry_is_moved_as_a_link(self, tmp_path: Path) -> None:
+        """``.claude -> ~/.claude`` must hide the link, not empty the operator's
+        own directory through it."""
+        from franktheunicorn.review.tool_executor import guard_agent_argv
+
+        home_claude = tmp_path / "home" / ".claude"
+        home_claude.mkdir(parents=True)
+        (home_claude / "settings.json").write_text("operator\n")
+        repo = tmp_path / "checkout"
+        repo.mkdir()
+        _git(repo, "init", "-q")
+        (repo / ".claude").symlink_to(home_claude)
+
+        done = _REAL_RUN(
+            guard_agent_argv(["sh", "-c", 'ls -A; ls -A "$0"', str(home_claude)]),
+            cwd=repo,
+            capture_output=True,
+            text=True,
+        )
+
+        assert done.stdout.split() == [".git", "settings.json"]
+        assert (repo / ".claude").is_symlink()
+        assert (home_claude / "settings.json").read_text() == "operator\n"
+
+    def test_a_missing_agent_binary_moves_nothing(self, tmp_path: Path) -> None:
+        from franktheunicorn.review.tool_executor import guard_agent_argv
+
+        repo = _pr_checkout(tmp_path)
+        before = _snapshot(repo)
+
+        done = _REAL_RUN(
+            guard_agent_argv(["frank-no-such-agent", "-p", "x"]),
+            cwd=repo,
+            capture_output=True,
+            text=True,
+        )
+
+        assert done.returncode == 127
+        assert "frank-no-such-agent: command not found" in done.stderr
+        assert _snapshot(repo) == before
+
+    def test_outside_a_git_checkout_it_refuses(self, tmp_path: Path) -> None:
+        from franktheunicorn.review.tool_executor import GUARD_REFUSED_EXIT, guard_agent_argv
+
+        plain = tmp_path / "plain"
+        (plain / ".claude").mkdir(parents=True)
+
+        done = _REAL_RUN(
+            guard_agent_argv(["sh", "-c", "echo AGENT RAN"]),
+            cwd=plain,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "GIT_CEILING_DIRECTORIES": str(tmp_path)},
+        )
+
+        assert done.returncode == GUARD_REFUSED_EXIT
+        assert "AGENT RAN" not in done.stdout
+        assert "not running the agent" in done.stderr
+
+    def test_an_entry_that_will_not_move_refuses_and_restores_the_rest(
+        self, tmp_path: Path
+    ) -> None:
+        """The agent must not start with one entry in place, and the entries
+        already moved must not be stranded by the refusal."""
+        from franktheunicorn.review.tool_executor import GUARD_REFUSED_EXIT, guard_agent_argv
+
+        repo = _pr_checkout(tmp_path)
+        before = _snapshot(repo)
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        real_mv = shutil.which("mv")
+        (bin_dir / "mv").write_text(
+            f'#!/bin/sh\ncase "$2" in ./.mcp.json) exit 1;; esac\nexec {real_mv} "$@"\n'
+        )
+        (bin_dir / "mv").chmod(0o755)
+
+        done = _REAL_RUN(
+            guard_agent_argv(["sh", "-c", "echo AGENT RAN"]),
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
+        )
+
+        assert done.returncode == GUARD_REFUSED_EXIT
+        assert "AGENT RAN" not in done.stdout
+        assert "could not move .mcp.json out" in done.stderr
+        assert _snapshot(repo) == before
+
+    def test_a_timeout_still_puts_everything_back(self, tmp_path: Path) -> None:
+        """``_run_local`` sends TERM and waits before its SIGKILL; the guard's
+        trap stops the agent and restores in that window."""
+        from franktheunicorn.review.tool_executor import guard_agent_argv
+
+        repo = _pr_checkout(tmp_path)
+        before = _snapshot(repo)
+
+        result = LocalExecutor().run(guard_agent_argv(["sleep", "30"]), cwd=str(repo), timeout=1)
+
+        assert result is None
+        assert _snapshot(repo) == before
+
+    def test_a_run_killed_outright_is_put_back_by_the_next(self, tmp_path: Path) -> None:
+        import signal
+
+        from franktheunicorn.review.tool_executor import guard_agent_argv
+
+        repo = _pr_checkout(tmp_path)
+        before = _snapshot(repo)
+        proc = subprocess.Popen(guard_agent_argv(["sleep", "30"]), cwd=repo, start_new_session=True)
+        deadline = time.monotonic() + 10
+        while (repo / ".claude").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+        assert not (repo / ".claude").exists()
+
+        done = _REAL_RUN(guard_agent_argv(_LIST_ENTRIES), cwd=repo, capture_output=True, text=True)
+
+        assert done.stdout.split() == [".git", "src"]
+        assert _snapshot(repo) == before
+
+    def test_a_killed_run_does_not_block_checking_out_the_next_pr(self, tmp_path: Path) -> None:
+        """The PR under review edited a tracked config file and the run was killed
+        with it stashed. The next PR's non-forced checkout must still work (git
+        reads a missing tracked file as up to date), and the next guarded run
+        must not resurrect the killed PR's version over the new one."""
+        import signal
+
+        from franktheunicorn.review.tool_executor import GUARD_STASH, guard_agent_argv
+
+        repo = _pr_checkout(tmp_path)
+        (repo / ".mcp.json").write_text("{}\n")
+        (repo / ".claude" / "settings.local.json").unlink()
+        base = _git(repo, "rev-parse", "HEAD").strip()
+        (repo / ".claude" / "settings.json").write_text('{"hooks": {"x": 1}}\n')
+        _git(repo, "commit", "-qam", "the PR edits its hooks")
+        proc = subprocess.Popen(guard_agent_argv(["sleep", "30"]), cwd=repo, start_new_session=True)
+        deadline = time.monotonic() + 10
+        while (repo / ".claude").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+
+        _git(repo, "checkout", "-q", "--detach", base)
+        done = _REAL_RUN(guard_agent_argv(_LIST_ENTRIES), cwd=repo, capture_output=True, text=True)
+
+        assert done.stdout.split() == [".git", "src"]
+        assert (repo / ".claude" / "settings.json").read_text() == '{"hooks": {}}\n'
+        assert _git(repo, "status", "--porcelain") == ""
+        assert not any((repo / ".git" / GUARD_STASH).iterdir())
+
+    def test_a_stashed_copy_the_tree_has_again_is_kept_not_deleted(self, tmp_path: Path) -> None:
+        """A forced checkout put a fresh tracked ``.claude`` back after a killed
+        run; the stashed one held the operator's untracked file too."""
+        from franktheunicorn.review.tool_executor import GUARD_STASH, guard_agent_argv
+
+        repo = _pr_checkout(tmp_path)
+        git_dir = repo / ".git"
+        stash = git_dir / GUARD_STASH
+        stash.mkdir()
+        (repo / ".claude").rename(stash / ".claude")
+        _git(repo, "checkout", "-q", "--", ".claude")
+
+        done = _REAL_RUN(guard_agent_argv(_LIST_ENTRIES), cwd=repo, capture_output=True, text=True)
+
+        assert done.returncode == 3
+        assert "from an agent run on an unknown commit is in" in done.stderr
+        kept = list((git_dir / f"{GUARD_STASH}.displaced").glob("*/.claude/settings.local.json"))
+        assert [p.read_text() for p in kept] == ["operator's own\n"]
+        assert not (stash / ".claude").exists()
+
+    def test_a_killed_runs_stash_is_not_planted_in_another_commit(self, tmp_path: Path) -> None:
+        """PR A adds .claude; its run is killed; PR B (no .claude) is checked
+        out. Putting A's .claude into B's tree would leave untracked files that
+        refuse every later checkout of A."""
+        import signal
+
+        from franktheunicorn.review.tool_executor import GUARD_STASH, guard_agent_argv
+
+        repo = tmp_path / "checkout"
+        repo.mkdir()
+        _git(repo, "init", "-q")
+        (repo / "README").write_text("base\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "base")
+        base = _git(repo, "rev-parse", "HEAD").strip()
+        (repo / ".claude").mkdir()
+        (repo / ".claude" / "settings.json").write_text('{"hooks": {"SessionStart": "x"}}\n')
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "PR A")
+        pr_a = _git(repo, "rev-parse", "HEAD").strip()
+        proc = subprocess.Popen(guard_agent_argv(["sleep", "30"]), cwd=repo, start_new_session=True)
+        deadline = time.monotonic() + 10
+        while (repo / ".claude").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+        _git(repo, "checkout", "-q", "--detach", base)  # PR B
+
+        done = _REAL_RUN(guard_agent_argv(_LIST_ENTRIES), cwd=repo, capture_output=True, text=True)
+
+        assert done.returncode == 3
+        assert f"from an agent run on {pr_a} is in" in done.stderr
+        assert not (repo / ".claude").exists()
+        assert _git(repo, "status", "--porcelain") == ""
+        _git(repo, "checkout", "-q", "--detach", pr_a)  # not wedged
+        displaced = list((repo / ".git" / f"{GUARD_STASH}.displaced").glob("*/.claude"))
+        assert len(displaced) == 1
+
+    def test_a_head_moved_during_the_run_is_left_alone_at_restore(self, tmp_path: Path) -> None:
+        """Remotely, a run that timed out locally keeps going on the host while
+        the runner checks out the next PR. Its restore must not overwrite the
+        new commit's tracked copy with the old PR's."""
+        from franktheunicorn.review.tool_executor import guard_agent_argv
+
+        repo = tmp_path / "checkout"
+        repo.mkdir()
+        _git(repo, "init", "-q")
+        (repo / ".claude").mkdir()
+        (repo / ".claude" / "settings.json").write_text('{"pr": "B"}\n')
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "PR B")
+        pr_b = _git(repo, "rev-parse", "HEAD").strip()
+        (repo / ".claude" / "settings.json").write_text('{"pr": "A", "hooks": "evil"}\n')
+        _git(repo, "commit", "-qam", "PR A")
+        # The "agent" is the runner moving on underneath it.
+        agent = ["sh", "-c", f"git checkout -q --detach {pr_b}"]
+
+        done = _REAL_RUN(guard_agent_argv(agent), cwd=repo, capture_output=True, text=True)
+
+        assert done.returncode == 0
+        assert (repo / ".claude" / "settings.json").read_text() == '{"pr": "B"}\n'
+        assert _git(repo, "status", "--porcelain") == ""
+
+    def test_a_live_run_holding_the_checkout_refuses_a_second(self, tmp_path: Path) -> None:
+        """Two runs in one tree would have the second's recovery hand the
+        first's agent its hooks back."""
+        from franktheunicorn.review.tool_executor import (
+            GUARD_REFUSED_EXIT,
+            GUARD_STASH,
+            guard_agent_argv,
+        )
+
+        repo = _pr_checkout(tmp_path)
+        before = _snapshot(repo)
+        lock = repo / ".git" / f"{GUARD_STASH}.lock"
+        lock.mkdir()
+        (lock / "pid").write_text(f"{os.getpid()}\n")
+
+        done = _REAL_RUN(
+            guard_agent_argv(["sh", "-c", "echo AGENT RAN"]),
+            cwd=repo,
+            capture_output=True,
+            text=True,
+        )
+
+        assert done.returncode == GUARD_REFUSED_EXIT
+        assert "AGENT RAN" not in done.stdout
+        assert f"agent run {os.getpid()} holds" in done.stderr
+        assert _snapshot(repo) == before
+        assert lock.exists()  # still the other run's
+
+    def test_a_dead_runs_lock_is_taken_over_and_released(self, tmp_path: Path) -> None:
+        from franktheunicorn.review.tool_executor import GUARD_STASH, guard_agent_argv
+
+        repo = _pr_checkout(tmp_path)
+        gone = subprocess.Popen(["true"])
+        gone.wait()
+        lock = repo / ".git" / f"{GUARD_STASH}.lock"
+        lock.mkdir()
+        (lock / "pid").write_text(f"{gone.pid}\n")
+
+        done = _REAL_RUN(guard_agent_argv(_LIST_ENTRIES), cwd=repo, capture_output=True, text=True)
+
+        assert done.stdout.split() == [".git", "src"]
+        assert not lock.exists()
+
+    def test_the_agent_gets_no_stdin(self, tmp_path: Path) -> None:
+        """Remotely the shell's stdin is the delivery stream; an agent reading
+        it would eat the rest of the script."""
+        from franktheunicorn.review.tool_executor import guard_agent_argv
+
+        repo = _pr_checkout(tmp_path)
+        done = _REAL_RUN(
+            guard_agent_argv(["sh", "-c", "cat; echo end"]),
+            cwd=repo,
+            input="delivery stream\n",
+            capture_output=True,
+            text=True,
+        )
+
+        assert done.stdout == "end\n"
+
+    def test_unwrap_guarded(self) -> None:
+        from franktheunicorn.review.tool_executor import guard_agent_argv, unwrap_guarded
+
+        argv = ["claude", "-p", "review this"]
+        assert unwrap_guarded(guard_agent_argv(argv)) == argv
+        assert unwrap_guarded(argv) is argv
+        assert unwrap_guarded(["sh", "-c", "true"]) == ["sh", "-c", "true"]
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_it_survives_stdin_delivery_to_a_remote(self, mock_run: Any, tmp_path: Path) -> None:
+        from franktheunicorn.review.tool_executor import guard_agent_argv
+
+        repo = _pr_checkout(tmp_path)
+        before = _snapshot(repo)
+        delivery = TestRemoteCommandDelivery()
+        mock_run.side_effect = delivery._fake_sf
+        executor = RemoteSSHExecutor(config=delivery._wrapper_config())
+
+        result = executor.run(guard_agent_argv(_LIST_ENTRIES), cwd=str(repo))
+
+        assert result is not None
+        assert result.returncode == 3
+        assert result.stdout.split()[-2:] == [".git", "src"]
+        assert _snapshot(repo) == before
+
+    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    def test_it_survives_argv_delivery_to_a_remote(self, mock_run: Any, tmp_path: Path) -> None:
+        """ssh joins its trailing arguments into one string for the remote
+        shell; the guard script's quotes and newlines must survive that."""
+        from franktheunicorn.review.tool_executor import guard_agent_argv
+
+        repo = _pr_checkout(tmp_path)
+        before = _snapshot(repo)
+
+        def _ssh(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            return _REAL_RUN(["sh", "-c", " ".join(argv[1:])], capture_output=True, text=True)
+
+        mock_run.side_effect = _ssh
+        executor = RemoteSSHExecutor(config=RemoteExecutionConfig(mode="ssh", ssh_command=["s"]))
+
+        result = executor.run(guard_agent_argv(_LIST_ENTRIES), cwd=str(repo))
+
+        assert result is not None
+        assert result.returncode == 3
+        assert result.stdout.split() == [".git", "src"]
+        assert _snapshot(repo) == before
+
+
+class TestLocalChildrenAtShutdown:
+    """Local agents run in their own session, so a Ctrl-C or hangup at the
+    worker's terminal no longer reaches them; the worker has to stop them."""
+
+    @pytest.fixture(autouse=True)
+    def _not_shutting_down_afterwards(self) -> Any:
+        from franktheunicorn.review import tool_executor
+
+        yield
+        tool_executor._SHUTTING_DOWN.clear()
+
+    def test_stop_local_children_ends_a_run_on_another_thread(self, tmp_path: Path) -> None:
+        import threading
+
+        from franktheunicorn.review.tool_executor import (
+            WorkerShutdown,
+            guard_agent_argv,
+            stop_local_children,
+        )
+
+        repo = _pr_checkout(tmp_path)
+        before = _snapshot(repo)
+        raised: list[KeyboardInterrupt] = []
+
+        def _run() -> None:
+            try:
+                LocalExecutor().run(guard_agent_argv(["sleep", "60"]), cwd=str(repo), timeout=120)
+            except KeyboardInterrupt as exc:  # WorkerShutdown is one
+                raised.append(exc)
+
+        worker = threading.Thread(target=_run, daemon=True)
+        started = time.monotonic()
+        worker.start()
+        deadline = time.monotonic() + 10
+        while (repo / ".claude").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+
+        assert stop_local_children() == 1
+        worker.join(timeout=15)
+
+        assert not worker.is_alive()
+        assert time.monotonic() - started < 30
+        # Not an ordinary CLI failure: the caller must not go on to the next run.
+        assert len(raised) == 1 and isinstance(raised[0], WorkerShutdown)
+        assert _snapshot(repo) == before  # TERM first, so the guard put it back
+        assert stop_local_children() == 0
+
+    def test_nothing_new_starts_once_shutdown_began(self, tmp_path: Path) -> None:
+        from franktheunicorn.review.tool_executor import (
+            WorkerShutdown,
+            _run_local,
+            stop_local_children,
+        )
+
+        stop_local_children()
+        marker = tmp_path / "ran"
+
+        with pytest.raises(WorkerShutdown):
+            _run_local(["touch", str(marker)], str(tmp_path), 10, None)
+        assert not marker.exists()
+
+    def test_ctrl_c_in_the_running_thread_terms_before_it_kills(self, tmp_path: Path) -> None:
+        import _thread
+        import threading
+
+        from franktheunicorn.review.tool_executor import _run_local, guard_agent_argv
+
+        repo = _pr_checkout(tmp_path)
+        before = _snapshot(repo)
+
+        def _interrupt_once_moved() -> None:
+            deadline = time.monotonic() + 10
+            while (repo / ".claude").exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            _thread.interrupt_main()
+
+        threading.Thread(target=_interrupt_once_moved, daemon=True).start()
+        with pytest.raises(KeyboardInterrupt):
+            _run_local(guard_agent_argv(["sleep", "60"]), str(repo), 120, None)
+
+        assert _snapshot(repo) == before

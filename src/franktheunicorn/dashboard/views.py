@@ -20,7 +20,8 @@ if TYPE_CHECKING:
 
 from django.contrib import messages
 from django.db import transaction
-from django.db.models import Count, Max, Min, Q, Sum
+from django.db.models import Count, F, Max, Min, Q, Sum
+from django.db.models.expressions import OrderBy
 from django.http import HttpRequest, HttpResponse, StreamingHttpResponse
 
 # StreamingHttpResponse is not an HttpResponse — both descend from
@@ -29,6 +30,7 @@ from django.http.response import HttpResponseBase
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
+from django.utils.html import escape
 from django.views.decorators.http import require_POST
 
 from franktheunicorn.core.models import (
@@ -70,6 +72,7 @@ logger = logging.getLogger(__name__)
 QUEUE_TABS: list[dict[str, str]] = [
     {"key": "review", "label": "Review"},
     {"key": ALMOST_READY_QUEUE, "label": "Almost Ready to Merge"},
+    {"key": "intending-to-merge", "label": "Intending to Merge"},
     {"key": "your-prs", "label": "Your PRs"},
     {"key": "mentioned", "label": "Mentioned"},
     {"key": "ai-generated", "label": "AI-Generated"},
@@ -294,9 +297,13 @@ def _merge_readiness_disabled_q() -> Q | None:
     return q
 
 
-def _queue_ordering(queue: str) -> tuple[str, ...]:
+def _queue_ordering(queue: str) -> tuple[str | OrderBy, ...]:
     if queue == ALMOST_READY_QUEUE:
         return ("-merge_readiness_score", "-interest_score", "-github_updated_at")
+    if queue == "intending-to-merge":
+        # A follow-up list, not a triage list: the approval that has waited
+        # longest is the one to act on first, whatever it scored.
+        return (F("merge_intent_at").asc(nulls_last=True), "-github_updated_at")
     return ("-interest_score", "-github_updated_at")
 
 
@@ -381,18 +388,27 @@ def build_agent_run_summary(
     # Build the ordered list of configured (expected) agents.
     configured: list[tuple[str, str]] = []  # (source_key, display_name)
 
-    # 1. LLM backends from operator config.
-    backends = list(operator_config.llm_backends)
-    if not backends:
+    from franktheunicorn.worker.runner import llm_run_key, resolve_agent_cli_reviewers
+
+    # 1. LLM backends from operator config. Drafts are tagged by provider, so
+    # three openai backends are one row, not three copies of the same drafts.
+    # The pipeline records each provider's turn under llm_run_key.
+    models_by_source: dict[str, list[str]] = {}
+    for backend in operator_config.llm_backends:
+        source_key = "agent" if backend.provider == "stub" else backend.provider
+        models = models_by_source.setdefault(source_key, [])
+        if backend.model and backend.model not in models:
+            models.append(backend.model)
+    if not models_by_source:
         # Stub fallback — used when no backends are configured.
-        configured.append(("agent", "Stub Agent"))
-    else:
-        for backend in backends:
-            source_key = "agent" if backend.provider == "stub" else backend.provider
-            display = backend.provider.title()
-            if backend.model:
-                display += f" ({backend.model})"
-            configured.append((source_key, display))
+        models_by_source["agent"] = []
+    run_keys: dict[str, str] = {}
+    for source_key, models in models_by_source.items():
+        display = "Stub Agent" if source_key == "agent" else source_key.title()
+        if models:
+            display += f" ({', '.join(models)})"
+        configured.append((source_key, display))
+        run_keys[source_key] = llm_run_key(source_key)
 
     # 2. CodeRabbit (when enabled).
     if operator_config.coderabbit.enabled:
@@ -405,8 +421,6 @@ def build_agent_run_summary(
     # pr.agent_runs — "failed", "no-checkout" — had no row to render in, and a
     # CLI reviewer skipped on an ssh failure read exactly like one that was
     # never configured.
-    from franktheunicorn.worker.runner import resolve_agent_cli_reviewers
-
     claimed = {key for key, _ in configured}
     for rc in resolve_agent_cli_reviewers(operator_config):
         if rc.name in claimed:
@@ -450,10 +464,11 @@ def build_agent_run_summary(
     summary = []
     for source_key, display_name in configured:
         drafts = source_drafts.get(source_key, [])
-        run = runs.get(source_key)
-        # Falls back to the draft inference for rows that predate the records, so
-        # an existing install's history does not all read as "not run".
-        did_run = run is not None if runs else bool(drafts)
+        # Falling back to the bare key keeps a same-named CLI reviewer's record.
+        run = runs.get(run_keys.get(source_key, source_key)) or runs.get(source_key)
+        # Drafts prove a run even where no record does (history from before
+        # the records, or a source that never wrote one).
+        did_run = run is not None or bool(drafts)
         run_status = str(run.get("status", "")) if isinstance(run, dict) else ""
 
         status_counts: dict[str, int] = dict.fromkeys(_status_keys, 0)
@@ -767,8 +782,17 @@ def post_review(request: HttpRequest, pr_id: int) -> HttpResponse:
     if not approved:
         return HttpResponse('<div class="post-result">No approved findings to post.</div>')
 
+    # The moved-head guard's override, sent by the buttons the refusal renders.
+    on_stale_head = request.POST.get("stale_head", "refuse")
+    if on_stale_head not in ("refuse", "post", "body-only"):
+        on_stale_head = "refuse"
+
     try:
-        from franktheunicorn.backends.poster import GitHubPoster
+        from franktheunicorn.backends.poster import (
+            GitHubPoster,
+            PostUnverifiedError,
+            StaleHeadError,
+        )
 
         client = _make_posting_client(pr)
         if client is None:
@@ -778,17 +802,70 @@ def post_review(request: HttpRequest, pr_id: int) -> HttpResponse:
             )
 
         try:
-            poster = GitHubPoster(client)  # type: ignore[arg-type]
-            poster.post_review(pr, approved)
+            poster = GitHubPoster(client, mention_allowlist=_mention_allowlist())  # type: ignore[arg-type]
+            result = poster.post_review(pr, approved, on_stale_head=on_stale_head)
+        except StaleHeadError as exc:
+            url = reverse("dashboard:post_review", args=[pr.pk])
+            return HttpResponse(
+                '<div class="post-result error-note">'
+                f"Not posted: PR #{pr.number} has new commits since these drafts were made "
+                f"({exc.stored[:8]} \u2192 {exc.live[:8]}), so inline line numbers may no "
+                "longer match the diff. Re-poll the PR to redraft, or: "
+                f'<button class="action-btn" hx-post="{url}" hx-vals=\'{{"stale_head": "post"}}\' '
+                'hx-target="#post-result" hx-swap="innerHTML">Post anyway</button> '
+                f'<button class="action-btn" hx-post="{url}" hx-vals=\'{{"stale_head": "body-only"}}\' '
+                'hx-target="#post-result" hx-swap="innerHTML">Post as review body only</button>'
+                "</div>"
+            )
+        except PostUnverifiedError:
+            return HttpResponse(
+                '<div class="post-result error-note">'
+                "Posting failed, and frank could not read the PR's reviews back to tell "
+                "whether it landed anyway. Check the PR before posting again: a second "
+                "post would put a duplicate review on it, and a review cannot be deleted."
+                "</div>"
+            )
         finally:
             client.close()  # type: ignore[attr-defined]
 
-        return HttpResponse(
-            f'<div class="post-result ok-note">Posted {len(approved)} findings to GitHub.</div>'
-        )
+        if result is None:
+            return HttpResponse(
+                '<div class="post-result error-note">'
+                "Failed to post review. frank checked the PR afterwards and nothing landed, "
+                "so it is safe to try again.</div>"
+            )
+        note = f"Posted {len(approved)} findings to GitHub."
+        if isinstance(result, dict) and result.get("verified_after_error"):
+            note = (
+                f"The forge reported an error, but the review landed; recorded "
+                f"{len(approved)} findings as posted."
+            )
+        if isinstance(result, dict):
+            escaped = result.get("mentions_escaped") or []
+            if escaped:
+                note += f" {len(escaped)} @-mention(s) backtick-quoted: {', '.join(escaped)}."
+            folded = result.get("folded_into_body") or 0
+            if folded:
+                note += (
+                    f" {folded} inline comment(s) folded into the review body "
+                    "(their lines are not in the current diff)."
+                )
+        return HttpResponse(f'<div class="post-result ok-note">{escape(note)}</div>')
     except Exception:
         logger.exception("Failed to post review for PR #%d", pr.number)
         return HttpResponse('<div class="post-result error-note">Failed to post review.</div>')
+
+
+def _mention_allowlist() -> list[str]:
+    """Handles the operator lets stay live in a posted review; [] when unconfigured."""
+    try:
+        from django.conf import settings
+
+        from franktheunicorn.config.loader import load_operator_config
+
+        return list(load_operator_config(settings.FRANK_OPERATOR_CONFIG).mention_allowlist)
+    except Exception:
+        return []
 
 
 def _is_agent_feedback_enabled() -> bool:
@@ -967,6 +1044,7 @@ def stats(request: HttpRequest) -> HttpResponse:
         .order_by("-count")[:5]
     )
     flaky_checks_known = CICheckHistory.objects.filter(flaky_count__gt=0).count()
+    projects = Project.objects.annotate(pr_count=Count("pull_requests")).order_by("owner", "repo")
 
     return render(
         request,
@@ -975,6 +1053,7 @@ def stats(request: HttpRequest) -> HttpResponse:
             "merge_verdicts": merge_verdicts,
             "merge_reasons": merge_reasons,
             "flaky_checks_known": flaky_checks_known,
+            "projects": projects,
             "action_counts": action_counts,
             "total_cost": total_cost.get("total") or Decimal("0"),
             "total_tokens_in": total_cost.get("total_tokens_in") or 0,
@@ -992,14 +1071,20 @@ def stats(request: HttpRequest) -> HttpResponse:
 
 
 def merge_queue_view(request: HttpRequest) -> HttpResponse:
-    """Show PRs eligible for merging."""
+    """Show PRs eligible for merging.
+
+    The operator's own PRs, plus every PR they (or a configured approver)
+    have already approved — those are the ones the merge script is about to
+    be run on, so the readiness checklist belongs next to them too.
+    """
     from django.conf import settings
 
     from franktheunicorn.config.loader import load_project_configs
     from franktheunicorn.worker.merge_queue import evaluate_merge_eligibility
 
     eligible_prs = (
-        PullRequest.objects.filter(state="open", is_operator_pr=True)
+        PullRequest.objects.filter(state="open")
+        .filter(Q(is_operator_pr=True) | ~Q(merge_intent=""))
         .select_related("project")
         .order_by("-interest_score")[:50]
     )
@@ -1954,6 +2039,39 @@ def security_archive_drop(request: HttpRequest) -> HttpResponse:
     return _back_to_security_list(request)
 
 
+@require_POST
+def project_wipe_prs(request: HttpRequest, project_id: int) -> HttpResponse:
+    """Delete a project's PRs and everything hanging off them, for a clean re-review.
+
+    Security reports have no FK to a PR and stay. So do anti-patterns (the
+    learning, not the data) and cost/action history (SET_NULL). The next poll
+    refetches the open PRs and reviews them again, at full LLM cost. A poll
+    cycle mid-review can still re-save a PR; stop the worker for a clean wipe.
+    """
+    project = get_object_or_404(Project, pk=project_id)
+    target = reverse("dashboard:stats")
+    prs = PullRequest.objects.filter(project=project)
+    in_flight = WorkerCommand.objects.filter(
+        pull_request__project=project, status__in=("pending", "running")
+    ).count()
+    if in_flight:
+        # The worker holds those PRs; a save() after the delete re-inserts one.
+        messages.error(
+            request,
+            f"{in_flight} worker command(s) are queued or running on "
+            f"{project.owner}/{project.repo}; wait for them, then wipe.",
+        )
+    else:
+        with transaction.atomic():
+            total = prs.count()
+            prs.delete()
+        messages.success(request, f"Wiped {total} PR(s) from {project.owner}/{project.repo}.")
+        logger.info("Wiped %d PR(s) from %s/%s", total, project.owner, project.repo)
+    if request.headers.get("HX-Request") == "true":
+        return HttpResponse(status=204, headers={"HX-Redirect": target})
+    return redirect(target)
+
+
 def _back_to_security_list(request: HttpRequest) -> HttpResponse:
     """Reload the security list, whether htmx made the request or the form did.
 
@@ -2554,6 +2672,7 @@ def security_report_create(request: HttpRequest) -> HttpResponse:
         # metadata is filled even with no LLM backend configured. Anything the
         # operator typed in the form wins; this only fills the blanks.
         from franktheunicorn.data_access.email_inbox.parser import parse_pasted_report
+        from franktheunicorn.security.intake import record_injection_hits
 
         parsed = parse_pasted_report(raw_text)
 
@@ -2564,7 +2683,11 @@ def security_report_create(request: HttpRequest) -> HttpResponse:
             reporter_name=reporter_name or parsed.from_name,
             reporter_email=reporter_email or parsed.from_email,
             source="paste",
+            relay_kind=parsed.relay_kind,
+            reporter_credit=parsed.reporter_credit,
+            credit_kind=parsed.credit_kind,
         )
+        record_injection_hits(report)
 
         # Queue auto-triage if configured — runs in the worker, not inline.
         try:
@@ -2729,7 +2852,8 @@ def _has_triage_assessment(report: SecurityReport) -> bool:
 
 
 def _has_triage_severity(report: SecurityReport) -> bool:
-    """Whether the parse step rated the report, which happens two LLM calls earlier.
+    """Whether the parse step got as far as reading the reporter's severity claim,
+    which happens two LLM calls before the assessment.
 
     Kept apart from the assessment because it can be true on its own — that's the
     commonest partial failure, parse fine and the analysis model unreachable — and
@@ -2738,7 +2862,7 @@ def _has_triage_severity(report: SecurityReport) -> bool:
     Analysis" heading, with the "produced no assessment" explanation suppressed
     because something counted as a result.
     """
-    return bool(report.assessed_severity and report.assessed_severity != "unknown")
+    return bool(report.claimed_severity and report.claimed_severity != "unknown")
 
 
 @require_POST
@@ -4276,13 +4400,31 @@ def security_cve_advisory_push(request: HttpRequest, report_id: int) -> HttpResp
             else:
                 try:
                     from franktheunicorn.config.loader import get_operator_config
+                    from franktheunicorn.security.cve_merge import (
+                        CVEMergeRefusedError,
+                        apply_merge_guards,
+                    )
 
                     base_url = get_operator_config().security_triage.cve_api.base_url
+                    # The push is an upsert, so read what the service holds first
+                    # and refuse the regressions a regenerated draft makes by
+                    # accident (published state walked back, hand-added references
+                    # dropped, the product renamed). One extra GET per push.
+                    current = fetch_record(report.matched_cve_id, token=token, base_url=base_url)
+                    record = apply_merge_guards(
+                        current.raw if current.found else None,
+                        record,
+                        allow_state_downgrade=bool(request.POST.get("allow_state_downgrade")),
+                        replace_references=bool(request.POST.get("replace_references")),
+                        allow_product_change=bool(request.POST.get("allow_product_change")),
+                    )
                     update_record(report.matched_cve_id, record, token=token, base_url=base_url)
                     refreshed = fetch_record(report.matched_cve_id, token=token, base_url=base_url)
                 except CVETokenExpiredError:
                     drop_token(pmc, "write")
                     blocked = "The service rejected the write token (they live for hours). Deleted; paste a fresh one."
+                except CVEMergeRefusedError as exc:
+                    blocked = f"Not pushed. {exc}"
                 except CVEAPIError as exc:
                     blocked = str(exc)
                 else:

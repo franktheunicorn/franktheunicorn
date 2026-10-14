@@ -203,6 +203,17 @@ class TestFetchRecord:
         record = fetch_record("CVE-2026-12345", token="tok", http_client=_client(handler))
         assert record.state == "PUBLISHED"
 
+    @pytest.mark.parametrize("state", ["DRAFT", "REVIEW", "READY", "PUBLIC"])
+    def test_the_asf_workflow_states_are_recognised(self, state: str) -> None:
+        """Found while fact-checking the Magpie notes: an advisory push to
+        PUBLIC read back as "Unrecognised response"."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=[{"body": _record_body(state=state)}])
+
+        record = fetch_record("CVE-2026-12345", token="tok", http_client=_client(handler))
+        assert record.state == state
+
     def test_unrecognised_state_is_unknown(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json=[{"body": _record_body(state="LIMBO")}])

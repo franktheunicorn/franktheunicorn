@@ -209,6 +209,8 @@ class AgentCLIBackend(BaseLLMBackend):
         del api_key
 
         from franktheunicorn.review.tool_executor import (
+            auth_failure_advice,
+            looks_like_auth_failure,
             looks_like_workspace_trust_refusal,
             make_executor,
             workspace_trust_advice,
@@ -258,6 +260,10 @@ class AgentCLIBackend(BaseLLMBackend):
                 if looks_like_workspace_trust_refusal(result.stderr, result.stdout)
                 else ""
             )
+            if looks_like_auth_failure(result.stderr):
+                advice += " " + auth_failure_advice(
+                    reviewer.name, borrowed.cli_argv[0], remote=borrowed.remote.mode == "ssh"
+                )
             logger.error(
                 "The %s CLI exited %d: %s%s",
                 reviewer.name,

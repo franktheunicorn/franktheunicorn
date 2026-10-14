@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from franktheunicorn.scoring.signals import (
     WEIGHTS,
     is_ai_agent,
@@ -12,6 +14,9 @@ from franktheunicorn.scoring.signals import (
     score_cve_file_history,
     score_draft_findings,
     score_has_review_request,
+    score_jira_linked,
+    score_jira_priority_author_commented,
+    score_jira_priority_author_created,
     score_keyword_match,
     score_llm_interest,
     score_mentioned_or_assigned,
@@ -355,6 +360,52 @@ class TestDraftFindings:
         assert score_draft_findings(50) == WEIGHTS["draft_findings"]
 
 
+class TestJiraSignals:
+    _BASE_CACHE = {
+        "ticket_id": "SPARK-12345",
+        "creator": "Holden Karau",
+        "creator_username": "holdenk",
+        "recent_comments": [
+            {"author": "Dongjoon Hyun", "author_username": "dongjoon-hyun", "body": "Looks good"}
+        ],
+    }
+
+    def test_linked(self) -> None:
+        assert score_jira_linked(self._BASE_CACHE) == WEIGHTS["jira_linked"]
+
+    def test_linked_requires_ticket_id(self) -> None:
+        assert score_jira_linked({"creator": "Holden Karau"}) is None
+
+    def test_created_by_priority_author(self) -> None:
+        assert (
+            score_jira_priority_author_created(self._BASE_CACHE, ["Holden Karau"])
+            == WEIGHTS["jira_priority_author_created"]
+        )
+
+    def test_created_by_matches_username(self) -> None:
+        assert (
+            score_jira_priority_author_created(self._BASE_CACHE, ["holdenk"])
+            == WEIGHTS["jira_priority_author_created"]
+        )
+
+    def test_commented_by_priority_author(self) -> None:
+        cache = {
+            "ticket_id": "SPARK-12345",
+            "creator": "Someone Else",
+            "recent_comments": [{"author": "Holden Karau"}],
+        }
+        assert (
+            score_jira_priority_author_commented(cache, ["Holden Karau"])
+            == WEIGHTS["jira_priority_author_commented"]
+        )
+
+    def test_commented_suppressed_when_creator_matches(self) -> None:
+        assert score_jira_priority_author_commented(self._BASE_CACHE, ["holdenk"]) is None
+
+    def test_commented_missing_author_match(self) -> None:
+        assert score_jira_priority_author_commented(self._BASE_CACHE, ["alice"]) is None
+
+
 class TestCveFileHistory:
     def test_no_cve_files(self) -> None:
         assert score_cve_file_history(["src/main.py"], []) is None
@@ -407,3 +458,74 @@ class TestCveFileHistory:
     def test_no_prefix_false_positive(self) -> None:
         """Exact path 'src/auth.py' should NOT match 'src/auth.py.bak'."""
         assert score_cve_file_history(["src/auth.py.bak"], ["src/auth.py"]) is None
+
+
+class TestAuthorAwaitingMaintainer:
+    """The author's last word asks one of us, and nobody has answered: the ball
+    is in the maintainers' court (Magpie's pr-triage F5c)."""
+
+    @staticmethod
+    def _c(author: str, body: str, at: str = "2026-10-01T00:00:00Z") -> dict[str, str]:
+        return {"author": author, "body": body, "created_at": at}
+
+    def _score(self, comments: list[dict[str, str]], committers: list[str] | None = None) -> Any:
+        from franktheunicorn.scoring.signals import score_author_awaiting_maintainer
+
+        return score_author_awaiting_maintainer(comments, "alice", "holdenk", committers or [])
+
+    def test_the_author_asking_the_operator_fires(self) -> None:
+        assert self._score([self._c("alice", "@holdenk could you take another look?")]) == 20
+
+    def test_asking_a_committer_or_a_team_fires(self) -> None:
+        assert self._score([self._c("alice", "ping @srowen")], committers=["srowen"]) == 20
+        assert self._score([self._c("alice", "cc @apache/spark-committers")]) == 20
+
+    def test_a_maintainer_answering_last_does_not(self) -> None:
+        comments = [
+            self._c("alice", "@holdenk ready?", "2026-10-01T00:00:00Z"),
+            self._c("holdenk", "Looking now.", "2026-10-02T00:00:00Z"),
+        ]
+        assert self._score(comments) is None
+
+    def test_a_bot_after_the_author_is_ignored(self) -> None:
+        comments = [
+            self._c("alice", "@holdenk ready?", "2026-10-01T00:00:00Z"),
+            self._c("github-actions[bot]", "CI passed", "2026-10-02T00:00:00Z"),
+        ]
+        assert self._score(comments) == 20
+
+    def test_mentioning_nobody_with_merge_rights_does_not(self) -> None:
+        assert self._score([self._c("alice", "thanks @bob for the idea")]) is None
+        assert self._score([self._c("alice", "no mention at all")]) is None
+
+    def test_a_mention_inside_code_does_not_count(self) -> None:
+        assert self._score([self._c("alice", "see `@holdenk` in the CODEOWNERS file")]) is None
+
+    def test_the_operators_own_pr_never_fires(self) -> None:
+        from franktheunicorn.scoring.signals import score_author_awaiting_maintainer
+
+        comments = [self._c("holdenk", "@srowen could you review?")]
+        assert score_author_awaiting_maintainer(comments, "holdenk", "holdenk", ["srowen"]) is None
+
+    def test_no_comments_no_signal(self) -> None:
+        assert self._score([]) is None
+
+    def test_an_npm_scope_is_not_a_team_once_the_org_is_known(self) -> None:
+        """Found in review: "bumped @types/node" read as a team mention."""
+        from franktheunicorn.scoring.signals import score_author_awaiting_maintainer
+
+        bump = [self._c("alice", "Bumped @types/node to 20, ready for another look")]
+        team = [self._c("alice", "cc @apache/spark-committers")]
+        assert score_author_awaiting_maintainer(bump, "alice", "holdenk", [], org="apache") is None
+        assert score_author_awaiting_maintainer(team, "alice", "holdenk", [], org="apache") == 20
+
+
+class TestNewContributorBumpRespectsAssociation:
+    def test_a_forge_known_contributor_gets_no_bump(self) -> None:
+        from franktheunicorn.scoring.signals import score_new_human_contributor
+
+        assert (
+            score_new_human_contributor("ret", "op", [], author_association="CONTRIBUTOR") is None
+        )
+        assert score_new_human_contributor("new", "op", [], author_association="FIRST_TIMER") == 10
+        assert score_new_human_contributor("new", "op", [], author_association="") == 10

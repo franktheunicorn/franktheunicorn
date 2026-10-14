@@ -9,7 +9,8 @@ operator's own ``affected_versions`` sentence for them to edit.
 
 Update semantics: when the service already holds a record (``existing``),
 its ``cveMetadata`` and any non-cna containers are preserved verbatim and
-only the cna fields this module manages are replaced. A fresh record mirrors
+only the cna fields this module manages are replaced (``credits`` only when
+the report has a credited reporter to replace them with). A fresh record mirrors
 what the service's own allocate route creates (``cveMetadata.state``
 "PUBLISHED" with ``CNA_private.state`` "RESERVED" — odd, but consistent with
 the house the record lives in).
@@ -74,6 +75,9 @@ def build_cve5_json(
     references = _references(report)
     if references:
         cna["references"] = references
+    credits = _credits(report)
+    if credits:
+        cna["credits"] = credits
     return record
 
 
@@ -84,6 +88,25 @@ def _description(report: SecurityReport) -> str:
         if text and text.strip():
             return text.strip()[:_MAX_DESCRIPTION_CHARS]
     return report.matched_cve_id
+
+
+def _credits(report: SecurityReport) -> list[dict[str, str]]:
+    """The relay's credited reporter, typed the way CVE 5 distinguishes them.
+
+    Only ``reporter_credit`` (the name a relay's credit line gave) is used;
+    ``reporter_name`` is whoever the mail came from, which on a relayed report
+    is the broker. Nothing is inferred when there is no credit line: the
+    operator adds one in the preview. A credited tool or AI account is typed
+    ``tool`` rather than ``finder``, Apache Magpie's bot-credit policy
+    (``tools/cve-tool-vulnogram/bot-credits-policy.md`` at apache/magpie
+    commit dadb315caa8b881fc1d2195bef03223dac25915a): the scanner that found
+    the hole gets the credit, under the schema's category for it.
+    """
+    credit = report.reporter_credit.strip() if report.reporter_credit else ""
+    if not credit:
+        return []
+    credit_type = "tool" if report.credit_kind == "tool" else "finder"
+    return [{"lang": "en", "value": credit, "type": credit_type}]
 
 
 def _affected(report: SecurityReport, pmc: str) -> dict[str, Any]:
@@ -103,7 +126,19 @@ def _affected(report: SecurityReport, pmc: str) -> dict[str, Any]:
 
 
 def _references(report: SecurityReport) -> list[dict[str, str]]:
-    """Links the record can defend: the fix branch and the report thread."""
+    """Links the record can defend: the fix branch(es), and nothing private.
+
+    This used to append ``https://lists.apache.org/thread/<email_message_id>``
+    for every emailed report. A report that arrived by email arrived on
+    ``security@`` (or a forwarder relaying it), and that archive page is
+    access-gated: the link was a private-thread pointer on a public CVE record,
+    and the raw Message-ID in it is itself a reporter-identifying string.
+    Apache Magpie states the rule plainly in its AGENTS.md ("CVE references must
+    never point at non-public mailing-list threads", apache/magpie @
+    dadb315caa8b881fc1d2195bef03223dac25915a) and this builder now follows it:
+    the thread stays on the report page for the operator, the record carries
+    only URLs that are public by construction.
+    """
     refs: list[dict[str, str]] = []
     if report.project:
         owner = report.project.owner
@@ -116,6 +151,4 @@ def _references(report: SecurityReport) -> list[dict[str, str]]:
             refs.append(
                 {"url": f"https://github.com/{owner}/{repo}/tree/{report.fixed_in_branch.strip()}"}
             )
-    if report.email_message_id:
-        refs.append({"url": f"https://lists.apache.org/thread/{report.email_message_id}"})
     return refs

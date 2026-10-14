@@ -18,7 +18,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from franktheunicorn.backends.base import MAX_LISTED_PULL_REQUESTS, ForgeClient
-from franktheunicorn.config.models import ProjectConfig
+from franktheunicorn.config.models import MergeIntentConfig, ProjectConfig
 from franktheunicorn.core.models import Project, PullRequest, ReviewDraft
 from franktheunicorn.core.session_detector import detect_agent_session
 from franktheunicorn.scoring.merge_readiness import (
@@ -29,6 +29,13 @@ from franktheunicorn.scoring.merge_readiness import (
     refresh_review_and_ci_state,
 )
 from franktheunicorn.scoring.scorer import score_pull_request_from_model
+from franktheunicorn.worker.merge_intent import (
+    MERGE_INTENT_FIELDS,
+    MergeIntent,
+    apply_merge_intent,
+    count_approvals,
+    detect_merge_intent,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -84,12 +91,16 @@ def poll_project(
     *,
     repo_path: Path | None = None,
     skipped_prs: list[PullRequest] | None = None,
+    merge_intent: MergeIntentConfig | None = None,
 ) -> list[PullRequest]:
     """
     Poll a single project for PRs, score them, and store in the DB.
 
     If repo_path is provided and points to a valid git clone, blame data
     is fetched for changed files and passed to the scorer.
+
+    *merge_intent* says whose approvals put a PR in the intending-to-merge
+    queue; ``None`` means the defaults, i.e. the operator's own.
 
     Returns the list of PullRequest objects that were created or updated.
     PRs skipped as unchanged are not in the returned list; pass a list as
@@ -200,7 +211,13 @@ def poll_project(
 
         try:
             pr_obj = _refresh_pull_request(
-                client, project, project_config, pr_data, operator_username, repo_path
+                client,
+                project,
+                project_config,
+                pr_data,
+                operator_username,
+                repo_path,
+                merge_intent=merge_intent,
             )
         except Exception:
             # Per-PR, not per-project: this used to raise out of poll_project, and
@@ -268,6 +285,8 @@ def _refresh_pull_request(
     pr_data: dict[str, Any],
     operator_username: str,
     repo_path: Path | None,
+    *,
+    merge_intent: MergeIntentConfig | None = None,
 ) -> PullRequest:
     """Spend the per-PR API calls on one PR: upsert, enrich, score, route.
 
@@ -351,6 +370,10 @@ def _refresh_pull_request(
         pr_obj.base_sha = base_sha
     if head_sha and pr_obj.head_sha != head_sha:
         pr_obj.head_sha = head_sha
+        # A push invalidates the stored CI verdict. Cleared here, not where
+        # the fresh one is read, so a failed read leaves "unknown" and never
+        # an old head's "pass" that the merge queue would act on.
+        pr_obj.ci_status = ""
     if head_branch and pr_obj.head_branch != head_branch:
         pr_obj.head_branch = head_branch
     if base_branch and pr_obj.base_branch != base_branch:
@@ -430,6 +453,8 @@ def _refresh_pull_request(
     operator_review_posted_at: str | None = None
     author_replies: list[str] | None = None
     comment_bodies: list[str] | None = None
+    comment_events: list[dict[str, str]] | None = None
+    fetched_comments: list[dict[str, Any]] | None = None
 
     try:
         all_comments = client.get_issue_comments(
@@ -437,27 +462,35 @@ def _refresh_pull_request(
             project_config.repo,
             pr_number,
         )
+        fetched_comments = all_comments
         comment_bodies = [str(c.get("body", "")) for c in all_comments if c.get("body")]
-
-        latest_posted_at = (
-            ReviewDraft.objects.filter(
-                pull_request=pr_obj, status="posted", posted_at__isnull=False
-            )
-            .order_by("-posted_at")
-            .values_list("posted_at", flat=True)
-            .first()
+        comment_events = _comment_events(all_comments)
+        operator_review_posted_at, author_replies = _replies_since_posted_review(
+            pr_obj, all_comments
         )
-        if latest_posted_at is not None:
-            operator_review_posted_at = latest_posted_at.isoformat()
-            pr_author = pr_obj.author.lower()
-            author_replies = [
-                c["created_at"]
-                for c in all_comments
-                if c.get("user", {}).get("login", "").lower() == pr_author
-                and c.get("created_at", "") >= operator_review_posted_at
-            ]
     except Exception:
         logger.debug("Could not fetch comments for PR #%d", pr_number)
+
+    # Has an approver already said yes? Reads the comments fetched above plus
+    # one reviews call; routes to the intending-to-merge queue below.
+    _sync_merge_intent(
+        client,
+        project_config.owner,
+        project_config.repo,
+        pr_obj,
+        operator_username,
+        merge_intent,
+        comments=fetched_comments,
+    )
+
+    # Populate JIRA cache before scoring so JIRA-derived ranking signals are
+    # available during normal poll-based ingest, not only during agent runs.
+    try:
+        from franktheunicorn.data_access.context_orchestrator import fetch_jira_context
+
+        fetch_jira_context(pr_obj, project_config)
+    except Exception:
+        logger.debug("Could not fetch JIRA context for PR #%d", pr_number, exc_info=True)
 
     # Score the PR
     score, breakdown = score_pull_request_from_model(
@@ -469,6 +502,7 @@ def _refresh_pull_request(
         operator_review_posted_at=operator_review_posted_at,
         author_replies_after_review=author_replies,
         comment_bodies=comment_bodies,
+        comment_events=comment_events,
     )
     pr_obj.interest_score = score
     pr_obj.score_breakdown = breakdown
@@ -514,6 +548,7 @@ def _refresh_pull_request(
             "title",
             "body",
             *READINESS_UPDATE_FIELDS,
+            *MERGE_INTENT_FIELDS,
         ]
     )
     return pr_obj
@@ -691,6 +726,111 @@ def _mark_reviews_stale(pr_obj: PullRequest) -> None:
         PullRequest.objects.filter(pk=pr_obj.pk).update(agent_runs=updated)
 
 
+def _replies_since_posted_review(
+    pr_obj: PullRequest, comments: list[dict[str, Any]]
+) -> tuple[str | None, list[str] | None]:
+    """When the operator's latest review on *pr_obj* was posted, and when the
+    author commented since: the pending-response signal's two inputs. Both
+    ``None`` while nothing has been posted."""
+    latest_posted_at = (
+        ReviewDraft.objects.filter(pull_request=pr_obj, status="posted", posted_at__isnull=False)
+        .order_by("-posted_at")
+        .values_list("posted_at", flat=True)
+        .first()
+    )
+    if latest_posted_at is None:
+        return None, None
+    posted_at = latest_posted_at.isoformat()
+    pr_author = pr_obj.author.lower()
+    return posted_at, [
+        c["created_at"]
+        for c in comments
+        if c.get("user", {}).get("login", "").lower() == pr_author
+        and c.get("created_at", "") >= posted_at
+    ]
+
+
+def _comment_events(comments: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """Who said what, when, in posting order: the "whose court is the ball in"
+    signal needs the last human speaker, not just the words."""
+    return sorted(
+        (
+            {
+                "author": str((c.get("user") or {}).get("login", "")),
+                "body": str(c.get("body", "") or ""),
+                "created_at": str(c.get("created_at", "") or ""),
+            }
+            for c in comments
+        ),
+        key=lambda e: e["created_at"],
+    )
+
+
+def _sync_merge_intent(
+    client: ForgeClient,
+    owner: str,
+    repo: str,
+    pr_obj: PullRequest,
+    operator_username: str,
+    config: MergeIntentConfig | None,
+    *,
+    comments: list[dict[str, Any]] | None = None,
+) -> None:
+    """Refresh the PR's merge intent, approval count and (when queued) CI status.
+
+    One reviews read per PR; *comments* are passed in when the caller already
+    fetched them. A failed read leaves the stored answer standing rather than
+    clearing it — a rate-limit window must not empty the queue. The CI read is
+    spent only on PRs that need it (queued, or the operator's own, which the
+    merge queue reads), since it is two more calls per PR.
+    """
+    config = config or MergeIntentConfig()
+    if not config.enabled:
+        # Off means off for rows classified before it was switched off too:
+        # routing reads the stored field, so leaving it would keep them in a
+        # queue nothing can clear them from.
+        apply_merge_intent(pr_obj, MergeIntent())
+        return
+    approvers = config.approvers_for(operator_username)
+    if not approvers:
+        logger.debug("Merge intent skipped for PR #%d: no approvers configured", pr_obj.number)
+        return
+
+    try:
+        reviews = client.list_pull_request_reviews(owner, repo, pr_obj.number)
+    except Exception:
+        logger.debug("Could not fetch reviews for PR #%d", pr_obj.number, exc_info=True)
+        return
+    if comments is None:
+        try:
+            comments = client.get_issue_comments(owner, repo, pr_obj.number)
+        except Exception:
+            # Same rule as the reviews read: no comments means no answer, not
+            # "no approval" — an empty list here would clear a comment-based
+            # intent on every rate-limited cycle.
+            logger.debug("Could not fetch comments for PR #%d", pr_obj.number, exc_info=True)
+            return
+
+    intent = detect_merge_intent(reviews, comments, approvers)
+    changed = apply_merge_intent(pr_obj, intent)
+    if "merge_intent" in changed:
+        logger.info(
+            "PR #%d merge intent %s: %s",
+            pr_obj.number,
+            intent.kind or "cleared",
+            intent.excerpt[:80] if intent.excerpt else f"by {intent.by}",
+        )
+    pr_obj.approval_count = count_approvals(reviews, exclude=pr_obj.author)
+
+    # By author rather than is_operator_pr, which routing sets after this runs.
+    is_own = bool(operator_username) and pr_obj.author.lower() == operator_username.lower()
+    if config.track_ci and (intent.is_set or is_own) and pr_obj.head_sha:
+        try:
+            pr_obj.ci_status = client.get_commit_ci_status(owner, repo, pr_obj.head_sha)
+        except Exception:
+            logger.debug("Could not fetch CI status for PR #%d", pr_obj.number, exc_info=True)
+
+
 def _close_missing_pull_requests(
     project: Project,
     raw_prs: list[dict[str, Any]],
@@ -757,6 +897,7 @@ def _route_pr_to_queue(
         "changed_files": pr_obj.changed_files,
         "requested_reviewers": pr_obj.requested_reviewers,
         "assignees": pr_obj.assignees,
+        "author_association": pr_obj.author_association,
     }
     if pr_obj.github_created_at:
         from datetime import UTC, datetime
@@ -793,6 +934,12 @@ def _route_pr_to_queue(
     is_wip = pr_obj.is_draft or "wip_title" in flags
     if skip_wip and is_wip:
         pr_obj.queue = "wip"
+    # Already approved (or "LGTM pending CI") by an approver: it is waiting on
+    # a merge, not on anybody's review, whatever else is true of it. Ahead of
+    # your-prs too — "merging once CI is green" on the operator's own PR is
+    # the same follow-up.
+    elif pr_obj.merge_intent:
+        pr_obj.queue = "intending-to-merge"
     # Route to queue based on priority of flags. A PR the operator is
     # personally pulled into (mentioned/assigned/review-requested) outranks
     # bot and new-contributor routing, but not the operator's own PRs.
@@ -957,6 +1104,10 @@ def _upsert_pull_request(
                 "is_draft": pr_data.get("draft", False),
                 "github_created_at": _parse_github_datetime(pr_data.get("created_at")),
                 "github_updated_at": _parse_github_datetime(pr_data.get("updated_at")),
+                # GitHub's own answer to "has this author committed here"; ""
+                # from Gitea, GitLab and the scrape path, where the known-authors
+                # rule decides as before.
+                "author_association": str(pr_data.get("author_association", "") or "")[:32],
             }
         )
 
@@ -1051,25 +1202,66 @@ def ingest_single_pr(
 
     pr_obj = _upsert_pull_request(project, pr_data, changed_files)
 
-    # The single-PR payload carries the refs the list payload lacks; the
-    # merge-readiness fetch below needs the head.
-    head_data = pr_data.get("head")
-    if isinstance(head_data, dict) and head_data.get("sha"):
-        pr_obj.head_sha = str(head_data["sha"])
-    base_data = pr_data.get("base")
-    if isinstance(base_data, dict):
-        if base_data.get("sha"):
-            pr_obj.base_sha = str(base_data["sha"])
-        if base_data.get("ref"):
-            pr_obj.base_branch = str(base_data["ref"])
-    if isinstance(pr_data.get("mergeable"), bool):
-        pr_obj.mergeable = pr_data["mergeable"]
+    # ``get_pull_request`` is the detail endpoint, so the refs and mergeable
+    # state are already in hand. Keep them: the CI read below needs the head
+    # SHA, and the merge queue reads mergeable off rows that may only ever be
+    # reached through this path.
+    raw_mergeable = pr_data.get("mergeable")
+    if isinstance(raw_mergeable, bool):
+        pr_obj.mergeable = raw_mergeable
+    for side, sha_field, ref_field in (
+        ("base", "base_sha", "base_branch"),
+        ("head", "head_sha", "head_branch"),
+    ):
+        side_data = pr_data.get(side)
+        if isinstance(side_data, dict):
+            new_sha = side_data.get("sha")
+            if new_sha and getattr(pr_obj, sha_field) != new_sha:
+                setattr(pr_obj, sha_field, new_sha)
+                if sha_field == "head_sha":
+                    # Same rule as the poll path: a new head, no CI verdict yet.
+                    pr_obj.ci_status = ""
+            if side_data.get("ref"):
+                setattr(pr_obj, ref_field, side_data["ref"])
+
+    # One comments read for scoring and the merge-intent sync below. Scoring
+    # without them wrote over the poll's mention bonus, "ball in our court" and
+    # pending-response bumps on every own-PR scan, which is every cycle for
+    # exactly the PRs the operator is engaged in.
+    fetched_comments: list[dict[str, Any]] | None = None
+    comment_bodies: list[str] | None = None
+    comment_events: list[dict[str, str]] | None = None
+    operator_review_posted_at: str | None = None
+    author_replies: list[str] | None = None
+    try:
+        fetched_comments = client.get_issue_comments(owner, repo, pr_number)
+        comment_bodies = [str(c.get("body", "")) for c in fetched_comments if c.get("body")]
+        comment_events = _comment_events(fetched_comments)
+        operator_review_posted_at, author_replies = _replies_since_posted_review(
+            pr_obj, fetched_comments
+        )
+    except Exception:
+        logger.debug("Could not fetch comments for PR #%d during on-demand ingest", pr_number)
 
     if project_config:
+        try:
+            from franktheunicorn.data_access.context_orchestrator import fetch_jira_context
+
+            fetch_jira_context(pr_obj, project_config)
+        except Exception:
+            logger.debug(
+                "Could not fetch JIRA context for PR #%d during on-demand ingest",
+                pr_number,
+                exc_info=True,
+            )
         score, breakdown = score_pull_request_from_model(
             pr=pr_obj,
             project_config=project_config,
             operator_username=operator_config.github_username or "",
+            operator_review_posted_at=operator_review_posted_at,
+            author_replies_after_review=author_replies,
+            comment_bodies=comment_bodies,
+            comment_events=comment_events,
         )
         pr_obj.interest_score = score
         pr_obj.score_breakdown = breakdown
@@ -1080,6 +1272,20 @@ def ingest_single_pr(
     # limited to DB-only PR authors (which are sparse on first/force ingest).
     if not project.contributors_cache:
         _refresh_contributors_cache(client, project, owner, repo)
+
+    # The operator's own-PR scan lands here for every PR they have reviewed or
+    # commented on — exactly the set whose approvals the intending-to-merge
+    # queue is made of, and the only path that reaches a PR the project poll
+    # could not list. Same two reads as the poll path.
+    _sync_merge_intent(
+        client,
+        owner,
+        repo,
+        pr_obj,
+        operator_config.github_username or "",
+        operator_config.merge_intent,
+        comments=fetched_comments,
+    )
 
     _route_pr_to_queue(
         pr_obj,
@@ -1105,11 +1311,13 @@ def ingest_single_pr(
             "is_mentioned",
             "is_low_context",
             "is_likely_unowned",
-            "head_sha",
-            "base_sha",
-            "base_branch",
             "mergeable",
+            "base_sha",
+            "head_sha",
+            "base_branch",
+            "head_branch",
             *READINESS_UPDATE_FIELDS,
+            *MERGE_INTENT_FIELDS,
         ]
     )
     return pr_obj

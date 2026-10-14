@@ -9,6 +9,7 @@
   <thead>
     <tr>
       <th>PR</th>
+      <th>Intent</th>
       <th>CI</th>
       <th>Approvals</th>
       <th>Conflicts</th>
@@ -25,7 +26,16 @@
         </a>
         <br><small>{{ item.pr.title|truncatechars:60 }}</small>
       </td>
-      <td>{% if item.ci_pass %}✓{% else %}✗{% endif %}</td>
+      <td>
+        {% if item.pr.merge_intent %}
+        <span class="badge-intent {{ item.pr.merge_intent }}" title="{% if item.pr.merge_intent_excerpt %}&ldquo;{{ item.pr.merge_intent_excerpt }}&rdquo;{% endif %}">{% if item.pr.merge_intent == 'conditional' %}Approved pending CI{% else %}Approved{% endif %}</span>
+        {% if item.pr.merge_intent_at %}<br><small>{{ item.pr.merge_intent_at|timesince }} ago</small>{% endif %}
+        {% if item.pr.moved_since_approval %}<br><small class="badge-conflict">Pushed since</small>{% endif %}
+        {% elif item.pr.is_operator_pr %}
+        <small class="muted">Your PR</small>
+        {% endif %}
+      </td>
+      <td>{% if item.ci_pass %}✓{% else %}✗{% endif %}{% if item.pr.ci_status %} <small class="muted">{{ item.pr.ci_status }}</small>{% endif %}</td>
       <td>{% if item.approvals_met %}✓{% else %}✗{% endif %}</td>
       <td>{% if item.no_conflicts %}✓{% else %}✗{% endif %}</td>
       <td>{% if item.eligible %}<strong style="color: var(--green);">Ready</strong>{% else %}Not ready{% endif %}</td>
@@ -54,6 +64,6 @@
 
 {# copyMergeCommand lives in shortcuts.js — shared with the almost-ready tab. #}
 {% else %}
-<p>No PRs in the merge queue. Enable merge_queue in your project config to track PRs here.</p>
+<p>No PRs in the merge queue. Enable merge_queue in your project config to track your own PRs and the ones you have approved here.</p>
 {% endif %}
 {% endblock %}

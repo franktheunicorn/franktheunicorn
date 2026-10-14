@@ -246,6 +246,85 @@ class TestFetchJiraContext:
         assert "SPARK-123" in result
         assert "Fix the bug" in result
 
+    @patch("franktheunicorn.data_access.jira.fetcher.extract_ticket_ids")
+    def test_clears_cache_when_ticket_id_disappears(self, mock_extract: MagicMock) -> None:
+        from franktheunicorn.data_access.context_orchestrator import fetch_jira_context
+
+        mock_extract.return_value = []
+        config = ProjectConfig(
+            owner="apache",
+            repo="spark",
+            jira=JiraConfig(
+                enabled=True, server="https://jira.example.com", project_prefix="SPARK"
+            ),
+        )
+        pr = PullRequestFactory(
+            title="No ticket anymore",
+            jira_ticket_id="SPARK-123",
+            jira_cache={
+                "ticket_id": "SPARK-123",
+                "summary": "Old ticket",
+                "status": "Open",
+                "assignee": "dev",
+                "description": "Old details",
+                "recent_comments": [],
+            },
+        )
+
+        result = fetch_jira_context(pr, config)
+        assert result == ""
+        pr.refresh_from_db()
+        assert pr.jira_ticket_id == ""
+        assert pr.jira_cache is None
+
+    @patch("franktheunicorn.data_access.jira.fetcher.JiraFetcher")
+    @patch("franktheunicorn.data_access.jira.fetcher.extract_ticket_ids")
+    def test_refetches_when_ticket_id_changes(
+        self, mock_extract: MagicMock, mock_fetcher_cls: MagicMock
+    ) -> None:
+        from franktheunicorn.data_access.context_orchestrator import fetch_jira_context
+
+        mock_extract.return_value = ["SPARK-999"]
+        mock_result = MagicMock()
+        mock_result.to_cache_dict.return_value = {
+            "ticket_id": "SPARK-999",
+            "summary": "New ticket",
+            "status": "Open",
+            "assignee": "dev",
+            "description": "",
+            "recent_comments": [],
+        }
+        mock_result.to_prompt_context.return_value = "SPARK-999: New ticket"
+        mock_fetcher_cls.return_value.fetch.return_value = mock_result
+
+        config = ProjectConfig(
+            owner="apache",
+            repo="spark",
+            jira=JiraConfig(
+                enabled=True, server="https://jira.example.com", project_prefix="SPARK"
+            ),
+        )
+        pr = PullRequestFactory(
+            title="[SPARK-999] New direction",
+            jira_ticket_id="SPARK-123",
+            jira_cache={
+                "ticket_id": "SPARK-123",
+                "summary": "Old ticket",
+                "status": "Open",
+                "assignee": "dev",
+                "description": "",
+                "recent_comments": [],
+            },
+        )
+
+        result = fetch_jira_context(pr, config, http_client=MagicMock())
+        assert "SPARK-999" in result
+        mock_fetcher_cls.return_value.fetch.assert_called_once_with(
+            "https://jira.example.com", "SPARK-999"
+        )
+        pr.refresh_from_db()
+        assert pr.jira_ticket_id == "SPARK-999"
+
     def test_uses_cache_with_comments(self) -> None:
         from franktheunicorn.data_access.context_orchestrator import fetch_jira_context
 

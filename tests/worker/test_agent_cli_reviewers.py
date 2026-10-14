@@ -37,7 +37,7 @@ from franktheunicorn.config.models import (
     RemoteExecutionConfig,
 )
 from franktheunicorn.core.models import PullRequest
-from franktheunicorn.review.agent_cli import run_agent_cli_review
+from franktheunicorn.review.agent_cli import AgentCLIRunError, run_agent_cli_review
 from franktheunicorn.review.tool_executor import ExecResult, RemoteSSHExecutor
 from franktheunicorn.worker.runner import (
     _check_agent_cli_reviewers,
@@ -191,10 +191,9 @@ class TestFailuresAreLogged:
             None,
         ]
 
-        with caplog.at_level(logging.INFO):
-            findings = run_agent_cli_review("/w", "base", _ssh_reviewer(), executor=executor)
+        with caplog.at_level(logging.INFO), pytest.raises(AgentCLIRunError):
+            run_agent_cli_review("/w", "base", _ssh_reviewer(), executor=executor)
 
-        assert findings == []
         errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
         assert errors, "a reviewer that could not be reached must say so"
         assert "ssh_command" in errors[0].getMessage()
@@ -203,10 +202,9 @@ class TestFailuresAreLogged:
         executor = MagicMock()
         executor.run.return_value = ExecResult(returncode=128, stdout="", stderr="bad revision")
 
-        with caplog.at_level(logging.INFO):
-            findings = run_agent_cli_review("/w", "base", _ssh_reviewer(), executor=executor)
+        with caplog.at_level(logging.INFO), pytest.raises(AgentCLIRunError):
+            run_agent_cli_review("/w", "base", _ssh_reviewer(), executor=executor)
 
-        assert findings == []
         assert any(r.levelno >= logging.WARNING for r in caplog.records)
         assert "bad revision" in caplog.text
 
@@ -242,7 +240,7 @@ class TestFailuresAreLogged:
             ExecResult(returncode=127, stdout="", stderr="claude: command not found"),
         ]
 
-        with caplog.at_level(logging.INFO):
+        with caplog.at_level(logging.INFO), pytest.raises(AgentCLIRunError):
             run_agent_cli_review("/w", "base", _ssh_reviewer(), executor=executor)
 
         assert "command not found" in caplog.text
@@ -285,7 +283,7 @@ class TestNoCheckoutIsLoud:
             patch.object(
                 RemoteSSHExecutor,
                 "run",
-                return_value=ExecResult(returncode=0, stdout="", stderr=""),
+                return_value=ExecResult(returncode=0, stdout="b" * 40, stderr=""),
             ),
             patch(
                 "franktheunicorn.review.agent_cli.run_agent_cli_review",
@@ -332,7 +330,7 @@ class TestSecurityFocusWiring:
             patch.object(
                 RemoteSSHExecutor,
                 "run",
-                return_value=ExecResult(returncode=0, stdout="", stderr=""),
+                return_value=ExecResult(returncode=0, stdout="b" * 40, stderr=""),
             ),
             # Imported lazily inside _run_agent_cli_for_pr, so patching the
             # module attribute intercepts it.
@@ -395,7 +393,7 @@ class TestStartupProbe:
             patch.object(
                 RemoteSSHExecutor,
                 "run",
-                return_value=ExecResult(returncode=0, stdout="", stderr=""),
+                return_value=ExecResult(returncode=0, stdout="b" * 40, stderr=""),
             ),
             caplog.at_level(logging.INFO),
         ):
@@ -824,3 +822,53 @@ class TestTwoModelsOnOneCommand:
         resolved = {rc.name: rc for rc in resolve_agent_cli_reviewers(oc)}
         assert resolved["cursor-agent"].model == "glm-5.2"
         assert resolved["cursor-agent-k3-max"].model == "kimi-k3-max"
+
+
+class TestReadOnlyStartupLine:
+    """The startup check names the read-only flags in use, and says so loudly
+    when an override has taken them away from a binary that had them."""
+
+    @staticmethod
+    def _local(**fields: Any) -> AgentCLIReviewerConfig:
+        return AgentCLIReviewerConfig(name="claude", enabled=True, cli_path="claude", **fields)
+
+    def test_the_enabled_line_names_the_flags(self, caplog: Any) -> None:
+        oc = OperatorConfig(agent_cli_reviewers=[self._local()])
+        with caplog.at_level(logging.INFO):
+            _check_agent_cli_reviewers(oc)
+        assert (
+            "read-only via --setting-sources user --strict-mcp-config --tools Read,Grep,Glob"
+            in caplog.text
+        )
+        assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+
+    def test_an_override_to_nothing_on_a_launcher_warns(self, caplog: Any) -> None:
+        oc = OperatorConfig(
+            agent_cli_reviewers=[
+                AgentCLIReviewerConfig(
+                    name="claude-uv", enabled=True, cli_path="uv run claude", readonly_args=[]
+                )
+            ]
+        )
+        with caplog.at_level(logging.INFO):
+            _check_agent_cli_reviewers(oc)
+        warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("claude runs without read-only flags" in m for m in warnings)
+
+    def test_an_agent_frank_has_no_flags_for_warns(self, caplog: Any) -> None:
+        oc = OperatorConfig(
+            agent_cli_reviewers=[
+                AgentCLIReviewerConfig(name="gemini", enabled=True, cli_path="gemini")
+            ]
+        )
+        with caplog.at_level(logging.INFO):
+            _check_agent_cli_reviewers(oc)
+        warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("frank has no read-only flags for gemini" in m for m in warnings)
+
+    def test_an_override_to_nothing_warns(self, caplog: Any) -> None:
+        oc = OperatorConfig(agent_cli_reviewers=[self._local(readonly_args=[])])
+        with caplog.at_level(logging.INFO):
+            _check_agent_cli_reviewers(oc)
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("without read-only flags" in r.getMessage() for r in warnings)

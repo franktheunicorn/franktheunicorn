@@ -11,8 +11,10 @@ from __future__ import annotations
 import logging
 import re
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 from bs4 import BeautifulSoup
+from bs4.element import Tag
 
 from franktheunicorn.data_access.base import (
     DataFetcher,
@@ -81,6 +83,8 @@ class JiraFetcher(DataFetcher[JiraTicketResult]):
         fields = data.get("fields", {})
 
         assignee_obj = fields.get("assignee") or {}
+        creator_obj = fields.get("creator") or {}
+        reporter_obj = fields.get("reporter") or {}
         priority_obj = fields.get("priority") or {}
         status_obj = fields.get("status") or {}
         issuetype_obj = fields.get("issuetype") or {}
@@ -97,11 +101,18 @@ class JiraFetcher(DataFetcher[JiraTicketResult]):
         recent_comments = [
             JiraComment(
                 author=_get_nested(c, "author", "displayName"),
+                author_username=_get_nested(c, "author", "name")
+                or _get_nested(c, "author", "accountId"),
                 body=c.get("body", ""),
                 created=c.get("created", ""),
             )
             for c in raw_comments[-5:]
         ]
+
+        creator = creator_obj.get("displayName", "") or reporter_obj.get("displayName", "")
+        creator_username = creator_obj.get("name", "") or creator_obj.get("accountId", "")
+        if not creator_username:
+            creator_username = reporter_obj.get("name", "") or reporter_obj.get("accountId", "")
 
         return JiraTicketResult(
             fetched_via=FetchMethod.API,
@@ -113,6 +124,10 @@ class JiraFetcher(DataFetcher[JiraTicketResult]):
             priority=priority_obj.get("name", ""),
             issue_type=issuetype_obj.get("name", ""),
             project=project_obj.get("key", ""),
+            creator=creator,
+            creator_username=creator_username,
+            reporter=reporter_obj.get("displayName", ""),
+            reporter_username=reporter_obj.get("name", "") or reporter_obj.get("accountId", ""),
             recent_comments=recent_comments,
         )
 
@@ -159,6 +174,27 @@ class JiraFetcher(DataFetcher[JiraTicketResult]):
         if priority_el:
             priority = priority_el.get_text(strip=True)
 
+        creator = ""
+        creator_username = ""
+        creator_el = soup.find("span", id="creator-val")
+        if creator_el:
+            creator = creator_el.get_text(strip=True)
+            creator_link = creator_el.find("a")
+            creator_username = _extract_user_key_from_href(_href_from_tag(creator_link))
+
+        reporter = ""
+        reporter_username = ""
+        reporter_el = soup.find("span", id="reporter-val")
+        if reporter_el:
+            reporter = reporter_el.get_text(strip=True)
+            reporter_link = reporter_el.find("a")
+            reporter_username = _extract_user_key_from_href(_href_from_tag(reporter_link))
+
+        if not creator:
+            creator = reporter
+        if not creator_username:
+            creator_username = reporter_username
+
         # Parse comments from the activity section.
         comments: list[JiraComment] = []
         comment_blocks = soup.find_all("div", class_="activity-comment")
@@ -169,6 +205,7 @@ class JiraFetcher(DataFetcher[JiraTicketResult]):
             comments.append(
                 JiraComment(
                     author=author_el.get_text(strip=True) if author_el else "",
+                    author_username=_extract_user_key_from_href(_href_from_tag(author_el)),
                     body=body_el.get_text(strip=True) if body_el else "",
                     created=str(date_el.get("datetime", "")) if date_el else "",
                 )
@@ -182,6 +219,10 @@ class JiraFetcher(DataFetcher[JiraTicketResult]):
             status=status,
             assignee=assignee,
             priority=priority,
+            creator=creator,
+            creator_username=creator_username,
+            reporter=reporter,
+            reporter_username=reporter_username,
             recent_comments=comments,
         )
 
@@ -195,3 +236,31 @@ def _get_nested(d: dict[str, Any], *keys: str) -> str:
         else:
             return ""
     return str(current) if current else ""
+
+
+def _extract_user_key_from_href(href: str) -> str:
+    """Extract a stable user key from common JIRA profile URL formats."""
+    if not href:
+        return ""
+    for pattern in (r"/user/([^/?#]+)", r"/people/([^/?#]+)"):
+        m = re.search(pattern, href)
+        if m:
+            return m.group(1).strip()
+
+    parsed = urlparse(href)
+    query = parse_qs(parsed.query)
+    for key in ("name", "username", "user", "userKey"):
+        values = query.get(key, [])
+        if values:
+            value = values[0].strip()
+            if value:
+                return value
+    return ""
+
+
+def _href_from_tag(tag: object) -> str:
+    """Read an ``href`` attribute from a BeautifulSoup tag if present."""
+    if not isinstance(tag, Tag):
+        return ""
+    href = tag.get("href", "")
+    return str(href) if href else ""

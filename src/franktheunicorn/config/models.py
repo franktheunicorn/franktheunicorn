@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 import re
 import shlex
+from collections.abc import Collection
+from pathlib import PurePath
 from typing import Literal
 
 from pydantic import (
@@ -221,6 +223,10 @@ class ClaudeCLIConfig(BaseModel):
     # Matches the registry default; see CLAUDE_CLI_DEFAULT_MODEL.
     model: str = CLAUDE_CLI_DEFAULT_MODEL
     extra_args: list[str] = Field(default_factory=list)
+    #: ``None`` takes ``CLAUDE_READONLY_ARGS`` (or what an ``agent_cli_reviewers``
+    #: ``claude`` entry set explicitly); ``[]`` opts out, for a wrapper that
+    #: rejects flags it does not know. The worker warns at startup either way.
+    readonly_args: list[str] | None = None
     timeout_seconds: int = 300
     max_diff_chars: int = 60_000
     remote: RemoteExecutionConfig = Field(default_factory=RemoteExecutionConfig)
@@ -242,6 +248,30 @@ class ClaudeCLIConfig(BaseModel):
     def cli_argv(self) -> list[str]:
         """``cli_path`` split into argv -- supports ``"cmd arg1 arg2"``."""
         return _parse_cli_path(self.cli_path)
+
+
+#: npm packages that install a seeded binary under another name, so an
+#: ``npx`` launcher (``npx -y @anthropic-ai/claude-code``) is recognised.
+_PACKAGE_BINARIES = {"claude-code": "claude", "pi-coding-agent": "pi"}
+
+
+def agent_binary_in(argv: list[str], binaries: Collection[str]) -> str:
+    """The first of *binaries* that *argv* runs, by basename; ``""`` if none.
+
+    The whole argv, not just its head: ``uv run claude``, ``npx codex`` and
+    ``corp-wrap claude --headless`` are the launcher shapes operator.yaml
+    documents, and each still runs the binary the seed's flags are for. An npm
+    package spec counts as the binary it installs, with any ``@version`` pin
+    dropped: ``@anthropic-ai/claude-code@2.1.0``, ``@openai/codex@0.162.1``.
+    """
+    for part in argv:
+        name = PurePath(part).name
+        if "@" in name[1:]:
+            name = name[: name.index("@", 1)]
+        name = _PACKAGE_BINARIES.get(name, name)
+        if name in binaries:
+            return name
+    return ""
 
 
 class AgentCLIReviewerConfig(BaseModel):
@@ -329,6 +359,22 @@ class AgentCLIReviewerConfig(BaseModel):
     #: directory absent from ``~/.claude.json``'s project map — exit 0, and no
     #: entry added.
     trust_args: list[str] = Field(default_factory=list)
+    #: Flags that keep this CLI from editing files, running shell commands or
+    #: reaching the operator's MCP servers while it reads someone else's PR. A
+    #: reviewer needs to read and search; anything more is what a prompt
+    #: injected into the diff would use. Seeded for every built-in reviewer
+    #: (``CLAUDE_READONLY_ARGS``, ``CODEX_READONLY_ARGS``,
+    #: ``CURSOR_READONLY_ARGS``, ``PI_READONLY_ARGS``). The checkout's own agent
+    #: config is a separate door and the agent guard
+    #: (``tool_executor.guard_agent_argv``) closes it for every reviewer,
+    #: seeded or not.
+    #:
+    #: Its own field for the reason ``trust_args`` is: registry merging is field
+    #: by field, so an operator overriding ``extra_args`` keeps these. Setting
+    #: ``readonly_args: []`` explicitly is the opt-out, and the worker says so at
+    #: startup. The security verifier and the ``agent-cli`` LLM backend borrow a
+    #: reviewer entry through ``build_invocation``, so they inherit the flags too.
+    readonly_args: list[str] = Field(default_factory=list)
     #: A headless agent reviewing a real diff reads files, greps, and thinks; five
     #: minutes was optimistic and the symptom was indistinguishable from a broken
     #: ssh_command, because a timeout and an unreachable host both come back as
@@ -382,14 +428,80 @@ class AgentCLIReviewerConfig(BaseModel):
         argument; for ``flag`` mode the prompt follows ``prompt_arg`` (e.g.
         ``-p``).
 
-        ``trust_args`` goes ahead of ``extra_args`` so an operator's own flags win
-        a conflict, and after the subcommand in ``subcommand`` mode — a flag before
-        ``exec`` is a flag to the wrong parser.
+        ``trust_args`` and ``readonly_args`` go ahead of ``extra_args`` so an
+        operator's own flags win a conflict, and after the subcommand in
+        ``subcommand`` mode — a flag before ``exec`` is a flag to the wrong parser.
         """
         model_part = [self.model_flag, self.model] if self.model else []
+        # A config written before readonly_args existed restates the read-only
+        # flags in extra_args (``extra_args: ["--mode", "ask"]``); pass them once.
+        readonly = (
+            [] if _contains_run(self.extra_args, self.readonly_args) else list(self.readonly_args)
+        )
+        fixed = [*self.trust_args, *readonly, *self.extra_args]
         if self.prompt_mode == "subcommand":
-            return [self.prompt_arg, *model_part, *self.trust_args, *self.extra_args, prompt]
-        return [*model_part, *self.trust_args, *self.extra_args, self.prompt_arg, prompt]
+            return [self.prompt_arg, *model_part, *fixed, prompt]
+        return [*model_part, *fixed, self.prompt_arg, prompt]
+
+
+#: ``claude`` with exactly Read, Grep and Glob, no MCP servers, and no settings
+#: from the checkout it runs in.
+#:
+#: An allowlist (``--tools``), not a denylist: with claude 2.1.299, Magpie's
+#: ``--disallowedTools Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch,Task``
+#: still left 34 tools in the session's init event, among them ``Monitor``
+#: (runs shell commands under the operator's own ``Bash(...)`` allow rules),
+#: ``Workflow`` and ``SendMessage``; ``--tools Read,Grep,Glob`` left those three
+#: and nothing else. A denylist also misses every tool Claude Code adds later.
+#:
+#: ``--setting-sources user``: the reviewer runs in a checkout of the PR and
+#: ``-p`` skips the workspace-trust prompt, so without it claude loads the PR's
+#: own ``.claude/settings.json``, whose hooks are shell commands run outside
+#: the tool system. Verified: a SessionStart hook in the checkout ran without
+#: this flag and did not run with it. ``--strict-mcp-config`` with no
+#: ``--mcp-config`` loads no MCP servers. ``--tools`` takes a variadic list,
+#: which ends at the next ``-``-flag, so it goes last. The approach started
+#: from Apache Magpie's adapter (``tools/adversarial-review/src/
+#: adversarial_review/backends.py`` at apache/magpie commit
+#: dadb315caa8b881fc1d2195bef03223dac25915a); both changes are worth sending
+#: back.
+CLAUDE_READONLY_ARGS: tuple[str, ...] = (
+    "--setting-sources",
+    "user",
+    "--strict-mcp-config",
+    "--tools",
+    "Read,Grep,Glob",
+)
+
+#: ``cursor-agent``'s read-only Q&A mode. ``-p`` on its own is documented as
+#: having "access to all tools, including write and shell". It was in the seed's
+#: ``extra_args``, where an operator's ``extra_args`` override replaced it.
+CURSOR_READONLY_ARGS: tuple[str, ...] = ("--mode", "ask")
+
+#: ``codex exec`` in its read-only sandbox, without the operator's
+#: ``$CODEX_HOME/config.toml``. The config file is where codex's MCP servers
+#: live, and an empty-table override does not remove them: codex deep-merges
+#: ``-c mcp_servers={}`` into the user layer and every server stays enabled.
+#: Verified with codex-cli 0.162.1 and a throwaway CODEX_HOME holding one fake
+#: server: ``-c mcp_servers={}`` spawned it, ``--ignore-user-config`` did not.
+#: (Apache Magpie's adapter, which these flags started from, uses the empty
+#: override; the finding is worth sending upstream.) Auth still comes from
+#: CODEX_HOME. The cost is that a model provider or profile set in
+#: config.toml is not loaded either; frank's ``model`` field still passes
+#: ``--model``, and an operator who needs their config.toml can set
+#: ``readonly_args: ["-s", "read-only"]`` and accept the MCP exposure.
+#: Project hooks need persisted trust in codex, which frank never grants.
+CODEX_READONLY_ARGS: tuple[str, ...] = ("-s", "read-only", "--ignore-user-config")
+
+#: ``pi`` with its four read-only tools. Its default set is read, bash, edit and
+#: write, and the seed used to pass nothing, so a reviewer pointed at a
+#: stranger's PR had a shell. ``--tools`` is an allowlist that also filters
+#: tools an extension registers (``agent-session.js`` ``isAllowedTool`` in
+#: pi-coding-agent 0.73.1). Not ``--no-extensions``: the operator's own
+#: extensions may be what supplies their model provider, and the checkout's
+#: ``.pi/`` (extensions *and* packages, which ``--no-extensions`` would not
+#: stop) is kept away by the agent guard instead.
+PI_READONLY_ARGS: tuple[str, ...] = ("--tools", "read,grep,find,ls")
 
 
 def _default_agent_cli_reviewers() -> list[AgentCLIReviewerConfig]:
@@ -402,15 +514,29 @@ def _default_agent_cli_reviewers() -> list[AgentCLIReviewerConfig]:
     return [
         # model comes from default_claude_model, not from here.
         AgentCLIReviewerConfig(
-            name="claude", cli_path="claude", prompt_mode="flag", prompt_arg="-p"
+            name="claude",
+            cli_path="claude",
+            prompt_mode="flag",
+            prompt_arg="-p",
+            readonly_args=list(CLAUDE_READONLY_ARGS),
         ),
         # ``codex exec`` accepts ``-m, --model <MODEL>`` (verified via
         # ``codex exec --help``), so the default ``model_flag="--model"`` works
         # for codex; no override needed.
         AgentCLIReviewerConfig(
-            name="codex", cli_path="codex", prompt_mode="subcommand", prompt_arg="exec"
+            name="codex",
+            cli_path="codex",
+            prompt_mode="subcommand",
+            prompt_arg="exec",
+            readonly_args=list(CODEX_READONLY_ARGS),
         ),
-        AgentCLIReviewerConfig(name="pi", cli_path="pi", prompt_mode="flag", prompt_arg="-p"),
+        AgentCLIReviewerConfig(
+            name="pi",
+            cli_path="pi",
+            prompt_mode="flag",
+            prompt_arg="-p",
+            readonly_args=list(PI_READONLY_ARGS),
+        ),
         # Cursor's headless agent. The binary is ``cursor-agent``, not ``cursor``.
         #
         # ``--mode ask`` is not a preference, it is the safety property: ``-p`` on
@@ -443,9 +569,17 @@ def _default_agent_cli_reviewers() -> list[AgentCLIReviewerConfig]:
             prompt_mode="flag",
             prompt_arg="-p",
             trust_args=["--trust"],
-            extra_args=["--mode", "ask"],
+            readonly_args=list(CURSOR_READONLY_ARGS),
         ),
     ]
+
+
+def _contains_run(haystack: list[str], needle: list[str]) -> bool:
+    """Whether *needle* appears in *haystack* as a contiguous run."""
+    if not needle:
+        return False
+    n = len(needle)
+    return any(haystack[i : i + n] == needle for i in range(len(haystack) - n + 1))
 
 
 def _fill_unset_reviewer_fields(
@@ -501,6 +635,9 @@ class JiraConfig(BaseModel):
     enabled: bool = False
     server: str = ""
     project_prefix: str = ""
+    # Identities (display names or usernames) that should increase PR scoring
+    # when they created or commented on the linked ticket.
+    priority_authors: list[str] = Field(default_factory=list)
 
     @field_validator("server")
     @classmethod
@@ -510,6 +647,11 @@ class JiraConfig(BaseModel):
             msg = "JIRA server must be a URL starting with http:// or https://"
             raise ValueError(msg)
         return v
+
+    @field_validator("priority_authors")
+    @classmethod
+    def priority_authors_normalized(cls, v: list[str]) -> list[str]:
+        return [name.strip() for name in v if name.strip()]
 
 
 KNOWN_COMMUNITY_SOURCE_TYPES: frozenset[str] = frozenset(
@@ -1865,12 +2007,51 @@ class ForgeRegistryEntry(BaseModel):
         return self
 
 
+class MergeIntentConfig(BaseModel):
+    """The intending-to-merge queue: PRs an approver has already said yes to.
+
+    On by default. The only cost is one reviews read per PR the poller
+    refreshes anyway, and the queue is empty until somebody approves
+    something, so there is nothing for a flag to protect — turning it off is
+    for an operator who wants that API call back.
+    """
+
+    enabled: bool = True
+    #: Forge logins whose approval or "LGTM pending CI" puts a PR in the
+    #: queue. Empty means the operator alone (``github_username``); list
+    #: several to track a co-maintainer's approvals too.
+    approvers: list[str] = Field(default_factory=list)
+    #: Refresh ``PullRequest.ci_status`` for queued PRs (and the operator's
+    #: own) from the forge's check runs, so "pending CI" can be answered
+    #: without opening the PR. One or two extra reads per queued PR.
+    track_ci: bool = True
+
+    @field_validator("approvers")
+    @classmethod
+    def approvers_normalised(cls, v: list[str]) -> list[str]:
+        cleaned = [login.strip().lstrip("@") for login in v]
+        return [login for login in cleaned if login]
+
+    def approvers_for(self, operator_username: str) -> list[str]:
+        """The effective approver list: configured, else the operator."""
+        if self.approvers:
+            return list(self.approvers)
+        return [operator_username] if operator_username else []
+
+
 class OperatorConfig(BaseModel):
     """Top-level operator config loaded from operator.yaml."""
 
     github_username: str = ""
     review_style: str = "direct but kind"
     personality: str = "frank"
+    #: Handles that may stay a live ``@``-mention in a posted review. Everything
+    #: else frank posts is backtick-quoted first (``backends/mentions.py``), so a
+    #: model's or a quoted contributor's ``@handle`` notifies nobody. The key
+    #: name matches Apache Magpie's ``mention_allowlist`` so a project running
+    #: both tools keeps one list. Empty by default: the review itself already
+    #: notifies the author and every subscriber.
+    mention_allowlist: list[str] = Field(default_factory=list)
     auto_post: bool = False
     poll_interval_seconds: int | None = None
     log_level: str = "INFO"
@@ -1899,6 +2080,7 @@ class OperatorConfig(BaseModel):
     perplexity: PerplexityConfig = Field(default_factory=PerplexityConfig)
     fine_tuning: FineTuningConfig = Field(default_factory=FineTuningConfig)
     security_triage: SecurityTriageConfig = Field(default_factory=SecurityTriageConfig)
+    merge_intent: MergeIntentConfig = Field(default_factory=MergeIntentConfig)
     # Multiple LLM backends can run in parallel. Each produces findings
     # independently; results are combined and deduped via anti-patterns.
     llm_backends: list[LLMBackendConfig] = Field(default_factory=list)
@@ -1973,13 +2155,17 @@ class OperatorConfig(BaseModel):
         # ``cursor-agent`` *name* at ``command: cursor`` must not become the
         # template for every other entry that still execs ``cursor-agent``.
         seed_names = {seed.name for seed in seeds}
-        seeds_by_binary = {seed.cli_argv[0]: seed for seed in seeds}
+        # By basename: an operator whose service PATH lacks ~/.local/bin writes
+        # ``command: /home/op/.local/bin/claude``, and that entry must inherit the
+        # claude seed's trust and read-only flags as much as a bare ``claude``.
+        # And anywhere in the argv, so ``uv run claude`` inherits them too.
+        seeds_by_binary = {PurePath(seed.cli_argv[0]).name: seed for seed in seeds}
         for entry in self.agent_cli_reviewers:
             if entry.name in seed_names:
                 continue
-            binary_seed = seeds_by_binary.get(entry.cli_argv[0])
-            if binary_seed is not None:
-                _fill_unset_reviewer_fields(entry, binary_seed)
+            binary = agent_binary_in(entry.cli_argv, seeds_by_binary)
+            if binary:
+                _fill_unset_reviewer_fields(entry, seeds_by_binary[binary])
 
         # Promote iff the operator actually provided a ``claude_cli:`` block.
         # ``model_fields_set`` distinguishes "explicitly configured" (even
@@ -1988,6 +2174,18 @@ class OperatorConfig(BaseModel):
         # of silently reverting to the "auto" seed and auto-running Claude.
         legacy = self.claude_cli
         if "claude_cli" in self.model_fields_set:
+            # The legacy block's own setting first, then an explicit one on the
+            # entry being replaced, so an opt-out written in either place holds.
+            readonly = legacy.readonly_args
+            if readonly is None:
+                readonly = next(
+                    (
+                        rc.readonly_args
+                        for rc in self.agent_cli_reviewers
+                        if rc.name == "claude" and "readonly_args" in rc.model_fields_set
+                    ),
+                    list(CLAUDE_READONLY_ARGS),
+                )
             promoted = AgentCLIReviewerConfig(
                 name="claude",
                 enabled=legacy.enabled,
@@ -1995,6 +2193,7 @@ class OperatorConfig(BaseModel):
                 model=legacy.model,
                 prompt_mode="flag",
                 prompt_arg="-p",
+                readonly_args=list(readonly),
                 extra_args=list(legacy.extra_args),
                 timeout_seconds=legacy.timeout_seconds,
                 max_diff_chars=legacy.max_diff_chars,
@@ -2258,6 +2457,18 @@ class ProjectConfig(BaseModel):
     #: to the repo name for ``apache/*`` projects (apache/spark → "spark"),
     #: logged when used; set it when the PMC and the repo name differ.
     cve_process_pmc: str = ""
+    #: How this project names its release tags when that is not ``[v]X.Y.Z``:
+    #: the part before the version, stripped before the final-release test
+    #: (``release-`` for Flink's ``release-1.18.0``, ``rel/`` for a namespaced
+    #: ``rel/1.2.3``). Without it, a tag containing ``/`` is not a release of
+    #: this project, and a release candidate never is either way. Read by
+    #: ``security.release_tags``.
+    release_tag_prefix: str = ""
+    #: For a scheme no prefix expresses (``STRUTS_7_4_0``, ``REL_5_2_5``): a
+    #: regex a final release tag must match in full, case-insensitively. Takes
+    #: the place of the version test when set; ``release_tag_prefix`` still
+    #: decides which other tags are pre-releases.
+    release_tag_pattern: str = ""
     new_contributor_addendum: str = ""
     enabled: bool = True
     # Default review-gating policy (token saver). Controls which PRs the
@@ -2359,6 +2570,17 @@ class ProjectConfig(BaseModel):
     # Differential test runner (§9). Disabled by default; see docs/test-runner.md.
     tests: TestExecutionConfig = Field(default_factory=TestExecutionConfig)
 
+    @field_validator("release_tag_pattern")
+    @classmethod
+    def release_tag_pattern_compiles(cls, v: str) -> str:
+        if v:
+            try:
+                re.compile(v)
+            except re.error as exc:
+                msg = f"release_tag_pattern is not a valid regex: {exc}"
+                raise ValueError(msg) from exc
+        return v
+
     @field_validator("llm_checks")
     @classmethod
     def llm_checks_warn_unknown(cls, v: list[str]) -> list[str]:
@@ -2371,6 +2593,7 @@ class ProjectConfig(BaseModel):
             "pr-description",
             "security",
             "security-context",
+            "security-disclosure",
         }
         for name in v:
             if name not in known:

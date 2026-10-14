@@ -250,6 +250,14 @@ review_areas_of_interest:
 # used — set it when the PMC and the repo name differ.
 cve_process_pmc: "spark"
 
+# How release tags are named when they are not [v]X.Y.Z. Only a final release
+# tag marks a fix "released" (release candidates and previews do not); set the
+# part before the version for prefixed or namespaced tags, e.g. "release-" for
+# release-1.18.0 or "rel/" for rel/1.2.3. Spark's v3.5.0 needs nothing. For a
+# scheme no prefix expresses, a regex final tags must match in full:
+# release_tag_pattern: 'STRUTS_\d+(_\d+)+'
+# release_tag_prefix: ""
+
 security_model: |
   Spark treats anyone who can submit code, SQL, UDFs, jobs, or ML
   models/pipelines to a cluster as fully trusted: those inputs run arbitrary
@@ -277,6 +285,7 @@ llm_checks:
   - pr-description    # nudges incomplete or vague PR descriptions
   - issue-link        # flags PRs missing a SPARK-xxxxx reference
   - api-misuse        # deprecated/complex API calls (needs network; see below)
+  - security-disclosure  # title/description naming a security fix before the advisory (ASF policy)
 
 # api-misuse look-up config.  Only active when "api-misuse" is in llm_checks.
 # Issues requests to Maven Central (and optionally hosted Javadoc).
@@ -362,11 +371,14 @@ context:
   import_depth: 1
   package_roots: ["sql", "core", "python"]
 
-# Differential test runner (see docs/test-runner.md). Spark publishes a
-# CI-grade test image upstream, so we use it as-is rather than rebuilding.
+# Differential test runner (see docs/test-runner.md). Off for Spark: there is
+# no runnable upstream test image (ghcr.io/apache/spark-test doesn't exist and
+# the ghcr "-cache" images are BuildKit cache manifests), and PySpark tests
+# need Spark's jars, which a read-only, --network=none checkout doesn't have.
+# The Dockerfile below builds, but base and head would both just fail.
 tests:
-  enabled: true
-  container_image: ghcr.io/apache/spark-test:latest
+  enabled: false
+  dockerfile: dev/spark-test-image/python-312/Dockerfile
   resource_tier: heavy
   test_command: "python -m pytest {tests} --tb=short -q"
 

@@ -1788,6 +1788,48 @@ class TestAgentRunSummary:
         assert claude_entry["rejected"] == 1
         assert len(claude_entry["findings"]) == 2
 
+    def test_llm_backends_read_the_llm_run_record(self, db_pr: PullRequest) -> None:
+        """Rows are keyed by provider; the pipeline records under llm:<provider>.
+        Reading the bare provider key showed every backend as "not run" once
+        any CLI reviewer had recorded a run. Same-provider backends share a row."""
+        from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig
+        from franktheunicorn.dashboard.views import build_agent_run_summary
+
+        db_pr.agent_runs = {
+            "llm": {"status": "ok"},
+            "llm:openai": {"status": "failed", "findings": 0},
+            "codex": {"status": "ok"},
+        }
+        db_pr.save(update_fields=["agent_runs"])
+        op_cfg = OperatorConfig(
+            llm_backends=[
+                LLMBackendConfig(provider="openai", model="qwen"),
+                LLMBackendConfig(provider="openai", model="sonnet"),
+                LLMBackendConfig(provider="openai", model="sonnet"),
+            ]
+        )
+
+        result = build_agent_run_summary(db_pr, op_cfg, None)
+
+        openai_rows = [e for e in result if e["source"] == "openai"]
+        assert len(openai_rows) == 1
+        assert openai_rows[0]["display_name"] == "Openai (qwen, sonnet)"
+        assert openai_rows[0]["did_run"] is True
+        assert openai_rows[0]["run_status"] == "failed"
+
+    def test_drafts_prove_a_run_without_a_record(self, db_pr: PullRequest) -> None:
+        from franktheunicorn.config.models import ProjectConfig
+        from franktheunicorn.dashboard.views import build_agent_run_summary
+
+        db_pr.agent_runs = {"codex": {"status": "ok"}}
+        db_pr.save(update_fields=["agent_runs"])
+        ReviewDraftFactory(pull_request=db_pr, sources=["check:security"])
+        pc = ProjectConfig(owner="apache", repo="spark", llm_checks=["security"])
+
+        result = build_agent_run_summary(db_pr, self._cli_op_config(), pc)
+
+        assert next(e for e in result if e["source"] == "check:security")["did_run"] is True
+
     @staticmethod
     def _cli_op_config() -> Any:
         """An operator config with one active ssh-mode CLI reviewer.
@@ -1965,3 +2007,143 @@ class TestAgentRunSummaryHelpers:
         draft_nothing.sources = []
         draft_nothing.backend_used = ""
         assert _draft_source_key(draft_nothing) == "unknown"
+
+
+@pytest.mark.django_db
+class TestProjectWipePRs:
+    def test_wipes_only_that_projects_pr_data(self, client: Client) -> None:
+        from franktheunicorn.core.models import SecurityReport
+        from tests.factories import ProjectFactory, PullRequestFactory, SecurityReportFactory
+
+        target = ProjectFactory(owner="apache", repo="spark")
+        other = ProjectFactory(owner="apache", repo="flink")
+        doomed = PullRequestFactory(project=target)
+        ReviewDraftFactory(pull_request=doomed)
+        kept = PullRequestFactory(project=other)
+        report = SecurityReportFactory(project=target)
+        ap = AntiPatternFactory(project=target)
+
+        response = client.post(f"/project/{target.pk}/wipe-prs/")
+
+        assert response.status_code == 302
+        assert not PullRequest.objects.filter(project=target).exists()
+        assert not ReviewDraft.objects.filter(pull_request_id=doomed.pk).exists()
+        assert PullRequest.objects.filter(pk=kept.pk).exists()
+        assert SecurityReport.objects.filter(pk=report.pk).exists()
+        assert AntiPattern.objects.filter(pk=ap.pk).exists()
+
+    def test_refused_while_the_worker_holds_a_pr(self, client: Client) -> None:
+        from tests.factories import ProjectFactory, PullRequestFactory
+
+        project = ProjectFactory()
+        pr = PullRequestFactory(project=project)
+        WorkerCommand.objects.create(command="run_agents", pull_request=pr, status="running")
+
+        client.post(f"/project/{project.pk}/wipe-prs/")
+
+        assert PullRequest.objects.filter(pk=pr.pk).exists()
+
+    def test_get_is_refused(self, client: Client) -> None:
+        from tests.factories import ProjectFactory
+
+        project = ProjectFactory()
+        assert client.get(f"/project/{project.pk}/wipe-prs/").status_code == 405
+
+    def test_stats_lists_the_button(self, client: Client, db_pr: PullRequest) -> None:
+        response = client.get("/stats/")
+        assert b"Wipe PR data" in response.content
+
+
+@pytest.mark.django_db
+class TestPostReviewMovedHead:
+    """The refusal renders the two overrides; the override is passed through."""
+
+    def test_refusal_offers_post_anyway_and_body_only(
+        self, client: Client, db_pr: PullRequest
+    ) -> None:
+        from unittest.mock import MagicMock, patch
+
+        from franktheunicorn.backends.poster import StaleHeadError
+
+        ReviewDraftFactory(pull_request=db_pr, status="accepted", comment_body="x")
+        mock_poster = MagicMock()
+        mock_poster.post_review.side_effect = StaleHeadError("aaaa1111aaaa", "bbbb2222bbbb")
+
+        with (
+            patch("franktheunicorn.backends.github.GitHubClient"),
+            patch("franktheunicorn.backends.poster.GitHubPoster", return_value=mock_poster),
+            patch("django.conf.settings.FRANK_GITHUB_TOKEN", "test-token", create=True),
+        ):
+            response = client.post(f"/pr/{db_pr.pk}/post/")
+
+        assert response.status_code == 200
+        assert b"Not posted" in response.content
+        assert b"aaaa1111" in response.content and b"bbbb2222" in response.content
+        assert b'"stale_head": "post"' in response.content
+        assert b'"stale_head": "body-only"' in response.content
+
+    def test_the_override_reaches_the_poster_and_the_note_counts_folds(
+        self, client: Client, db_pr: PullRequest
+    ) -> None:
+        from unittest.mock import MagicMock, patch
+
+        ReviewDraftFactory(pull_request=db_pr, status="accepted", comment_body="cc @alice")
+        mock_poster = MagicMock()
+        mock_poster.post_review.return_value = {
+            "id": 1,
+            "mentions_escaped": ["alice"],
+            "folded_into_body": 1,
+        }
+
+        with (
+            patch("franktheunicorn.backends.github.GitHubClient"),
+            patch("franktheunicorn.backends.poster.GitHubPoster", return_value=mock_poster),
+            patch("django.conf.settings.FRANK_GITHUB_TOKEN", "test-token", create=True),
+        ):
+            response = client.post(f"/pr/{db_pr.pk}/post/", {"stale_head": "body-only"})
+
+        assert response.status_code == 200
+        assert mock_poster.post_review.call_args.kwargs["on_stale_head"] == "body-only"
+        assert b"1 @-mention(s) backtick-quoted: alice" in response.content
+        assert b"1 inline comment(s) folded into the review body" in response.content
+
+
+@pytest.mark.django_db
+class TestPostReviewFailureIsVerified:
+    """The view reports what the poster established after a failure, instead of
+    "Posted" for a post that never happened."""
+
+    def _post(self, client: Client, db_pr: PullRequest, **poster_behaviour: Any) -> bytes:
+        from unittest.mock import MagicMock, patch
+
+        ReviewDraftFactory(pull_request=db_pr, status="accepted", comment_body="x")
+        mock_poster = MagicMock()
+        for name, value in poster_behaviour.items():
+            setattr(mock_poster.post_review, name, value)
+        with (
+            patch("franktheunicorn.backends.github.GitHubClient"),
+            patch("franktheunicorn.backends.poster.GitHubPoster", return_value=mock_poster),
+            patch("django.conf.settings.FRANK_GITHUB_TOKEN", "test-token", create=True),
+        ):
+            response = client.post(f"/pr/{db_pr.pk}/post/")
+        assert response.status_code == 200
+        return bytes(response.content)
+
+    def test_unknown_says_to_check_before_posting_again(
+        self, client: Client, db_pr: PullRequest
+    ) -> None:
+        from franktheunicorn.backends.poster import PostUnverifiedError
+
+        body = self._post(client, db_pr, side_effect=PostUnverifiedError("x"))
+        assert b"Check the PR before posting again" in body
+
+    def test_absent_says_a_retry_is_safe(self, client: Client, db_pr: PullRequest) -> None:
+        body = self._post(client, db_pr, return_value=None)
+        assert b"nothing landed" in body
+        assert b"Posted" not in body
+
+    def test_landed_after_an_error_is_reported_as_landed(
+        self, client: Client, db_pr: PullRequest
+    ) -> None:
+        body = self._post(client, db_pr, return_value={"id": 3, "verified_after_error": True})
+        assert b"but the review landed" in body

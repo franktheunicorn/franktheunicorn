@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 from django.utils import timezone
 
+from franktheunicorn.security.fix_language import scan_branches
 from franktheunicorn.security.verifier import injection_hits
 
 if TYPE_CHECKING:
@@ -591,6 +592,7 @@ def refresh_fix_status(report: SecurityReport, operator_config: OperatorConfig) 
         report.fix_branch_sha,
         report.fix_status,
         report.fix_status_detail,
+        list(report.fix_language_hits),
     )
     run_branch = ""
     could_not_ask = ""
@@ -653,11 +655,26 @@ def refresh_fix_status(report: SecurityReport, operator_config: OperatorConfig) 
         report.fix_branch_sha = sha
         if report.fix_status != "failed":
             report.fix_status = "branch-pushed"
+    # Every branch naming the finding, not just the one chosen: the operator
+    # may open the PR from any of them, and the fork's branch list is public
+    # whichever one they pick.
+    names = [name for name, _ in candidates]
+    if run_branch and run_branch not in names:
+        names.append(run_branch)
+    report.fix_language_hits = scan_branches(names, _disclosure_terms(report))
+    if report.fix_language_hits:
+        logger.warning(
+            "Fix branch for report #%s says what it fixes (%s). The fork's branch list is "
+            "public before the advisory is: rename the branch before opening a PR.",
+            report.pk,
+            "; ".join(report.fix_language_hits),
+        )
     if (
         report.fix_branch,
         report.fix_branch_sha,
         report.fix_status,
         report.fix_status_detail,
+        list(report.fix_language_hits),
     ) != before:
         report.save(
             update_fields=[
@@ -665,6 +682,7 @@ def refresh_fix_status(report: SecurityReport, operator_config: OperatorConfig) 
                 "fix_branch_sha",
                 "fix_status",
                 "fix_status_detail",
+                "fix_language_hits",
                 "updated_at",
             ]
         )
@@ -674,12 +692,20 @@ def refresh_fix_status(report: SecurityReport, operator_config: OperatorConfig) 
         if len(candidates) > 1:
             others = ", ".join(name for name, _ in candidates[1:])
             note += f" (also matching this finding: {others} — judge which is the one you want)"
+        if report.fix_language_hits:
+            note += " — DISCLOSURE RISK: the branch name says what it fixes; rename it first"
         return note
     if report.fix_status in ("failed", "finished-no-branch"):
         return report.fix_status_detail
     if could_not_ask:
         return could_not_ask
     return "no branch on the fork yet" if report.fix_agent_id else "no fix agent launched yet"
+
+
+def _disclosure_terms(report: SecurityReport) -> list[str]:
+    """The report's own identifiers, which a public branch name must not carry."""
+    terms = [report.matched_cve_id, report.reporter_name]
+    return [t for t in terms if t and t.strip()]
 
 
 def _run_fix_branch(data: dict[str, Any], bug_id: str, fork: str) -> str:

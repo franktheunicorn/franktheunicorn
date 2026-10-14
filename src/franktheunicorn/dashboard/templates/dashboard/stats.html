@@ -66,4 +66,31 @@
         <tr><td>Auto-Suppressed Findings</td><td>{{ suppressed_count }}</td></tr>
     </tbody>
 </table>
+
+<h3 style="margin-top: 1.5rem;">Projects</h3>
+<table>
+    <thead><tr><th>Project</th><th>PRs</th><th></th></tr></thead>
+    <tbody>
+    {% for project in projects %}
+        <tr>
+            <td>{{ project.owner }}/{{ project.repo }}</td>
+            <td>{{ project.pr_count }}</td>
+            <td>
+                {# type=button: irreversible, so no htmx means no confirm and no submit. #}
+                <form>
+                    {% csrf_token %}
+                    <button type="button" class="action-btn reject"
+                            hx-post="{% url 'dashboard:project_wipe_prs' project.pk %}"
+                            hx-include="closest form"
+                            hx-confirm="Delete all {{ project.pr_count }} PR(s) for {{ project.owner }}/{{ project.repo }} with their drafts, runs and test results? Security reports and anti-patterns stay. The next poll re-reviews open PRs at full LLM cost. This cannot be undone.">
+                        🗑 Wipe PR data
+                    </button>
+                </form>
+            </td>
+        </tr>
+    {% empty %}
+        <tr><td colspan="3" class="muted">No projects yet.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
 {% endblock %}

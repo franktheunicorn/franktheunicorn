@@ -86,3 +86,68 @@ class TestProcessPrForgeAwareDiff:
 
         # Fetch raised → empty diff; draft_review still runs on the placeholder.
         assert captured["diff"] == ""
+
+
+@pytest.mark.django_db
+def test_llm_checks_skip_a_backend_preflight_disabled() -> None:
+    """Checks use llm_backends[0]; a disabled one must not be it."""
+    from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig
+    from franktheunicorn.worker.runner import process_pr
+
+    pr = PullRequestFactory(state="open")
+    config = ProjectConfig(owner=pr.project.owner, repo=pr.project.repo, llm_checks=["security"])
+    op = OperatorConfig(
+        llm_backends=[
+            LLMBackendConfig(provider="openai", model="dead"),
+            LLMBackendConfig(provider="openai", model="alive"),
+        ],
+        agent_cli_reviewers=[],
+    )
+    forge_client = MagicMock()
+    forge_client.get_pull_request_diff.return_value = "diff"
+
+    with (
+        patch("franktheunicorn.review.drafter.draft_review", return_value=[]),
+        patch("franktheunicorn.review.checks.run_enabled_checks", return_value=[]) as checks,
+    ):
+        process_pr(
+            pr,
+            config,
+            operator_config=op,
+            force=True,
+            forge_client=forge_client,
+            disabled_backends=frozenset({0}),
+        )
+
+    used = checks.call_args.kwargs["operator_config"].llm_backends
+    assert [b.model for b in used] == ["alive"]
+
+
+@pytest.mark.django_db
+def test_llm_checks_skip_when_every_backend_is_disabled() -> None:
+    """An empty effective list would fall back to the stub's canned findings."""
+    from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig
+    from franktheunicorn.worker.runner import process_pr
+
+    pr = PullRequestFactory(state="open")
+    config = ProjectConfig(owner=pr.project.owner, repo=pr.project.repo, llm_checks=["security"])
+    op = OperatorConfig(
+        llm_backends=[LLMBackendConfig(provider="openai", model="dead")], agent_cli_reviewers=[]
+    )
+    forge_client = MagicMock()
+    forge_client.get_pull_request_diff.return_value = "diff"
+
+    with (
+        patch("franktheunicorn.review.drafter.draft_review", return_value=[]),
+        patch("franktheunicorn.review.checks.run_enabled_checks", return_value=[]) as checks,
+    ):
+        process_pr(
+            pr,
+            config,
+            operator_config=op,
+            force=True,
+            forge_client=forge_client,
+            disabled_backends=frozenset({0}),
+        )
+
+    checks.assert_not_called()

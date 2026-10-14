@@ -172,6 +172,20 @@ class GiteaClient(ForgeClient):
         result: list[dict[str, Any]] = response.json()
         return result
 
+    def list_pull_request_reviews(
+        self, owner: str, repo: str, pr_number: int
+    ) -> list[dict[str, Any]]:
+        """Submitted reviews, with Gitea's state names mapped onto GitHub's.
+
+        Gitea says ``REQUEST_CHANGES`` and ``COMMENT`` where GitHub says
+        ``CHANGES_REQUESTED`` and ``COMMENTED``; the detector speaks GitHub.
+        """
+        url = f"/repos/{owner}/{repo}/pulls/{pr_number}/reviews"
+        response = self._client.get(url, params={"limit": 100})
+        response.raise_for_status()
+        reviews: list[dict[str, Any]] = response.json()
+        return [_normalize_gitea_review(r) for r in reviews]
+
     def get_issue_comments(
         self,
         owner: str,
@@ -271,4 +285,29 @@ def _to_gitea_comment(comment: ReviewComment, diff_text: str) -> dict[str, Any] 
         out["old_position"] = target_line
     else:
         out["new_position"] = target_line
+    return out
+
+
+_GITEA_REVIEW_STATES = {
+    "APPROVED": "APPROVED",
+    "REQUEST_CHANGES": "CHANGES_REQUESTED",
+    "COMMENT": "COMMENTED",
+    "PENDING": "PENDING",
+    "REQUEST_REVIEW": "COMMENTED",
+}
+
+
+def _normalize_gitea_review(review: dict[str, Any]) -> dict[str, Any]:
+    """Translate a Gitea review into the GitHub review shape."""
+    out = dict(review)
+    state = str(out.get("state", "") or "").upper()
+    out["state"] = _GITEA_REVIEW_STATES.get(state, state)
+    # ``dismissed`` is a separate boolean on Gitea rather than a state.
+    if out.get("dismissed"):
+        out["state"] = "DISMISSED"
+    out["commit_id"] = out.get("commit_id", "") or ""
+    out["submitted_at"] = out.get("submitted_at", "") or ""
+    user = out.get("user")
+    if not isinstance(user, dict):
+        out["user"] = {"login": ""}
     return out

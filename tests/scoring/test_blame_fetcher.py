@@ -333,3 +333,30 @@ class TestEndToEndBlameScoring:
         # "charlie" never touched any file → no credit
         score = score_touches_operator_code(results, "charlie")
         assert score is None
+
+
+def test_changed_lines_ignore_base_commits_after_the_fork(tmp_path: Path) -> None:
+    """A base commit after the PR branched is not one of the PR's changed lines."""
+    from franktheunicorn.scoring.blame_fetcher import _get_changed_lines_for_file
+
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    git("init", "-q", "-b", "master")
+    (tmp_path / "f.txt").write_text("a\nb\nc\n")
+    git("add", ".")
+    git("commit", "-qm", "base")
+    git("checkout", "-qb", "pr")
+    (tmp_path / "f.txt").write_text("a\nB\nc\n")
+    git("commit", "-qam", "pr")
+    git("checkout", "-q", "master")
+    (tmp_path / "f.txt").write_text("a\nb\nC\n")
+    git("commit", "-qam", "later master")
+
+    assert _get_changed_lines_for_file(tmp_path, "f.txt", "master", "pr") == {2}
