@@ -124,3 +124,25 @@ def test_auto_build_hash_changes_with_requirements(tmp_path: Path) -> None:
     (tmp_path / "requirements.txt").write_text("pytest==9.0\n")
     tag2 = resolve_image(docker, "o", "r", cfg, tmp_path)
     assert tag1 != tag2
+
+
+def test_named_build_contexts_go_through_buildx(tmp_path: Path) -> None:
+    """docker-py's build can't pass --build-context; Spark's image needs root=."""
+    from unittest.mock import patch
+
+    (tmp_path / "dev").mkdir()
+    (tmp_path / "dev" / "Dockerfile").write_text("FROM ubuntu\nCOPY --from=root a b\n")
+    docker = _docker_with_no_cached_image()
+    cfg = TestExecutionConfig(
+        enabled=True, dockerfile="dev/Dockerfile", build_contexts={"root": "."}
+    )
+    with patch("franktheunicorn.worker.test_image.subprocess.run") as run:
+        run.return_value.returncode = 0
+        tag = resolve_image(docker, "apache", "spark", cfg, tmp_path)
+
+    argv = run.call_args.args[0]
+    assert argv[:4] == ["docker", "buildx", "build", "--load"]
+    assert f"root={tmp_path / '.'}" in argv
+    assert argv[-1] == str(tmp_path / "dev")
+    assert tag in argv
+    docker.images.build.assert_not_called()

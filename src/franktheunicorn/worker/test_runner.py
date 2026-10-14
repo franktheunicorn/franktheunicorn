@@ -8,15 +8,23 @@ verdict: GOOD, SUSPECT, BROKEN, or INFRA.
 
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import logging
+import os
+import subprocess
+import tempfile
+import time
 from datetime import UTC, datetime
+from fnmatch import fnmatch
 from pathlib import Path
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, NotRequired, TypedDict
 
 from franktheunicorn.core.models import TestRun
 from franktheunicorn.worker.test_identifier import identify_test_scope
 from franktheunicorn.worker.test_image import resolve_image
 from franktheunicorn.worker.test_workspace import (
+    _ensure_ref,
     base_cherry_pick_workspace,
     pr_branch_workspace,
 )
@@ -50,6 +58,7 @@ if TYPE_CHECKING:
             volumes: Mapping[str, Mapping[str, str]],
             working_dir: str,
             environment: Mapping[str, str],
+            user: str | None = None,
         ) -> _DockerContainer: ...
 
     class _DockerImages(Protocol):
@@ -66,6 +75,7 @@ if TYPE_CHECKING:
 
     class _DockerClient(Protocol):
         def ping(self) -> bool: ...
+        def info(self) -> Mapping[str, object]: ...
         @property
         def containers(self) -> _DockerContainers: ...
         @property
@@ -83,6 +93,8 @@ class _ContainerResult(TypedDict):
     stdout: str
     stderr: str
     timed_out: bool
+    # Only on a run with a build_command: the build step failed (infra, not a test result).
+    build_failed: NotRequired[bool]
 
 
 logger = logging.getLogger(__name__)
@@ -93,6 +105,60 @@ RESOURCE_TIERS: dict[str, _ResourceTier] = {
     "standard": {"cpu_count": 4, "mem_limit": "8g", "timeout": 15 * 60},
     "light": {"cpu_count": 2, "mem_limit": "4g", "timeout": 5 * 60},
 }
+
+
+#: Touched in $HOME when build_command fails, so a failed build reads as infra.
+_BUILD_FAILED_MARKER = ".frank-build-failed"
+_HOME_MOUNT = "/frank-home"
+_CACHE_MOUNT = "/frank-cache"
+_WARM_RETRY_SECONDS = 6 * 3600
+
+
+def _build_cache_dir(project_config: ProjectConfig) -> Path:
+    from django.conf import settings
+
+    path = Path(settings.DATA_DIR) / "test-cache" / f"{project_config.owner}-{project_config.repo}"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _warm_recently_failed(project_config: ProjectConfig) -> bool:
+    cutoff = time.time() - _WARM_RETRY_SECONDS
+    return any(
+        f.stat().st_mtime > cutoff
+        for f in _build_cache_dir(project_config).glob(".frank-warm-failed-*")
+    )
+
+
+def _is_rootless(docker: _DockerClient) -> bool:
+    try:
+        options = docker.info().get("SecurityOptions") or []
+    except Exception:
+        return False
+    return isinstance(options, list) and any("rootless" in str(o) for o in options)
+
+
+def _merge_base(repo_path: Path, base_sha: str, head_sha: str) -> str:
+    proc = subprocess.run(
+        ["git", "merge-base", base_sha, head_sha],
+        capture_output=True,
+        text=True,
+        cwd=str(repo_path),
+        timeout=60,
+    )
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def _warm_key(workspace: Path, key_files: list[str]) -> str:
+    """Hash of the build-defining files, so the cache re-warms when they change."""
+    h = hashlib.sha256()
+    for rel in key_files:
+        root = workspace / rel
+        for f in sorted(root.rglob("*")) if root.is_dir() else [root]:
+            if f.is_file():
+                h.update(str(f.relative_to(workspace)).encode())
+                h.update(f.read_bytes())
+    return h.hexdigest()[:16]
 
 
 def _is_trusted_author(pr: PullRequest, project_config: ProjectConfig) -> bool:
@@ -163,6 +229,12 @@ class TestRunner:
         changed_files: list[str] = pr.changed_files or []
         test_scope = identify_test_scope(changed_files, pr.body or "")
 
+        if tests.test_globs:
+            test_scope = [t for t in test_scope if any(fnmatch(t, g) for g in tests.test_globs)]
+            if not test_scope:
+                logger.debug("PR #%d: no identified test matches tests.test_globs", pr.number)
+                return None
+
         if not test_scope and not pr.likely_ai_generated:
             # No test files changed and not AI-generated — skip.
             return None
@@ -211,6 +283,17 @@ class TestRunner:
 
         resources = RESOURCE_TIERS.get(tests.resource_tier, RESOURCE_TIERS["standard"])
 
+        # Before the image build and the TestRun row: during a warm backoff a
+        # run would only rebuild the image and file another failure, every cycle.
+        if not force and tests.build_command and _warm_recently_failed(project_config):
+            logger.info(
+                "PR #%d: test run skipped — the %s build-cache warm failed in the last %dh",
+                pr.number,
+                project_config.full_name,
+                _WARM_RETRY_SECONDS // 3600,
+            )
+            return None
+
         # Create TestRun record. ``container_image`` is filled in once the
         # image has been resolved (build may take a while).
         test_run = TestRun.objects.create(
@@ -238,6 +321,15 @@ class TestRunner:
                     build_ws,
                 )
             test_run.container_image = image
+            if tests.build_command:
+                # The fork point too: a PR branched off an older master builds
+                # against that master's dependencies (Spark's snowflake-jdbc
+                # thin switch broke every older PR's offline build). Still base
+                # code, so still trusted; same build files is a no-op.
+                # merge-base needs the head in the clone, and a new head isn't yet.
+                _ensure_ref(repo_path, pr.head_sha)
+                for sha in {pr.base_sha, _merge_base(repo_path, pr.base_sha, pr.head_sha)} - {""}:
+                    self._warm_build_cache(docker, image, repo_path, sha, project_config)
 
             with pr_branch_workspace(repo_path, pr.head_sha) as pr_ws:
                 pr_result = self._run_container(
@@ -247,6 +339,7 @@ class TestRunner:
                     test_scope,
                     resources,
                     tests,
+                    project_config,
                 )
 
             with base_cherry_pick_workspace(
@@ -259,6 +352,7 @@ class TestRunner:
                     test_scope,
                     resources,
                     tests,
+                    project_config,
                 )
 
             verdict = self._compute_verdict(pr_result, base_result)
@@ -281,6 +375,61 @@ class TestRunner:
 
         return test_run
 
+    def _warm_build_cache(
+        self,
+        docker: _DockerClient,
+        image: str,
+        repo_path: Path,
+        base_sha: str,
+        project_config: ProjectConfig,
+    ) -> None:
+        """Fill the dependency cache by building the *base* checkout with network.
+
+        Base code is trusted the way the image build already is; PR code only
+        ever sees a read-only copy of the result. Skipped while the build files
+        are unchanged since the last warm.
+        """
+        tests = project_config.tests
+        cache = _build_cache_dir(project_config)
+        # The poll cycle and a force-run can both get here; two warms into one
+        # cache dir corrupt it.
+        with (
+            open(cache / ".frank-lock", "w") as lock,
+            pr_branch_workspace(repo_path, base_sha) as ws,
+        ):
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            key = _warm_key(ws, tests.warm_key_files)
+            marker = cache / f".frank-warmed-{key}"
+            if marker.exists():
+                return
+            # A failed warm is a 90-minute build; don't redo it every cycle.
+            failed = cache / f".frank-warm-failed-{key}"
+            if failed.exists() and time.time() - failed.stat().st_mtime < _WARM_RETRY_SECONDS:
+                msg = f"build cache warm failed for build files {key} recently; retrying later"
+                raise RuntimeError(msg)
+            logger.info(
+                "Warming %s build cache from base %s", project_config.full_name, base_sha[:12]
+            )
+            result = self._run_in_container(
+                docker,
+                image,
+                ws,
+                tests.warm_command or tests.build_command or "",
+                tests,
+                RESOURCE_TIERS.get(tests.resource_tier, RESOURCE_TIERS["standard"]),
+                home=cache,
+                network=True,
+                timeout=tests.build_timeout_seconds,
+            )
+            if result["exit_code"] != 0:
+                failed.touch()
+                tail = result["stderr"][-1500:] or result["stdout"][-1500:]
+                msg = f"build cache warm failed (exit {result['exit_code']}): {tail}"
+                raise RuntimeError(msg)
+            failed.unlink(missing_ok=True)
+            # Additive: a cache warmed for two sets of build files serves both.
+            marker.touch()
+
     def _run_container(
         self,
         docker: _DockerClient,
@@ -289,13 +438,65 @@ class TestRunner:
         test_files: list[str],
         resources: _ResourceTier,
         tests: TestExecutionConfig,
+        project_config: ProjectConfig | None = None,
     ) -> _ContainerResult:
         """Run tests in a Docker container.
 
         Returns a dict with 'exit_code', 'stdout', 'stderr', 'timed_out'.
         """
         command = tests.test_command.format(tests=" ".join(test_files))
+        if tests.build_command and project_config is not None:
+            # A marker file, not an exit code: a test can exit with any code,
+            # and a failed build must not read as a test result.
+            command = (
+                f"cp -a {_CACHE_MOUNT}/. $HOME/ && ({tests.build_command}) || "
+                f"{{ touch $HOME/{_BUILD_FAILED_MARKER}; exit 1; }}; {command}"
+            )
+            cache = _build_cache_dir(project_config)
+            # Shared lock: a warm writing the cache mid-copy would hand this run
+            # half a jar. The home sits beside the cache, on the data disk.
+            with (
+                open(cache / ".frank-lock", "w") as lock,
+                tempfile.TemporaryDirectory(prefix="frank-home-", dir=cache.parent) as home,
+            ):
+                fcntl.flock(lock, fcntl.LOCK_SH)
+                result = self._run_in_container(
+                    docker,
+                    image,
+                    workspace,
+                    command,
+                    tests,
+                    resources,
+                    home=Path(home),
+                    cache=cache,
+                    timeout=resources.get("timeout", 900) + tests.build_timeout_seconds,
+                )
+                result["build_failed"] = (Path(home) / _BUILD_FAILED_MARKER).exists()
+                return result
 
+        return self._run_in_container(docker, image, workspace, command, tests, resources)
+
+    def _run_in_container(
+        self,
+        docker: _DockerClient,
+        image: str,
+        workspace: Path,
+        command: str,
+        tests: TestExecutionConfig,
+        resources: _ResourceTier,
+        *,
+        home: Path | None = None,
+        cache: Path | None = None,
+        network: bool = False,
+        timeout: int | None = None,
+    ) -> _ContainerResult:
+        """Run *command* in the locked-down container (§9.5).
+
+        With *home*, the workspace and that host dir are writable and the
+        container runs as the worker's uid: a build writes target/ dirs, and on
+        a rootful daemon root-owned output couldn't be cleaned up. *cache* is
+        mounted read-only. *network* is only ever set for the base-checkout warm.
+        """
         # Writable scratch area separate from the read-only repo mount. Tests
         # need somewhere to write pytest cache, pip cache, $HOME files, etc.
         # Mounting tmpfs at the same path as the repo bind would either fail
@@ -303,11 +504,33 @@ class TestRunner:
         # them disjoint.
         scratch = "/frank-scratch"
         env = {
-            "HOME": scratch,
+            "HOME": _HOME_MOUNT if home is not None else scratch,
             "TMPDIR": scratch,
             "PYTHONUSERBASE": scratch,
             **dict(tests.env),
+            **(dict(tests.offline_env) if cache is not None else {}),
         }
+        volumes = {str(workspace): {"bind": tests.workdir, "mode": "ro" if home is None else "rw"}}
+        user: str | None = None
+        passwd: Path | None = None
+        if home is not None:
+            volumes[str(home)] = {"bind": _HOME_MOUNT, "mode": "rw"}
+            # Rootless already maps container root to us; a uid there is a subuid.
+            if not _is_rootless(docker):
+                uid, gid = os.getuid(), os.getgid()
+                user = f"{uid}:{gid}"
+                # The image has no entry for our uid, and getpwuid() returning
+                # nothing breaks the JDK's login (Hadoop: "invalid null input: name").
+                fd, name = tempfile.mkstemp(prefix="frank-passwd-")
+                passwd = Path(name)
+                with os.fdopen(fd, "w") as fh:
+                    fh.write(
+                        f"root:x:0:0::/root:/bin/sh\nfrank:x:{uid}:{gid}::{_HOME_MOUNT}:/bin/sh\n"
+                    )
+                passwd.chmod(0o644)
+                volumes[name] = {"bind": "/etc/passwd", "mode": "ro"}
+        if cache is not None:
+            volumes[str(cache)] = {"bind": _CACHE_MOUNT, "mode": "ro"}
 
         container = None
         try:
@@ -315,7 +538,7 @@ class TestRunner:
                 image,
                 command=["sh", "-c", command],
                 detach=True,
-                network_mode="none",  # §9.5: no network access
+                network_mode="bridge" if network else "none",  # §9.5: PR code gets none
                 # nano_cpus, not cpu_count: cpu_count is a Windows-only
                 # HostConfig option that the Linux daemon silently ignores,
                 # which left the §9.4 CPU tiers unenforced.
@@ -325,12 +548,13 @@ class TestRunner:
                 cap_drop=["ALL"],
                 read_only=True,
                 tmpfs={"/tmp": "size=1G", scratch: "size=2G,exec"},
-                volumes={str(workspace): {"bind": tests.workdir, "mode": "ro"}},
+                volumes=volumes,
                 working_dir=tests.workdir,
                 environment=env,
+                user=user,
             )
 
-            timeout = resources.get("timeout", 900)
+            timeout = timeout or resources.get("timeout", 900)
             result = container.wait(timeout=timeout)
             stdout = container.logs(stdout=True, stderr=False).decode("utf-8", errors="replace")
             stderr = container.logs(stdout=False, stderr=True).decode("utf-8", errors="replace")
@@ -339,8 +563,10 @@ class TestRunner:
 
             return {
                 "exit_code": result.get("StatusCode", -1),
-                "stdout": stdout[:10000],
-                "stderr": stderr[:5000],
+                # Tails: with a build step the head is all build log, and the
+                # test summary is at the end.
+                "stdout": stdout[-10000:],
+                "stderr": stderr[-5000:],
                 "timed_out": False,
             }
         except Exception as exc:
@@ -353,6 +579,8 @@ class TestRunner:
                 }
             raise
         finally:
+            if passwd is not None:
+                passwd.unlink(missing_ok=True)
             if container is not None:
                 try:
                     container.remove(force=True)
@@ -369,8 +597,13 @@ class TestRunner:
         GOOD:    pass on PR, fail on base (test validates the change)
         SUSPECT: pass on both (test doesn't catch the change)
         BROKEN:  fail on both (flaky or broken)
-        INFRA:   base errors on import/setup (inconclusive)
+        INFRA:   base errors on import/setup, or either build failed (inconclusive)
         """
+        if pr_result.get("build_failed") or base_result.get("build_failed"):
+            # No build, no test result. On the PR side often a new dependency
+            # the offline cache doesn't have.
+            return "infra"
+
         pr_pass = pr_result.get("exit_code") == 0
         base_pass = base_result.get("exit_code") == 0
 
