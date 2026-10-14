@@ -23,17 +23,16 @@ import sys
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import FrameType
 from typing import TYPE_CHECKING, Any
 
 import django
+import httpx
 
 if TYPE_CHECKING:
-    import httpx
-
     from franktheunicorn.backends.base import ForgeClient
     from franktheunicorn.config.models import (
         AgentCLIReviewerConfig,
@@ -1062,8 +1061,6 @@ def process_pr(
     """
     import contextlib
 
-    import httpx as _httpx
-
     from franktheunicorn.config.loader import get_operator_config
     from franktheunicorn.review.drafter import draft_review
 
@@ -1073,7 +1070,7 @@ def process_pr(
 
     close_http = False
     if diff_http is None:
-        diff_http = _httpx.Client()
+        diff_http = _shared_http_client(operator_config)
         close_http = True
 
     cr_config: CodeRabbitConfig | None = None
@@ -1442,7 +1439,6 @@ def _run_cycle(
     ``disabled_backends`` is a set of indices into ``operator_config.llm_backends``
     that failed preflight and should be excluded for this run.
     """
-    import httpx
     from django.conf import settings
 
     from franktheunicorn.backends.poller import poll_project
@@ -1456,10 +1452,9 @@ def _run_cycle(
     # For non-GitHub projects, the LLM-checks/copypasta/changelog code paths
     # below will silently fall through. Tracked as a follow-up; see review
     # comment on PR #75.
-    diff_http = httpx.Client()
+    diff_http = _shared_http_client(operator_config)
     # Adaptive limiter (SQLite bucket + X-RateLimit-Remaining headers) for
-    # this client's unauthenticated GitHub calls — per the rate-limiting
-    # convention in CLAUDE.md.
+    # this client's GitHub calls — per the rate-limiting convention in CLAUDE.md.
     rate_limiter = None
     try:
         from django.conf import settings as _settings
@@ -2033,6 +2028,41 @@ def _strip_forge_api_suffix(base_url: str) -> str:
         if base.endswith(suffix):
             return base[: -len(suffix)]
     return base
+
+
+class _GitHubAPIAuth(httpx.Auth):
+    """Bearer token for api.github.com only.
+
+    The shared client also talks to JIRA, the mailing lists and Sentry, so a
+    client-wide header would hand the GitHub token to every one of them.
+    Anonymous, the per-PR diff fetches get 60 calls an hour, which spread the
+    first Spark cycle (600+ PRs) over a day.
+    """
+
+    def __init__(self, token: str) -> None:
+        self._token = token
+
+    def auth_flow(self, request: httpx.Request) -> Generator[httpx.Request, httpx.Response, None]:
+        if request.url.host == "api.github.com" and "authorization" not in request.headers:
+            request.headers["Authorization"] = f"Bearer {self._token}"
+        yield request
+
+
+def _shared_http_client(operator_config: OperatorConfig | None) -> httpx.Client:
+    """The cycle's shared client, authenticated to public GitHub when a token is set."""
+    token = ""
+    if operator_config is not None:
+        token = next(
+            (
+                f.token
+                for f in operator_config.forges
+                if f.type == "github"
+                and f.token
+                and _strip_forge_api_suffix(f.base_url or "") in ("", "https://api.github.com")
+            ),
+            operator_config.github_token,
+        )
+    return httpx.Client(auth=_GitHubAPIAuth(token) if token else None)
 
 
 def _clone_url_for_project(
