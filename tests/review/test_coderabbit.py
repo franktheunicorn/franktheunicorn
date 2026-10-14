@@ -202,7 +202,7 @@ class TestCreateDraftsFromCodeRabbit:
 @pytest.mark.django_db
 class TestWorkerCodeRabbitIntegration:
     @patch("franktheunicorn.worker.runner._resolve_base_ref", return_value="origin/main")
-    @patch("franktheunicorn.review.tool_executor.subprocess.run")
+    @patch("franktheunicorn.review.tool_executor._run_local")
     def test_run_coderabbit_for_pr_creates_drafts(
         self,
         mock_subprocess: Any,

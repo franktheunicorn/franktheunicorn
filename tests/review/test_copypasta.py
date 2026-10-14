@@ -1308,3 +1308,18 @@ class TestScanExtensionsValidation:
     def test_empty_extensions_rejected(self) -> None:
         with pytest.raises(ValueError, match="at least one extension"):
             ProjectConfig(owner="test", repo="test", copypasta_scan_extensions=[])
+
+
+def test_repo_fingerprints_are_reused_until_the_content_changes() -> None:
+    """Every PR used to re-fingerprint the whole repo (~60s on Spark)."""
+    from unittest.mock import patch
+
+    cache = copypasta_module._RepoFingerprints()
+    files = {"a.py": "def f(x):\n    return x + 1\n" * 5, "b.py": "y = 2\n" * 30}
+    real = copypasta_module._fingerprint
+    with patch.object(copypasta_module, "_fingerprint", side_effect=real) as fp:
+        cache.current(files)
+        cache.current(files)
+        assert fp.call_count == 2
+        cache.current({**files, "b.py": "z = 3\n" * 30})
+        assert fp.call_count == 3

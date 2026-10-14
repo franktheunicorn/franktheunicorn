@@ -435,6 +435,41 @@ class TestRefreshFixStatus:
         assert "bug_86-manual" in note
 
     @pytest.mark.django_db
+    def test_a_branch_that_says_what_it_fixes_is_flagged_not_blocked(self) -> None:
+        # The fork's branch list is public before the advisory is. The branch is
+        # still recorded (frank never opens the PR), but the row carries the
+        # hits and the note says so, so the operator renames before clicking.
+        report = patched_report(matched_cve_id="CVE-2026-4242")
+        with patch(
+            "franktheunicorn.security.fix_agent.find_fix_branches_on_fork",
+            return_value=[
+                ("bug_86-sql-injection-fix", "sha1"),
+                ("bug_86-cve-2026-4242", "sha2"),
+            ],
+        ):
+            note = refresh_fix_status(report, make_operator_config())
+        report.refresh_from_db()
+        # The first candidate is still recorded as the branch; every candidate
+        # is scanned.
+        assert report.fix_branch == "bug_86-sql-injection-fix"
+        assert report.fix_status == "branch-pushed"
+        assert "bug_86-sql-injection-fix: sql injection" in report.fix_language_hits
+        assert "bug_86-cve-2026-4242: CVE-2026-4242" in report.fix_language_hits
+        assert "DISCLOSURE RISK" in note
+
+    @pytest.mark.django_db
+    def test_an_innocuous_branch_records_no_hits(self) -> None:
+        report = patched_report()
+        with patch(
+            "franktheunicorn.security.fix_agent.find_fix_branches_on_fork",
+            return_value=[("bug_86-quiet-cleanup", "sha1")],
+        ):
+            note = refresh_fix_status(report, make_operator_config())
+        report.refresh_from_db()
+        assert report.fix_language_hits == []
+        assert "DISCLOSURE RISK" not in note
+
+    @pytest.mark.django_db
     def test_a_branch_that_is_not_the_fix_is_ignored(self) -> None:
         # The run touched the base branch and a scratch branch; neither names
         # the bug, so neither is the fix — recording one would read as "your

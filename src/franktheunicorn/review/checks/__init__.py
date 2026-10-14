@@ -58,6 +58,7 @@ def _get_registry() -> dict[str, type[BaseCheck]]:
     from franktheunicorn.review.checks.pr_description import PRDescriptionCheck
     from franktheunicorn.review.checks.security import SecurityCheck
     from franktheunicorn.review.checks.security_context import SecurityContextCheck
+    from franktheunicorn.review.checks.security_disclosure import SecurityDisclosureCheck
 
     return {
         "api-misuse": APIMisuseCheck,
@@ -68,6 +69,7 @@ def _get_registry() -> dict[str, type[BaseCheck]]:
         "pr-description": PRDescriptionCheck,
         "security": SecurityCheck,
         "security-context": SecurityContextCheck,
+        "security-disclosure": SecurityDisclosureCheck,
     }
 
 
@@ -95,6 +97,7 @@ def run_enabled_checks(
     """
     from franktheunicorn.config.models import LLMBackendConfig
     from franktheunicorn.config.models import OperatorConfig as DefaultOperatorConfig
+    from franktheunicorn.worker.runner import record_agent_run
 
     if operator_config is None:
         operator_config = DefaultOperatorConfig()
@@ -130,17 +133,20 @@ def run_enabled_checks(
             logger.warning("Unknown LLM check '%s'; skipping.", check_name)
             continue
 
+        source = f"check:{check_name}"
         check = _instantiate_check(check_cls, check_name, project_config, repo_path, forge_client)
         try:
             findings = _run_check_dispatch(check, pr, diff, pr_context, backend_config)
         except Exception:
             logger.exception("LLM check '%s' failed.", check_name)
+            record_agent_run(pr, source, status="failed")
             continue
 
+        # Recorded even at zero findings, or a clean check reads as "not run".
+        record_agent_run(pr, source, status="ok", findings=len(findings))
         if not findings:
             continue
 
-        source = f"check:{check_name}"
         drafts = create_drafts_from_findings(
             pr,
             findings,
@@ -180,6 +186,10 @@ def _instantiate_check(
             config=project_config.backport,
             forge_client=forge_client,
         )
+    if check_name == "security-disclosure":
+        from franktheunicorn.review.checks.security_disclosure import SecurityDisclosureCheck
+
+        return SecurityDisclosureCheck(governance=project_config.governance)
     return check_cls()
 
 

@@ -367,6 +367,7 @@ Interest scoring determines what surfaces in the dashboard and in what order the
 | `new_human_contributor` | 10 | Author's first or second PR to this project (positive bump — encourage newcomers) |
 | `keyword_match` | 10 | PR title/body matches configured keywords |
 | `ai_generated` | 10 | PR author or trailers match `ai_agents` config |
+| `author_awaiting_maintainer` | 20 | The author's last comment @-mentions the operator, a committer or a team, and no maintainer has commented since: the ball is in our court (Apache Magpie's pr-triage F5c) |
 
 The `is_operator_pr` signal is not a score boost — it's a separate priority lane (see §2.3 Shepherding).
 
@@ -546,6 +547,7 @@ blame_watching:
 | `new_human_contributor` | 10 | First/second PR from this author (positive bump) |
 | `keyword_match` | 10 | PR title/body matches keywords |
 | `ai_generated` | 10 | AI agent author or commit trailers |
+| `author_awaiting_maintainer` | 20 | Author's last comment asks the operator, a committer or a team; no maintainer reply since |
 | `downstream_impact` | 20 | (v1.5) Touches APIs tracked in downstream project |
 
 ### Performance Considerations

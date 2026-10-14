@@ -158,6 +158,30 @@ class ForgeClient(ABC):
     ) -> list[dict[str, Any]]:
         pass
 
+    def list_pull_request_reviews(
+        self, owner: str, repo: str, pr_number: int
+    ) -> list[dict[str, Any]]:
+        """Every submitted review on the PR, GitHub-shaped.
+
+        Each dict carries ``user.login``, ``state`` (``APPROVED``,
+        ``CHANGES_REQUESTED``, ``COMMENTED``, ``DISMISSED``), ``body``,
+        ``submitted_at`` (ISO 8601, may be empty) and ``commit_id`` (may be
+        empty). The intending-to-merge detector reads these; forges without
+        a reviews API inherit this empty default and the queue stays empty
+        for their projects rather than erroring.
+        """
+        return []
+
+    def get_commit_ci_status(self, owner: str, repo: str, sha: str) -> str:
+        """Fold the commit's CI into ``pass`` / ``fail`` / ``pending`` / ``""``.
+
+        ``""`` is unknown: no checks reported, or a forge that does not
+        expose them (this default). Read for the intending-to-merge queue,
+        where "approved pending CI" needs the answer, and for the merge
+        queue's eligibility check.
+        """
+        return ""
+
     @abstractmethod
     def delete_review_comment(self, owner: str, repo: str, pr_number: int, comment_id: int) -> None:
         """Delete a posted review comment.

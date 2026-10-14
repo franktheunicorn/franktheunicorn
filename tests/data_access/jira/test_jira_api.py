@@ -26,6 +26,8 @@ class TestJiraAPIFetch:
         assert result.assignee == "Huaxin Gao"
         assert result.issue_type == "Improvement"
         assert result.project == "SPARK"
+        assert result.creator == "Holden Karau"
+        assert result.creator_username == "holdenk"
 
     def test_parses_description(
         self, httpx_mock: HTTPXMock, jira_fetcher: JiraFetcher, ticket_api_json: dict
@@ -47,6 +49,7 @@ class TestJiraAPIFetch:
         result = jira_fetcher.fetch_via_api("https://issues.apache.org/jira", "SPARK-12345")
         assert len(result.recent_comments) == 2
         assert result.recent_comments[0].author == "Dongjoon Hyun"
+        assert result.recent_comments[0].author_username == "dongjoon-hyun"
         assert "batching" in result.recent_comments[0].body
 
     def test_404_raises_not_found(self, httpx_mock: HTTPXMock, jira_fetcher: JiraFetcher) -> None:
@@ -67,4 +70,5 @@ class TestJiraAPIFetch:
         result = jira_fetcher.fetch_via_api("https://issues.apache.org/jira", "SPARK-1")
         assert result.summary == ""
         assert result.assignee == ""
+        assert result.creator == ""
         assert result.recent_comments == []

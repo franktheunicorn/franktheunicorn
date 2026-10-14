@@ -41,6 +41,7 @@ urlpatterns = [
     ),
     # Stats
     path("stats/", views.stats, name="stats"),
+    path("project/<int:project_id>/wipe-prs/", views.project_wipe_prs, name="project_wipe_prs"),
     # Zombie Queue: closed-but-unmerged PRs whose JIRA is still open. The hunt
     # is a worker sweep (bulk priority); the two per-PR buttons live on the
     # detail page and swap the panel.

@@ -1,0 +1,13 @@
+# Pinned Apache Magpie revision: which upstream commit frank's vendored text and
+# pinned tools come from. See docs/magpie-integration.md and
+# src/franktheunicorn/magpie/pin.py.
+#
+# Edited by `manage.py magpie_sync --bump <commit>`, which also regenerates
+# vendored/. Hand edits to `commit` without a --sync leave vendored/ stale, and
+# `manage.py magpie_sync --check` (run in CI) will say so.
+url: https://github.com/apache/magpie.git
+commit: dadb315caa8b881fc1d2195bef03223dac25915a
+tag: ''
+commit_date: '2026-10-11'
+tools: []
+vendored: []

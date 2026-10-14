@@ -44,12 +44,20 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Tools disabled on every invocation: this backend is used as a pure text
-# completion primitive (review JSON, RLM notebook calls, security triage
-# prompts) and must never wander the filesystem or shell out on our behalf.
-# For the "cli" transport this is enforced via --disallowedTools; for "acp"
-# it's enforced by advertising no client capabilities (see acp_transport).
-_DISALLOWED_TOOLS = ["Bash", "Edit", "Write", "Read"]
+# No tools on any invocation: this backend is a pure text completion
+# primitive (review JSON, RLM notebook calls, security triage prompts) fed
+# contributor diffs and emailed reports, and must never wander the filesystem
+# or shell out on our behalf. For the "cli" transport that is ``--tools ""``,
+# an allowlist of nothing: the denylist this replaced (Bash, Edit, Write,
+# Read) left the rest of Claude Code's tools, Monitor among them, which runs
+# shell commands under the operator's own allow rules (the reviewer's
+# CLAUDE_READONLY_ARGS finding, config/models.py). ``--setting-sources user``
+# keeps a ``.claude/settings.json`` in the working directory, and its hooks,
+# from loading, and ``--strict-mcp-config`` keeps the operator's MCP servers
+# out. Checked with claude 2.1.299: the init event lists no tools and no MCP
+# servers. For "acp" it's enforced by advertising no client capabilities (see
+# acp_transport).
+_READONLY_FLAGS = ["--setting-sources", "user", "--strict-mcp-config", "--tools", ""]
 
 _DEFAULT_CLI_TIMEOUT_SECONDS = 300
 # Reference ACP agent adapter, run via npx so no separate install step is
@@ -110,17 +118,20 @@ class ClaudeCodeBackend(BaseLLMBackend):
         return self._call_cli(system_prompt, user_message)
 
     def _call_cli(self, system_prompt: str, user_message: str) -> str:
-        argv = [self._cli_path, "-p", user_message, "--output-format", "json"]
+        # ``--tools`` takes a variadic list, so it goes before ``-p``, which
+        # ends it.
+        argv = [self._cli_path, *_READONLY_FLAGS, "-p", user_message, "--output-format", "json"]
         if system_prompt:
             argv += ["--system-prompt", system_prompt]
         if self._model:
             argv += ["--model", self._model]
-        argv += ["--disallowedTools", *_DISALLOWED_TOOLS]
 
-        # Run from a neutral directory (not a project checkout) so the CLI
-        # has nothing to wander into even if a tool guard is ever bypassed.
+        # Run from a fresh private directory (not a project checkout, and not
+        # the shared temp root, where another local user could plant a
+        # .claude/ for every run to find).
         executor = make_executor(None)
-        result = executor.run(argv, cwd=tempfile.gettempdir(), timeout=self._cli_timeout)
+        with tempfile.TemporaryDirectory(prefix="frank-claude-code-") as cwd:
+            result = executor.run(argv, cwd=cwd, timeout=self._cli_timeout)
         if result is None or not result.ok:
             stderr = (
                 result.stderr if result is not None else "(no result — CLI missing or timed out)"
@@ -134,12 +145,13 @@ class ClaudeCodeBackend(BaseLLMBackend):
         # text block sent as the prompt turn.
         text = f"{system_prompt}\n\n{user_message}" if system_prompt else user_message
         try:
-            out, usage = acp_complete(
-                self._acp_argv(),
-                text,
-                cwd=tempfile.gettempdir(),
-                timeout=self._cli_timeout,
-            )
+            with tempfile.TemporaryDirectory(prefix="frank-claude-code-") as cwd:
+                out, usage = acp_complete(
+                    self._acp_argv(),
+                    text,
+                    cwd=cwd,
+                    timeout=self._cli_timeout,
+                )
         except AcpProtocolError as exc:
             raise RuntimeError(f"ACP agent failed: {exc}") from exc
 

@@ -23,6 +23,13 @@
     {% if pr.is_new_contributor %}&middot; New Contributor{% endif %}
     {% if pr.is_mentioned %}&middot; <span class="badge-mentioned" title="You are a requested reviewer, assignee, or @-mentioned in this PR">Mentioned</span>{% endif %}
     {% if pr.mergeable == False %}&middot; <span class="badge-conflict" title="PR has merge conflicts">Needs Rebase</span>{% endif %}
+    {% if pr.merge_intent %}
+    &middot; <span class="badge-intent {{ pr.merge_intent }}">{% if pr.merge_intent == 'conditional' %}Approved pending CI{% else %}Approved{% endif %}</span>
+    by <strong>{{ pr.merge_intent_by }}</strong>{% if pr.merge_intent_at %} <span title="{{ pr.merge_intent_at|date:'Y-m-d H:i' }} UTC">{{ pr.merge_intent_at|timesince }} ago</span>{% endif %}
+    {% if pr.ci_status %}&middot; <span class="badge-ci {{ pr.ci_status }}" title="CI on the current head">CI: {{ pr.ci_status }}</span>{% endif %}
+    {% if pr.moved_since_approval %}&middot; <span class="badge-conflict" title="The PR head moved after the approval — new commits to look at">Pushed since approval</span>{% endif %}
+    {% if pr.merge_intent_excerpt %}<br><span class="intent-excerpt" title="The {{ pr.merge_intent_source }} that counted as the approval">&ldquo;{{ pr.merge_intent_excerpt }}&rdquo;</span>{% endif %}
+    {% endif %}
     &middot; Queue: {{ pr.queue }}
     {% if pr.github_updated_at %}&middot; Updated upstream: <span title="{{ pr.github_updated_at|date:'Y-m-d H:i:s' }} UTC">{{ pr.github_updated_at|timesince }} ago</span>{% endif %}
     &middot; Reviewed locally: <span {% if pr.last_local_action_at %}title="{{ pr.last_local_action_at|date:'Y-m-d H:i:s' }} UTC"{% endif %}>{% if pr.last_local_action_at %}{{ pr.last_local_action_at|timesince }} ago{% else %}never{% endif %}</span>

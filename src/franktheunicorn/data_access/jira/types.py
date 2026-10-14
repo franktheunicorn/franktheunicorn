@@ -14,6 +14,7 @@ class JiraComment:
     author: str
     body: str
     created: str
+    author_username: str = ""
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,10 @@ class JiraTicketResult(FetchResult):
     priority: str = ""
     issue_type: str = ""
     project: str = ""
+    creator: str = ""
+    creator_username: str = ""
+    reporter: str = ""
+    reporter_username: str = ""
     recent_comments: list[JiraComment] = field(default_factory=list)
 
     def to_prompt_context(self) -> str:
@@ -36,6 +41,8 @@ class JiraTicketResult(FetchResult):
             f"JIRA {self.ticket_id}: {self.summary}",
             f"Status: {self.status} | Priority: {self.priority} | Assignee: {self.assignee}",
         ]
+        if self.creator:
+            parts.append(f"Creator: {self.creator}")
         if self.description:
             desc = self.description[:1000]
             if len(self.description) > 1000:
@@ -61,8 +68,17 @@ class JiraTicketResult(FetchResult):
             "priority": self.priority,
             "issue_type": self.issue_type,
             "project": self.project,
+            "creator": self.creator,
+            "creator_username": self.creator_username,
+            "reporter": self.reporter,
+            "reporter_username": self.reporter_username,
             "recent_comments": [
-                {"author": c.author, "body": c.body[:500], "created": c.created}
+                {
+                    "author": c.author,
+                    "author_username": c.author_username,
+                    "body": c.body[:500],
+                    "created": c.created,
+                }
                 for c in self.recent_comments[:5]
             ],
         }

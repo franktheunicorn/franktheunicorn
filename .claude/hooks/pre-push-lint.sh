@@ -4,14 +4,28 @@ set -uo pipefail
 # Claude Code PreToolUse hook: runs CI checks before any git push.
 # Receives tool_input JSON on stdin. Exits 0 to allow, 2 to block.
 
-COMMAND=$(python3 -c "import sys, json; print(json.load(sys.stdin).get('tool_input', {}).get('command', ''))")
+HOOK_INPUT=$(cat)
 
-# Determine which gate we're in: commit, push, or neither.
+# Determine which gate we're in: commit, push, or neither. git_gate.py splits the
+# command into simple commands the way a shell does, so `cd repo && git push`,
+# `git -C repo push` and a push inside a retry loop are all gated; an anchored
+# regex let every one of those through. If the helper cannot run, fail closed
+# on any command that mentions git at all.
+GATE=$(printf '%s' "$HOOK_INPUT" | python3 "$(dirname "$0")/git_gate.py" 2>/dev/null) || GATE=""
+if [ -z "$GATE" ]; then
+    if printf '%s' "$HOOK_INPUT" | grep -q 'git.*push'; then
+        GATE=push
+    elif printf '%s' "$HOOK_INPUT" | grep -q 'git.*commit'; then
+        GATE=commit
+    else
+        GATE=none
+    fi
+fi
 IS_COMMIT=0
 IS_PUSH=0
-if echo "$COMMAND" | grep -qE '^\s*git\s+push\b'; then
+if [ "$GATE" = "push" ]; then
     IS_PUSH=1
-elif echo "$COMMAND" | grep -qE '^\s*git\s+commit\b'; then
+elif [ "$GATE" = "commit" ]; then
     IS_COMMIT=1
 fi
 

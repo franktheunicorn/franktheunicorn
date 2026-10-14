@@ -216,12 +216,16 @@ class TestEmailIngestionQueuesTriage:
         from datetime import UTC, datetime
 
         from franktheunicorn.core.models import WorkerCommand
+        from franktheunicorn.data_access.email_inbox.types import InboxMessage
         from franktheunicorn.worker import runner
 
         config = _operator_config()
         config.security_triage.email.enabled = True
 
-        message = MagicMock(
+        # The real type, not a MagicMock: the poll reads every InboxMessage field
+        # onto the report row, and an unspecced mock answers each new field with
+        # another mock, which Django then tries to insert as a column value.
+        message = InboxMessage(
             message_id="<m1>",
             subject="[SECURITY] path traversal",
             from_name="Reporter",
@@ -229,7 +233,7 @@ class TestEmailIngestionQueuesTriage:
             body="A path traversal in the log viewer.",
             received_at=datetime(2026, 8, 1, tzinfo=UTC),
             is_forwarded=False,
-            matched_keywords=["path traversal"],
+            matched_keywords=("path traversal",),
             is_security_report=True,
         )
         fetched = MagicMock(examined=[message], already_scanned=0)

@@ -639,8 +639,12 @@ def draft_review(
     # don't collide on the unique (pull_request, backend) constraint.
     all_findings: list[tuple[str, ReviewFinding]] = []
     failed_backends: list[str] = []
+    #: provider source -> (any backend for it succeeded, raw findings).
+    per_source: dict[str, tuple[bool, int]] = {}
     for backend_config in backend_configs:
         source, result, failed = _run_single_backend(backend_config, diff, pr_context, pr=pr)
+        ok, n = per_source.get(source, (False, 0))
+        per_source[source] = (ok or not failed, n + len(result.findings))
         if failed:
             model_name = backend_config.model or "<default>"
             failed_backends.append(f"{backend_config.provider}/{model_name}")
@@ -663,6 +667,12 @@ def draft_review(
             len(failed_backends),
             ", ".join(failed_backends),
         )
+
+    from franktheunicorn.worker.runner import llm_run_key, record_agent_run
+
+    # Per provider, so the dashboard can tell a dead backend from a clean one.
+    for source, (ok, n) in per_source.items():
+        record_agent_run(pr, llm_run_key(source), status="ok" if ok else "failed", findings=n)
 
     # Always create a rebase-needed draft when GitHub reports merge conflicts.
     # This runs independently of LLM findings so operators see it even when all

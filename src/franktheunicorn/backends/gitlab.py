@@ -242,6 +242,37 @@ class GitLabClient(ForgeClient):
         notes: list[dict[str, Any]] = response.json()
         return [_normalize_note(n) for n in notes if not n.get("position")]
 
+    def list_pull_request_reviews(
+        self, owner: str, repo: str, pr_number: int
+    ) -> list[dict[str, Any]]:
+        """GitLab approvals as GitHub-shaped APPROVED reviews.
+
+        GitLab has no review object: approval is a toggle per user, with no
+        body. Its ``approved_at`` is kept as the review time, so a withdrawal
+        comment and an approval sort in the order they happened. An instance
+        too old to send it gives an undated approval, which the detector sorts
+        first, so any later comment can still override it.
+        """
+        url = f"/projects/{_project_id(owner, repo)}/merge_requests/{pr_number}/approvals"
+        response = self._client.get(url)
+        response.raise_for_status()
+        data: dict[str, Any] = response.json()
+        reviews: list[dict[str, Any]] = []
+        for entry in data.get("approved_by") or []:
+            user = entry.get("user") if isinstance(entry, dict) else None
+            if not isinstance(user, dict):
+                continue
+            reviews.append(
+                {
+                    "user": {"login": user.get("username", "") or ""},
+                    "state": "APPROVED",
+                    "body": "",
+                    "submitted_at": str(entry.get("approved_at") or ""),
+                    "commit_id": "",
+                }
+            )
+        return reviews
+
     def delete_review_comment(self, owner: str, repo: str, pr_number: int, comment_id: int) -> None:
         url = f"/projects/{_project_id(owner, repo)}/merge_requests/{pr_number}/notes/{comment_id}"
         response = self._client.delete(url)

@@ -172,3 +172,66 @@ class TestComputeModerationFlags:
 
     def test_graceful_missing_keys(self) -> None:
         assert isinstance(compute_moderation_flags({}, "op"), list)
+
+
+class TestAuthorAssociationDecidesNewContributor:
+    """GitHub knows whether an author has committed to the repo; frank's own
+    known-authors list is capped at 500 forge contributors plus what it has
+    ingested, so on a large repo it was wrong for everyone past the cap."""
+
+    def test_a_contributor_past_the_cap_is_not_new(self) -> None:
+        flags = compute_moderation_flags(
+            {"author": "returning", "author_association": "CONTRIBUTOR"},
+            "op",
+            known_authors=["someone-else"],
+            contributor_evidence_available=True,
+        )
+        assert "new_contributor" not in flags
+
+    def test_member_owner_and_collaborator_are_never_new(self) -> None:
+        for association in ("MEMBER", "OWNER", "COLLABORATOR"):
+            flags = compute_moderation_flags(
+                {"author": "x", "author_association": association},
+                "op",
+                known_authors=[],
+                contributor_evidence_available=True,
+            )
+            assert "new_contributor" not in flags, association
+
+    def test_a_first_timer_is_new_even_without_contributor_evidence(self) -> None:
+        for association in ("FIRST_TIME_CONTRIBUTOR", "FIRST_TIMER"):
+            flags = compute_moderation_flags(
+                {"author": "newbie", "author_association": association},
+                "op",
+                known_authors=None,
+                contributor_evidence_available=False,
+            )
+            assert "new_contributor" in flags, association
+
+    def test_a_first_timer_frank_has_already_seen_is_not_new(self) -> None:
+        flags = compute_moderation_flags(
+            {"author": "newbie", "author_association": "FIRST_TIME_CONTRIBUTOR"},
+            "op",
+            known_authors=["newbie"],
+            contributor_evidence_available=True,
+        )
+        assert "new_contributor" not in flags
+
+    def test_no_association_keeps_the_old_rule(self) -> None:
+        for association in ("", "NONE"):
+            pr = {"author": "stranger", "author_association": association}
+            assert "new_contributor" in compute_moderation_flags(
+                pr, "op", known_authors=["other"], contributor_evidence_available=True
+            )
+            assert "new_contributor" not in compute_moderation_flags(
+                pr, "op", known_authors=["other"], contributor_evidence_available=False
+            )
+
+    def test_a_bot_is_never_new(self) -> None:
+        flags = compute_moderation_flags(
+            {"author": "renovate[bot]", "author_association": "FIRST_TIME_CONTRIBUTOR"},
+            "op",
+            known_authors=[],
+            contributor_evidence_available=True,
+        )
+        assert "new_contributor" not in flags

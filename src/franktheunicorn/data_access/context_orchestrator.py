@@ -47,19 +47,29 @@ def fetch_jira_context(
     if not project_config.jira.enabled or not project_config.jira.server:
         return ""
 
-    # Use cached data if available.
-    if pr.jira_cache:
-        return _format_jira_from_cache(pr.jira_cache)
-
     # Extract ticket ID from PR title/body.
     from franktheunicorn.data_access.jira.fetcher import JiraFetcher, extract_ticket_ids
 
     text = f"{pr.title} {pr.body}"
     ticket_ids = extract_ticket_ids(text, project_config.jira.project_prefix)
+    cached_ticket_id = (pr.jira_ticket_id or "").strip()
+    if not cached_ticket_id and isinstance(pr.jira_cache, dict):
+        raw_cached = pr.jira_cache.get("ticket_id", "")
+        if isinstance(raw_cached, str):
+            cached_ticket_id = raw_cached.strip()
+
     if not ticket_ids:
+        if pr.jira_cache or cached_ticket_id:
+            _clear_jira_cache(pr)
         return ""
 
     ticket_id = ticket_ids[0]
+    if pr.jira_cache and cached_ticket_id == ticket_id:
+        return _format_jira_from_cache(pr.jira_cache)
+
+    # Ticket reference changed; do not let stale cache keep affecting ranking.
+    if pr.jira_cache and cached_ticket_id and cached_ticket_id != ticket_id:
+        _clear_jira_cache(pr)
 
     try:
         client = http_client or httpx.Client()
@@ -82,12 +92,22 @@ def fetch_jira_context(
         return ""
 
 
+def _clear_jira_cache(pr: PullRequest) -> None:
+    """Clear stale JIRA cache fields on a PR."""
+    pr.jira_ticket_id = ""
+    pr.jira_cache = None
+    pr.save(update_fields=["jira_ticket_id", "jira_cache", "updated_at"])
+
+
 def _format_jira_from_cache(cache: dict) -> str:  # type: ignore[type-arg]
     """Format cached JIRA data for prompt injection."""
     parts = [
         f"JIRA {cache.get('ticket_id', '')}: {cache.get('summary', '')}",
         f"Status: {cache.get('status', '')} | Assignee: {cache.get('assignee', '')}",
     ]
+    creator = cache.get("creator", "")
+    if creator:
+        parts.append(f"Creator: {creator}")
     desc = cache.get("description", "")
     if desc:
         parts.append(f"Description: {desc[:500]}")

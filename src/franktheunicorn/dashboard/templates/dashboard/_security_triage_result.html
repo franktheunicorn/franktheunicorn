@@ -1,6 +1,24 @@
 <div style="background: var(--card); border: 1px solid var(--border); border-radius: 4px; padding: 0.75rem;">
     <h3 style="font-size: 0.9rem; margin-bottom: 0.5rem;">Triage Analysis</h3>
 
+    {% if report.auto_triage_disposition %}
+    {# The class is a proposal (Magpie's taxonomy); the status below is the #}
+    {# verdict. The quoted line is what the call rests on; its absence means #}
+    {# the model cited nothing, which is worth seeing. #}
+    <p style="font-size: 0.85rem; margin-bottom: 0.5rem;">
+        <strong>Disposition:</strong>
+        <span class="score-badge mid">{{ report.get_auto_triage_disposition_display }}</span>
+        {% if report.auto_triage_disposition == "UNCERTAIN" %}
+        <span class="muted">low-confidence call; challenge it</span>
+        {% endif %}
+        {% if report.triage_model_quote %}
+        <br><span class="muted">Rests on:</span> <q>{{ report.triage_model_quote }}</q>
+        {% else %}
+        <br><span class="muted">No line of the security model was cited.</span>
+        {% endif %}
+    </p>
+    {% endif %}
+
     {% if report.is_expected_behavior %}
     <div style="background: var(--orange-bg); border-left: 3px solid var(--orange); padding: 0.5rem 0.75rem; margin-bottom: 0.5rem;">
         <strong style="color: var(--orange);">Expected Behavior</strong>

@@ -503,7 +503,7 @@ class TestYAMLErrorHandling:
 
     @pytest.mark.skipif(
         hasattr(os, "geteuid") and os.geteuid() == 0,
-        reason="root reads a chmod 000 file, so the file is not unreadable",
+        reason="root reads a mode-000 file, so there is nothing unreadable to test",
     )
     def test_an_unreadable_file_is_named_not_raised(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
@@ -638,15 +638,20 @@ class TestJiraConfig:
         assert config.enabled is False
         assert config.server == ""
         assert config.project_prefix == ""
+        assert config.priority_authors == []
 
     def test_valid_server(self) -> None:
         from franktheunicorn.config.models import JiraConfig
 
         config = JiraConfig(
-            enabled=True, server="https://issues.apache.org/jira", project_prefix="SPARK"
+            enabled=True,
+            server="https://issues.apache.org/jira",
+            project_prefix="SPARK",
+            priority_authors=["Holden Karau"],
         )
         assert config.server == "https://issues.apache.org/jira"
         assert config.project_prefix == "SPARK"
+        assert config.priority_authors == ["Holden Karau"]
 
     def test_trailing_slash_stripped(self) -> None:
         from franktheunicorn.config.models import JiraConfig
@@ -659,6 +664,12 @@ class TestJiraConfig:
 
         with pytest.raises(ValidationError, match="URL"):
             JiraConfig(server="issues.apache.org/jira")
+
+    def test_priority_authors_are_normalized(self) -> None:
+        from franktheunicorn.config.models import JiraConfig
+
+        config = JiraConfig(priority_authors=["  Holden Karau  ", "", "holdenk"])
+        assert config.priority_authors == ["Holden Karau", "holdenk"]
 
 
 class TestCommunitySourceConfig:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from franktheunicorn.scoring.signals import (
     LARGE_PR_THRESHOLD,
     _lowered,
+    association_says_new,
     is_likely_bot,
     is_operator_involved,
 )
@@ -79,14 +80,20 @@ def compute_moderation_flags(
     if len(body.strip()) < _MIN_BODY_LENGTH and not labels:
         flags.append("low_context")
 
-    if (
-        contributor_evidence_available
-        and known_authors is not None
-        and author
-        and author.lower() not in _lowered(known_authors)
-        and not is_likely_bot(author)
-    ):
-        flags.append("new_contributor")
+    if author and not is_likely_bot(author):
+        # The forge's author association decides when it can (see
+        # signals.association_says_new): CONTRIBUTOR and up is never new, which
+        # fixes the 500-login contributors cap; FIRST_TIME_CONTRIBUTOR is new even
+        # when the contributors fetch failed. Otherwise frank's own rule.
+        says = association_says_new(str(pr.get("author_association", "") or ""))
+        known = known_authors is not None and author.lower() in _lowered(known_authors)
+        if (says is True and not known) or (
+            says is None
+            and contributor_evidence_available
+            and known_authors is not None
+            and not known
+        ):
+            flags.append("new_contributor")
 
     changed = _str_list(pr, "changed_files")
     has_source = any(f.startswith(_SOURCE_PREFIXES) for f in changed)

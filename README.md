@@ -82,6 +82,7 @@ For project configuration and workspaces, see the **[Install Guide](docs/install
 - **Runs differential tests** to verify new tests actually fail without the PR's changes — see [Dual Run Tests](#dual-run-tests) below and [docs/test-runner.md](docs/test-runner.md) to enable per project
 - **Routes PRs to queues** — AI-generated, new contributors, low-context drive-bys, consider-closing
 - **Hunts zombies** — walks a project's closed-but-unmerged PRs newest-first, keeps the ones whose JIRA is still open, asks the model whether the ticket and the fix still make sense and what the fix needs to land today, and lines them up in the dashboard's Zombie Queue (`manage.py find_zombie_prs`, or the button on the tab; bounded per run and resumable, so a Spark-sized backlog is worked through over many presses)
+- **Remembers what you meant to merge** — PRs you approved, or said "LGTM pending CI" on, sit in an Intending to Merge queue (oldest approval first, with CI status) until they land
 - **Respects project cultures** — ASF governance norms are different from your Django side project
 - **Works on your phone** — responsive dashboard over Tailscale for conference triage
 
@@ -140,7 +141,7 @@ committers:
   - cloud-fan
 tests:
   enabled: true
-  container_image: ghcr.io/apache/spark-test:latest
+  container_image: ghcr.io/apache/spark-test:latest  # illustrative: Spark publishes no runnable test image
   resource_tier: heavy          # 8 CPU, 16 GB RAM, 45 min timeout
   test_command: "python -m pytest {tests} --tb=short -q"
   workdir: /workspace

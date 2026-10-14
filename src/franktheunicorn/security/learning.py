@@ -36,7 +36,14 @@ _MAX_RULINGS_FOR_DISTILLATION = 50
 #: The statuses that mean "a person ruled on this", as opposed to staged machine
 #: output — ``status`` is the operator's field (triage stages its suggestion in
 #: ``auto_triage_status``), so a non-auto status is unambiguously a ruling.
-RULED_STATUSES = ("valid", "invalid", "duplicate", "expected-behavior")
+RULED_STATUSES = (
+    "valid",
+    "invalid",
+    "duplicate",
+    "expected-behavior",
+    "defense-in-depth",
+    "info-only",
+)
 
 _DISTILL_SYSTEM_PROMPT = (
     "You are distilling an operator's judgment on security triage into concise, "
