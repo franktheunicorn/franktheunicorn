@@ -722,9 +722,24 @@ def test_remote_diff_is_against_the_fork_point_not_base_sha(
     assert changed.splitlines() == ["pr_file.txt"]
 
 
-def test_shared_client_sends_the_github_token_to_api_github_com_only() -> None:
+def test_shared_client_sends_the_github_token_to_api_github_com_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The client also reaches JIRA and the mailing lists; the token must not."""
     import httpx
+
+    # Hermetic: with a proxy in the environment, httpx mounts a proxy transport
+    # per scheme at construction and the mock transport below never sees a
+    # request.
+    for name in (
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "ALL_PROXY",
+        "https_proxy",
+        "http_proxy",
+        "all_proxy",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
     from franktheunicorn.config.models import ForgeRegistryEntry, OperatorConfig
     from franktheunicorn.worker.runner import _shared_http_client
