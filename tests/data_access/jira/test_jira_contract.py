@@ -41,6 +41,9 @@ class TestJiraContract:
     def test_status(self, jira_result: JiraTicketResult) -> None:
         assert jira_result.status == "Open"
 
+    def test_creator(self, jira_result: JiraTicketResult) -> None:
+        assert jira_result.creator == "Holden Karau"
+
     def test_has_comments(self, jira_result: JiraTicketResult) -> None:
         assert len(jira_result.recent_comments) >= 1
 
@@ -55,6 +58,7 @@ class TestJiraContract:
     def test_to_cache_dict(self, jira_result: JiraTicketResult) -> None:
         d = jira_result.to_cache_dict()
         assert d["ticket_id"] == "SPARK-12345"
+        assert d["creator"] == "Holden Karau"
         assert isinstance(d["recent_comments"], list)
 
 

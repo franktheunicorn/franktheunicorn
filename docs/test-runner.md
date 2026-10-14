@@ -57,7 +57,7 @@ owner: apache
 repo: spark
 tests:
   enabled: true
-  container_image: ghcr.io/apache/spark-test:latest
+  container_image: ghcr.io/apache/spark-test:latest  # illustrative: Spark publishes no runnable test image
   resource_tier: heavy        # 8 CPU, 16GB, 45 min
   test_command: "python -m pytest {tests} --tb=short -q"
 ```

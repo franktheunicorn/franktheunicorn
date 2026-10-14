@@ -120,9 +120,20 @@ class TestProcessPendingCommands:
         )
         mock_pc = MagicMock()
 
+        seen: dict[str, Any] = {}
+
         def fake_process_pr(
-            pr, project_config, opc, repo_path=None, *, forge_client=None, force, log_lines
+            pr,
+            project_config,
+            opc,
+            repo_path=None,
+            *,
+            forge_client=None,
+            force,
+            log_lines,
+            disabled_backends,
         ):
+            seen["disabled"] = disabled_backends
             log_lines.append("ran agent A")
             return [MagicMock(), MagicMock(), MagicMock()]
 
@@ -135,12 +146,15 @@ class TestProcessPendingCommands:
                 "franktheunicorn.worker.runner.process_pr",
                 side_effect=fake_process_pr,
             ),
+            # A force-run must skip what the boot preflight disabled.
+            patch("franktheunicorn.review.backends.preflight._disabled_at_boot", frozenset({0})),
         ):
             process_pending_commands(operator_config)
 
         cmd.refresh_from_db()
         assert cmd.status == "completed"
         assert "3 finding" in cmd.log
+        assert seen["disabled"] == frozenset({0})
 
     def test_security_sandbox_dispatch(self) -> None:
         operator_config = MagicMock()

@@ -48,6 +48,53 @@ _WINNOW_WIN = 4  # window size
 # Minimum overlap ratio from copydetect to count as a match
 _WINNOW_MIN_OVERLAP = 0.5
 
+
+class _RepoFingerprints:
+    """Repo fingerprints by (path, content hash), plus hash -> keys index.
+
+    Fingerprinting all of Spark is ~60s, and every PR used to redo it and then
+    compare each chunk to all ~10k files. Content-keyed because each PR
+    excludes its own changed files, and the tree moves between cycles.
+    """
+
+    def __init__(self) -> None:
+        self.fps: dict[tuple[str, int], CodeFingerprint | None] = {}
+        self.index: dict[int, set[tuple[str, int]]] = {}
+
+    def current(self, repo_files: dict[str, str]) -> dict[tuple[str, int], CodeFingerprint]:
+        """Fingerprints for exactly *repo_files*, computing only the new ones."""
+        if len(self.fps) > 2 * len(repo_files) + 1000:
+            # Old versions of files that moved on; start over rather than grow.
+            self.fps.clear()
+            self.index.clear()
+        live: dict[tuple[str, int], CodeFingerprint] = {}
+        for path, content in repo_files.items():
+            key = (path, hash(content))
+            if key not in self.fps:
+                self.fps[key] = _fingerprint(path, content)
+                fp = self.fps[key]
+                for h in fp.hashes if fp is not None else ():
+                    self.index.setdefault(h, set()).add(key)
+            fp = self.fps[key]
+            if fp is not None:
+                live[key] = fp
+        return live
+
+
+def _fingerprint(path: str, content: str) -> CodeFingerprint | None:
+    if not content.strip():
+        return None
+    try:
+        return CodeFingerprint(file=path, k=_WINNOW_K, win_size=_WINNOW_WIN, fp=StringIO(content))
+    except Exception:
+        logger.debug("Could not fingerprint %s, skipping", path)
+        return None
+
+
+#: One per repo root: a shared one would be flushed by the size check every
+#: time a small project's PR followed a Spark one.
+_REPO_FINGERPRINTS: dict[str, _RepoFingerprints] = {}
+
 # Scaffolding that is duplicated on purpose in every file that needs it.
 # Matched against whitespace-collapsed lines, so indentation doesn't matter.
 # Deliberately conservative: only lines that carry no logic of their own.
@@ -168,7 +215,8 @@ def check_copypasta(
     # Tier 1b: copydetect winnowing (fingerprint-based)
     unmatched_chunks = [c for c in chunks if (c.file_path, c.start_line) not in matched_chunk_keys]
     if unmatched_chunks:
-        winnow_matches = _check_winnowing(unmatched_chunks, repo_files)
+        cache = _REPO_FINGERPRINTS.setdefault(str(repo_path), _RepoFingerprints())
+        winnow_matches = _check_winnowing(unmatched_chunks, repo_files, cache)
         matches.extend(winnow_matches)
 
     # Tier 2: LLM (stub)
@@ -540,24 +588,13 @@ def _check_symilar(
 def _check_winnowing(
     chunks: list[CodeChunk],
     repo_files: dict[str, str],
+    cache: _RepoFingerprints | None = None,
 ) -> list[CopyPastaMatch]:
     """Tier 1b: Use copydetect's winnowing for fingerprint-based detection."""
     matches: list[CopyPastaMatch] = []
-
-    # Pre-compute fingerprints for repo files
-    repo_fps: dict[str, CodeFingerprint] = {}
-    for path, content in repo_files.items():
-        if not content.strip():
-            continue
-        try:
-            repo_fps[path] = CodeFingerprint(
-                file=path,
-                k=_WINNOW_K,
-                win_size=_WINNOW_WIN,
-                fp=StringIO(content),
-            )
-        except Exception:
-            logger.debug("Could not fingerprint %s, skipping", path)
+    cache = cache or _RepoFingerprints()
+    live = cache.current(repo_files)
+    order = {key: i for i, key in enumerate(live)}
 
     for chunk in chunks:
         chunk_text = "\n".join(chunk.lines) + "\n"
@@ -575,7 +612,10 @@ def _check_winnowing(
             logger.debug("Could not fingerprint chunk %s:%d", chunk.file_path, chunk.start_line)
             continue
 
-        for path, repo_fp in repo_fps.items():
+        # A file sharing no hash with the chunk overlaps by 0, so it can't match.
+        candidates = set().union(*(cache.index.get(h, ()) for h in chunk_fp.hashes))
+        for key in sorted(candidates & order.keys(), key=order.__getitem__):
+            path, repo_fp = key[0], live[key]
             try:
                 overlap_tokens, (ratio1, _ratio2), (_chunk_slices, repo_slices) = compare_files(
                     chunk_fp, repo_fp

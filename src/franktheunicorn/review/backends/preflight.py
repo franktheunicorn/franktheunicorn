@@ -198,3 +198,18 @@ def _probe_ollama(cfg: LLMBackendConfig) -> ProbeResult:
     except Exception as exc:
         return ProbeResult(ok=False, reason=f"{type(exc).__name__}: {exc}")
     return ProbeResult(ok=True)
+
+
+#: The worker's boot verdict: indices into operator_config.llm_backends that
+#: failed. Kept here, not on the runner, because the worker runs that module as
+#: __main__ and an importer would get a second copy with the global still empty.
+_disabled_at_boot: frozenset[int] = frozenset()
+
+
+def record_disabled_at_boot(disabled: frozenset[int]) -> None:
+    global _disabled_at_boot
+    _disabled_at_boot = disabled
+
+
+def disabled_at_boot() -> frozenset[int]:
+    return _disabled_at_boot

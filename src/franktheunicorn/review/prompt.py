@@ -6,6 +6,13 @@ import json
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
+from franktheunicorn.core.untrusted import (
+    UNTRUSTED_CONTENT_RULE,
+    fence,
+    fence_note,
+    fresh_nonce,
+)
+
 if TYPE_CHECKING:
     from franktheunicorn.review.backends.base import PRContext
 
@@ -187,6 +194,8 @@ def build_system_prompt(ctx: PRContext) -> str:
 
     parts.append("")
     parts.append(REVIEWING_GUIDANCE)
+    parts.append("")
+    parts.append(UNTRUSTED_CONTENT_RULE)
     if ctx.review_guidance and ctx.review_guidance.strip():
         parts.append("")
         parts.append("Project-specific review guidance (treat as authoritative):")
@@ -203,12 +212,21 @@ def build_system_prompt(ctx: PRContext) -> str:
     return "\n".join(parts)
 
 
-def build_user_message(diff: str, ctx: PRContext) -> str:
-    """Build the user message containing PR metadata and the diff."""
+def build_user_message(diff: str, ctx: PRContext, nonce: str = "") -> str:
+    """Build the user message containing PR metadata and the diff.
+
+    The parts a contributor wrote (description, prior comments, the diff) go
+    inside nonce-marked fences (``core.untrusted``); the parts frank derived
+    from the checkout or its own state do not. ``nonce`` is for tests; every
+    real call gets a fresh one.
+    """
+    nonce = nonce or fresh_nonce()
     header_parts = [
         f"PR #{ctx.pr_number}: {ctx.pr_title}",
         f"Author: {ctx.pr_author}",
         f"Project: {ctx.project_name}",
+        "",
+        fence_note(nonce),
     ]
 
     if ctx.pr_body:
@@ -216,7 +234,7 @@ def build_user_message(diff: str, ctx: PRContext) -> str:
         body_preview = ctx.pr_body[:2000]
         if len(ctx.pr_body) > 2000:
             body_preview += "\n... (truncated)"
-        header_parts.append(f"\nPR description:\n{body_preview}")
+        header_parts.append("\nPR description:\n" + fence("PR description", body_preview, nonce))
 
     # Local-source context (read from the checkout, before the diff so the
     # reviewer can ground hunks in surrounding code).
@@ -226,9 +244,9 @@ def build_user_message(diff: str, ctx: PRContext) -> str:
         header_parts.append(f"\n{ctx.imported_modules_context}")
 
     if ctx.prior_comments:
-        header_parts.append(f"\n{ctx.prior_comments}")
+        header_parts.append("\n" + fence("prior comments", ctx.prior_comments, nonce))
 
-    header_parts.append(f"\nDiff:\n```diff\n{diff}\n```")
+    header_parts.append("\nDiff:\n" + fence("diff", f"```diff\n{diff}\n```", nonce))
 
     # Repo health context (from git history analysis — trusted, locally generated).
     if ctx.repo_health_context:

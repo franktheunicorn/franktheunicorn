@@ -720,3 +720,40 @@ def test_remote_diff_is_against_the_fork_point_not_base_sha(
     cwd, base_ref, _ = resolved
     changed = _git(Path(cwd), "diff", "--name-only", base_ref, "HEAD")
     assert changed.splitlines() == ["pr_file.txt"]
+
+
+def test_shared_client_sends_the_github_token_to_api_github_com_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The client also reaches JIRA and the mailing lists; the token must not."""
+    import httpx
+
+    # Hermetic: with a proxy in the environment, httpx mounts a proxy transport
+    # per scheme at construction and the mock transport below never sees a
+    # request.
+    for name in (
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "ALL_PROXY",
+        "https_proxy",
+        "http_proxy",
+        "all_proxy",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    from franktheunicorn.config.models import ForgeRegistryEntry, OperatorConfig
+    from franktheunicorn.worker.runner import _shared_http_client
+
+    seen: dict[str, str | None] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen[request.url.host] = request.headers.get("authorization")
+        return httpx.Response(200)
+
+    op = OperatorConfig(forges=[ForgeRegistryEntry(name="github", token="tok")])
+    client = _shared_http_client(op)
+    client._transport = httpx.MockTransport(handler)
+    client.get("https://api.github.com/repos/apache/spark/pulls/1")
+    client.get("https://issues.apache.org/jira/rest/api/2/issue/SPARK-1")
+
+    assert seen == {"api.github.com": "Bearer tok", "issues.apache.org": None}

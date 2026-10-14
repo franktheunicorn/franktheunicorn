@@ -21,6 +21,18 @@
     </div>
     {% endif %}
 
+    {% if report.fix_language_hits %}
+    {# The fork's branch list is public before the advisory is. Never a block: #}
+    {# frank does not open the PR. A red badge next to the branch the operator #}
+    {# is about to use, in every state. #}
+    <div class="verify-result error-note">
+        <span class="badge badge-warning">disclosure risk</span>
+        The fix branch name says what it fixes
+        ({{ report.fix_language_hits|join:"; " }}). Rename it before opening a PR:
+        the branch list on a public fork is readable by anyone.
+    </div>
+    {% endif %}
+
     {% if report.fix_agent_id %}
     <p>
         Fix agent

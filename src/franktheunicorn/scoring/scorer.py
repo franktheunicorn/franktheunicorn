@@ -12,10 +12,14 @@ from franktheunicorn.scoring.signals import (
     MAX_SCORE,
     WEIGHTS,
     score_ai_generated,
+    score_author_awaiting_maintainer,
     score_committer_is_on_it,
     score_cve_file_history,
     score_draft_findings,
     score_has_review_request,
+    score_jira_linked,
+    score_jira_priority_author_commented,
+    score_jira_priority_author_created,
     score_keyword_match,
     score_llm_interest,
     score_mentioned_or_assigned,
@@ -62,6 +66,7 @@ def score_pull_request(
     cve_affected_files: list[str] | None = None,
     draft_findings_count: int | None = None,
     comment_bodies: list[str] | None = None,
+    comment_events: list[dict[str, str]] | None = None,
 ) -> tuple[float, dict[str, float]]:
     """Score a PR for operator interest. Pure function — no Django imports.
 
@@ -79,6 +84,12 @@ def score_pull_request(
     watched = _get_list(project_config_dict, "watched_paths")
     contributors = _get_list(project_config_dict, "frequent_contributors")
     keywords = _get_list(project_config_dict, "watch_keywords")
+    jira_enabled = bool(project_config_dict.get("jira_enabled", False))
+    jira_priority_authors = _get_list(project_config_dict, "jira_priority_authors")
+    if not jira_priority_authors and operator_username:
+        jira_priority_authors = [operator_username]
+    jira_cache_raw = pr_dict.get("jira_cache")
+    jira_cache = jira_cache_raw if isinstance(jira_cache_raw, dict) else None
 
     # Per-project weight overrides
     weights = dict(WEIGHTS)
@@ -111,6 +122,7 @@ def score_pull_request(
             operator_username,
             known_authors or [],
             ai_agents or None,
+            str(pr_dict.get("author_association", "") or ""),
         ),
     )
     _add("keyword_match", score_keyword_match(title, body, keywords))
@@ -184,6 +196,18 @@ def score_pull_request(
             "pending_response",
             score_pending_response(operator_review_posted_at, author_replies_after_review),
         )
+    # Ball in the maintainers' court: the author's last comment asks one of us.
+    if comment_events is not None:
+        _add(
+            "author_awaiting_maintainer",
+            score_author_awaiting_maintainer(
+                comment_events,
+                author,
+                operator_username,
+                _get_list(project_config_dict, "committers"),
+                org=str(project_config_dict.get("owner", "") or ""),
+            ),
+        )
 
     # Cross-project downstream impact (v1.5 §2.5)
     if downstream_apis:
@@ -201,6 +225,16 @@ def score_pull_request(
         _add("sentry_errors", WEIGHTS.get("sentry_errors", 15))
 
     _add("draft_findings", score_draft_findings(draft_findings_count))
+    if jira_enabled:
+        _add("jira_linked", score_jira_linked(jira_cache))
+        _add(
+            "jira_priority_author_created",
+            score_jira_priority_author_created(jira_cache, jira_priority_authors),
+        )
+        _add(
+            "jira_priority_author_commented",
+            score_jira_priority_author_commented(jira_cache, jira_priority_authors),
+        )
 
     if custom_expressions:
         for i, expr in enumerate(custom_expressions):
@@ -233,6 +267,7 @@ def score_pull_request_from_model(
     cve_affected_files: list[str] | None = None,
     draft_findings_count: int | None = None,
     comment_bodies: list[str] | None = None,
+    comment_events: list[dict[str, str]] | None = None,
 ) -> tuple[float, dict[str, float]]:
     """Django-aware wrapper: converts models to dicts, resolves known_authors."""
     pr_dict: dict[str, object] = {
@@ -246,6 +281,8 @@ def score_pull_request_from_model(
         "title": pr.title,
         "body": pr.body,
         "assignees": pr.assignees,
+        "jira_cache": pr.jira_cache,
+        "author_association": pr.author_association,
     }
     if pr.github_created_at:
         age = (datetime.now(tz=UTC) - pr.github_created_at).days
@@ -264,6 +301,8 @@ def score_pull_request_from_model(
         committers = project_config.committers
 
     config_dict: dict[str, object] = {
+        # Scopes the awaiting-maintainer signal's team mentions to this org.
+        "owner": project_config.owner,
         "watched_paths": project_config.watched_paths,
         "frequent_contributors": project_config.frequent_contributors,
         "watch_keywords": project_config.watch_keywords,
@@ -271,6 +310,8 @@ def score_pull_request_from_model(
         "scoring_weights": project_config.scoring_weights,
         "custom_scoring_max_boost": project_config.custom_scoring_max_boost,
         "committers": committers,
+        "jira_enabled": project_config.jira.enabled,
+        "jira_priority_authors": project_config.jira.priority_authors,
     }
 
     if known_authors is None:
@@ -340,4 +381,5 @@ def score_pull_request_from_model(
         cve_affected_files=cve_affected_files,
         draft_findings_count=draft_findings_count,
         comment_bodies=comment_bodies,
+        comment_events=comment_events,
     )

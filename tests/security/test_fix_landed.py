@@ -22,6 +22,7 @@ from franktheunicorn.security.fix_landed import (
     check_fix_landed,
     check_project_fixes,
 )
+from franktheunicorn.security.release_tags import ReleaseTagRule
 from tests.factories import ProjectFactory, SecurityReportFactory
 
 _LISTING = ExecResult(
@@ -466,3 +467,113 @@ class TestAgentScope:
         assert run.reports_considered == 1
         assert agents.fix_landed_status == "merged"
         assert persons.fix_landed_status == ""
+
+
+@pytest.mark.django_db
+class TestOnlyFinalReleasesAreReleased:
+    """A release candidate is a tag too. ``released`` is terminal, so counting
+    one stamped the report released for good on the strength of a vote that
+    might still fail."""
+
+    def test_a_release_candidate_alone_is_merged_and_stays_open(self) -> None:
+        project = ProjectFactory()
+        report = SecurityReportFactory(project=project, fix_branch_sha="abc123")
+        executor = _Executor(shas=("abc123",), tags={"abc123": ["v3.5.0-rc1", "v4.0.0-preview1"]})
+
+        run = _run_with(executor, check_project_fixes, project)
+
+        report.refresh_from_db()
+        assert run.released == 0
+        assert report.fix_landed_status == "merged"
+        assert report.fix_landed_detail["prerelease_tags"] == ["v3.5.0-rc1", "v4.0.0-preview1"]
+        assert "no final release yet" in report.fix_landed_detail["note"]
+
+        executor.tags["abc123"].append("v3.5.0")
+        run = _run_with(executor, check_project_fixes, project)
+
+        report.refresh_from_db()
+        assert run.reports_considered == 1  # merged is not terminal
+        assert report.fix_landed_status == "released"
+        assert report.fix_landed_detail["tags"] == ["v3.5.0"]
+
+    def test_only_the_final_tags_are_recorded_as_releases(self) -> None:
+        project = ProjectFactory()
+        report = SecurityReportFactory(project=project, fix_branch_sha="abc123")
+        executor = _Executor(
+            shas=("abc123",), tags={"abc123": ["v3.5.0", "v3.5.0-rc1", "v3.5.1.post1"]}
+        )
+
+        _run_with(executor, check_project_fixes, project)
+
+        report.refresh_from_db()
+        assert report.fix_landed_status == "released"
+        assert report.fix_landed_detail["tags"] == ["v3.5.0", "v3.5.1.post1"]
+        assert report.fix_landed_detail["tag_count"] == 2
+
+    def test_a_prefixed_tag_counts_only_under_its_configured_prefix(self) -> None:
+        project = ProjectFactory()
+        report = SecurityReportFactory(project=project, fix_branch_sha="abc123")
+        executor = _Executor(shas=("abc123",), tags={"abc123": ["release-1.18.0"]})
+
+        _run_with(executor, check_project_fixes, project)
+        report.refresh_from_db()
+        # Any tag on origin proves the commit is published: merged, never
+        # not-merged, whatever the rule thinks of the tag's name.
+        assert report.fix_landed_status == "merged"
+        assert "release_tag_prefix" in report.fix_landed_detail["note"]
+
+        with patch(
+            "franktheunicorn.security.fix_landed.release_tag_rule_for",
+            return_value=ReleaseTagRule(prefix="release-"),
+        ):
+            _run_with(executor, check_project_fixes, project)
+        report.refresh_from_db()
+        assert report.fix_landed_status == "released"
+
+    @pytest.mark.parametrize(
+        ("tag", "rule"),
+        [
+            ("STRUTS_7_4_0", ReleaseTagRule(pattern=r"STRUTS_\d+(_\d+)+")),
+            ("v0.9.0-incubating", ReleaseTagRule()),
+        ],
+    )
+    def test_schemes_no_prefix_expresses_can_still_be_released(
+        self, tag: str, rule: ReleaseTagRule
+    ) -> None:
+        project = ProjectFactory()
+        report = SecurityReportFactory(project=project, fix_branch_sha="abc123")
+        executor = _Executor(shas=("abc123",), tags={"abc123": [tag]})
+
+        with patch("franktheunicorn.security.fix_landed.release_tag_rule_for", return_value=rule):
+            _run_with(executor, check_project_fixes, project)
+
+        report.refresh_from_db()
+        assert report.fix_landed_status == "released"
+
+    def test_the_note_names_candidates_and_unrecognised_tags_together(self) -> None:
+        project = ProjectFactory()
+        report = SecurityReportFactory(project=project, fix_branch_sha="abc123")
+        executor = _Executor(shas=("abc123",), tags={"abc123": ["rel/2.0.0", "v2.0.0-rc1"]})
+
+        _run_with(executor, check_project_fixes, project)
+
+        report.refresh_from_db()
+        note = report.fix_landed_detail["note"]
+        assert "pre-release tag(s) v2.0.0-rc1" in note
+        assert "rel/2.0.0" in note
+        assert "no final release yet" not in note
+
+    def test_the_per_report_check_reads_the_prefix_too(self) -> None:
+        project = ProjectFactory()
+        report = SecurityReportFactory(project=project, fix_branch_sha="abc123")
+        executor = _Executor(shas=("abc123",), tags={"abc123": ["rel/2.0.0"]})
+
+        with patch(
+            "franktheunicorn.security.fix_landed.release_tag_rule_for",
+            return_value=ReleaseTagRule(prefix="rel/"),
+        ):
+            answer = _run_with(executor, check_fix_landed, report)
+
+        report.refresh_from_db()
+        assert answer.startswith("released")
+        assert report.fix_landed_status == "released"

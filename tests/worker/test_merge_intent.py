@@ -12,6 +12,7 @@ from franktheunicorn.worker.merge_intent import (
     INTENT_APPROVED,
     INTENT_CONDITIONAL,
     INTENT_NONE,
+    INTENT_WITHDRAWN,
     MergeIntent,
     apply_merge_intent,
     classify_body,
@@ -113,7 +114,61 @@ class TestClassifyBody:
     )
     def test_negated_or_asked_gates_are_not_approvals(self, body: str) -> None:
         kind, _ = classify_body(body)
-        assert kind == INTENT_NONE
+        # "Do not merge once CI passes" is a hold, which withdraws; the rest
+        # say nothing. Neither approves.
+        assert kind not in (INTENT_APPROVED, INTENT_CONDITIONAL)
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "-1, this breaks the shuffle path",
+            "-1",
+            "Retracting my LGTM, I found a race in the retry.",
+            "I take back my +1 until the benchmark is in.",
+            "I am withdrawing my earlier approval.",
+            "Please hold off merging, I found an issue.",
+            "Do not merge yet.",
+            "Thanks, don't merge yet",
+            "Let's hold off on merging until 4.0 is cut.",
+            "This is not ready to merge.",
+            "It's not ready to be merged yet",
+            "-1.",
+            "Please don't merge this until the release is cut.",
+            "I take back my LGTM if the tests don't pass.",
+        ],
+    )
+    def test_withdrawal_phrases(self, body: str) -> None:
+        kind, match = classify_body(body)
+        assert kind == INTENT_WITHDRAWN
+        assert match is not None
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "x = -1 is the sentinel here",
+            "-1.5 is an odd default",
+            "Should I retract my +1?",
+            "The revoke approval path needs a test.",
+            "If we don't merge this before the freeze we lose a release.",
+            "The other PR is not ready to merge, so this one goes first.",
+            "I won't hold off merging for the docs.",
+            "> -1\n\nThe quoted vote is someone else's.",
+            "-1.5 is the default",
+            "-1 on the naming, +1 overall",
+            "Don't merge these two maps, keep them separate.",
+            "Let's hold off merging the follow-up until this lands.",
+            "Please hold off merging #123 until this lands.",
+            "It's not ready to merge SPARK-12345 yet, so this goes first.",
+        ],
+    )
+    def test_not_withdrawals(self, body: str) -> None:
+        kind, _ = classify_body(body)
+        assert kind != INTENT_WITHDRAWN
+
+    def test_an_approval_with_a_hold_stays_an_approval(self) -> None:
+        """Checked last, so the comment keeps the reading it had before."""
+        kind, _ = classify_body("LGTM, but don't merge until the branch is cut")
+        assert kind == INTENT_APPROVED
 
     def test_negation_in_an_earlier_sentence_does_not_count(self) -> None:
         kind, _ = classify_body("I did not get to the tests yesterday. LGTM pending CI.")
@@ -195,6 +250,89 @@ class TestDetectMergeIntent:
             ["holdenk"],
         )
         assert not intent.is_set
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "-1, this regresses the planner",
+            "Retracting my LGTM, found a race.",
+            "Please hold off merging.",
+        ],
+    )
+    def test_a_withdrawing_comment_after_approval_clears(self, body: str) -> None:
+        intent = detect_merge_intent(
+            [_review("holdenk", "APPROVED", at="2026-10-01T10:00:00Z")],
+            [_comment("holdenk", body, "2026-10-02T10:00:00Z")],
+            ["holdenk"],
+        )
+        assert not intent.is_set
+
+    def test_a_dismissed_review_sets_nothing(self) -> None:
+        """GitHub keeps a dismissed review with state DISMISSED and its body; an
+        "LGTM" there is an approval the forge no longer counts."""
+        intent = detect_merge_intent(
+            [_review("holdenk", "DISMISSED", "LGTM", at="2026-10-01T10:00:00Z")],
+            [],
+            ["holdenk"],
+        )
+        assert not intent.is_set
+
+    def test_a_dismissed_changes_request_does_not_clear_an_approval(self) -> None:
+        """Found in review: DISMISSED does not say what was dismissed, and
+        dismissing a changes request is how a maintainer unblocks a PR."""
+        intent = detect_merge_intent(
+            [
+                _review("holdenk", "APPROVED", at="2026-10-01T10:00:00Z"),
+                _review("cloud-fan", "DISMISSED", "Needs a test", at="2026-10-02T10:00:00Z"),
+            ],
+            [],
+            ["holdenk", "cloud-fan"],
+        )
+        assert intent.kind == INTENT_APPROVED
+
+    def test_a_gated_retraction_is_not_a_fresh_approval(self) -> None:
+        intent = detect_merge_intent(
+            [_review("holdenk", "APPROVED", at="2026-10-01T10:00:00Z")],
+            [
+                _comment(
+                    "holdenk",
+                    "I take back my LGTM if the tests don't pass on 3.5.",
+                    "2026-10-02T10:00:00Z",
+                )
+            ],
+            ["holdenk"],
+        )
+        assert not intent.is_set
+
+    def test_approval_after_a_withdrawal_sets(self) -> None:
+        intent = detect_merge_intent(
+            [_review("holdenk", "APPROVED", at="2026-10-03T10:00:00Z")],
+            [_comment("holdenk", "-1 until the docs land", "2026-10-02T10:00:00Z")],
+            ["holdenk"],
+        )
+        assert intent.kind == INTENT_APPROVED
+
+    def test_a_co_approvers_withdrawal_clears(self) -> None:
+        """Any configured approver's latest word decides, as with
+        CHANGES_REQUESTED."""
+        intent = detect_merge_intent(
+            [_review("holdenk", "APPROVED", at="2026-10-01T10:00:00Z")],
+            [_comment("cloud-fan", "Please hold off merging.", "2026-10-02T10:00:00Z")],
+            ["holdenk", "cloud-fan"],
+        )
+        assert not intent.is_set
+
+    def test_the_approve_button_wins_over_a_withdrawing_body(self) -> None:
+        intent = detect_merge_intent(
+            [
+                _review(
+                    "holdenk", "APPROVED", "-1 on the naming but fine", at="2026-10-01T10:00:00Z"
+                )
+            ],
+            [],
+            ["holdenk"],
+        )
+        assert intent.kind == INTENT_APPROVED
 
     def test_approval_after_changes_requested_sets(self) -> None:
         intent = detect_merge_intent(

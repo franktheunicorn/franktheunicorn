@@ -20,7 +20,7 @@ from franktheunicorn.config.models import (
     SecurityVerifierConfig,
 )
 from franktheunicorn.core.models import SecurityVerification
-from franktheunicorn.review.tool_executor import ExecResult
+from franktheunicorn.review.tool_executor import ExecResult, unwrap_guarded
 from franktheunicorn.security.verifier import (
     parse_verdict,
     resolve_verifier_reviewer,
@@ -49,12 +49,18 @@ class _FakeExecutor:
         self.responses = responses
         self.cwd = cwd
         self.calls: list[list[str]] = []
+        self.guarded: list[bool] = []
 
     def prepare_repo(self, owner: str, repo: str, **kwargs: Any) -> str | None:
         self.subdir = kwargs.get("workspace_subdir", "")
         return self.cwd
 
     def run(self, cmd: list[str], cwd: str, timeout: int = 0, stdin: Any = None) -> Any:
+        # The agent runs inside the checkout-config guard; record and match the
+        # agent's own argv, and remember whether it was guarded.
+        unwrapped = unwrap_guarded(cmd)
+        self.guarded.append(unwrapped is not cmd)
+        cmd = unwrapped
         self.calls.append(cmd)
         # git calls match on their subcommand; anything else is the agent and
         # matches on argv[0] alone. Never on the whole argv: the prompt is a
@@ -259,6 +265,16 @@ class TestVerifyReport:
         assert {row.branch for row in rows} >= {"master", "branch-4.0"}
         assert all(row.verdict == "affected" for row in rows)
         assert all(row.commit == "deadbeefcafe" for row in rows)
+
+    def test_every_agent_run_is_guarded_and_no_git_call_is(self) -> None:
+        """Whatever has been merged to a release branch, including an agent hooks
+        file, is someone's; git itself needs no guard."""
+        _, _, executor = self._run(json.dumps({"verdict": "unclear"}))
+        runs = list(zip(executor.calls, executor.guarded, strict=True))
+        agent_runs = [guarded for cmd, guarded in runs if cmd[0] != "git"]
+        git_runs = [guarded for cmd, guarded in runs if cmd[0] == "git"]
+        assert agent_runs and all(agent_runs)
+        assert git_runs and not any(git_runs)
 
     def test_uses_a_distinct_checkout_from_the_review_pipeline(self) -> None:
         """This one gets checked out onto release branches and left there; doing
@@ -1212,6 +1228,68 @@ class TestWorkspaceTrust:
         assert row.verdict == "error"
         assert "trust_args" in row.summary
         assert "--trust" in row.summary
+
+
+@pytest.mark.django_db
+class TestLoggedOutCLI:
+    def test_the_verdict_says_to_log_the_cli_in(self) -> None:
+        report = SecurityReportFactory(
+            project=ProjectFactory(owner="apache", repo="spark"), title="t", raw_text="b"
+        )
+        config = _operator(_verifier(reviewer="cursor-agent"))
+        config.agent_cli_reviewers = [
+            AgentCLIReviewerConfig(name="cursor-agent", cli_path="cursor-agent")
+        ]
+        executor = _FakeExecutor(
+            {
+                "symbolic-ref": ExecResult(returncode=0, stdout="origin/master\n", stderr=""),
+                "for-each-ref": _BRANCH_LISTING,
+                "checkout": ExecResult(returncode=0, stdout="", stderr=""),
+                "rev-parse HEAD": ExecResult(returncode=0, stdout="abc123\n", stderr=""),
+                "cursor-agent": ExecResult(
+                    returncode=1, stdout="", stderr="Authentication required"
+                ),
+            }
+        )
+        with patch("franktheunicorn.review.tool_executor.make_executor", return_value=executor):
+            verify_report(report, config)
+
+        row = report.verifications.first()
+        assert row is not None
+        assert row.verdict == "error"
+        assert "not logged in on this machine" in row.summary
+
+
+@pytest.mark.django_db
+class TestGuardRefusalInVerdict:
+    def test_the_summary_says_the_agent_did_not_run(self) -> None:
+        report = SecurityReportFactory(
+            project=ProjectFactory(owner="apache", repo="spark"), title="t", raw_text="b"
+        )
+        config = _operator(_verifier(reviewer="cursor-agent"))
+        config.agent_cli_reviewers = [
+            AgentCLIReviewerConfig(name="cursor-agent", cli_path="cursor-agent")
+        ]
+        note = "frank: cursor-agent: command not found; not running the agent\n"
+        executor = _FakeExecutor(
+            {
+                "symbolic-ref": ExecResult(returncode=0, stdout="origin/master\n", stderr=""),
+                "for-each-ref": _BRANCH_LISTING,
+                "checkout": ExecResult(returncode=0, stdout="", stderr=""),
+                "rev-parse HEAD": ExecResult(returncode=0, stdout="abc123\n", stderr=""),
+                "cursor-agent": ExecResult(returncode=127, stdout="", stderr=note),
+            }
+        )
+        with patch("franktheunicorn.review.tool_executor.make_executor", return_value=executor):
+            verify_report(report, config)
+
+        row = report.verifications.first()
+        assert row is not None
+        assert row.verdict == "error"
+        assert row.summary == (
+            "The cursor-agent CLI did not run: cursor-agent: command not found; "
+            "not running the agent."
+        )
 
 
 @pytest.mark.django_db

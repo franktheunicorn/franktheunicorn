@@ -91,7 +91,7 @@ class TestClaudeCodeBackendComplete:
         assert backend._last_tokens_out == 34
 
     @patch("shutil.which", return_value="/usr/local/bin/claude")
-    def test_argv_includes_prompt_model_and_disallowed_tools(self, _mock_which: MagicMock) -> None:
+    def test_argv_includes_prompt_model_and_no_tools(self, _mock_which: MagicMock) -> None:
         backend = ClaudeCodeBackend(LLMBackendConfig(provider="claude-code", model="opus"))
         executor = _fake_executor(ExecResult(returncode=0, stdout=_cli_json("ok"), stderr=""))
 
@@ -107,7 +107,27 @@ class TestClaudeCodeBackendComplete:
         assert argv[argv.index("--system-prompt") + 1] == "sys prompt"
         assert "--model" in argv
         assert argv[argv.index("--model") + 1] == "opus"
-        assert "--disallowedTools" in argv
+        # No tools at all (an allowlist of nothing, ended by -p), no project
+        # settings or hooks, no MCP servers.
+        assert argv[argv.index("--tools") + 1] == ""
+        assert argv.index("--tools") + 2 == argv.index("-p")
+        assert argv[argv.index("--setting-sources") + 1] == "user"
+        assert "--strict-mcp-config" in argv
+        assert "--disallowedTools" not in argv
+
+    @patch("shutil.which", return_value="/usr/local/bin/claude")
+    def test_runs_in_a_private_directory_not_the_temp_root(self, _mock_which: MagicMock) -> None:
+        import tempfile
+
+        backend = ClaudeCodeBackend(LLMBackendConfig(provider="claude-code"))
+        executor = _fake_executor(ExecResult(returncode=0, stdout=_cli_json("ok"), stderr=""))
+
+        with patch(_MAKE_EXECUTOR, return_value=executor):
+            backend.complete("hi")
+
+        cwd = executor.run.call_args.kwargs["cwd"]
+        assert cwd != tempfile.gettempdir()
+        assert "frank-claude-code-" in cwd
 
     @patch("shutil.which", return_value="/usr/local/bin/claude")
     def test_non_json_stdout_falls_back_to_plain_text(self, _mock_which: MagicMock) -> None:

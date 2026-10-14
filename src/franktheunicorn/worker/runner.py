@@ -23,17 +23,16 @@ import sys
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import FrameType
 from typing import TYPE_CHECKING, Any
 
 import django
+import httpx
 
 if TYPE_CHECKING:
-    import httpx
-
     from franktheunicorn.backends.base import ForgeClient
     from franktheunicorn.config.models import (
         AgentCLIReviewerConfig,
@@ -234,6 +233,9 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
     )
 
     disabled_backends = _check_backends(operator_config)
+    from franktheunicorn.review.backends.preflight import record_disabled_at_boot
+
+    record_disabled_at_boot(disabled_backends)
     # Seed triage's own backend health so a backend the boot preflight 86'd
     # is skipped by triage too — without this, triage read llm_backends directly
     # and tried a backend _check_backends had already disabled. Probes the
@@ -246,6 +248,11 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
     _check_ssh_configs(operator_config)
 
     signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
+    # Hangup too, so closing the terminal runs the same shutdown, including
+    # stopping local agents, which run in their own sessions and so no longer
+    # get the hangup themselves. Not under nohup, which ignores it on purpose.
+    if signal.getsignal(signal.SIGHUP) is not signal.SIG_IGN:
+        signal.signal(signal.SIGHUP, _raise_keyboard_interrupt)
 
     stop_interactive = threading.Event()
     interactive = threading.Thread(
@@ -301,18 +308,38 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
     except KeyboardInterrupt:
         logger.info("Worker shutting down.")
     finally:
-        # Asked to stop, then given a moment. A *short* command finishes; a long
-        # one does not, and cannot — an agent CLI has a 1500s budget and nobody
-        # wants Ctrl-C to take 25 minutes. Anything still running is abandoned in
-        # `running` and recovered by requeue_interrupted_commands at next startup,
-        # which is why that sweep exists.
-        stop_interactive.set()
-        interactive.join(timeout=INTERACTIVE_SHUTDOWN_SECONDS)
-        if interactive.is_alive():
-            logger.info(
-                "Interactive command still running at shutdown; leaving it to the "
-                "next worker's stuck-command sweep."
-            )
+        # A second signal (Ctrl-C again, or `make down`'s follow-up) would raise
+        # in the middle of this cleanup and skip the rest of it, leaving agents
+        # running after the worker. The shutdown is already under way.
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            signal.signal(sig, signal.SIG_IGN)
+        from franktheunicorn.review.tool_executor import stop_local_children
+
+        # Local agents first, not after the join: they run in their own
+        # sessions, so nothing else stops them, and a launcher's SIGKILL can
+        # come seconds after its TERM. Stopped, the interactive thread's run
+        # ends as "interrupted by worker shutdown" and the join is short.
+        try:
+            stopped = stop_local_children()
+            if stopped:
+                logger.info(
+                    "Stopped %d local agent run(s) still going at shutdown, so none keeps "
+                    "running (and billing) after the worker.",
+                    stopped,
+                )
+        finally:
+            # Asked to stop, then given a moment. A *short* command finishes; a
+            # long one does not, and cannot — an agent CLI has a 1500s budget and
+            # nobody wants Ctrl-C to take 25 minutes. Anything still running is
+            # abandoned in `running` and recovered by requeue_interrupted_commands
+            # at next startup, which is why that sweep exists.
+            stop_interactive.set()
+            interactive.join(timeout=INTERACTIVE_SHUTDOWN_SECONDS)
+            if interactive.is_alive():
+                logger.info(
+                    "Interactive command still running at shutdown; leaving it to the "
+                    "next worker's stuck-command sweep."
+                )
         # Close each unique client exactly once (mock mode reuses one instance).
         for c in {id(v): v for v in clients.values()}.values():
             try:
@@ -579,6 +606,8 @@ def _check_agent_cli_reviewers(operator_config: OperatorConfig) -> None:
     Also primes the memoized cache on ``operator_config`` so per-PR processing
     reuses the PATH probe rather than re-running it.
     """
+    from franktheunicorn.config.models import agent_binary_in
+
     resolved = resolve_agent_cli_reviewers(operator_config)
     resolved_names = {rc.name for rc in resolved}
 
@@ -597,15 +626,45 @@ def _check_agent_cli_reviewers(operator_config: OperatorConfig) -> None:
             logger.info("Agent CLI %r: SKIPPED (%s) — %s", rc.name, where, reason)
             continue
         logger.info(
-            "Agent CLI %r: ENABLED (%s) — %s%s",
+            "Agent CLI %r: ENABLED (%s) — %s%s%s",
             rc.name,
             where,
             " ".join(rc.cli_argv),
             f", model {rc.model!r} via {rc.model_flag}" if rc.model else "",
+            f", read-only via {' '.join(rc.readonly_args)}" if rc.readonly_args else "",
         )
+        binary = agent_binary_in(rc.cli_argv, _READONLY_SEEDED_BINARIES)
+        if not binary and not rc.readonly_args:
+            # An agent frank ships no flags for, or one behind a launcher it does
+            # not recognise. Not an error, and the checkout guard still keeps the
+            # PR's own agent config away from it, but what the agent itself may
+            # do in that checkout is now the operator's call to make visibly.
+            logger.warning(
+                "Agent CLI %r: frank has no read-only flags for %s, so it runs with "
+                "that CLI's default tools in the checkout of the PR it reviews. Set "
+                "readonly_args to its own read-only options to contain it.",
+                rc.name,
+                " ".join(rc.cli_argv),
+            )
+        if binary and not rc.readonly_args:
+            # The seed's read-only flags were overridden away. Not an error (an
+            # operator may want an agent that edits), but a reviewer that can run
+            # shell commands in a checkout of a stranger's PR should be a choice
+            # someone can see, not an accident of an override.
+            logger.warning(
+                "Agent CLI %r: %s runs without read-only flags (readonly_args is empty), "
+                "so it can edit files and run commands in the checkout of the PR it "
+                "reviews. Remove the readonly_args override to restore the defaults.",
+                rc.name,
+                binary,
+            )
         if rc.remote.mode == "ssh":
             _probe_remote_agent_cli(rc)
 
+
+#: Binaries frank ships read-only flags for; an entry for one of them with empty
+#: ``readonly_args`` has had them overridden away, which the startup check names.
+_READONLY_SEEDED_BINARIES = frozenset({"claude", "codex", "cursor-agent", "pi"})
 
 #: Echoed through the remote command path to prove a command actually ran there.
 _REMOTE_PROBE_SENTINEL = "frank-remote-ok"
@@ -1059,8 +1118,6 @@ def process_pr(
     """
     import contextlib
 
-    import httpx as _httpx
-
     from franktheunicorn.config.loader import get_operator_config
     from franktheunicorn.review.drafter import draft_review
 
@@ -1070,7 +1127,7 @@ def process_pr(
 
     close_http = False
     if diff_http is None:
-        diff_http = _httpx.Client()
+        diff_http = _shared_http_client(operator_config)
         close_http = True
 
     cr_config: CodeRabbitConfig | None = None
@@ -1439,7 +1496,6 @@ def _run_cycle(
     ``disabled_backends`` is a set of indices into ``operator_config.llm_backends``
     that failed preflight and should be excluded for this run.
     """
-    import httpx
     from django.conf import settings
 
     from franktheunicorn.backends.poller import poll_project
@@ -1453,10 +1509,9 @@ def _run_cycle(
     # For non-GitHub projects, the LLM-checks/copypasta/changelog code paths
     # below will silently fall through. Tracked as a follow-up; see review
     # comment on PR #75.
-    diff_http = httpx.Client()
+    diff_http = _shared_http_client(operator_config)
     # Adaptive limiter (SQLite bucket + X-RateLimit-Remaining headers) for
-    # this client's unauthenticated GitHub calls — per the rate-limiting
-    # convention in CLAUDE.md.
+    # this client's GitHub calls — per the rate-limiting convention in CLAUDE.md.
     rate_limiter = None
     try:
         from django.conf import settings as _settings
@@ -2032,6 +2087,41 @@ def _strip_forge_api_suffix(base_url: str) -> str:
     return base
 
 
+class _GitHubAPIAuth(httpx.Auth):
+    """Bearer token for api.github.com only.
+
+    The shared client also talks to JIRA, the mailing lists and Sentry, so a
+    client-wide header would hand the GitHub token to every one of them.
+    Anonymous, the per-PR diff fetches get 60 calls an hour, which spread the
+    first Spark cycle (600+ PRs) over a day.
+    """
+
+    def __init__(self, token: str) -> None:
+        self._token = token
+
+    def auth_flow(self, request: httpx.Request) -> Generator[httpx.Request, httpx.Response, None]:
+        if request.url.host == "api.github.com" and "authorization" not in request.headers:
+            request.headers["Authorization"] = f"Bearer {self._token}"
+        yield request
+
+
+def _shared_http_client(operator_config: OperatorConfig | None) -> httpx.Client:
+    """The cycle's shared client, authenticated to public GitHub when a token is set."""
+    token = ""
+    if operator_config is not None:
+        token = next(
+            (
+                f.token
+                for f in operator_config.forges
+                if f.type == "github"
+                and f.token
+                and _strip_forge_api_suffix(f.base_url or "") in ("", "https://api.github.com")
+            ),
+            operator_config.github_token,
+        )
+    return httpx.Client(auth=_GitHubAPIAuth(token) if token else None)
+
+
 def _clone_url_for_project(
     pc: object,
     operator_config: OperatorConfig | None,
@@ -2483,6 +2573,7 @@ def _run_review_tool_for_pr(
     returned outcome the per-reviewer result lived only in the worker log —
     so there a skipped reviewer read exactly like a clean one.
     """
+    from franktheunicorn.review.agent_cli import AgentCLIRunError
     from franktheunicorn.review.tool_executor import make_executor
 
     mode = getattr(remote_config, "mode", "local")
@@ -2542,6 +2633,10 @@ def _run_review_tool_for_pr(
         # two states the rescan has to tell apart.
         record_agent_run(pr, source, status="ok", findings=len(findings))
         return f"{len(findings)} finding(s) → {len(drafts)} draft(s)"
+    except AgentCLIRunError as exc:
+        # Already logged with the detail where it happened; no traceback needed.
+        record_agent_run(pr, source, status="failed")
+        return f"failed — {exc}"
     except Exception:
         logger.exception("%s failed for PR #%d; continuing.", tool_name, pr.number)
         record_agent_run(pr, source, status="failed")
@@ -2880,6 +2975,8 @@ def _poll_security_emails(operator_config: OperatorConfig) -> None:
 
         fetch = fetch_security_emails(operator_config.security_triage.email, seen_ids)
 
+        from franktheunicorn.security.intake import record_injection_hits
+
         ingested = 0
         ingested_message_ids: list[str] = []
         for msg in fetch.examined:
@@ -2898,7 +2995,12 @@ def _poll_security_emails(operator_config: OperatorConfig) -> None:
                     source="email",
                     email_message_id=msg.message_id,
                     email_received_at=msg.received_at,
+                    relay_kind=msg.relay_kind,
+                    reporter_credit=msg.reporter_credit,
+                    credit_kind=msg.credit_kind,
+                    attachments=msg.attachment_rows(),
                 )
+                record_injection_hits(report)
                 ingested += 1
                 if msg.message_id:
                     ingested_message_ids.append(msg.message_id)

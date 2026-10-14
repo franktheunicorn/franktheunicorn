@@ -31,6 +31,7 @@ from django.http.response import HttpResponseBase
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
+from django.utils.html import escape
 from django.views.decorators.http import require_POST
 
 from franktheunicorn.core.models import (
@@ -705,8 +706,17 @@ def post_review(request: HttpRequest, pr_id: int) -> HttpResponse:
     if not approved:
         return HttpResponse('<div class="post-result">No approved findings to post.</div>')
 
+    # The moved-head guard's override, sent by the buttons the refusal renders.
+    on_stale_head = request.POST.get("stale_head", "refuse")
+    if on_stale_head not in ("refuse", "post", "body-only"):
+        on_stale_head = "refuse"
+
     try:
-        from franktheunicorn.backends.poster import GitHubPoster
+        from franktheunicorn.backends.poster import (
+            GitHubPoster,
+            PostUnverifiedError,
+            StaleHeadError,
+        )
 
         client = _make_posting_client(pr)
         if client is None:
@@ -716,17 +726,70 @@ def post_review(request: HttpRequest, pr_id: int) -> HttpResponse:
             )
 
         try:
-            poster = GitHubPoster(client)  # type: ignore[arg-type]
-            poster.post_review(pr, approved)
+            poster = GitHubPoster(client, mention_allowlist=_mention_allowlist())  # type: ignore[arg-type]
+            result = poster.post_review(pr, approved, on_stale_head=on_stale_head)
+        except StaleHeadError as exc:
+            url = reverse("dashboard:post_review", args=[pr.pk])
+            return HttpResponse(
+                '<div class="post-result error-note">'
+                f"Not posted: PR #{pr.number} has new commits since these drafts were made "
+                f"({exc.stored[:8]} \u2192 {exc.live[:8]}), so inline line numbers may no "
+                "longer match the diff. Re-poll the PR to redraft, or: "
+                f'<button class="action-btn" hx-post="{url}" hx-vals=\'{{"stale_head": "post"}}\' '
+                'hx-target="#post-result" hx-swap="innerHTML">Post anyway</button> '
+                f'<button class="action-btn" hx-post="{url}" hx-vals=\'{{"stale_head": "body-only"}}\' '
+                'hx-target="#post-result" hx-swap="innerHTML">Post as review body only</button>'
+                "</div>"
+            )
+        except PostUnverifiedError:
+            return HttpResponse(
+                '<div class="post-result error-note">'
+                "Posting failed, and frank could not read the PR's reviews back to tell "
+                "whether it landed anyway. Check the PR before posting again: a second "
+                "post would put a duplicate review on it, and a review cannot be deleted."
+                "</div>"
+            )
         finally:
             client.close()  # type: ignore[attr-defined]
 
-        return HttpResponse(
-            f'<div class="post-result ok-note">Posted {len(approved)} findings to GitHub.</div>'
-        )
+        if result is None:
+            return HttpResponse(
+                '<div class="post-result error-note">'
+                "Failed to post review. frank checked the PR afterwards and nothing landed, "
+                "so it is safe to try again.</div>"
+            )
+        note = f"Posted {len(approved)} findings to GitHub."
+        if isinstance(result, dict) and result.get("verified_after_error"):
+            note = (
+                f"The forge reported an error, but the review landed; recorded "
+                f"{len(approved)} findings as posted."
+            )
+        if isinstance(result, dict):
+            escaped = result.get("mentions_escaped") or []
+            if escaped:
+                note += f" {len(escaped)} @-mention(s) backtick-quoted: {', '.join(escaped)}."
+            folded = result.get("folded_into_body") or 0
+            if folded:
+                note += (
+                    f" {folded} inline comment(s) folded into the review body "
+                    "(their lines are not in the current diff)."
+                )
+        return HttpResponse(f'<div class="post-result ok-note">{escape(note)}</div>')
     except Exception:
         logger.exception("Failed to post review for PR #%d", pr.number)
         return HttpResponse('<div class="post-result error-note">Failed to post review.</div>')
+
+
+def _mention_allowlist() -> list[str]:
+    """Handles the operator lets stay live in a posted review; [] when unconfigured."""
+    try:
+        from django.conf import settings
+
+        from franktheunicorn.config.loader import load_operator_config
+
+        return list(load_operator_config(settings.FRANK_OPERATOR_CONFIG).mention_allowlist)
+    except Exception:
+        return []
 
 
 def _is_agent_feedback_enabled() -> bool:
@@ -2440,6 +2503,7 @@ def security_report_create(request: HttpRequest) -> HttpResponse:
         # metadata is filled even with no LLM backend configured. Anything the
         # operator typed in the form wins; this only fills the blanks.
         from franktheunicorn.data_access.email_inbox.parser import parse_pasted_report
+        from franktheunicorn.security.intake import record_injection_hits
 
         parsed = parse_pasted_report(raw_text)
 
@@ -2451,7 +2515,11 @@ def security_report_create(request: HttpRequest) -> HttpResponse:
             reporter_email=reporter_email or parsed.from_email,
             source="paste",
             source_agent=source_agent,
+            relay_kind=parsed.relay_kind,
+            reporter_credit=parsed.reporter_credit,
+            credit_kind=parsed.credit_kind,
         )
+        record_injection_hits(report)
 
         # Queue auto-triage if configured — runs in the worker, not inline.
         try:
@@ -2617,7 +2685,8 @@ def _has_triage_assessment(report: SecurityReport) -> bool:
 
 
 def _has_triage_severity(report: SecurityReport) -> bool:
-    """Whether the parse step rated the report, which happens two LLM calls earlier.
+    """Whether the parse step got as far as reading the reporter's severity claim,
+    which happens two LLM calls before the assessment.
 
     Kept apart from the assessment because it can be true on its own — that's the
     commonest partial failure, parse fine and the analysis model unreachable — and
@@ -2626,7 +2695,7 @@ def _has_triage_severity(report: SecurityReport) -> bool:
     Analysis" heading, with the "produced no assessment" explanation suppressed
     because something counted as a result.
     """
-    return bool(report.assessed_severity and report.assessed_severity != "unknown")
+    return bool(report.claimed_severity and report.claimed_severity != "unknown")
 
 
 @require_POST
@@ -4420,13 +4489,31 @@ def security_cve_advisory_push(request: HttpRequest, report_id: int) -> HttpResp
             else:
                 try:
                     from franktheunicorn.config.loader import get_operator_config
+                    from franktheunicorn.security.cve_merge import (
+                        CVEMergeRefusedError,
+                        apply_merge_guards,
+                    )
 
                     base_url = get_operator_config().security_triage.cve_api.base_url
+                    # The push is an upsert, so read what the service holds first
+                    # and refuse the regressions a regenerated draft makes by
+                    # accident (published state walked back, hand-added references
+                    # dropped, the product renamed). One extra GET per push.
+                    current = fetch_record(report.matched_cve_id, token=token, base_url=base_url)
+                    record = apply_merge_guards(
+                        current.raw if current.found else None,
+                        record,
+                        allow_state_downgrade=bool(request.POST.get("allow_state_downgrade")),
+                        replace_references=bool(request.POST.get("replace_references")),
+                        allow_product_change=bool(request.POST.get("allow_product_change")),
+                    )
                     update_record(report.matched_cve_id, record, token=token, base_url=base_url)
                     refreshed = fetch_record(report.matched_cve_id, token=token, base_url=base_url)
                 except CVETokenExpiredError:
                     drop_token(pmc, "write")
                     blocked = "The service rejected the write token (they live for hours). Deleted; paste a fresh one."
+                except CVEMergeRefusedError as exc:
+                    blocked = f"Not pushed. {exc}"
                 except CVEAPIError as exc:
                     blocked = str(exc)
                 else:

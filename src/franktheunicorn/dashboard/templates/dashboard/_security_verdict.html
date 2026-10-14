@@ -21,6 +21,8 @@
                 <option value="invalid" {% if report.status == "invalid" %}selected{% endif %}>Invalid</option>
                 <option value="duplicate" {% if report.status == "duplicate" %}selected{% endif %}>Duplicate</option>
                 <option value="expected-behavior" {% if report.status == "expected-behavior" %}selected{% endif %}>Expected Behavior</option>
+                <option value="defense-in-depth" {% if report.status == "defense-in-depth" %}selected{% endif %}>Defense in Depth (fix welcome, no CVE)</option>
+                <option value="info-only" {% if report.status == "info-only" %}selected{% endif %}>Info Only (explain, no change)</option>
             </select>
         </div>
 

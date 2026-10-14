@@ -46,6 +46,7 @@ copypasta_llm_enabled: true
 #   enabled: false
 #   server: ""
 #   project_prefix: ""
+#   priority_authors: ["Team Lead Name", "team-lead-jira-username"]
 # community_sources: []
 
 # Recursive Language Model scoring/rejection judges (v1.5, opt-in, default off).

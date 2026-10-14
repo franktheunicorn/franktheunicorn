@@ -9,7 +9,7 @@ ifeq ($(wildcard $(VENV)/bin/python),)
   ACTIVATE_MSG := "(run 'make venv' first or 'make setup')"
 endif
 
-.PHONY: help venv setup test lint format typecheck check serve worker worker-debug migrate up down up-status clear-fallbacks check-migrations docker-up docker-build clean
+.PHONY: help venv setup test lint format typecheck check serve worker worker-debug migrate up down up-status clear-fallbacks check-migrations docker-up docker-build clean magpie-check magpie-sync
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -42,7 +42,13 @@ typecheck: venv ## Run mypy type checking
 check-migrations: venv ## Check for migration conflicts
 	$(PYTHON) manage.py check_migration_conflicts
 
-check: lint typecheck check-migrations test ## Run all checks (lint + typecheck + test)
+magpie-check: venv ## Verify vendored Apache Magpie files match the pin (offline)
+	$(PYTHON) manage.py magpie_sync --check
+
+magpie-sync: venv ## Re-fetch the pinned Apache Magpie commit and regenerate vendored files
+	$(PYTHON) manage.py magpie_sync --sync
+
+check: lint typecheck check-migrations magpie-check test ## Run all checks (lint + typecheck + test)
 
 serve: venv migrate ## Start Django dev server
 	$(PYTHON) manage.py runserver
