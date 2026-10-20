@@ -274,6 +274,12 @@ def queue_zombie_assessment(pr: PullRequest, *, priority: int = PRIORITY_INTERAC
     return queue_command("assess_zombie_pr", pull_request=pr, priority=priority)
 
 
+def queue_ci_analysis(pr: PullRequest, *, priority: int = PRIORITY_INTERACTIVE) -> bool:
+    """Queue per-PR CI-failure analysis (base comparison + LLM per failure).
+    Interactive: the "Analyze CI" button on the detail page."""
+    return queue_command("analyze_pr_ci", pull_request=pr, priority=priority)
+
+
 def cancel_pending_for_reports(report_ids: list[int]) -> int:
     """Drop pending worker jobs for *report_ids* before the reports themselves go.
 

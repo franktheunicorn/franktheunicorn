@@ -5419,6 +5419,29 @@ def run_dual_tests(request: HttpRequest, pr_id: int) -> HttpResponse:
     )
 
 
+@require_POST
+def analyze_ci(request: HttpRequest, pr_id: int) -> HttpResponse:
+    """Queue CI-failure analysis for one PR (htmx).
+
+    Compares the PR's failing checks against the base branch and, when a
+    backend is configured, has an LLM read each failure against the diff. The
+    verdicts land in the merge-readiness detail; reload to see them.
+    """
+    pr = get_object_or_404(PullRequest.objects.select_related("project"), pk=pr_id)
+
+    from franktheunicorn.security.queue import queue_ci_analysis
+
+    if not queue_ci_analysis(pr):
+        return HttpResponse(
+            '<div class="run-tests-result queued-note">'
+            "CI analysis for this PR is already queued or running.</div>"
+        )
+    return HttpResponse(
+        '<div class="run-tests-result queued-note">'
+        "CI analysis queued. Reload this page in a minute to see the flake/real verdicts.</div>"
+    )
+
+
 def _resolve_and_redirect_pr(
     request: HttpRequest, owner: str, repo: str, pr_number: int
 ) -> HttpResponse:

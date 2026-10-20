@@ -158,6 +158,18 @@
         <span id="run-tests-spinner" class="htmx-indicator run-agents-spinner" aria-label="Starting..."></span>
         <div id="run-tests-result"></div>
     </div>
+    <div>
+        <button class="action-btn"
+                hx-post="{% url 'dashboard:analyze_ci' pr.pk %}"
+                hx-target="#analyze-ci-result"
+                hx-swap="innerHTML"
+                hx-indicator="#analyze-ci-spinner"
+                hx-confirm="Analyze this PR's CI failures (base-branch comparison + LLM per failure)? Runs in background — reload to see verdicts.">
+            Analyze CI
+        </button>
+        <span id="analyze-ci-spinner" class="htmx-indicator run-agents-spinner" aria-label="Starting..."></span>
+        <div id="analyze-ci-result"></div>
+    </div>
 </div>
 
 {% if agent_run_summary %}

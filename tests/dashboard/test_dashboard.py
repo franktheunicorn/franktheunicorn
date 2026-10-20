@@ -20,6 +20,7 @@ from tests.factories import (
     AntiPatternFactory,
     CostRecordFactory,
     DependencyChangeFactory,
+    ProjectFactory,
     PullRequestFactory,
     ReviewDraftFactory,
     TestRunFactory,
@@ -2155,3 +2156,25 @@ class TestPostReviewFailureIsVerified:
     ) -> None:
         body = self._post(client, db_pr, return_value={"id": 3, "verified_after_error": True})
         assert b"but the review landed" in body
+
+
+@pytest.mark.django_db
+class TestAnalyzeCIButton:
+    """The PR-detail 'Analyze CI' button queues a worker command (htmx)."""
+
+    def test_queues_an_interactive_command_once(self, client: Client) -> None:
+        from franktheunicorn.security.queue import PRIORITY_INTERACTIVE
+
+        pr = PullRequestFactory(project=ProjectFactory(owner="apache", repo="spark"))
+        first = client.post(f"/pr/{pr.pk}/analyze-ci/")
+        second = client.post(f"/pr/{pr.pk}/analyze-ci/")
+
+        cmds = WorkerCommand.objects.filter(command="analyze_pr_ci", pull_request=pr)
+        assert cmds.count() == 1
+        assert cmds.get().priority == PRIORITY_INTERACTIVE
+        assert b"CI analysis queued" in first.content
+        assert b"already queued or running" in second.content
+
+    def test_get_is_not_allowed(self, client: Client) -> None:
+        pr = PullRequestFactory(project=ProjectFactory(owner="apache", repo="spark"))
+        assert client.get(f"/pr/{pr.pk}/analyze-ci/").status_code == 405

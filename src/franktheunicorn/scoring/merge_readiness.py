@@ -32,7 +32,7 @@ failure. Every rule is one line the dashboard can show.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from fnmatch import fnmatch
@@ -259,12 +259,26 @@ def _matches_any(name: str, patterns: Iterable[str]) -> bool:
     return any(fnmatch(lowered, p.lower()) for p in patterns if p)
 
 
+#: Confidence floor/ceiling for the two CI-analysis signals that see more than
+#: a check name (scoring/ci_analysis.py). An LLM verdict read the actual failure
+#: and the diff, so it takes precedence over the name prior; "also failing on
+#: the base branch" is strong per-run evidence the PR did not cause it.
+_ANALYSIS_VERDICT_CONFIDENCE: dict[str, float] = {
+    "real-pr": 0.02,  # a real failure in the changed code — the author must fix it
+    "flake": 0.95,  # the LLM judged it a flake
+    "real-pre-existing": 0.9,  # real, but already failing without this PR
+}
+_BASE_FAILING_PRIOR = 0.9
+
+
 def flake_confidence(
     check: CICheck,
     *,
     flaky_patterns: Iterable[str] = (),
     deterministic_patterns: Iterable[str] = DEFAULT_DETERMINISTIC_CHECKS,
     history: Mapping[str, tuple[int, int]] | None = None,
+    base_failing: Collection[str] = (),
+    analysis: Mapping[str, Mapping[str, str]] | None = None,
 ) -> tuple[float, str]:
     """How likely one failing check is to be a flake, and the one-line reason.
 
@@ -276,7 +290,35 @@ def flake_confidence(
     the operator's "this failure is real" beat a configured-flaky pattern
     after a few repeats, and lets a check nobody configured earn flaky status
     from rebases that went green.
+
+    Two stronger signals, when supplied, see more than the check name and so
+    take precedence (scoring/ci_analysis.py fills them):
+
+    - ``analysis`` — an LLM verdict per check (it read the failure output and
+      the diff). It overrides the name prior and history outright.
+    - ``base_failing`` — check names that are *also failing on the base branch
+      right now*, i.e. the PR did not cause them. A strong prior toward flake,
+      still blended with history so an operator's repeated "this is real" is
+      not silently overridden by an infra outage.
     """
+    verdict = (analysis or {}).get(check.name)
+    if verdict and verdict.get("verdict") in _ANALYSIS_VERDICT_CONFIDENCE:
+        conf = _ANALYSIS_VERDICT_CONFIDENCE[str(verdict["verdict"])]
+        reason = verdict.get("reason") or str(verdict["verdict"])
+        return conf, f"CI analysis: {reason}"
+
+    if check.name in base_failing:
+        prior, why = _BASE_FAILING_PRIOR, "also failing on the base branch — not caused by this PR"
+        flaky, real = (history or {}).get(check.name, (0, 0))
+        observations = flaky + real
+        if observations <= 0:
+            return prior, why
+        learned = (flaky + 1) / (observations + 2)
+        weight = observations / (observations + 2)
+        return round(
+            (1 - weight) * prior + weight * learned, 3
+        ), f"{why}; flaked {flaky}x, real {real}x before"
+
     if _matches_any(check.name, flaky_patterns):
         prior, why = _CONFIGURED_FLAKY_PRIOR, "configured as flaky"
     elif check.conclusion in _CONCLUSION_FLAKE_PRIOR:
@@ -303,6 +345,8 @@ def classify_ci(
     flaky_patterns: Iterable[str] = (),
     deterministic_patterns: Iterable[str] = DEFAULT_DETERMINISTIC_CHECKS,
     history: Mapping[str, tuple[int, int]] | None = None,
+    base_failing: Collection[str] = (),
+    analysis: Mapping[str, Mapping[str, str]] | None = None,
 ) -> CIAssessment:
     """Green / flaky / red / pending / unknown for one commit's checks.
 
@@ -354,6 +398,8 @@ def classify_ci(
             flaky_patterns=flaky_patterns,
             deterministic_patterns=deterministic_patterns,
             history=history,
+            base_failing=base_failing,
+            analysis=analysis,
         )
         assessment.flake_confidence[check.name] = conf
         assessment.reasons.append(f"{check.name}: {why}")
@@ -921,6 +967,7 @@ READINESS_UPDATE_FIELDS: tuple[str, ...] = (
     "approval_count",
     "ci_checks",
     "ci_checks_sha",
+    "ci_analysis",
     "ci_status",
     "merge_readiness_score",
     "merge_readiness_verdict",
@@ -1020,6 +1067,26 @@ def current_checks(pr: PullRequest) -> list[dict[str, Any]]:
     return [c for c in (pr.ci_checks or []) if isinstance(c, dict)]
 
 
+def current_ci_analysis(pr: PullRequest) -> tuple[set[str], dict[str, dict[str, str]]]:
+    """``(base_failing, verdicts)`` from ``pr.ci_analysis``, only for this head.
+
+    Like :func:`current_checks`, the analysis is pinned to the head it was run
+    against (``ci_analysis["sha"]``); a stale analysis from a previous commit is
+    not evidence about the code now at ``head_sha``.
+    """
+    analysis = pr.ci_analysis if isinstance(pr.ci_analysis, dict) else {}
+    if not analysis or analysis.get("sha") != pr.head_sha:
+        return set(), {}
+    base = {str(n) for n in analysis.get("base_failing", []) if isinstance(n, str)}
+    raw_verdicts = analysis.get("verdicts", {})
+    verdicts = {
+        str(k): {str(vk): str(vv) for vk, vv in v.items()}
+        for k, v in raw_verdicts.items()
+        if isinstance(v, dict)
+    }
+    return base, verdicts
+
+
 def build_readiness_input(
     pr: PullRequest,
     project_config: ProjectConfig,
@@ -1032,11 +1099,14 @@ def build_readiness_input(
     cfg = project_config.merge_readiness
     if history is None:
         history = check_history_for(pr.project)
+    base_failing, analysis = current_ci_analysis(pr)
     ci = classify_ci(
         current_checks(pr),
         flaky_patterns=cfg.flaky_checks,
         deterministic_patterns=cfg.deterministic_checks,
         history=history,
+        base_failing=base_failing,
+        analysis=analysis,
     )
     if pr.ci_checks and not current_checks(pr):
         ci.reasons.append("the CI results on file are for an older commit")

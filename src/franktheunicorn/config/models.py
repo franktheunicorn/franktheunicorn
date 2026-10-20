@@ -1376,6 +1376,13 @@ class MergeReadinessConfig(BaseModel):
     # Unknown CI (no checks reported for the head) counts as not ready when
     # True. Set False for forges or repos with no CI at all.
     require_ci: bool = True
+    # CI-failure analysis (scoring/ci_analysis.py). Layer 1 — comparing a PR's
+    # failing checks against the base branch's current CI — is deterministic and
+    # cheap, so it runs for readiness candidates whenever enabled. Layer 2 reads
+    # each still-unexplained failure with an LLM (flake / real-caused-by-PR /
+    # pre-existing); it is opt-in because it spends a call per failing check.
+    ci_analysis: bool = True
+    ci_analysis_llm: bool = False
     # Require an approval from someone in ``committers`` before a PR is listed.
     require_committer_approval: bool = False
     # Body of the approving review the LGTM button posts.

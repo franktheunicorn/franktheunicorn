@@ -524,6 +524,13 @@ def _refresh_pull_request(
         project_config,
     )
 
+    # CI-failure analysis runs just before readiness so classify_ci can read
+    # its verdicts: Layer 1 compares the PR's failing checks against the base
+    # branch, Layer 2 (opt-in) has an LLM read each still-unexplained failure.
+    # Gated to merge candidates so it is not run on every failing PR on Spark.
+    if readiness_on and _should_analyze_ci(pr_obj, project_config):
+        _run_ci_analysis(pr_obj, client, project_config)
+
     # Merge readiness reads the routing flags and the fresh review/CI state,
     # so it goes last. The review pipeline re-evaluates after it runs, since
     # "your review found nothing serious" is one of the signals.
@@ -884,6 +891,45 @@ def _close_missing_pull_requests(
         number__in=open_numbers
     )
     return int(stale.update(state="closed", updated_at=timezone.now()))
+
+
+def _should_analyze_ci(pr_obj: PullRequest, project_config: ProjectConfig) -> bool:
+    """Whether to run CI-failure analysis on this PR.
+
+    Only merge candidates — someone approved it, said they intend to merge, or
+    it already scored onto the almost-ready list — so the analysis (and, with
+    the LLM layer on, a call per failing check) is not spent on every failing
+    PR on a repo the size of Spark.
+    """
+    cfg = project_config.merge_readiness
+    if not cfg.ci_analysis:
+        return False
+    from franktheunicorn.scoring.merge_readiness import LISTED_VERDICTS
+
+    return bool(
+        pr_obj.approval_count
+        or pr_obj.merge_intent
+        or pr_obj.merge_readiness_verdict in LISTED_VERDICTS
+    )
+
+
+def _run_ci_analysis(
+    pr_obj: PullRequest, client: ForgeClient, project_config: ProjectConfig
+) -> None:
+    """Fill ``pr_obj.ci_analysis`` (base comparison + opt-in LLM). Best-effort."""
+    from franktheunicorn.scoring.ci_analysis import analyze_pr_ci
+
+    use_llm = project_config.merge_readiness.ci_analysis_llm
+    backend_cfg = None
+    if use_llm:
+        from franktheunicorn.config.loader import get_operator_config
+
+        oc = get_operator_config()
+        backend_cfg = oc.llm_backends[0] if oc.llm_backends else None
+    try:
+        analyze_pr_ci(pr_obj, client, backend_config=backend_cfg, use_llm=use_llm)
+    except Exception:
+        logger.debug("CI analysis failed for PR #%d", pr_obj.number, exc_info=True)
 
 
 def _route_pr_to_queue(
