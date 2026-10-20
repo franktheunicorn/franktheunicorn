@@ -451,6 +451,46 @@ class GitHubClient(ForgeClient):
             )
         return checks
 
+    def get_commit_check_outputs(self, owner: str, repo: str, sha: str) -> dict[str, Any]:
+        """``check name -> failure output text`` for the failing check runs on ``sha``.
+
+        Used by CI-failure analysis so an LLM can read *why* a check failed, not
+        just that it did. Only the check-runs API carries ``output`` (title +
+        summary); commit statuses (Jenkins et al.) have only a short
+        ``description``, which ``get_commit_checks`` already surfaces via the
+        url. Best-effort: a fetch failure yields no output for that check, which
+        the caller treats as "analyse from the name alone".
+        """
+        outputs: dict[str, Any] = {}
+        runs_url = f"/repos/{owner}/{repo}/commits/{sha}/check-runs"
+        for page in range(1, 11):
+            try:
+                response = self._get(runs_url, params={"per_page": 100, "page": page})
+                response.raise_for_status()
+            except Exception:
+                logger.debug(
+                    "Could not fetch check-run outputs for %s/%s@%s", owner, repo, sha[:12]
+                )
+                break
+            payload = response.json()
+            runs = payload.get("check_runs", []) if isinstance(payload, dict) else []
+            for run in runs:
+                if not isinstance(run, dict) or not isinstance(run.get("name"), str):
+                    continue
+                if run.get("conclusion") not in ("failure", "timed_out", "action_required"):
+                    continue
+                out = run.get("output")
+                if not isinstance(out, dict):
+                    out = {}
+                title = str(out.get("title") or "")
+                summary = str(out.get("summary") or "")
+                text = f"{title}\n{summary}".strip()
+                if text:
+                    outputs[run["name"]] = text
+            if len(runs) < 100:
+                break
+        return outputs
+
     def create_issue_comment(
         self, owner: str, repo: str, issue_number: int, body: str
     ) -> dict[str, Any]:

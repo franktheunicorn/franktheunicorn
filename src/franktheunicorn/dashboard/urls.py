@@ -27,6 +27,7 @@ urlpatterns = [
         name="regenerate_findings",
     ),
     path("pr/<int:pr_id>/run-dual-tests/", views.run_dual_tests, name="run_dual_tests"),
+    path("pr/<int:pr_id>/analyze-ci/", views.analyze_ci, name="analyze_ci"),
     # Agent feedback (v1.25)
     path("pr/<int:pr_id>/compose-feedback/", views.compose_feedback, name="compose_feedback"),
     path("pr/<int:pr_id>/send-feedback/", views.send_feedback, name="send_feedback"),

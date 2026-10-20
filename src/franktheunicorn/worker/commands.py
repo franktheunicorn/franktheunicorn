@@ -323,6 +323,7 @@ def _dispatch(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
         "run_agents": _run_agents,
         "scan_zombie_prs": _scan_zombie_prs,
         "assess_zombie_pr": _assess_zombie_pr,
+        "analyze_pr_ci": _analyze_pr_ci,
     }
     handler = handlers.get(cmd.command)
     if handler is None:
@@ -789,3 +790,48 @@ def _assess_zombie_pr(cmd: WorkerCommand, operator_config: OperatorConfig) -> No
     from franktheunicorn.review.zombie import assess_pr
 
     cmd.log = assess_pr(cmd.pull_request, operator_config)
+
+
+def _analyze_pr_ci(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
+    """The detail page's "Analyze CI" button: base comparison + LLM per failure.
+
+    The button is an explicit "really look at this", so it runs the LLM layer
+    whenever a backend is configured, independent of the project's auto
+    ``ci_analysis_llm`` flag (the auto path stays gated). Re-runs merge
+    readiness so the new verdicts land in the queue immediately.
+    """
+    if cmd.pull_request is None:
+        msg = "analyze_pr_ci requires a pull_request target"
+        raise ValueError(msg)
+
+    from franktheunicorn.config.loader import get_project_config
+    from franktheunicorn.scoring.ci_analysis import analyze_pr_ci
+    from franktheunicorn.scoring.merge_readiness import refresh_merge_readiness
+
+    pr = cmd.pull_request
+    project_config = get_project_config(pr.project.full_name)
+    if project_config is None:
+        cmd.log = "no project config; CI analysis skipped"
+        return
+
+    client = _forge_client_for(project_config, operator_config)
+    backend = operator_config.llm_backends[0] if operator_config.llm_backends else None
+    diff = ""
+    if client is not None and backend is not None:
+        try:
+            diff = client.get_pull_request_diff(pr.project.owner, pr.project.repo, pr.number)
+        except Exception:
+            diff = ""
+
+    analysis = analyze_pr_ci(
+        pr, client, backend_config=backend, use_llm=backend is not None, diff=diff
+    )
+    pr.save(update_fields=["ci_analysis"])
+    refresh_merge_readiness(pr, project_config, operator_config.github_username or "")
+
+    if not analysis:
+        cmd.log = "no failing checks to analyze"
+        return
+    verdicts = analysis.get("verdicts", {})
+    base = analysis.get("base_failing", [])
+    cmd.log = f"CI analysis: {len(verdicts)} verdict(s); also failing on base: {base or 'none'}"

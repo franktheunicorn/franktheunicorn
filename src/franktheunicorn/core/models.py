@@ -200,6 +200,14 @@ class PullRequest(models.Model):
     # and learning "the rebase went green" needs to know which head it reads.
     ci_checks = models.JSONField(default=list, blank=True)
     ci_checks_sha = models.CharField(max_length=64, blank=True, default="")
+    # CI-failure analysis (scoring/ci_analysis.py): why each failing check is
+    # probably a flake or probably real, from signals the name-prior classifier
+    # cannot see — whether the same check is failing on the base branch right
+    # now, and (opt-in) an LLM reading the failure output against the diff.
+    # Shape: {"sha": <head these apply to>, "base_failing": [name, ...],
+    #   "verdicts": {name: {"verdict": "flake"|"real-pr"|"real-pre-existing",
+    #   "reason": str, "source": "base"|"llm"}}}. SHA-guarded like ci_checks.
+    ci_analysis = models.JSONField(default=dict, blank=True)
     # The readiness verdict: "ready", "flaky-ci" (ready but for a CI failure
     # that is probably a flake), or "" (not ready). The score is 0-1 like
     # interest_score; the detail JSON carries reasons, blockers and the CI
