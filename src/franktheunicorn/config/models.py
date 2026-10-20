@@ -2088,6 +2088,30 @@ class MergeIntentConfig(BaseModel):
         return [operator_username] if operator_username else []
 
 
+class JudgeConfig(BaseModel):
+    """Second-level review judge (review/judge.py), opt-in.
+
+    A cheaper model re-reads the main backend's draft comments and drops the
+    ones not worth posting — vague nits, malformed fragments, claims the diff
+    does not support, near-duplicates. Off by default because it spends LLM
+    calls on every review; enable it and (optionally) point it at a cheaper
+    model than the one writing the reviews. Degrades to a no-op when no usable
+    backend resolves, so enabling it can only trim findings, never block review.
+    """
+
+    enabled: bool = False
+    #: Backend for the judge. ``None`` reuses the first review backend, so the
+    #: judge works the moment it is enabled; set it to a cheaper model (e.g. a
+    #: small qwen) to save cost and latency — judging is easier than reviewing.
+    backend: LLMBackendConfig | None = None
+    #: Tier B: re-check each finding the batch tier marks borderline with a
+    #: focused, adversarial per-finding call.
+    verify_borderline: bool = True
+    #: Cap on tier-B verify calls per PR, so a flood of borderline findings
+    #: cannot run up the bill.
+    max_verify: int = 5
+
+
 class OperatorConfig(BaseModel):
     """Top-level operator config loaded from operator.yaml."""
 
@@ -2134,6 +2158,9 @@ class OperatorConfig(BaseModel):
     # Multiple LLM backends can run in parallel. Each produces findings
     # independently; results are combined and deduped via anti-patterns.
     llm_backends: list[LLMBackendConfig] = Field(default_factory=list)
+
+    # Second-level judge that screens draft comments before they become drafts.
+    judge: JudgeConfig = Field(default_factory=JudgeConfig)
 
     # Legacy single-backend field — still accepted for backwards compat.
     # If set and llm_backends is empty, it is promoted into llm_backends.
