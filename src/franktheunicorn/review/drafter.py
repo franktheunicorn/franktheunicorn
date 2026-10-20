@@ -696,6 +696,32 @@ def draft_review(
     # the "security:"-style prefixes the category scan relies on.
     categories = [_derive_category(f.title) for f in deduped]
 
+    # Second-level judge (opt-in): a cheaper model screens the findings and
+    # drops the ones not worth posting, before the tone guard spends a rewrite
+    # call on each. It only ever trims — a dead or misconfigured judge backend
+    # degrades to keeping everything (judge.judge_findings handles that). Runs
+    # here so the parallel lists (sources, categories) are filtered together.
+    judge_config = getattr(operator_config, "judge", None)
+    if judge_config is not None and judge_config.enabled and deduped:
+        from franktheunicorn.review.judge import apply_verdicts, judge_findings
+
+        judge_backend = judge_config.backend or (backend_configs[0] if backend_configs else None)
+        verdicts = judge_findings(
+            deduped,
+            pr_context,
+            judge_backend,
+            diff=diff,
+            verify_borderline=judge_config.verify_borderline,
+            max_verify=judge_config.max_verify,
+            project_id=pr.project_id,
+            pr_id=pr.pk,
+        )
+        deduped, kept_indices = apply_verdicts(deduped, verdicts)
+        deduped_sources = [deduped_sources[i] for i in kept_indices]
+        categories = [categories[i] for i in kept_indices]
+        if not deduped:
+            return extra_drafts
+
     # Apply tone guard rewrite pass. apply_tone_guard_batch is 1:1 over the
     # input list, so the parallel lists stay aligned with deduped after this.
     tone_backend = backend_configs[0] if backend_configs else None

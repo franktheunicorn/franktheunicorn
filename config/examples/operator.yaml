@@ -186,6 +186,33 @@ digest_enabled: false
 #   model: "claude-sonnet-4-20250514"
 #   api_key_env: "ANTHROPIC_API_KEY"
 
+# --- Second-level judge (opt-in) ---
+# A cheaper model re-reads the draft comments the review backend produced and
+# drops the ones not worth posting: vague nits ("a lot of manual state
+# management"), malformed fragments, claims the diff doesn't support, and
+# near-duplicates. Off by default (it spends LLM calls on every review).
+#
+# Two tiers: a single batch call screens all findings at once (and may lightly
+# tighten wording); verify_borderline then re-checks anything the batch was
+# unsure about with a focused per-finding call, capped by max_verify. A finding
+# the batch model skips (smaller models answer only the first of a list) is
+# re-asked one-on-one, so coverage is reliable even on a small judge model.
+#
+# Judging ("is this comment worth posting?") is easier than reviewing, so a
+# smaller/cheaper model is a good fit. Leave `backend` unset to reuse
+# llm_backends[0]. Degrades to a no-op if no usable backend resolves.
+# judge:
+#   enabled: true
+#   verify_borderline: true
+#   max_verify: 5
+#   backend:
+#     provider: "openai"
+#     model: "qwen3-8b"
+#     base_url: "https://llm.apache.org/v1"
+#     api_key_env: "LLMAO_KEY"
+#     temperature: 0.1
+#     max_tokens: 2048
+
 # --- Agent Feedback Channel (v1.25) ---
 # Direct feedback to AI agent sessions that created PRs.
 # When a PR description contains a session link (Claude Code, Codex),
