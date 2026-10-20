@@ -13,10 +13,14 @@ from django.utils import timezone
 
 from franktheunicorn.backends.base import MAX_LISTED_PULL_REQUESTS
 from franktheunicorn.backends.mock import MockGitHubClient
-from franktheunicorn.backends.poller import _upsert_pull_request, poll_project
+from franktheunicorn.backends.poller import (
+    _route_pr_to_queue,
+    _upsert_pull_request,
+    poll_project,
+)
 from franktheunicorn.config.models import ProjectConfig
 from franktheunicorn.core.models import Project, PullRequest
-from tests.factories import ProjectFactory, ReviewDraftFactory
+from tests.factories import ProjectFactory, PullRequestFactory, ReviewDraftFactory
 
 
 @pytest.mark.django_db
@@ -1682,3 +1686,76 @@ class TestAuthorAssociationIsStored:
             operator_username="nobody",
         )
         assert PullRequest.objects.get(number=98).author_association in ("", "NONE")
+
+
+@pytest.mark.django_db
+class TestMultiQueueRouting:
+    """A PR can belong to several queues at once; queue is the primary one."""
+
+    def _pr(self, **kw: Any) -> PullRequest:
+        project = ProjectFactory(owner="apache", repo="spark")
+        defaults: dict[str, Any] = {
+            "project": project,
+            "author": "newbie",
+            "author_association": "FIRST_TIME_CONTRIBUTOR",
+            # Long enough that the short-body low_context flag (→ needs-triage)
+            # does not fire; this test is about the mention/new-contributor mix.
+            "body": "This change normalizes float grouping keys in filters pushed "
+            "below Aggregate so the pushed predicate reads the normalized value. "
+            "It adds a regression test and updates the optimizer rule accordingly.",
+            "score_breakdown": {},
+        }
+        defaults.update(kw)
+        return PullRequestFactory(**defaults)
+
+    def test_comment_mention_plus_new_contributor_lands_in_both(self) -> None:
+        # The scorer credited a comment @-mention (mentioned_or_assigned in the
+        # persisted breakdown); the author is also a first-time contributor.
+        pr = self._pr(score_breakdown={"mentioned_or_assigned": 25.0})
+        _route_pr_to_queue(
+            pr,
+            "holdenk",
+            project_config=ProjectConfig(owner="apache", repo="spark"),
+        )
+        assert set(pr.queues) == {"mentioned", "new-contributor"}
+        # Primary (highest-priority) queue leads the list.
+        assert pr.queue == "mentioned"
+        assert pr.queues[0] == "mentioned"
+        assert pr.is_mentioned is True
+
+    def test_no_comment_mention_routes_to_new_contributor_only(self) -> None:
+        pr = self._pr(score_breakdown={})
+        _route_pr_to_queue(
+            pr,
+            "holdenk",
+            project_config=ProjectConfig(owner="apache", repo="spark"),
+        )
+        assert pr.queues == ["new-contributor"]
+        assert pr.queue == "new-contributor"
+        assert pr.is_mentioned is False
+
+    def test_queue_filter_matches_membership_in_both_tabs(self) -> None:
+        pr = self._pr(score_breakdown={"mentioned_or_assigned": 25.0})
+        _route_pr_to_queue(
+            pr,
+            "holdenk",
+            project_config=ProjectConfig(owner="apache", repo="spark"),
+        )
+        pr.save()
+        for tab in ("mentioned", "new-contributor"):
+            assert (
+                PullRequest.objects.filter(PullRequest.queue_filter(tab)).filter(pk=pr.pk).exists()
+            )
+        for tab in ("review", "your-prs"):
+            assert (
+                not PullRequest.objects.filter(PullRequest.queue_filter(tab))
+                .filter(pk=pr.pk)
+                .exists()
+            )
+
+    def test_legacy_rows_with_empty_queues_still_match_primary(self) -> None:
+        # A row routed before the queues field existed: queue set, queues empty.
+        pr = self._pr(queue="review", queues=[])
+        assert (
+            PullRequest.objects.filter(PullRequest.queue_filter("review")).filter(pk=pr.pk).exists()
+        )

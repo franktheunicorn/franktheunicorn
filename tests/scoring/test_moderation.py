@@ -149,6 +149,23 @@ class TestComputeModerationFlags:
         )
         assert "mentioned" not in flags
 
+    def test_mentioned_via_comment_flag(self) -> None:
+        # A @-mention in a *comment* (not body/assignee/reviewer) is passed in
+        # by the caller as mentioned_via_comment; it still routes to Mentioned.
+        flags = compute_moderation_flags(
+            {"author": "alice", "body": "a routine change"},
+            "holdenk",
+            mentioned_via_comment=True,
+        )
+        assert "mentioned" in flags
+
+    def test_comment_mention_flag_defaults_off(self) -> None:
+        flags = compute_moderation_flags(
+            {"author": "alice", "body": "a routine change"},
+            "holdenk",
+        )
+        assert "mentioned" not in flags
+
     def test_mentioned_independent_of_operator_pr(self) -> None:
         # Operator both authored AND is a requested reviewer: both flags set,
         # mentioned is not suppressed by is_operator_pr.
