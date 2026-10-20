@@ -20,7 +20,7 @@ from collections import Counter, defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from io import StringIO
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from copydetect.detector import CodeFingerprint, compare_files  # type: ignore[import-untyped]
@@ -45,8 +45,20 @@ _PR_CHUNK_PREFIX = "pr_chunk:"
 _WINNOW_K = 25  # k-gram size
 _WINNOW_WIN = 4  # window size
 
-# Minimum overlap ratio from copydetect to count as a match
+# Minimum overlap ratio from copydetect to count as a match, for two files in
+# the *same directory* — where a high structural overlap really is a copy-paste
+# worth flagging.
 _WINNOW_MIN_OVERLAP = 0.5
+
+# Minimum overlap ratio for two files in *different directories*. The winnowing
+# tier fingerprints structure with identifiers normalized away, so on a large
+# monorepo two unrelated files in different modules (a Parquet reader and a
+# Ganglia reporter, a JDBC scan builder and a UI jobs page) routinely clear 0.5
+# on shared language skeleton alone — the dominant false positive in practice.
+# Real cross-module copy-paste is near-identical, so hold it to a much higher
+# bar. Matches whose files share a deeper path prefix are scored between the two
+# thresholds (see :func:`_required_overlap`).
+_WINNOW_CROSS_DIR_MIN_OVERLAP = 0.85
 
 
 class _RepoFingerprints:
@@ -79,6 +91,32 @@ class _RepoFingerprints:
             if fp is not None:
                 live[key] = fp
         return live
+
+
+def _required_overlap(new_file: str, source_file: str) -> float:
+    """Overlap ratio a winnowing match must clear, by how far apart the files are.
+
+    Same directory → :data:`_WINNOW_MIN_OVERLAP`; no shared path at all →
+    :data:`_WINNOW_CROSS_DIR_MIN_OVERLAP`; in between, scaled by how much of the
+    shallower path the two share. A Parquet reader "duplicating" a Ganglia
+    reporter shares no module and must be near-identical to survive; two files in
+    the same package stay at the low bar.
+    """
+    a = PurePosixPath(new_file).parts[:-1]
+    b = PurePosixPath(source_file).parts[:-1]
+    if a == b:
+        return _WINNOW_MIN_OVERLAP
+    shared = 0
+    for seg_a, seg_b in zip(a, b, strict=False):
+        if seg_a != seg_b:
+            break
+        shared += 1
+    depth = min(len(a), len(b))
+    closeness = shared / depth if depth else 0.0
+    return (
+        _WINNOW_CROSS_DIR_MIN_OVERLAP
+        - (_WINNOW_CROSS_DIR_MIN_OVERLAP - _WINNOW_MIN_OVERLAP) * closeness
+    )
 
 
 def _fingerprint(path: str, content: str) -> CodeFingerprint | None:
@@ -623,7 +661,7 @@ def _check_winnowing(
             except Exception:
                 continue
 
-            if overlap_tokens > 0 and ratio1 >= _WINNOW_MIN_OVERLAP:
+            if overlap_tokens > 0 and ratio1 >= _required_overlap(chunk.file_path, path):
                 source_range = _slice_line_range(getattr(repo_fp, "raw_code", ""), repo_slices) or (
                     1,
                     1,
@@ -836,11 +874,22 @@ def _create_drafts(
         # was the hull again: regions at 1-3 and 15-17 are 6 duplicated lines,
         # not 17. The draft is anchored at the head of the added block (the dedup
         # key), so the count deliberately doesn't try to locate anything.
-        comment_body = (
-            f"Possible copy-paste ({tier_label} match, {match.num_lines} duplicated lines): "
-            f"this code appears to duplicate existing code in {location}. "
-            f"Consider extracting a shared function or reusing the existing implementation."
-        )
+        # A match whose source file has the same basename is almost always a
+        # move or rename, not a copy to deduplicate — "extract a shared helper"
+        # is the wrong advice there. Reframe it as a move and point at the thing
+        # that actually matters: a stale copy left behind.
+        if PurePosixPath(match.source_file).name == PurePosixPath(match.new_file).name:
+            comment_body = (
+                f"This looks like a move or rename of existing code from {location} "
+                f"({match.num_lines} matching lines). If so, confirm the original is "
+                f"removed so the two copies don't drift."
+            )
+        else:
+            comment_body = (
+                f"Possible copy-paste ({tier_label} match, {match.num_lines} duplicated lines): "
+                f"this code appears to duplicate existing code in {location}. "
+                f"Consider extracting a shared function or reusing the existing implementation."
+            )
 
         ap_matches = check_against_anti_patterns(comment_body, pr.project)
         if ap_matches:
