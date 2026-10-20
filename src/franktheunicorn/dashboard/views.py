@@ -158,7 +158,10 @@ def _queue_members_q(queue: str, readiness_off: Q | None = None) -> Q:
         if readiness_off is not None:
             q &= ~readiness_off
         return q
-    return Q(state="open", queue=queue)
+    # A PR can be in several queues at once; match membership, not just the
+    # primary queue, so e.g. a mentioned new-contributor PR shows under both
+    # tabs. PullRequest.queue_filter is SQLite-safe (no JSON-array contains).
+    return Q(state="open") & PullRequest.queue_filter(queue)
 
 
 def _zombie_tab_context() -> dict[str, object]:
@@ -375,7 +378,9 @@ def _queue_ordering(queue: str) -> tuple[str | OrderBy, ...]:
         # A follow-up list, not a triage list: the approval that has waited
         # longest is the one to act on first, whatever it scored.
         return (F("merge_intent_at").asc(nulls_last=True), "-github_updated_at")
-    return ("-interest_score", "-github_updated_at")
+    # interest_score saturates at 1.0, so break ties by the un-clamped raw
+    # score: a PR with every strong signal firing sorts above a merely-good one.
+    return ("-interest_score", "-interest_score_raw", "-github_updated_at")
 
 
 @require_POST

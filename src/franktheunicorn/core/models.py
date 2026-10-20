@@ -116,6 +116,12 @@ class PullRequest(models.Model):
 
     # Scoring
     interest_score = models.FloatField(default=0.0)
+    #: The un-clamped sum of score_breakdown, kept only to break ties in the
+    #: dashboard ordering: interest_score saturates at 1.0 (raw / MAX_SCORE
+    #: clamped), so a PR with every strong signal firing (raw well over 100)
+    #: sorted identically to a merely-good one. This preserves the [0, 1]
+    #: interest_score contract while letting the hottest PRs actually sort first.
+    interest_score_raw = models.FloatField(default=0.0)
     score_breakdown = models.JSONField(default=dict, blank=True)
 
     # Flags
@@ -158,8 +164,15 @@ class PullRequest(models.Model):
     community_context_cache = models.JSONField(null=True, blank=True)
     sentry_context_cache = models.JSONField(null=True, blank=True)
 
-    # Queue routing (§2.2)
+    # Queue routing (§2.2). ``queue`` is the *primary* (highest-priority) queue,
+    # kept for everything that reads a single routing decision and for display.
+    # ``queues`` is the full set a PR belongs to: a PR can be both "mentioned"
+    # (someone @-ed the operator) and "new-contributor" at once, and the
+    # dashboard surfaces it under every tab it belongs to. ``queue`` is always
+    # ``queues[0]`` when any routing applies. Membership is queried with
+    # :meth:`queue_filter` because SQLite has no JSON-array ``contains``.
     queue = models.CharField(max_length=50, choices=QUEUE_CHOICES, default="review")
+    queues = models.JSONField(default=list, blank=True)
 
     # Shepherding (v2 — §2.3)
     last_shepherded_at = models.DateTimeField(null=True, blank=True)
@@ -259,10 +272,23 @@ class PullRequest(models.Model):
         constraints = [
             models.UniqueConstraint(fields=["project", "number"], name="unique_pr_project_number"),
         ]
-        ordering = ["-interest_score", "-github_updated_at"]
+        ordering = ["-interest_score", "-interest_score_raw", "-github_updated_at"]
 
     def __str__(self) -> str:
         return f"#{self.number} {self.title}"
+
+    @staticmethod
+    def queue_filter(queue: str) -> Q:
+        """A ``Q`` matching rows that belong to *queue*, SQLite-safe.
+
+        Matches membership in the ``queues`` list (JSON array ``contains`` is
+        unsupported on SQLite, so this does a text match on the quoted key),
+        OR the legacy single ``queue`` field so rows routed before ``queues``
+        was populated still appear under their primary tab until the next poll
+        re-routes them. Queue keys come from ``QUEUE_CHOICES`` and never contain
+        a double quote, so the quoted-substring match is unambiguous.
+        """
+        return Q(queues__icontains=f'"{queue}"') | Q(queue=queue)
 
     @property
     def moved_since_approval(self) -> bool:

@@ -42,20 +42,30 @@ def compute_moderation_flags(
     operator_username: str,
     known_authors: list[str] | None = None,
     contributor_evidence_available: bool = False,
+    mentioned_via_comment: bool = False,
 ) -> list[str]:
     """Return flag labels for routing: is_operator_pr, draft, wip_title, bot, large_pr,
-    low_context, new_contributor, needs_tests, likely_unowned."""
+    low_context, new_contributor, needs_tests, likely_unowned.
+
+    ``mentioned_via_comment`` lets the caller add the "mentioned" flag for an
+    operator @-mention in a *comment* (a contributor asking the maintainer to
+    look), which ``is_operator_involved`` deliberately does not read. The caller
+    supplies it from the scorer's ``mentioned_or_assigned`` signal so the
+    "Mentioned" queue and the interest score never disagree about a PR.
+    """
     flags: list[str] = []
     author = str(pr.get("author", ""))
 
     if author and author.lower() == operator_username.lower():
         flags.append("is_operator_pr")
 
-    # Operator personally pulled in: requested reviewer, assignee, or
-    # @-mentioned in the PR body. Independent of is_operator_pr — the shared
-    # predicate (also used by the review-gating policy) never keys off
-    # authorship. Drives the "Mentioned" dashboard queue.
-    if is_operator_involved(
+    # Operator personally pulled in: requested reviewer, assignee, @-mentioned
+    # in the PR body, or (via the caller's flag) @-mentioned in a comment.
+    # Independent of is_operator_pr — the shared predicate (also used by the
+    # review-gating policy) never keys off authorship. Drives the "Mentioned"
+    # dashboard queue. The auto-review gate keeps using is_operator_involved
+    # directly, so a comment mention surfaces the PR without triggering a run.
+    if mentioned_via_comment or is_operator_involved(
         body=str(pr.get("body", "") or ""),
         assignees=_str_list(pr, "assignees"),
         requested_reviewers=_str_list(pr, "requested_reviewers"),

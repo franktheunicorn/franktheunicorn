@@ -509,6 +509,7 @@ def _refresh_pull_request(
         comment_events=comment_events,
     )
     pr_obj.interest_score = score
+    pr_obj.interest_score_raw = sum(breakdown.values())
     pr_obj.score_breakdown = breakdown
     # Marks a completed full refresh — this, not the auto_now updated_at,
     # is what the unchanged-PR skip times against.
@@ -924,11 +925,20 @@ def _route_pr_to_queue(
     # incorrectly flagged as new when the local DB is sparse.
     known_authors = list({*db_authors, *(forge_contributors or [])})
 
+    # The scorer's mentioned_or_assigned signal covers a @-mention in a comment
+    # (a contributor pinging the maintainer), which is_operator_involved does
+    # not read. It is persisted on the row, so both routing entry points — the
+    # full refresh (which just scored) and the batch re-route (which reads the
+    # stored breakdown) — agree with the interest score without re-fetching
+    # comments.
+    mentioned_via_comment = bool((pr_obj.score_breakdown or {}).get("mentioned_or_assigned"))
+
     flags = compute_moderation_flags(
         pr_dict,
         operator_username,
         known_authors,
         contributor_evidence_available,
+        mentioned_via_comment=mentioned_via_comment,
     )
 
     pr_obj.is_operator_pr = "is_operator_pr" in flags
@@ -937,40 +947,45 @@ def _route_pr_to_queue(
     pr_obj.is_low_context = "low_context" in flags
     pr_obj.is_likely_unowned = "likely_unowned" in flags
 
-    # When skip_wip is enabled and the PR is a draft or has a WIP title prefix,
-    # park it in the "wip" queue — it will be re-routed when it graduates.
+    # A PR can belong to several queues at once — @-mentioned *and* from a new
+    # contributor, say — and the dashboard surfaces it under every tab it is in.
+    # queues[0] is the primary (highest-priority) routing decision, preserved as
+    # pr_obj.queue so everything that reads a single queue is unchanged. The
+    # append order below is that priority order.
     skip_wip = project_config is not None and getattr(project_config, "skip_wip", False)
     is_wip = pr_obj.is_draft or "wip_title" in flags
+    queues: list[str] = []
     if skip_wip and is_wip:
-        pr_obj.queue = "wip"
-    # Already approved (or "LGTM pending CI") by an approver: it is waiting on
-    # a merge, not on anybody's review, whatever else is true of it. Ahead of
-    # your-prs too — "merging once CI is green" on the operator's own PR is
-    # the same follow-up.
-    elif pr_obj.merge_intent:
-        pr_obj.queue = "intending-to-merge"
-    # Route to queue based on priority of flags. A PR the operator is
-    # personally pulled into (mentioned/assigned/review-requested) outranks
-    # bot and new-contributor routing, but not the operator's own PRs.
-    elif pr_obj.is_operator_pr:
-        pr_obj.queue = "your-prs"
-    elif pr_obj.is_mentioned:
-        pr_obj.queue = "mentioned"
-    elif pr_obj.likely_ai_generated or "bot" in flags:
-        pr_obj.queue = "ai-generated"
-    elif pr_obj.is_new_contributor:
-        pr_obj.queue = "new-contributor"
-    elif pr_obj.is_likely_unowned:
-        pr_obj.queue = "consider-closing"
-    elif pr_obj.is_low_context:
-        pr_obj.queue = "needs-triage"
+        # Parked: deliberately exclusive. A WIP PR stays out of every other tab
+        # until it graduates, at which point the next poll re-routes it.
+        queues = ["wip"]
     else:
-        pr_obj.queue = "review"
+        # Already approved (or "LGTM pending CI"): waiting on a merge, not on a
+        # review, whatever else is true of it — so it leads the list.
+        if pr_obj.merge_intent:
+            queues.append("intending-to-merge")
+        if pr_obj.is_operator_pr:
+            queues.append("your-prs")
+        if pr_obj.is_mentioned:
+            queues.append("mentioned")
+        if pr_obj.likely_ai_generated or "bot" in flags:
+            queues.append("ai-generated")
+        if pr_obj.is_new_contributor:
+            queues.append("new-contributor")
+        if pr_obj.is_likely_unowned:
+            queues.append("consider-closing")
+        if pr_obj.is_low_context:
+            queues.append("needs-triage")
+        if not queues:
+            queues = ["review"]
+
+    pr_obj.queues = queues
+    pr_obj.queue = queues[0]
 
     logger.debug(
-        "PR #%d routed to queue=%r (flags=%s)",
+        "PR #%d routed to queues=%s (flags=%s)",
         pr_obj.number,
-        pr_obj.queue,
+        ", ".join(queues),
         ", ".join(flags) if flags else "none",
     )
 
@@ -1017,6 +1032,7 @@ def _reroute_pull_requests(
     for pr_obj in pull_requests:
         before = (
             pr_obj.queue,
+            tuple(pr_obj.queues or []),
             pr_obj.is_operator_pr,
             pr_obj.is_new_contributor,
             pr_obj.is_mentioned,
@@ -1032,6 +1048,7 @@ def _reroute_pull_requests(
         )
         after = (
             pr_obj.queue,
+            tuple(pr_obj.queues or []),
             pr_obj.is_operator_pr,
             pr_obj.is_new_contributor,
             pr_obj.is_mentioned,
@@ -1042,6 +1059,7 @@ def _reroute_pull_requests(
             pr_obj.save(
                 update_fields=[
                     "queue",
+                    "queues",
                     "is_operator_pr",
                     "is_new_contributor",
                     "is_mentioned",
@@ -1275,6 +1293,7 @@ def ingest_single_pr(
             comment_events=comment_events,
         )
         pr_obj.interest_score = score
+        pr_obj.interest_score_raw = sum(breakdown.values())
         pr_obj.score_breakdown = breakdown
         if readiness_on:
             reviews = refresh_review_and_ci_state(client, pr_obj, project_config)
