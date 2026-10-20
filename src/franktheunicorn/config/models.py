@@ -2671,7 +2671,12 @@ class ProjectConfig(BaseModel):
         known = {
             "api-misuse",
             "backport",
+            "concurrency",
+            "correctness",
             "coverage",
+            "design",
+            "doc-accuracy",
+            "edge-case",
             "issue-link",
             "malicious-prompt",
             "pr-description",

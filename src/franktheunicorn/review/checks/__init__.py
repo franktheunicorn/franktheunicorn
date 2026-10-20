@@ -52,7 +52,12 @@ def _get_registry() -> dict[str, type[BaseCheck]]:
     """Lazy registry to avoid circular imports at module level."""
     from franktheunicorn.review.checks.api_misuse import APIMisuseCheck
     from franktheunicorn.review.checks.backport import BackportCheck
+    from franktheunicorn.review.checks.concurrency import ConcurrencyCheck
+    from franktheunicorn.review.checks.correctness import CorrectnessCheck
     from franktheunicorn.review.checks.coverage import CoverageCheck
+    from franktheunicorn.review.checks.design import DesignCheck
+    from franktheunicorn.review.checks.doc_accuracy import DocAccuracyCheck
+    from franktheunicorn.review.checks.edge_case import EdgeCaseCheck
     from franktheunicorn.review.checks.issue_link import IssueLinkCheck
     from franktheunicorn.review.checks.malicious_prompt import MaliciousPromptCheck
     from franktheunicorn.review.checks.pr_description import PRDescriptionCheck
@@ -63,7 +68,12 @@ def _get_registry() -> dict[str, type[BaseCheck]]:
     return {
         "api-misuse": APIMisuseCheck,
         "backport": BackportCheck,
+        "concurrency": ConcurrencyCheck,
+        "correctness": CorrectnessCheck,
         "coverage": CoverageCheck,
+        "design": DesignCheck,
+        "doc-accuracy": DocAccuracyCheck,
+        "edge-case": EdgeCaseCheck,
         "issue-link": IssueLinkCheck,
         "malicious-prompt": MaliciousPromptCheck,
         "pr-description": PRDescriptionCheck,
