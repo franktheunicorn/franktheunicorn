@@ -279,6 +279,11 @@ security_model: |
 # LLM sub-checks — each runs a focused prompt and feeds findings through
 # the standard anti-pattern pipeline.  Add or remove as needed.
 llm_checks:
+  - correctness       # logic bugs: wrong result, broken invariant, inverted/off-by-one
+  - concurrency       # memory held across batches, leaks, spill accounting, thread-safety
+  - edge-case         # null / NaN / overflow / boundaries / special values
+  - doc-accuracy      # comments & scaladoc that disagree with the code
+  - design            # a simpler/safer alternative or a cross-cutting impact (rare)
   - coverage          # flags new code paths not covered by new tests
   - security          # scans diff for security anti-patterns
   - security-context  # broadens security scan with CVE-file context

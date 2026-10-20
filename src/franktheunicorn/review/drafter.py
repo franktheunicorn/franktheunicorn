@@ -233,11 +233,15 @@ def _derive_category(title: str) -> str:
     lowered = (title or "").lower()
     for cat in (
         "correctness",
+        "concurrency",
+        "edge-case",
+        "doc-accuracy",
         "style",
         "security-context",
         "security",
         "test-coverage",
         "architectural",
+        "design",
         "naming",
         "suggested-change",
         "moderation",
