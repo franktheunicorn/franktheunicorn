@@ -23,6 +23,7 @@ from franktheunicorn.review.copypasta import (
     _create_drafts,
     _meaningful_lines,
     _read_repo_files,
+    _required_overlap,
     _suppress_noise,
     check_copypasta,
     extract_added_chunks,
@@ -990,6 +991,67 @@ class TestCreateDrafts:
         assert "`utils.py`" in body
         # The location string should be just the filename, not "lines N-N"
         assert "(lines" not in body
+
+    def test_same_basename_reframed_as_move(self, db_pr: PullRequest) -> None:
+        """A match whose source shares the new file's basename reads as a move."""
+        matches = [
+            CopyPastaMatch(
+                source_file="pkg/old/AsyncCommitLog.scala",
+                source_start_line=5,
+                source_end_line=20,
+                new_file="pkg/new/AsyncCommitLog.scala",
+                new_start_line=1,
+                num_lines=15,
+                tier="winnowing",
+            ),
+        ]
+        drafts = _create_drafts(db_pr, matches)
+        assert len(drafts) == 1
+        body = drafts[0].comment_body
+        assert "move or rename" in body
+        # It must NOT give the wrong "extract a shared function" advice.
+        assert "extract a shared" not in body
+        assert "`pkg/old/AsyncCommitLog.scala`" in body
+
+    def test_different_basename_keeps_copy_paste_framing(self, db_pr: PullRequest) -> None:
+        matches = [
+            CopyPastaMatch(
+                source_file="pkg/a/Foo.scala",
+                source_start_line=5,
+                source_end_line=20,
+                new_file="pkg/b/Bar.scala",
+                new_start_line=1,
+                num_lines=15,
+                tier="winnowing",
+            ),
+        ]
+        drafts = _create_drafts(db_pr, matches)
+        assert "move or rename" not in drafts[0].comment_body
+        assert "copy-paste" in drafts[0].comment_body
+
+
+class TestRequiredOverlap:
+    """Directory distance sets the winnowing overlap bar (kills cross-module FPs)."""
+
+    def test_same_directory_uses_low_bar(self) -> None:
+        a = "sql/pipelines/autocdc/Scd1VersionMap.scala"
+        b = "sql/pipelines/autocdc/Scd2BatchProcessor.scala"
+        assert _required_overlap(a, b) == 0.5
+
+    def test_no_shared_module_uses_high_bar(self) -> None:
+        # The Parquet-reader-vs-Ganglia-reporter false positive from live data.
+        a = "sql/core/datasources/parquet/LateMaterializationParquetRecordReader.java"
+        b = "connector/spark-ganglia-lgpl/ganglia/GangliaReporter.java"
+        assert _required_overlap(a, b) == pytest.approx(0.85)
+
+    def test_partial_shared_prefix_scales_between(self) -> None:
+        a = "sql/catalyst/expressions/vectorExpressions.scala"
+        b = "sql/core/avro/AvroUtils.scala"
+        bar = _required_overlap(a, b)
+        assert 0.5 < bar <= 0.85
+
+    def test_root_level_files_same_dir(self) -> None:
+        assert _required_overlap("a.py", "b.py") == 0.5
 
 
 # -- Test end-to-end check_copypasta ----------------------------------------
