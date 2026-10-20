@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import re
 import subprocess
@@ -888,6 +889,26 @@ class TestSuppressNoise:
         )
         assert kept == [real, real]
 
+    def test_winnowing_needs_more_meaningful_lines_than_symilar(self) -> None:
+        """A structural match of only min_lines real lines is idiom, not a copy.
+
+        _REAL_DUPLICATE_BLOCK is 5 meaningful lines: it clears the symilar floor
+        (min_lines) but not the winnowing floor (2 * min_lines).
+        """
+        symilar = _match(_REAL_DUPLICATE_BLOCK)  # tier defaults to symilar
+        kept = _suppress_noise([symilar], {}, min_lines=5, max_repo_occurrences=0)
+        assert kept == [symilar]
+
+        winnow = dataclasses.replace(symilar, tier="winnowing")
+        kept = _suppress_noise([winnow], {}, min_lines=5, max_repo_occurrences=0)
+        assert kept == []
+
+    def test_winnowing_kept_when_enough_real_lines(self) -> None:
+        block = tuple(f"    x{i} = compute(step_{i}, offset_{i})" for i in range(10))
+        winnow = dataclasses.replace(_match(block), tier="winnowing")
+        kept = _suppress_noise([winnow], {}, min_lines=5, max_repo_occurrences=0)
+        assert kept == [winnow]
+
 
 class TestCountFilesContaining:
     def test_counts_only_contiguous_runs(self) -> None:
@@ -1042,16 +1063,30 @@ class TestRequiredOverlap:
         # The Parquet-reader-vs-Ganglia-reporter false positive from live data.
         a = "sql/core/datasources/parquet/LateMaterializationParquetRecordReader.java"
         b = "connector/spark-ganglia-lgpl/ganglia/GangliaReporter.java"
-        assert _required_overlap(a, b) == pytest.approx(0.85)
+        assert _required_overlap(a, b) == pytest.approx(0.9)
 
     def test_partial_shared_prefix_scales_between(self) -> None:
         a = "sql/catalyst/expressions/vectorExpressions.scala"
         b = "sql/core/avro/AvroUtils.scala"
         bar = _required_overlap(a, b)
-        assert 0.5 < bar <= 0.85
+        assert 0.5 < bar <= 0.9
 
     def test_root_level_files_same_dir(self) -> None:
         assert _required_overlap("a.py", "b.py") == 0.5
+
+    def test_configured_same_dir_floor_raises_whole_scale(self) -> None:
+        # Sibling test suites in the same package — the dominant live FP — must
+        # clear the project's raised floor, not the 0.5 default.
+        a = "sql/core/src/test/scala/org/apache/spark/sql/OrcFilterSuite.scala"
+        b = "sql/core/src/test/scala/org/apache/spark/sql/ParquetFilterSuite.scala"
+        assert _required_overlap(a, b, same_dir_min=0.8) == 0.8
+
+    def test_configured_floor_above_cross_dir_collapses_scale(self) -> None:
+        # A same-dir floor above the cross-dir ceiling must not invert the scale:
+        # unrelated files are held at the floor, never below it.
+        a = "sql/core/foo/A.scala"
+        b = "core/bar/B.scala"
+        assert _required_overlap(a, b, same_dir_min=0.95) == 0.95
 
 
 # -- Test end-to-end check_copypasta ----------------------------------------

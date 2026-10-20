@@ -45,9 +45,11 @@ _PR_CHUNK_PREFIX = "pr_chunk:"
 _WINNOW_K = 25  # k-gram size
 _WINNOW_WIN = 4  # window size
 
-# Minimum overlap ratio from copydetect to count as a match, for two files in
-# the *same directory* — where a high structural overlap really is a copy-paste
-# worth flagging.
+# Default minimum overlap ratio from copydetect to count as a match, for two
+# files in the *same directory* — where a high structural overlap really is a
+# copy-paste worth flagging. This is only the fallback: the real floor comes
+# from ``ProjectConfig.copypasta_winnow_min_overlap`` so an idiom-heavy monorepo
+# can demand near-verbatim structure (see that field's docstring).
 _WINNOW_MIN_OVERLAP = 0.5
 
 # Minimum overlap ratio for two files in *different directories*. The winnowing
@@ -58,7 +60,17 @@ _WINNOW_MIN_OVERLAP = 0.5
 # Real cross-module copy-paste is near-identical, so hold it to a much higher
 # bar. Matches whose files share a deeper path prefix are scored between the two
 # thresholds (see :func:`_required_overlap`).
-_WINNOW_CROSS_DIR_MIN_OVERLAP = 0.85
+_WINNOW_CROSS_DIR_MIN_OVERLAP = 0.9
+
+# A winnowing (structural, identifier-normalized) match is much weaker evidence
+# than a symilar (exact-ish line) one: a handful of shared skeleton lines —
+# ``test("…") { withTable(…) { … } }`` — is idiom, not a copy. So on top of the
+# overlap ratio, a winnowing match must leave this many *meaningful* lines after
+# boilerplate stripping, as a multiple of copypasta_min_lines. Symilar matches
+# keep the plain min_lines bar. Observed live on Spark: 100% of winnowing drafts
+# were false positives (sibling test suites, error-class files, config
+# registries), 0 from symilar — the structure collides, the exact text doesn't.
+_WINNOW_MIN_MEANINGFUL_FACTOR = 2
 
 
 class _RepoFingerprints:
@@ -93,19 +105,27 @@ class _RepoFingerprints:
         return live
 
 
-def _required_overlap(new_file: str, source_file: str) -> float:
+def _required_overlap(
+    new_file: str,
+    source_file: str,
+    same_dir_min: float = _WINNOW_MIN_OVERLAP,
+) -> float:
     """Overlap ratio a winnowing match must clear, by how far apart the files are.
 
-    Same directory → :data:`_WINNOW_MIN_OVERLAP`; no shared path at all →
+    Same directory → *same_dir_min* (the project's
+    ``copypasta_winnow_min_overlap``); no shared path at all →
     :data:`_WINNOW_CROSS_DIR_MIN_OVERLAP`; in between, scaled by how much of the
     shallower path the two share. A Parquet reader "duplicating" a Ganglia
     reporter shares no module and must be near-identical to survive; two files in
-    the same package stay at the low bar.
+    the same package stay at the low bar. The cross-dir constant is the ceiling,
+    so a project that raises *same_dir_min* above it collapses the scale to that
+    single higher bar rather than inverting it.
     """
+    cross = max(_WINNOW_CROSS_DIR_MIN_OVERLAP, same_dir_min)
     a = PurePosixPath(new_file).parts[:-1]
     b = PurePosixPath(source_file).parts[:-1]
     if a == b:
-        return _WINNOW_MIN_OVERLAP
+        return same_dir_min
     shared = 0
     for seg_a, seg_b in zip(a, b, strict=False):
         if seg_a != seg_b:
@@ -113,10 +133,7 @@ def _required_overlap(new_file: str, source_file: str) -> float:
         shared += 1
     depth = min(len(a), len(b))
     closeness = shared / depth if depth else 0.0
-    return (
-        _WINNOW_CROSS_DIR_MIN_OVERLAP
-        - (_WINNOW_CROSS_DIR_MIN_OVERLAP - _WINNOW_MIN_OVERLAP) * closeness
-    )
+    return cross - (cross - same_dir_min) * closeness
 
 
 def _fingerprint(path: str, content: str) -> CodeFingerprint | None:
@@ -254,7 +271,12 @@ def check_copypasta(
     unmatched_chunks = [c for c in chunks if (c.file_path, c.start_line) not in matched_chunk_keys]
     if unmatched_chunks:
         cache = _REPO_FINGERPRINTS.setdefault(str(repo_path), _RepoFingerprints())
-        winnow_matches = _check_winnowing(unmatched_chunks, repo_files, cache)
+        winnow_matches = _check_winnowing(
+            unmatched_chunks,
+            repo_files,
+            cache,
+            same_dir_min=project_config.copypasta_winnow_min_overlap,
+        )
         matches.extend(winnow_matches)
 
     # Tier 2: LLM (stub)
@@ -353,12 +375,20 @@ def _suppress_noise(
             continue
 
         meaningful = _meaningful_lines(match.matched_lines, extra_patterns)
-        if len(meaningful) < min_lines:
+        # A structural (winnowing) match is identifier-normalized, so a few
+        # shared skeleton lines is idiom, not a copy; demand more real lines than
+        # for an exact (symilar) match, which is already strong evidence.
+        floor = (
+            _WINNOW_MIN_MEANINGFUL_FACTOR * min_lines if match.tier == "winnowing" else min_lines
+        )
+        if len(meaningful) < floor:
             logger.debug(
-                "copypasta: dropping boilerplate match at %s:%d (%d meaningful line(s))",
+                "copypasta: dropping %s match at %s:%d (%d meaningful line(s) < %d)",
+                match.tier,
                 match.new_file,
                 match.new_start_line,
                 len(meaningful),
+                floor,
             )
             continue
 
@@ -627,6 +657,7 @@ def _check_winnowing(
     chunks: list[CodeChunk],
     repo_files: dict[str, str],
     cache: _RepoFingerprints | None = None,
+    same_dir_min: float = _WINNOW_MIN_OVERLAP,
 ) -> list[CopyPastaMatch]:
     """Tier 1b: Use copydetect's winnowing for fingerprint-based detection."""
     matches: list[CopyPastaMatch] = []
@@ -661,7 +692,9 @@ def _check_winnowing(
             except Exception:
                 continue
 
-            if overlap_tokens > 0 and ratio1 >= _required_overlap(chunk.file_path, path):
+            if overlap_tokens > 0 and ratio1 >= _required_overlap(
+                chunk.file_path, path, same_dir_min
+            ):
                 source_range = _slice_line_range(getattr(repo_fp, "raw_code", ""), repo_slices) or (
                     1,
                     1,
