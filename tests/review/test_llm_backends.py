@@ -209,6 +209,27 @@ class TestCoerceProse:
         assert len(result.findings) == 1
         assert result.findings[0].body == "+1 @author"
 
+    def test_parse_review_drops_bare_token_body(self) -> None:
+        # A weak model echoing a lone identifier / dotted path / call into the
+        # body (observed live: "workerDir") is not a comment — drop it, but keep
+        # real prose that merely contains such tokens.
+        data = {
+            "findings": [
+                {"file_path": "a.scala", "line_number": 1, "title": "t", "body": "workerDir"},
+                {"file_path": "b.scala", "line_number": 2, "title": "t", "body": "self.foo.bar"},
+                {"file_path": "c.scala", "line_number": 3, "title": "t", "body": "stopServer()"},
+                {
+                    "file_path": "d.scala",
+                    "line_number": 4,
+                    "title": "t",
+                    "body": "Should `workerDir` be absolute here?",
+                },
+            ],
+        }
+        result = parse_llm_review(json.dumps(data))
+        assert len(result.findings) == 1
+        assert result.findings[0].body == "Should `workerDir` be absolute here?"
+
 
 class TestParseReview:
     def test_extracts_overall_vibe_and_findings(self) -> None:

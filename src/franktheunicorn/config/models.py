@@ -2629,6 +2629,16 @@ class ProjectConfig(BaseModel):
     # that count as boilerplate on top of the built-in set. A block is only
     # reported if it still has copypasta_min_lines of non-boilerplate left.
     copypasta_ignore_patterns: list[str] = Field(default_factory=list)
+    # Minimum winnowing (structural, identifier-normalized) overlap ratio for a
+    # match between two files in the *same directory* — the lowest bar the tier
+    # uses; cross-directory matches are held higher (see copypasta.py
+    # _required_overlap). The default suited small projects. On a large,
+    # house-styled monorepo (Spark) the structural skeleton of error-class
+    # files, config registries, expression nodes and sibling test suites is
+    # identical by idiom, so 0.5 structural overlap is just "same language
+    # idiom" and the tier ran at ~0% precision. Raise it per project to demand
+    # near-verbatim structure before flagging. Range 0.0 to 1.0.
+    copypasta_winnow_min_overlap: float = 0.5
 
     # v1.75 rejection predictor — opt-in. When enabled, drafts are scored
     # with the per-project sklearn model (training it automatically once
@@ -2753,6 +2763,14 @@ class ProjectConfig(BaseModel):
     def copypasta_max_repo_occurrences_valid(cls, v: int) -> int:
         if v < 0:
             msg = "copypasta_max_repo_occurrences must be >= 0 (0 disables the check)"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("copypasta_winnow_min_overlap")
+    @classmethod
+    def copypasta_winnow_min_overlap_valid(cls, v: float) -> float:
+        if not 0.0 <= v <= 1.0:
+            msg = "copypasta_winnow_min_overlap must be between 0.0 and 1.0"
             raise ValueError(msg)
         return v
 

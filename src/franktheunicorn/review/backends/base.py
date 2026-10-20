@@ -645,10 +645,36 @@ _NONSENSE_BODIES: frozenset[str] = frozenset(
     {"true", "false", "null", "none", "n/a", "na", "{}", "[]", "nil", "undefined"}
 )
 
+#: A lone code token — no whitespace, and carrying an unambiguous code signal:
+#: a dot path, a trailing call, camelCase, or an underscore. This is what a weak
+#: model echoes into a body instead of a sentence ("workerDir", "self.foo",
+#: "stopServer()"). A plain word ("foo", "B") is left alone — it could be a
+#: terse real body — because prose always has a space and these never do.
+_BARE_CODE_TOKEN_RE = re.compile(
+    r"""
+    ^(?=[A-Za-z_])                 # starts like an identifier
+    (?:
+        [\w]*\.[\w.]+              # has a dot path (self.foo.bar)
+      | [\w.]*\(\)                 # or a trailing call (stopServer())
+      | [a-z0-9]+[A-Z][\w]*        # or camelCase (workerDir)
+      | [a-z0-9]+_[\w]*            # or snake_case (worker_dir)
+    )$
+    """,
+    re.VERBOSE,
+)
+
 
 def _is_nonsense_body(text: str) -> bool:
-    """Whether *text* is a bare literal with no review content."""
-    return text.strip().strip("\"'").lower() in _NONSENSE_BODIES
+    """Whether *text* is a bare literal or lone token with no review content.
+
+    A review comment is prose. A body that is a single bare identifier or
+    dotted path with no whitespace ("workerDir", "self.foo.bar") is a stray
+    field the model echoed, not a comment — drop it like the bare literals.
+    """
+    stripped = text.strip().strip("\"'")
+    if stripped.lower() in _NONSENSE_BODIES:
+        return True
+    return len(stripped) < 40 and _BARE_CODE_TOKEN_RE.match(stripped) is not None
 
 
 def parse_llm_review(raw_text: str) -> ReviewResult:

@@ -322,6 +322,13 @@ copypasta_ignore_patterns:
   - "^sc\\.stop\\(\\)$"
   - "^spark\\.stop\\(\\)$"
   - "^self\\.spark\\.stop\\(\\)$"
+# Structural (winnowing) matches are identifier-normalized, so on a codebase
+# written to one house style — Spark's error-class files, config registries,
+# expression nodes and sibling test suites — half the fingerprint overlaps on
+# idiom alone. At the 0.5 default this tier ran at ~0% precision (every draft a
+# false positive); demand near-verbatim structure instead. Same-directory floor;
+# cross-directory matches are held higher still.
+copypasta_winnow_min_overlap: 0.8
 
 # Poll cost control. A PR whose upstream updated_at hasn't moved — and whose
 # title/labels/reviewers/assignees/draft state are unchanged — is skipped
