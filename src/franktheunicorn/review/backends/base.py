@@ -594,6 +594,63 @@ def json_object_candidates(text: str) -> Iterator[str]:
         start = text.rfind("{", 0, start)
 
 
+#: A leading JSON-object-key prefix inside a salvaged body: `"key":` or `key:`.
+_LEADING_KEY_RE = re.compile(r'\s*(?:"(?:[^"\\]|\\.)*"|[\w.]+)\s*:\s*')
+
+
+def _coerce_prose(text: str) -> str:
+    """Unwrap a finding body a weaker model double-encoded as a JSON object.
+
+    ``body`` is meant to be plain prose — the GitHub comment text. Some small
+    or local models ignore that and emit it as a nested object instead, e.g.
+    ``'{"comment": "..."}'``, ``'{"<some code token>": "..."}'``, a key equal
+    to its value, a bare ``'{}'``, or even a syntactically broken
+    ``'{"key": "unterminated prose'``. Left alone, that posts to GitHub as a
+    JSON blob. This salvages the human sentence:
+
+    * a parseable object → its longest string value (``{}`` → ``""``);
+    * an unparseable ``{...}`` → strip the outer brace and a leading ``key:``;
+    * anything else (ordinary prose, which is the common case) → unchanged.
+
+    Mirrors the lenient-parsing stance the rest of this module takes toward
+    model output that narrates instead of returning clean JSON.
+    """
+    s = text.strip()
+    if not s.startswith("{"):
+        return text
+    try:
+        obj = json.loads(s)
+    except json.JSONDecodeError:
+        obj = None
+    if isinstance(obj, dict):
+        values = [v.strip() for v in obj.values() if isinstance(v, str) and v.strip()]
+        return max(values, key=len) if values else ""
+    if obj is not None:
+        # A valid JSON scalar/array that merely looks brace-y: leave it.
+        return text
+    # Unparseable object: strip the wrapper and a leading quoted/bare key.
+    inner = s[1:]
+    if inner.endswith("}"):
+        inner = inner[:-1]
+    inner = _LEADING_KEY_RE.sub("", inner, count=1).strip()
+    inner = inner.strip('"').strip()
+    return inner or text
+
+
+#: Bodies that are a bare literal rather than a comment — a weaker model
+#: occasionally emits ``"true"`` / ``"{}"`` / ``"n/a"`` as a finding body. These
+#: are noise, not review. Kept deliberately tiny and exact so a genuinely short
+#: comment ("+1 @author", "nit: inline this") is never caught.
+_NONSENSE_BODIES: frozenset[str] = frozenset(
+    {"true", "false", "null", "none", "n/a", "na", "{}", "[]", "nil", "undefined"}
+)
+
+
+def _is_nonsense_body(text: str) -> bool:
+    """Whether *text* is a bare literal with no review content."""
+    return text.strip().strip("\"'").lower() in _NONSENSE_BODIES
+
+
 def parse_llm_review(raw_text: str) -> ReviewResult:
     """Parse JSON output from an LLM into a ReviewResult.
 
@@ -646,6 +703,16 @@ def parse_llm_review(raw_text: str) -> ReviewResult:
             if finding.confidence == 0.5 and finding.severity.lower() in SEVERITY_CONFIDENCE:
                 finding.confidence = SEVERITY_CONFIDENCE[finding.severity.lower()]
             finding.severity = finding.severity.lower()
+            # Salvage a body a weaker model double-encoded as JSON.
+            finding.body = _coerce_prose(finding.body)
+            finding.title = _coerce_prose(finding.title)
+            # Drop a finding left with nothing to say (e.g. body was "{}") or
+            # one whose body is a bare literal ("true") — noise, not a review.
+            if (not finding.body.strip() and not finding.title.strip()) or _is_nonsense_body(
+                finding.body
+            ):
+                logger.debug("Skipping empty/nonsense finding after body coercion: %s", item)
+                continue
             findings.append(finding)
         except ValidationError:
             logger.debug("Skipping invalid finding item: %s", item)

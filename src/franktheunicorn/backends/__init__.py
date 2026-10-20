@@ -77,7 +77,9 @@ def _github_rate_limiter() -> GitHubRateLimiter | None:
         return None
 
 
-def make_client(entry: ForgeRegistryEntry, *, pace_requests: bool = True) -> ForgeClient:
+def make_client(
+    entry: ForgeRegistryEntry, *, pace_requests: bool = True, for_posting: bool = False
+) -> ForgeClient:
     """Construct the appropriate ForgeClient for a registry entry.
 
     Gitea and Forgejo share the same underlying API, so both ``type``
@@ -87,12 +89,19 @@ def make_client(entry: ForgeRegistryEntry, *, pace_requests: bool = True) -> For
     Pass ``pace_requests=False`` from a web request: the rate limiter's brake is
     a blocking sleep, which is right for the worker and wrong for a view. Quota
     tracking stays on either way.
+
+    Pass ``for_posting=True`` when the client will write to the forge (post a
+    review, comment, merge). The client is then built with the entry's
+    ``posting_token`` — its ``post_token`` if one is configured, otherwise the
+    same ``token`` used for polling. This lets an operator poll under a
+    high-rate-limit app token and comment under a personal account.
     """
+    token = entry.posting_token if for_posting else entry.token
     if entry.type == "github":
         from franktheunicorn.backends.github import GitHubClient
 
         return GitHubClient(
-            token=entry.token,
+            token=token,
             base_url=entry.base_url,
             rate_limiter=_github_rate_limiter(),
             pace_requests=pace_requests,
@@ -100,10 +109,10 @@ def make_client(entry: ForgeRegistryEntry, *, pace_requests: bool = True) -> For
     if entry.type in ("gitea", "forgejo"):
         from franktheunicorn.backends.gitea import GiteaClient
 
-        return GiteaClient(token=entry.token, base_url=entry.base_url)
+        return GiteaClient(token=token, base_url=entry.base_url)
     if entry.type == "gitlab":
         from franktheunicorn.backends.gitlab import GitLabClient
 
-        return GitLabClient(token=entry.token, base_url=entry.base_url)
+        return GitLabClient(token=token, base_url=entry.base_url)
     msg = f"forge type {entry.type!r} is not yet implemented"
     raise NotImplementedError(msg)

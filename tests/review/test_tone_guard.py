@@ -84,6 +84,85 @@ class TestApplyToneGuard:
         assert result.body == "Original."
         assert rewritten is False
 
+    def test_salvages_json_wrapped_rewrite(self) -> None:
+        # A weaker model wraps the rewrite in a JSON object despite being asked
+        # for plain text; the prose should be salvaged, not posted as a blob.
+        finding = ReviewFinding(body="Bad code.", file_path="test.py", line_number=3)
+        ctx = make_pr_context()
+
+        mock_backend = MagicMock()
+        mock_backend.metered_call.return_value = '{"comment": "Consider refactoring this."}'
+        mock_backend._resolve_api_key.return_value = "key"
+
+        with patch("franktheunicorn.review.backends.get_backend", return_value=mock_backend):
+            from franktheunicorn.config.models import LLMBackendConfig
+
+            config = LLMBackendConfig(provider="stub")
+            result, rewritten = apply_tone_guard(finding, ctx, backend_config=config)
+
+        assert rewritten is True
+        assert result.body == "Consider refactoring this."
+
+    def test_empty_json_object_rewrite_keeps_original(self) -> None:
+        # "{}" salvages to empty, which must fall back to the original body
+        # (and report rewritten=False) rather than blanking the finding.
+        finding = ReviewFinding(body="Original body.", file_path="test.py")
+        ctx = make_pr_context()
+
+        mock_backend = MagicMock()
+        mock_backend.metered_call.return_value = "{}"
+        mock_backend._resolve_api_key.return_value = "key"
+
+        with patch("franktheunicorn.review.backends.get_backend", return_value=mock_backend):
+            from franktheunicorn.config.models import LLMBackendConfig
+
+            config = LLMBackendConfig(provider="stub")
+            result, rewritten = apply_tone_guard(finding, ctx, backend_config=config)
+
+        assert result.body == "Original body."
+        assert rewritten is False
+
+    def test_meta_response_keeps_original(self) -> None:
+        # The model answers conversationally instead of rewriting; the original
+        # (already in-voice) body must be kept, not the meta-response.
+        finding = ReviewFinding(body="This might miss the subqueries.", file_path="a.scala")
+        ctx = make_pr_context()
+
+        mock_backend = MagicMock()
+        mock_backend.metered_call.return_value = (
+            "The user provided a prompt that does not contain a comment to rewrite. "
+            "Please provide the comment you would like me to edit."
+        )
+        mock_backend._resolve_api_key.return_value = "key"
+
+        with patch("franktheunicorn.review.backends.get_backend", return_value=mock_backend):
+            from franktheunicorn.config.models import LLMBackendConfig
+
+            config = LLMBackendConfig(provider="stub")
+            result, rewritten = apply_tone_guard(finding, ctx, backend_config=config)
+
+        assert result.body == "This might miss the subqueries."
+        assert rewritten is False
+
+    def test_please_add_a_test_is_not_meta(self) -> None:
+        # Guard against false positives: a legitimate "please add a test"
+        # comment must survive the meta-response filter.
+        finding = ReviewFinding(body="orig", file_path="a.scala")
+        ctx = make_pr_context()
+
+        mock_backend = MagicMock()
+        mock_backend.metered_call.return_value = "Could you please add a test for the null path?"
+        mock_backend._resolve_api_key.return_value = "key"
+
+        with patch("franktheunicorn.review.backends.get_backend", return_value=mock_backend):
+            from franktheunicorn.config.models import LLMBackendConfig
+
+            config = LLMBackendConfig(provider="stub")
+            result, rewritten = apply_tone_guard(finding, ctx, backend_config=config)
+
+        assert result.body == "Could you please add a test for the null path?"
+        assert rewritten is True
+
 
 class TestApplyToneGuardBatch:
     def test_no_backend_returns_originals(self) -> None:

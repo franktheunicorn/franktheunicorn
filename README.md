@@ -65,7 +65,7 @@ installed, and writes logs under `data/logs/`. Use
 **Make** (manual local development):
 ```bash
 make setup                     # creates venv, installs deps, runs migrations
-make serve                     # dashboard: http://localhost:8000
+make serve                     # dashboard: http://localhost:7742 (falls back to 4242 if busy)
 make worker                    # background PR poller (separate terminal)
 ```
 

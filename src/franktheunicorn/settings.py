@@ -135,6 +135,7 @@ STORAGES = {
 FRANK_OPERATOR_CONFIG: str = str(_resolved["config_path"])
 FRANK_PROJECTS_DIR: str = str(_resolved["projects_dir"])
 FRANK_GITHUB_TOKEN: str = str(_resolved["github_token"])
+FRANK_GITHUB_POST_TOKEN: str = str(_resolved["github_post_token"])
 FRANK_MOCK_MODE: bool = bool(_resolved["mock_mode"])
 FRANK_FIXTURES_DIR: str = str(_resolved["fixtures_dir"])
 FRANK_REPOS_DIR = Path(str(_resolved["repos_dir"]))

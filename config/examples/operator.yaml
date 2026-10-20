@@ -12,7 +12,17 @@
 mock_mode: false
 
 # GitHub personal access token.  Use ${ENV_VAR} to read from environment.
+# This token is used for POLLING (reading PRs, diffs, reviews, CI).
 github_token: "${FRANK_GITHUB_TOKEN}"
+
+# Optional separate token for POSTING (reviews, comments, LGTM/rebase nudges,
+# merges). Leave unset to post with github_token. Set it when the account that
+# reads PRs and the account that comments are deliberately different — e.g. a
+# high-rate-limit app/bot token for polling and a personal OAuth token so
+# comments post under your own identity. Carried into the default github forge
+# entry's post_token; a multi-forge `forges:` entry can set `post_token:`
+# directly instead.
+# github_post_token: "${GITHUB_OAUTH_KEY}"
 
 # Directory for persistent state (SQLite database, repos, etc.).
 # Leave empty to use the default (./data).

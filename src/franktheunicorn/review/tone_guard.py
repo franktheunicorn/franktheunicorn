@@ -61,6 +61,29 @@ def _build_tone_prompt(
     )
 
 
+#: Phrases that mean the model answered the rewrite prompt as a chat turn
+#: instead of rewriting the comment. Deliberately specific — these do not occur
+#: in a genuine code-review comment, so matching them avoids false positives on
+#: real findings (e.g. "please add a test" must NOT trip this).
+_META_RESPONSE_MARKERS: tuple[str, ...] = (
+    "does not contain a comment to rewrite",
+    "no comment to rewrite",
+    "provide the comment you",
+    "please provide the comment",
+    "the user provided a prompt",
+    "i need the comment",
+    "there is no comment",
+    "no comment was provided",
+    "as an ai language model",
+)
+
+
+def _looks_like_meta_response(text: str) -> bool:
+    """Whether *text* is the model talking about the task instead of doing it."""
+    low = text.lower()
+    return any(marker in low for marker in _META_RESPONSE_MARKERS)
+
+
 def apply_tone_guard(
     finding: ReviewFinding,
     pr_context: PRContext,
@@ -111,8 +134,22 @@ def apply_tone_guard(
         logger.warning("Tone guard LLM call failed; returning original finding.", exc_info=True)
         return finding, False
 
-    rewritten = rewritten.strip()
-    if not rewritten:
+    # A weaker model ignores "return ONLY the text" and wraps the rewrite in a
+    # JSON object ({"comment": "..."}) or returns "{}". Salvage the prose; if
+    # nothing survives, keep the original body rather than posting a blob.
+    from franktheunicorn.review.backends.base import _coerce_prose, _is_nonsense_body
+
+    rewritten = _coerce_prose(rewritten.strip()).strip()
+    if not rewritten or _is_nonsense_body(rewritten):
+        return finding, False
+
+    # A weaker model sometimes answers the rewrite prompt conversationally
+    # ("The user provided a prompt that does not contain a comment to rewrite.
+    # Please provide the comment…") instead of rewriting. That meta-response is
+    # not a review comment; keep the original body, which already carries the
+    # operator's voice from the main review prompt.
+    if _looks_like_meta_response(rewritten):
+        logger.debug("Tone guard returned a meta/non-rewrite response; keeping original body.")
         return finding, False
 
     return ReviewFinding(

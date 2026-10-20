@@ -50,8 +50,8 @@ magpie-sync: venv ## Re-fetch the pinned Apache Magpie commit and regenerate ven
 
 check: lint typecheck check-migrations magpie-check test ## Run all checks (lint + typecheck + test)
 
-serve: venv migrate ## Start Django dev server
-	$(PYTHON) manage.py runserver
+serve: venv migrate ## Start Django dev server (port 7742, falls back to 4242)
+	$(PYTHON) manage.py serve
 
 worker: venv ## Start background worker (log level from operator.yaml or FRANK_LOG_LEVEL)
 	$(PYTHON) -m franktheunicorn.worker.runner
