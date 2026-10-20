@@ -459,6 +459,9 @@ merge_readiness:
   require_ci: true              # unknown CI counts as not ready
   require_committer_approval: false
   lgtm_body: "LGTM"
+  # CI-failure analysis for merge candidates (scoring/ci_analysis.py):
+  ci_analysis: true             # Layer 1: compare failing checks to the base branch (cheap)
+  ci_analysis_llm: false        # Layer 2: LLM reads each unexplained failure (flake vs real); opt-in
   # rebase_request_template: "Hi @{author}, ... {checks} ... `{base_branch}` ..."
 
 # Merge queue — track and merge PRs meeting configurable criteria
