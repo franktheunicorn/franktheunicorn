@@ -890,7 +890,9 @@ def _make_posting_client(pr: PullRequest) -> object | None:
         forge_name = getattr(project_config, "forge", None) or "github"
         entry = get_forge_entry(operator_config, forge_name)
         # A view: track quota, but never block the operator's click on it.
-        return make_client(entry, pace_requests=False)
+        # for_posting=True so the write uses the forge's posting credential
+        # (its post_token if configured, else its polling token).
+        return make_client(entry, pace_requests=False, for_posting=True)
     except Exception:
         logger.debug(
             "Forge resolution failed for %s; falling back to GitHub client.",
@@ -901,7 +903,11 @@ def _make_posting_client(pr: PullRequest) -> object | None:
 
         from franktheunicorn.backends.github import GitHubClient
 
-        token = getattr(settings, "FRANK_GITHUB_TOKEN", "")
+        # Posting token if one is configured, else the polling token — same
+        # fallback order as ForgeRegistryEntry.posting_token.
+        token = getattr(settings, "FRANK_GITHUB_POST_TOKEN", "") or getattr(
+            settings, "FRANK_GITHUB_TOKEN", ""
+        )
         if not token:
             return None
         return GitHubClient(token=token)

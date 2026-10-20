@@ -45,7 +45,35 @@ def _finding_schema() -> str:
         ' Always include "overall_vibe" with at least one sentence.\n'
         'Leave "suggestion" as "". That field is posted as a GitHub suggestion '
         "block and replaces the commented lines verbatim. Put the direction in "
-        '"body" instead.'
+        '"body" instead.\n\n'
+        '"body" is the GitHub comment text itself: plain markdown prose, written '
+        "exactly as you would type it into the PR comment box. It is NOT a nested "
+        "JSON object, NOT a key/value pair, and NOT a restatement of the diff. "
+        "Do not wrap it in braces or quote it as JSON.\n\n"
+        "Example of a well-formed response:\n"
+        + json.dumps(
+            {
+                "overall_vibe": (
+                    "Solid fix and the guard looks right. One question on the null path."
+                ),
+                "findings": [
+                    {
+                        "file_path": "sql/core/src/main/scala/org/apache/spark/sql/Foo.scala",
+                        "line_number": 283,
+                        "title": "Subqueries may not be awaited",
+                        "body": (
+                            "If we don't register these in `runningSubqueries`, "
+                            "`waitForSubqueries` might not wait for them — was that "
+                            "intentional?"
+                        ),
+                        "suggestion": "",
+                        "severity": "important",
+                        "confidence": 0.7,
+                    }
+                ],
+            },
+            indent=2,
+        )
     )
 
 

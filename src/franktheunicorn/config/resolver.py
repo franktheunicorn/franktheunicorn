@@ -95,6 +95,7 @@ def resolve_config(base_dir: Path) -> tuple[OperatorConfig, dict[str, str | int 
         "mock_mode": oc.mock_mode,
         "data_dir": oc.data_dir or str(base_dir / "data"),
         "github_token": oc.github_token,
+        "github_post_token": oc.github_post_token,
         "fixtures_dir": oc.fixtures_dir or str(base_dir / "config" / "fixtures"),
         "repos_dir": oc.repos_dir or str(base_dir / "data" / "repos"),
         "projects_dir": _resolve_projects_dir(base_dir, oc),

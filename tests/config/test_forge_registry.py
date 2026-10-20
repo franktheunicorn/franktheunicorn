@@ -50,6 +50,14 @@ class TestForgeRegistryEntry:
         )
         assert entry.base_url == "https://git.work.example"
 
+    def test_posting_token_falls_back_to_token(self) -> None:
+        entry = ForgeRegistryEntry(name="gh", type="github", token="poll")
+        assert entry.posting_token == "poll"
+
+    def test_posting_token_prefers_post_token(self) -> None:
+        entry = ForgeRegistryEntry(name="gh", type="github", token="poll", post_token="post")
+        assert entry.posting_token == "post"
+
 
 class TestSynthesizeDefaultForge:
     def test_legacy_github_token_creates_github_entry(self) -> None:
@@ -61,6 +69,21 @@ class TestSynthesizeDefaultForge:
         assert entry.token == "ghp_abc123"
         assert entry.username == "alice"
         assert entry.base_url == "https://api.github.com"
+
+    def test_github_post_token_carried_into_entry(self) -> None:
+        oc = OperatorConfig(
+            github_token="ghp_poll", github_post_token="ghp_post", github_username="alice"
+        )
+        entry = oc.forges[0]
+        assert entry.token == "ghp_poll"
+        assert entry.post_token == "ghp_post"
+        assert entry.posting_token == "ghp_post"
+
+    def test_post_token_empty_falls_back_to_poll_token(self) -> None:
+        oc = OperatorConfig(github_token="ghp_poll")
+        entry = oc.forges[0]
+        assert entry.post_token == ""
+        assert entry.posting_token == "ghp_poll"
 
     def test_no_synthesis_when_token_empty(self) -> None:
         oc = OperatorConfig()
@@ -196,5 +219,29 @@ class TestMakeClientFactory:
         client = make_client(entry)
         try:
             assert isinstance(client, GitLabClient)
+        finally:
+            client.close()
+
+    def test_default_uses_polling_token(self) -> None:
+        entry = ForgeRegistryEntry(name="gh", type="github", token="poll", post_token="post")
+        client = make_client(entry)
+        try:
+            assert client._client.headers["Authorization"] == "Bearer poll"  # type: ignore[attr-defined]
+        finally:
+            client.close()
+
+    def test_for_posting_uses_post_token(self) -> None:
+        entry = ForgeRegistryEntry(name="gh", type="github", token="poll", post_token="post")
+        client = make_client(entry, for_posting=True)
+        try:
+            assert client._client.headers["Authorization"] == "Bearer post"  # type: ignore[attr-defined]
+        finally:
+            client.close()
+
+    def test_for_posting_falls_back_to_polling_token(self) -> None:
+        entry = ForgeRegistryEntry(name="gh", type="github", token="poll")
+        client = make_client(entry, for_posting=True)
+        try:
+            assert client._client.headers["Authorization"] == "Bearer poll"  # type: ignore[attr-defined]
         finally:
             client.close()

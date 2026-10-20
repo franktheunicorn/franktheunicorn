@@ -2007,7 +2007,20 @@ class ForgeRegistryEntry(BaseModel):
     type: str = "github"
     base_url: str = ""
     token: str = ""
+    #: Optional separate credential for *posting* (reviews, comments, merges)
+    #: as opposed to polling. Empty falls back to ``token``, so a single-token
+    #: setup needs nothing here. Set it (via ``${ENV_VAR}``) when the account
+    #: that reads PRs and the account that comments are deliberately different
+    #: — e.g. a high-rate-limit app token for polling and a personal OAuth
+    #: token for comments so they post under the operator's identity.
+    post_token: str = ""
     username: str = ""
+
+    @property
+    def posting_token(self) -> str:
+        """The credential to use when writing to the forge: ``post_token`` if
+        set, otherwise ``token``."""
+        return self.post_token or self.token
 
     @field_validator("name")
     @classmethod
@@ -2135,6 +2148,12 @@ class OperatorConfig(BaseModel):
     repos_dir: str = ""  # empty = default (data/repos)
     projects_dir: str = ""  # empty = default (config/active/projects)
     github_token: str = ""  # typically "${FRANK_GITHUB_TOKEN}"
+    #: Optional separate credential for posting (reviews, comments, merges).
+    #: Empty falls back to ``github_token``. Carried into the synthesized
+    #: default ``github`` forge entry's ``post_token`` (see ForgeRegistryEntry),
+    #: so a single-GitHub operator can split polling from posting without
+    #: writing a full ``forges:`` block. Use ``${ENV_VAR}`` for the value.
+    github_post_token: str = ""
     email: EmailConfig = Field(default_factory=EmailConfig)
 
     # Multi-forge registry. Each entry is a named forge instance (a GitHub
@@ -2256,6 +2275,7 @@ class OperatorConfig(BaseModel):
                     type="github",
                     base_url=_DEFAULT_FORGE_BASE_URLS["github"],
                     token=self.github_token,
+                    post_token=self.github_post_token,
                     username=self.github_username,
                 )
             ]

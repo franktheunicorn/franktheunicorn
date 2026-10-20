@@ -132,6 +132,84 @@ class TestParseResponse:
         assert findings[0].confidence == 0.75
 
 
+class TestCoerceProse:
+    """A weaker model sometimes double-encodes the body as a JSON object;
+    the parser should salvage the human sentence."""
+
+    def test_plain_prose_unchanged(self) -> None:
+        from franktheunicorn.review.backends.base import _coerce_prose
+
+        text = "If we don't register these, waitForSubqueries won't wait for them."
+        assert _coerce_prose(text) == text
+
+    def test_object_with_comment_key(self) -> None:
+        from franktheunicorn.review.backends.base import _coerce_prose
+
+        assert _coerce_prose('{"comment": "This config is marked internal."}') == (
+            "This config is marked internal."
+        )
+
+    def test_object_longest_value_wins(self) -> None:
+        from franktheunicorn.review.backends.base import _coerce_prose
+
+        out = _coerce_prose('{"k": "short", "v": "the much longer real sentence here"}')
+        assert out == "the much longer real sentence here"
+
+    def test_empty_object_becomes_empty(self) -> None:
+        from franktheunicorn.review.backends.base import _coerce_prose
+
+        assert _coerce_prose("{}") == ""
+
+    def test_malformed_unterminated_object_salvaged(self) -> None:
+        from franktheunicorn.review.backends.base import _coerce_prose
+
+        # Observed real shape: a code-token key, value with no closing quote/brace.
+        raw = '{ "isFileTypeEnabled" : "Is this the standard way to gate these checks?'
+        assert _coerce_prose(raw) == "Is this the standard way to gate these checks?"
+
+    def test_non_brace_scalar_unchanged(self) -> None:
+        from franktheunicorn.review.backends.base import _coerce_prose
+
+        assert _coerce_prose("nit: inline this helper") == "nit: inline this helper"
+
+    def test_parse_review_salvages_json_body(self) -> None:
+        data = {
+            "findings": [
+                {
+                    "file_path": "a.scala",
+                    "line_number": 10,
+                    "title": "T",
+                    "body": '{"comment": "Should this wait for the subqueries?"}',
+                    "severity": "important",
+                },
+            ],
+        }
+        result = parse_llm_review(json.dumps(data))
+        assert len(result.findings) == 1
+        assert result.findings[0].body == "Should this wait for the subqueries?"
+
+    def test_parse_review_drops_empty_object_body(self) -> None:
+        data = {
+            "findings": [
+                {"file_path": "a.scala", "line_number": 1, "title": "", "body": "{}"},
+            ],
+        }
+        result = parse_llm_review(json.dumps(data))
+        assert result.findings == []
+
+    def test_parse_review_drops_bare_literal_body(self) -> None:
+        data = {
+            "findings": [
+                {"file_path": "a.scala", "line_number": 1, "title": "x", "body": "true"},
+                {"file_path": "b.scala", "line_number": 2, "title": "y", "body": "+1 @author"},
+            ],
+        }
+        result = parse_llm_review(json.dumps(data))
+        # "true" dropped as nonsense; the short-but-real "+1 @author" survives.
+        assert len(result.findings) == 1
+        assert result.findings[0].body == "+1 @author"
+
+
 class TestParseReview:
     def test_extracts_overall_vibe_and_findings(self) -> None:
         data = {

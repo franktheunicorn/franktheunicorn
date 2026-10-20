@@ -401,3 +401,125 @@ class TestFineTuneCommand:
     def test_nonexistent_project(self) -> None:
         with pytest.raises(Exception, match="not found"):
             call_command("fine_tune", "--project=nonexistent/project")
+
+
+class TestServeCommand:
+    """Port selection for the `serve` dev-server wrapper."""
+
+    def test_is_port_free_true_for_unbound(self) -> None:
+        import socket
+
+        from franktheunicorn.core.management.commands.serve import is_port_free
+
+        # Grab an ephemeral port, close it, then assert it reads as free.
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        assert is_port_free("127.0.0.1", port) is True
+
+    def test_is_port_free_false_for_bound(self) -> None:
+        import socket
+
+        from franktheunicorn.core.management.commands.serve import is_port_free
+
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", 0))
+        s.listen(1)
+        port = s.getsockname()[1]
+        try:
+            assert is_port_free("127.0.0.1", port) is False
+        finally:
+            s.close()
+
+    def test_choose_port_prefers_preferred_when_free(self) -> None:
+        from franktheunicorn.core.management.commands import serve
+
+        with patch.object(serve, "is_port_free", return_value=True):
+            port, status = serve.choose_port("127.0.0.1")
+        assert port == serve.PREFERRED_PORT
+        assert status == "preferred"
+
+    def test_choose_port_falls_back_when_preferred_busy(self) -> None:
+        from franktheunicorn.core.management.commands import serve
+
+        # Preferred busy, fallback free.
+        def _free(host: str, port: int) -> bool:
+            return port == serve.FALLBACK_PORT
+
+        with patch.object(serve, "is_port_free", side_effect=_free):
+            port, status = serve.choose_port("127.0.0.1")
+        assert port == serve.FALLBACK_PORT
+        assert status == "fallback"
+
+    def test_choose_port_both_busy(self) -> None:
+        from franktheunicorn.core.management.commands import serve
+
+        with patch.object(serve, "is_port_free", return_value=False):
+            port, status = serve.choose_port("127.0.0.1")
+        assert port == serve.FALLBACK_PORT
+        assert status == "both-busy"
+
+    def test_command_auto_picks_preferred_and_runs(self) -> None:
+        from franktheunicorn.core.management.commands import serve
+
+        out = StringIO()
+        with (
+            patch.object(serve, "is_port_free", return_value=True),
+            patch.dict("os.environ", {}, clear=False) as env,
+            patch("franktheunicorn.core.management.commands.serve.call_command") as mock_run,
+        ):
+            env.pop("FRANK_SERVE_RESOLVED_PORT", None)
+            call_command("serve", stdout=out)
+        mock_run.assert_called_once_with("runserver", f"127.0.0.1:{serve.PREFERRED_PORT}")
+        assert str(serve.PREFERRED_PORT) in out.getvalue()
+
+    def test_command_prints_fallback(self) -> None:
+        from franktheunicorn.core.management.commands import serve
+
+        def _free(host: str, port: int) -> bool:
+            return port == serve.FALLBACK_PORT
+
+        out = StringIO()
+        with (
+            patch.object(serve, "is_port_free", side_effect=_free),
+            patch.dict("os.environ", {}, clear=False) as env,
+            patch("franktheunicorn.core.management.commands.serve.call_command") as mock_run,
+        ):
+            env.pop("FRANK_SERVE_RESOLVED_PORT", None)
+            call_command("serve", stdout=out)
+        assert f"{serve.PREFERRED_PORT} is in use" in out.getvalue()
+        mock_run.assert_called_once_with("runserver", f"127.0.0.1:{serve.FALLBACK_PORT}")
+
+    def test_explicit_port_skips_fallback(self) -> None:
+        out = StringIO()
+        with patch("franktheunicorn.core.management.commands.serve.call_command") as mock_run:
+            call_command("serve", "9000", stdout=out)
+        mock_run.assert_called_once_with("runserver", "9000")
+
+    def test_bare_host_keeps_autopick(self) -> None:
+        from franktheunicorn.core.management.commands import serve
+
+        out = StringIO()
+        with (
+            patch.object(serve, "is_port_free", return_value=True),
+            patch.dict("os.environ", {}, clear=False) as env,
+            patch("franktheunicorn.core.management.commands.serve.call_command") as mock_run,
+        ):
+            env.pop("FRANK_SERVE_RESOLVED_PORT", None)
+            call_command("serve", "0.0.0.0", stdout=out)
+        mock_run.assert_called_once_with("runserver", f"0.0.0.0:{serve.PREFERRED_PORT}")
+
+    def test_reloader_reuses_resolved_port(self) -> None:
+        from franktheunicorn.core.management.commands import serve
+
+        out = StringIO()
+        with (
+            patch.object(serve, "is_port_free", return_value=True) as mock_free,
+            patch.dict("os.environ", {"FRANK_SERVE_RESOLVED_PORT": "4242"}, clear=False),
+            patch("franktheunicorn.core.management.commands.serve.call_command") as mock_run,
+        ):
+            call_command("serve", stdout=out)
+        # Reuses the env port without re-probing.
+        mock_free.assert_not_called()
+        mock_run.assert_called_once_with("runserver", "127.0.0.1:4242")

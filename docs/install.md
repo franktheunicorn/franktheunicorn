@@ -116,7 +116,7 @@ make setup    # creates venv, installs deps, runs migrations
 Then start both services (in separate terminals, or use a multiplexer):
 
 ```bash
-make serve    # terminal 1 — dashboard at http://localhost:8000
+make serve    # terminal 1 — dashboard at http://localhost:7742 (falls back to 4242 if busy)
 make worker   # terminal 2 — background poller
 ```
 

@@ -692,14 +692,19 @@ class TestWorkspace:
         assert response.status_code == 200
 
     def test_post_review_no_token(self, client: Client, db_pr: PullRequest) -> None:
+        from unittest.mock import patch
+
         ReviewDraftFactory(
             pull_request=db_pr,
             status="accepted",
             comment_body="Post me.",
         )
-        response = client.post(f"/pr/{db_pr.pk}/post/")
+        # No forge client resolvable (no token configured): the view should
+        # say "Cannot post". Patched explicitly so the assertion holds even on
+        # a machine where frank is configured with real posting credentials.
+        with patch("franktheunicorn.dashboard.views._make_posting_client", return_value=None):
+            response = client.post(f"/pr/{db_pr.pk}/post/")
         assert response.status_code == 200
-        # Token not configured so should say "Cannot post"
         assert b"Cannot post" in response.content or b"No approved" in response.content
 
 
@@ -1270,7 +1275,10 @@ class TestRecallAndPostWithMock:
             posted_at=datetime.now(tz=UTC),
         )
 
-        with patch("django.conf.settings.FRANK_GITHUB_TOKEN", "", create=True):
+        # No forge client resolvable (no token configured). Patched explicitly
+        # so the assertion holds even on a machine where frank is configured
+        # with real posting credentials.
+        with patch("franktheunicorn.dashboard.views._make_posting_client", return_value=None):
             response = client.post(f"/draft/{draft.pk}/recall/")
 
         assert response.status_code == 200
