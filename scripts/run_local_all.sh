@@ -15,11 +15,18 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
 
 APP_NAME="franktheunicorn"
-WEB_URL="http://localhost:7742/"
-WEB_BIND="0.0.0.0:7742"
+# gunicorn (unlike `manage.py serve`) has no port fallback of its own, so the
+# bind is resolved at start time by resolve_web_bind(), mirroring serve.py's
+# 7742->4242 choice. These are the defaults / overrides it works from.
+WEB_HOST="${FRANK_WEB_HOST:-0.0.0.0}"
+PREFERRED_PORT="${FRANK_WEB_PORT:-7742}"
+FALLBACK_PORT="${FRANK_WEB_FALLBACK_PORT:-4242}"
+WEB_BIND="${WEB_HOST}:${PREFERRED_PORT}"
+WEB_URL="http://localhost:${PREFERRED_PORT}/"
 RUN_DIR="${REPO_ROOT}/data/run"
 LOG_DIR="${REPO_ROOT}/data/logs"
 BACKEND_FILE="${RUN_DIR}/local_all.backend"
+WEB_URL_FILE="${RUN_DIR}/local_all.web_url"
 
 SERVICES=("web" "worker")
 
@@ -57,6 +64,60 @@ python_cmd() {
     else
         printf '%s\n' "python3"
     fi
+}
+
+# Pick the web port the way `manage.py serve` does: PREFERRED_PORT if free,
+# else FALLBACK_PORT, else FALLBACK_PORT anyway (let gunicorn surface the real
+# bind error). Single-sources the choice through serve.choose_port so the two
+# start paths can't drift. Sets WEB_BIND/WEB_URL and persists the URL so a
+# later `status` reports the port we actually bound, not the preferred one.
+resolve_web_bind() {
+    local py probe port status
+    py="$(python_cmd)"
+    if probe="$("${py}" - "${WEB_HOST}" "${PREFERRED_PORT}" "${FALLBACK_PORT}" <<'PY'
+import sys
+
+from franktheunicorn.core.management.commands.serve import choose_port
+
+host, preferred, fallback = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+port, status = choose_port(host, preferred, fallback)
+print(f"{port} {status}")
+PY
+    )"; then
+        port="${probe%% *}"
+        status="${probe##* }"
+    else
+        warn "could not probe ports; using ${WEB_HOST}:${PREFERRED_PORT}"
+        port="${PREFERRED_PORT}"
+        status="preferred"
+    fi
+
+    case "${status}" in
+        fallback)
+            warn "port ${PREFERRED_PORT} is in use; falling back to ${port}"
+            ;;
+        both-busy)
+            warn "ports ${PREFERRED_PORT} and ${FALLBACK_PORT} both look in use; trying ${port} anyway"
+            ;;
+    esac
+
+    WEB_BIND="${WEB_HOST}:${port}"
+    WEB_URL="http://localhost:${port}/"
+    printf '%s\n' "${WEB_URL}" > "${WEB_URL_FILE}" 2>/dev/null || true
+}
+
+# For commands that don't start web (status/an up that finds web already
+# running): reuse the URL the starting run persisted, so we report the live
+# port rather than the preferred one.
+load_persisted_web_url() {
+    [ -f "${WEB_URL_FILE}" ] || return 0
+    local url port
+    url="$(cat "${WEB_URL_FILE}" 2>/dev/null || true)"
+    [ -n "${url}" ] || return 0
+    WEB_URL="${url}"
+    port="${url##*:}"
+    port="${port%%/*}"
+    [ -n "${port}" ] && WEB_BIND="${WEB_HOST}:${port}"
 }
 
 load_env() {
@@ -446,8 +507,10 @@ cmd_up() {
     if ! service_running web; then
         bootstrap "${py}"
         started_web="true"
+        resolve_web_bind
     else
         info "web: already running; skipping bootstrap"
+        load_persisted_web_url
     fi
 
     start_service web "${backend}" "${py}"
@@ -472,11 +535,12 @@ cmd_down() {
     for service in worker web; do
         stop_service "${service}"
     done
-    rm -f "${BACKEND_FILE}"
+    rm -f "${BACKEND_FILE}" "${WEB_URL_FILE}"
 }
 
 cmd_status() {
     ensure_dirs
+    load_persisted_web_url
     for service in "${SERVICES[@]}"; do
         print_status_line "${service}"
     done

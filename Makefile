@@ -67,7 +67,7 @@ worker-debug: venv ## Start background worker with DEBUG logging
 migrate: venv ## Run database migrations
 	$(PYTHON) manage.py migrate
 
-up: ## Start web + worker locally without Docker
+up: ## Start web + worker locally without Docker (port 7742, falls back to 4242)
 	./scripts/run_local_all.sh up
 
 down: ## Stop local web + worker started by make up
