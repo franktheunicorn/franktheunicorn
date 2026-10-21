@@ -1316,7 +1316,6 @@ def merge_pr(request: HttpRequest, pr_id: int) -> HttpResponse:
     """Execute a merge for a PR."""
     from django.conf import settings
 
-    from franktheunicorn.backends.github import GitHubClient
     from franktheunicorn.config.loader import load_project_configs
     from franktheunicorn.worker.merge_queue import evaluate_merge_eligibility, execute_merge
 
@@ -1340,17 +1339,19 @@ def merge_pr(request: HttpRequest, pr_id: int) -> HttpResponse:
             f"PR is no longer eligible for merge: {eligibility.details}</div>"
         )
 
-    token = getattr(settings, "FRANK_GITHUB_TOKEN", "")
-    if not token:
+    # Use the project's posting credential (post_token if configured, else the
+    # polling token), the same client the review and rebase writes use. Building
+    # a client straight from FRANK_GITHUB_TOKEN fails the merge in a split-token
+    # setup where the polling token is read-only.
+    github_client = _make_posting_client(pr)
+    if github_client is None:
         return HttpResponse(
-            '<div class="merge-result error-note">Cannot merge: GITHUB_TOKEN not configured.</div>'
+            '<div class="merge-result error-note">Cannot merge: no posting token configured.</div>'
         )
-
-    github_client = GitHubClient(token=token)
     try:
         result = execute_merge(pr, pc.merge_queue, github_client=github_client)
     finally:
-        github_client.close()
+        github_client.close()  # type: ignore[attr-defined]
 
     if result.success:
         try:
