@@ -1189,7 +1189,19 @@ class TestCredentialDetectionIntegration:
         ]
         with (
             patch("builtins.input", side_effect=inputs),
-            patch.dict("os.environ", {"ANTHROPIC_API_KEY": "sk-ant-test123"}, clear=False),
+            patch.dict(
+                "os.environ",
+                {
+                    "ANTHROPIC_API_KEY": "sk-ant-test123",
+                    # This test asserts the auto-detected default provider, so it
+                    # must see ONLY Anthropic — scrub competing provider keys a
+                    # developer or CI may have exported. The wizard reads these
+                    # with os.environ.get(), so "" is indistinguishable from unset.
+                    "OPENAI_API_KEY": "",
+                    "GOOGLE_API_KEY": "",
+                },
+                clear=False,
+            ),
             _NO_DISCOVERY,
         ):
             call_command("setup_llm", output=str(output_path))
