@@ -677,6 +677,60 @@ def _is_nonsense_body(text: str) -> bool:
     return len(stripped) < 40 and _BARE_CODE_TOKEN_RE.match(stripped) is not None
 
 
+#: A finding that asks for a change, raises a concern, or poses a question. The
+#: presence of any of these is what separates a real review comment from pure
+#: praise, so a body that matches here is NEVER treated as an affirmation even
+#: when it also says something nice ("looks good, but could leak on the error
+#: path"). Kept broad on purpose — a false negative here only lets one more
+#: affirmation through, while a false positive would drop a real finding.
+_CHANGE_SIGNAL_RE = re.compile(
+    r"\b(should|shouldn't|could|would|consider|instead|rather|"
+    r"needs?\s+(?:to|a|an|the|more|some|additional|better)|"
+    r"missing|miss|misses|lacks?|lacking|add|adding|remove|removing|rename|"
+    r"drop|fix|avoid|prefer|unless|but|however|though|although|wrong|"
+    r"incorrect|bug|leak|leaks|unsafe|race|deadlock|overflow|npe|risk|"
+    r"concern|suggest|recommend|why|what if|not sure|unclear|todo|nit)\b",
+    re.IGNORECASE,
+)
+
+#: Praise / "no change requested" phrasing. The review prompt forbids a finding
+#: that only confirms the code is correct, but a weaker model emits them anyway
+#: ("This looks solid.", "The finally block correctly releases the connection.",
+#: "This is what we need."). A prose instruction alone does not hold on a small
+#: model, so this is the deterministic backstop; the judge carries the same rule
+#: in words for the cases a regex cannot see.
+_AFFIRMATION_RE = re.compile(
+    r"\b("
+    r"looks?\s+(good|solid|right|correct|fine|great|reasonable|clean)"
+    r"|lgtm"
+    r"|this (is|looks) (exactly )?(what|how) (we|you) (need|want|do)"
+    r"|this is (good|correct|fine|right|solid|what we need)"
+    r"|(correctly|properly|safely)\s+\w+s\b"
+    r"|nicely done|well done|good (catch|call|job|idea)"
+    r"|makes sense|seems (fine|correct|right|good|reasonable)"
+    r"|no (issues?|concerns?|problems?)( here)?"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _is_affirmation_body(text: str) -> bool:
+    """Whether *text* only confirms/praises the code and asks for nothing.
+
+    A review comment must raise something — a concern, a question, or a change.
+    A body that poses no question, names no change, and matches a praise pattern
+    is an affirmation; approval belongs in ``overall_vibe``, not a line comment.
+    Conservative by construction: a "?" or any change signal short-circuits to
+    False, so a finding that also asks for something is never dropped.
+    """
+    s = text.strip()
+    if not s or "?" in s:
+        return False
+    if _CHANGE_SIGNAL_RE.search(s):
+        return False
+    return _AFFIRMATION_RE.search(s) is not None
+
+
 def parse_llm_review(raw_text: str) -> ReviewResult:
     """Parse JSON output from an LLM into a ReviewResult.
 
@@ -724,9 +778,14 @@ def parse_llm_review(raw_text: str) -> ReviewResult:
             continue
         try:
             finding = ReviewFinding(**item)
-            # Use severity-based confidence only when the LLM left it at
-            # the default (0.5), meaning it didn't provide one explicitly.
-            if finding.confidence == 0.5 and finding.severity.lower() in SEVERITY_CONFIDENCE:
+            # Derive confidence from severity rather than the model's self-
+            # report. Weaker models are systematically miscalibrated — confident
+            # about trivia (a dead __init__ at 1.0) and hedgy about real bugs (a
+            # missed registration at 0.8) — which inverts every downstream
+            # confidence sort (dedup tie-break, dashboard, the confidence-gated
+            # poster). Severity already encodes importance and is far steadier.
+            # Fall back to the model's number only for a severity we don't map.
+            if finding.severity.lower() in SEVERITY_CONFIDENCE:
                 finding.confidence = SEVERITY_CONFIDENCE[finding.severity.lower()]
             finding.severity = finding.severity.lower()
             # Salvage a body a weaker model double-encoded as JSON.
@@ -738,6 +797,12 @@ def parse_llm_review(raw_text: str) -> ReviewResult:
                 finding.body
             ):
                 logger.debug("Skipping empty/nonsense finding after body coercion: %s", item)
+                continue
+            # Drop a pure affirmation ("This looks solid"): approval belongs in
+            # overall_vibe, not a line comment. The prompt forbids these but a
+            # weaker model emits them anyway, so filter deterministically.
+            if _is_affirmation_body(finding.body):
+                logger.debug("Skipping pure-affirmation finding: %s", finding.body[:60])
                 continue
             findings.append(finding)
         except ValidationError:

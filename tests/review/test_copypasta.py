@@ -23,6 +23,7 @@ from franktheunicorn.review.copypasta import (
     _count_files_containing,
     _create_drafts,
     _meaningful_lines,
+    _path_excluded,
     _read_repo_files,
     _required_overlap,
     _suppress_noise,
@@ -647,6 +648,26 @@ class TestCheckLlm:
 
 
 # -- Test _read_repo_files ---------------------------------------------------
+
+
+class TestPathExcluded:
+    def test_matches_basename_glob_anywhere(self) -> None:
+        globs = ("*SQLConf.scala", "*/internal/config/*.scala")
+        assert _path_excluded(
+            "sql/catalyst/src/main/scala/org/apache/spark/sql/internal/SQLConf.scala", globs
+        )
+        assert _path_excluded(
+            "core/src/main/scala/org/apache/spark/internal/config/package.scala", globs
+        )
+
+    def test_does_not_match_unrelated_file(self) -> None:
+        globs = ("*SQLConf.scala",)
+        assert not _path_excluded(
+            "sql/core/src/main/scala/org/apache/spark/sql/execution/SparkPlan.scala", globs
+        )
+
+    def test_empty_globs_excludes_nothing(self) -> None:
+        assert not _path_excluded("anything.scala", ())
 
 
 class TestReadRepoFiles:

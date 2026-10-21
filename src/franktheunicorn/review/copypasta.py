@@ -13,6 +13,7 @@ Uses two complementary approaches:
 
 from __future__ import annotations
 
+import fnmatch
 import logging
 import re
 import subprocess
@@ -245,6 +246,11 @@ def check_copypasta(
     # Drop chunks that are pure scaffolding before spending any matcher time
     # on them.
     chunks = [c for c in chunks if len(_meaningful_lines(c.lines, extra_patterns)) >= min_lines]
+    # Drop chunks in files the project excludes from copy-paste (config
+    # registries, parallel test suites) — these collide on idiom, not copies.
+    exclude_globs = tuple(project_config.copypasta_exclude_paths)
+    if exclude_globs:
+        chunks = [c for c in chunks if not _path_excluded(c.file_path, exclude_globs)]
     if not chunks:
         return []
 
@@ -257,6 +263,10 @@ def check_copypasta(
         ignore_paths=project_config.ignore_paths,
         exclude_files=pr_changed_files,
     )
+    # Same exclusion on the source side: an excluded file must not be the thing a
+    # chunk is reported as duplicating either.
+    if exclude_globs:
+        repo_files = {p: c for p, c in repo_files.items() if not _path_excluded(p, exclude_globs)}
     if not repo_files:
         logger.debug("No repo files found to scan for copy-pasta")
         return []
@@ -296,6 +306,17 @@ def check_copypasta(
     )
 
     return _create_drafts(pr, matches)
+
+
+def _path_excluded(path: str, globs: tuple[str, ...]) -> bool:
+    """Whether *path* matches any of the project's copy-paste exclude globs.
+
+    Matched against both the full repo-relative path and the bare basename, so a
+    pattern like ``*SQLConf.scala`` catches the file wherever it lives without
+    the operator spelling out the directory.
+    """
+    name = PurePosixPath(path).name
+    return any(fnmatch.fnmatch(path, g) or fnmatch.fnmatch(name, g) for g in globs)
 
 
 def _compile_ignore_patterns(patterns: Sequence[str]) -> tuple[re.Pattern[str], ...]:
