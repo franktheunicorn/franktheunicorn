@@ -542,8 +542,10 @@ def _refresh_pull_request(
     pr_obj.save(
         update_fields=[
             "interest_score",
+            "interest_score_raw",
             "score_breakdown",
             "queue",
+            "queues",
             "is_operator_pr",
             "is_new_contributor",
             "is_mentioned",
@@ -921,13 +923,25 @@ def _run_ci_analysis(
 
     use_llm = project_config.merge_readiness.ci_analysis_llm
     backend_cfg = None
+    diff = ""
     if use_llm:
         from franktheunicorn.config.loader import get_operator_config
 
         oc = get_operator_config()
         backend_cfg = oc.llm_backends[0] if oc.llm_backends else None
+        # The LLM layer compares a failure against the changed code, so it needs
+        # the diff. The manual worker path fetches it; the poll path must too, or
+        # every prompt says the PR's code is unavailable (best-effort — a failed
+        # fetch just falls back to name/conclusion/history).
+        if backend_cfg is not None:
+            try:
+                diff = client.get_pull_request_diff(
+                    pr_obj.project.owner, pr_obj.project.repo, pr_obj.number
+                )
+            except Exception:
+                diff = ""
     try:
-        analyze_pr_ci(pr_obj, client, backend_config=backend_cfg, use_llm=use_llm)
+        analyze_pr_ci(pr_obj, client, backend_config=backend_cfg, use_llm=use_llm, diff=diff)
     except Exception:
         logger.debug("CI analysis failed for PR #%d", pr_obj.number, exc_info=True)
 
@@ -1382,8 +1396,10 @@ def ingest_single_pr(
     pr_obj.save(
         update_fields=[
             "interest_score",
+            "interest_score_raw",
             "score_breakdown",
             "queue",
+            "queues",
             "is_operator_pr",
             "is_new_contributor",
             "is_mentioned",

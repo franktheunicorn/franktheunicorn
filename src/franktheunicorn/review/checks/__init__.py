@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 from franktheunicorn.review.backends.base import PRContext, ReviewFinding, parse_llm_response
 from franktheunicorn.review.drafter import build_pr_context, create_drafts_from_findings
+from franktheunicorn.review.tone_guard import apply_tone_guard_batch
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -156,6 +157,24 @@ def run_enabled_checks(
         record_agent_run(pr, source, status="ok", findings=len(findings))
         if not findings:
             continue
+
+        # The sub-checks are a finding source like the main pipeline, so their
+        # findings get the same tone-guard rewrite before persistence — the main
+        # path (drafter) runs it and these must not bypass it. Honours the
+        # project's tone_guard_enabled flag; batch is 1:1 over the list.
+        if (
+            getattr(project_config, "tone_guard_enabled", True)
+            and backend_config.provider != "stub"
+        ):
+            findings, _ = apply_tone_guard_batch(
+                findings,
+                pr_context,
+                backend_config=backend_config,
+                is_new_contributor=getattr(pr, "is_new_contributor", False),
+                new_contributor_addendum=getattr(project_config, "new_contributor_addendum", ""),
+                project_id=pr.project_id,
+                pr_id=pr.pk,
+            )
 
         drafts = create_drafts_from_findings(
             pr,

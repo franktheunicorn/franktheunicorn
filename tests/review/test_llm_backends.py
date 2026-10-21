@@ -147,6 +147,23 @@ class TestParseResponse:
         assert len(findings) == 1
         assert findings[0].confidence == 0.3  # nit -> 0.3, not the model's 1.0
 
+    def test_drops_finding_whose_body_coerces_to_empty(self) -> None:
+        # body "{}" coerces to "" while the title stays nonempty. The body is the
+        # GitHub comment, so this must be dropped (it would post only attribution)
+        # rather than kept on the strength of the title.
+        data = [
+            {"file_path": "a.py", "title": "Something", "body": "{}", "severity": "nit"},
+            {
+                "file_path": "b.py",
+                "title": "Real",
+                "body": "This drops a guard.",
+                "severity": "nit",
+            },
+        ]
+        findings = parse_llm_response(json.dumps(data))
+        assert len(findings) == 1
+        assert findings[0].file_path == "b.py"
+
     def test_drops_pure_affirmation(self) -> None:
         data = [
             {"file_path": "a.py", "title": "LGTM", "body": "This looks solid.", "severity": "nit"},

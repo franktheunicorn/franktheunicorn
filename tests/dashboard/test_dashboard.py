@@ -1409,11 +1409,13 @@ class TestMergePRView:
                 "franktheunicorn.worker.merge_queue.evaluate_merge_eligibility",
                 return_value=eligible,
             ),
-            patch("django.conf.settings.FRANK_GITHUB_TOKEN", "", create=True),
+            # No posting token resolves (post_token and polling token both unset),
+            # so the posting client cannot be built.
+            patch("franktheunicorn.dashboard.views._make_posting_client", return_value=None),
         ):
             response = client.post(f"/pr/{pr.pk}/merge/")
         assert response.status_code == 200
-        assert b"GITHUB_TOKEN" in response.content
+        assert b"no posting token" in response.content
 
     def test_merge_pr_success(self, client: Client) -> None:
         from unittest.mock import patch

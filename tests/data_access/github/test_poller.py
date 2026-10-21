@@ -537,6 +537,19 @@ class TestMentionedRouting:
         assert fresh.is_mentioned is True
         assert fresh.queue == "mentioned"
 
+    def test_queues_and_raw_score_persisted_to_db(self, tmp_path: Path) -> None:
+        # Regression: _refresh_pull_request's save omitted `queues` and
+        # `interest_score_raw` from update_fields, so multi-queue membership and
+        # the raw-score tiebreak were set in memory but never reached the DB.
+        # _poll_one reloads from the DB before returning.
+        pr = self._poll_one(tmp_path, _mentioned_pr_data(109, "alice", reviewers=["holdenk"]))
+        assert pr.queues  # non-empty: full membership persisted, not just `queue`
+        assert "mentioned" in pr.queues
+        assert pr.queue == pr.queues[0]
+        # Raw score persisted (would be the 0.0 default if save dropped it).
+        assert pr.score_breakdown
+        assert pr.interest_score_raw == pytest.approx(sum(pr.score_breakdown.values()))
+
     def test_is_mentioned_cleared_when_involvement_removed(self, tmp_path: Path) -> None:
         # Re-poll after the operator is dropped as reviewer: flag/queue reset.
         # Exercises the reroute save path (state changes between polls).

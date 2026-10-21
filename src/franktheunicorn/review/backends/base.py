@@ -791,11 +791,11 @@ def parse_llm_review(raw_text: str) -> ReviewResult:
             # Salvage a body a weaker model double-encoded as JSON.
             finding.body = _coerce_prose(finding.body)
             finding.title = _coerce_prose(finding.title)
-            # Drop a finding left with nothing to say (e.g. body was "{}") or
-            # one whose body is a bare literal ("true") — noise, not a review.
-            if (not finding.body.strip() and not finding.title.strip()) or _is_nonsense_body(
-                finding.body
-            ):
+            # Drop a finding whose body has nothing to post — empty (e.g. it was
+            # "{}" and coerced to "") or a bare literal ("true"). The body is the
+            # GitHub comment, so an empty body posts only Frank's attribution
+            # marker regardless of the title; a nonempty title does not rescue it.
+            if not finding.body.strip() or _is_nonsense_body(finding.body):
                 logger.debug("Skipping empty/nonsense finding after body coercion: %s", item)
                 continue
             # Drop a pure affirmation ("This looks solid"): approval belongs in
