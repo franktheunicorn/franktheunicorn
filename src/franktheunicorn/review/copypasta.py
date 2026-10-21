@@ -106,6 +106,68 @@ class _RepoFingerprints:
         return live
 
 
+class _RepoLineSets:
+    """Parsed Symilar ``LineSet`` objects by (path, content hash), for tier 1a.
+
+    The symilar tier's analogue of :class:`_RepoFingerprints`, and for the same
+    reason: astroid-parsing all of Spark's Python into linesets is ~17s, and
+    every PR redid it before comparing one chunk against all ~1.5k of them —
+    which is what pegged the worker at a full CPU and kept a single poll cycle
+    from ever finishing. Content-keyed because each PR excludes its own changed
+    files and the tree moves between cycles. Also keyed on ``min_lines``, which
+    is baked into the ``LineSet`` at parse time, so a config change rebuilds.
+
+    Unparseable files (non-Python, or syntax-broken) are cached as ``None`` so
+    the ~8k Scala/Java/SQL files in a repo like Spark aren't re-attempted — and
+    re-failed — on every PR.
+    """
+
+    def __init__(self) -> None:
+        self.linesets: dict[tuple[str, int], Any] = {}
+        self.min_lines: int | None = None
+
+    def current(self, repo_files: dict[str, str], min_lines: int) -> dict[str, Any]:
+        """Return ``{path: LineSet}`` for exactly the parseable *repo_files*."""
+        if self.min_lines != min_lines:
+            self.linesets.clear()
+            self.min_lines = min_lines
+        if len(self.linesets) > 2 * len(repo_files) + 1000:
+            # Old versions of files that moved on; start over rather than grow.
+            self.linesets.clear()
+        live: dict[str, Any] = {}
+        for path, content in repo_files.items():
+            key = (path, hash(content))
+            if key not in self.linesets:
+                self.linesets[key] = _parse_lineset(path, content, min_lines)
+            lineset = self.linesets[key]
+            if lineset is not None:
+                live[path] = lineset
+        return live
+
+
+def _parse_lineset(path: str, content: str, min_lines: int) -> Any:
+    """Parse one repo file into a Symilar ``LineSet``, or ``None`` if it can't.
+
+    Mirrors the flags :func:`_check_symilar` builds its ``Symilar`` with, since
+    those are baked into the resulting ``LineSet``; a lineset parsed here is
+    therefore interchangeable with one that ``Symilar`` parsed inline. Symilar
+    reads content as a Python AST, so non-Python or syntax-broken files raise
+    (``AstroidSyntaxError`` and friends) inside ``append_stream`` and come back
+    ``None``.
+    """
+    sym = Symilar(
+        min_lines=min_lines,
+        ignore_comments=True,
+        ignore_docstrings=True,
+        ignore_imports=True,
+    )
+    try:
+        sym.append_stream(path, StringIO(content))
+    except Exception:
+        return None
+    return sym.linesets[0] if sym.linesets else None
+
+
 def _required_overlap(
     new_file: str,
     source_file: str,
@@ -150,6 +212,9 @@ def _fingerprint(path: str, content: str) -> CodeFingerprint | None:
 #: One per repo root: a shared one would be flushed by the size check every
 #: time a small project's PR followed a Spark one.
 _REPO_FINGERPRINTS: dict[str, _RepoFingerprints] = {}
+
+#: Same, for the symilar tier's parsed linesets (see :class:`_RepoLineSets`).
+_REPO_LINESETS: dict[str, _RepoLineSets] = {}
 
 # Scaffolding that is duplicated on purpose in every file that needs it.
 # Matched against whitespace-collapsed lines, so indentation doesn't matter.
@@ -271,8 +336,10 @@ def check_copypasta(
         logger.debug("No repo files found to scan for copy-pasta")
         return []
 
-    # Tier 1a: pylint symilar (line-based)
-    matches = _check_symilar(chunks, repo_files, min_lines)
+    # Tier 1a: pylint symilar (line-based). Repo linesets are parsed once per
+    # cycle and cached per repo, not re-parsed for every PR.
+    symilar_cache = _REPO_LINESETS.setdefault(str(repo_path), _RepoLineSets())
+    matches = _check_symilar(chunks, repo_files, min_lines, symilar_cache)
 
     # Track which chunks already matched so tier 1b skips them
     matched_chunk_keys = {(m.new_file, m.new_start_line) for m in matches}
@@ -584,9 +651,17 @@ def _check_symilar(
     chunks: list[CodeChunk],
     repo_files: dict[str, str],
     min_lines: int,
+    cache: _RepoLineSets | None = None,
 ) -> list[CopyPastaMatch]:
-    """Tier 1a: Use pylint's Symilar for line-based duplicate detection."""
+    """Tier 1a: Use pylint's Symilar for line-based duplicate detection.
+
+    *cache* holds the repo's parsed linesets across PRs; omit it (a one-shot
+    unit call) and a throwaway one is used, reproducing the pre-cache behaviour.
+    """
     matches: list[CopyPastaMatch] = []
+
+    if cache is None:
+        cache = _RepoLineSets()
 
     sym = Symilar(
         min_lines=min_lines,
@@ -614,12 +689,12 @@ def _check_symilar(
                 name,
             )
 
-    # Add existing repo files; skip any that also fail AST parsing.
-    for path, content in repo_files.items():
-        try:
-            sym.append_stream(path, StringIO(content))
-        except Exception:
-            logger.debug("symilar: skipping unparseable repo file %s", path)
+    # Repo linesets come from the per-repo cache: parsed once per cycle and
+    # reused across PRs, rather than astroid-reparsing all ~1.5k of Spark's
+    # Python files for every PR (~17s each, the cost that pegged the worker).
+    # A lineset the cache parsed is interchangeable with one Symilar parses
+    # inline — same flags, same min_lines — so _find_common treats them alike.
+    repo_linesets = list(cache.current(repo_files, min_lines).values())
 
     # NOTE: deliberately *not* calling sym.run(). run() compares every pair of
     # appended linesets — quadratic in file count, and all but a handful of
@@ -641,7 +716,6 @@ def _check_symilar(
     # Only PR-chunk-vs-repo-file pairs matter, so walk those directly instead
     # of every pair of linesets.
     pr_linesets = [ls for ls in sym.linesets if ls.name in chunk_names]
-    repo_linesets = [ls for ls in sym.linesets if ls.name not in chunk_names]
 
     for pr_ls in pr_linesets:
         # Extract original chunk info from the virtual file name

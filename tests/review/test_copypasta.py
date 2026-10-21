@@ -498,6 +498,102 @@ class TestCheckSymilar:
         assert received == [(pr_ls, repo_ls)]
 
 
+class TestSymilarLinesetCache:
+    """The symilar tier must parse each repo file once and reuse it across PRs.
+
+    Re-parsing the whole repo per PR (~17s on Spark) is what pegged the worker
+    at a full CPU and kept a poll cycle from ever finishing.
+    """
+
+    def test_repo_files_parsed_once_across_calls(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from franktheunicorn.review.copypasta import CodeChunk
+
+        parsed: list[str] = []
+        real_parse = copypasta_module._parse_lineset
+
+        def spy(path: str, content: str, min_lines: int) -> Any:
+            parsed.append(path)
+            return real_parse(path, content, min_lines)
+
+        monkeypatch.setattr(copypasta_module, "_parse_lineset", spy)
+
+        code = (
+            "def calculate_total(items):",
+            "    total = 0",
+            "    for item in items:",
+            "        total += item.price * item.quantity",
+            "    return total",
+        )
+        repo_files = {"existing.py": "\n".join(code) + "\n"}
+        cache = copypasta_module._RepoLineSets()
+
+        first = _check_symilar(
+            [CodeChunk(file_path="new.py", start_line=1, lines=code)],
+            repo_files,
+            min_lines=4,
+            cache=cache,
+        )
+        second = _check_symilar(
+            [CodeChunk(file_path="other.py", start_line=1, lines=code)],
+            repo_files,
+            min_lines=4,
+            cache=cache,
+        )
+
+        # existing.py is parsed on the first call and reused on the second.
+        assert parsed == ["existing.py"]
+        assert len(first) >= 1
+        assert len(second) >= 1
+
+    def test_unparseable_file_cached_as_none_not_retried(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from franktheunicorn.review.copypasta import CodeChunk
+
+        parsed: list[str] = []
+        real_parse = copypasta_module._parse_lineset
+
+        def spy(path: str, content: str, min_lines: int) -> Any:
+            parsed.append(path)
+            return real_parse(path, content, min_lines)
+
+        monkeypatch.setattr(copypasta_module, "_parse_lineset", spy)
+
+        code = (
+            "def calculate_total(items):",
+            "    total = 0",
+            "    for item in items:",
+            "        total += item.price * item.quantity",
+            "    return total",
+        )
+        # A Scala-ish file Symilar's Python AST parser can never read.
+        repo_files = {"Thing.scala": "class Thing { def f(x: Int): Int = x + 1 }\n"}
+        cache = copypasta_module._RepoLineSets()
+
+        chunk = [CodeChunk(file_path="new.py", start_line=1, lines=code)]
+        _check_symilar(chunk, repo_files, min_lines=4, cache=cache)
+        _check_symilar(chunk, repo_files, min_lines=4, cache=cache)
+
+        # Attempted once, cached as None, never retried.
+        assert parsed == ["Thing.scala"]
+        assert cache.linesets[("Thing.scala", hash(repo_files["Thing.scala"]))] is None
+
+    def test_min_lines_change_rebuilds_cache(self) -> None:
+        code = "\n".join(f"line_{i} = {i}" for i in range(10)) + "\n"
+        repo_files = {"a.py": code}
+        cache = copypasta_module._RepoLineSets()
+
+        cache.current(repo_files, min_lines=4)
+        assert cache.min_lines == 4
+        key_at_4 = set(cache.linesets)
+
+        cache.current(repo_files, min_lines=8)
+        # A different min_lines is a different parse, so the old entry is gone.
+        assert cache.min_lines == 8
+        assert set(cache.linesets) == {("a.py", hash(code))}
+        assert key_at_4 == {("a.py", hash(code))}
+
+
 # -- Test tier 1b: winnowing -------------------------------------------------
 
 
