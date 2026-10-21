@@ -2639,6 +2639,26 @@ class ProjectConfig(BaseModel):
     # idiom" and the tier ran at ~0% precision. Raise it per project to demand
     # near-verbatim structure before flagging. Range 0.0 to 1.0.
     copypasta_winnow_min_overlap: float = 0.5
+    # fnmatch globs for files that copy-paste detection should skip entirely, on
+    # BOTH sides of a comparison (the PR's added chunks and the repo files they
+    # are matched against). For files that are categorically lists of similar
+    # declarations — config registries (``buildConf(...)`` after
+    # ``buildConf(...)``), error-class catalogs, deliberately-parallel per-
+    # backend test suites — structural overlap is house idiom, not copy-paste
+    # worth extracting, and no overlap threshold separates the two. Exclude the
+    # file rather than chase the ratio. Example: ``["*SQLConf.scala",
+    # "*/internal/config/*.scala"]``.
+    copypasta_exclude_paths: list[str] = Field(default_factory=list)
+
+    # Tone Guard — a second LLM pass that rewrites each finding body for
+    # constructive tone (``review/tone_guard.py``). On by default, but it earns
+    # its keep only when the review model writes harshly. When the review model
+    # already produces the operator's voice (the shared COMMENT_VOICE prompt),
+    # a second pass over an already-in-voice comment is net-negative on a weaker
+    # rewrite model: observed on Spark/gemma dropping leading subjects ("The
+    # getent command uses $X" -> "command uses $X"). Turn it off per project to
+    # post the review model's own wording unmodified.
+    tone_guard_enabled: bool = True
 
     # v1.75 rejection predictor — opt-in. When enabled, drafts are scored
     # with the per-project sklearn model (training it automatically once

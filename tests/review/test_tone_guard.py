@@ -144,6 +144,41 @@ class TestApplyToneGuard:
         assert result.body == "This might miss the subqueries."
         assert rewritten is False
 
+    def test_dropped_leading_subject_keeps_original(self) -> None:
+        # The model returns the tail of the comment with its subject sliced off.
+        # The fragment must be rejected and the original (in-voice) body kept.
+        finding = ReviewFinding(
+            body="The `getent` command uses `$X` inside a string passed to `ssh`.",
+            file_path="setup.sh",
+        )
+        ctx = make_pr_context()
+
+        mock_backend = MagicMock()
+        mock_backend.metered_call.return_value = (
+            "command uses `$X` inside a string passed to `ssh`."
+        )
+        mock_backend._resolve_api_key.return_value = "key"
+
+        with patch("franktheunicorn.review.backends.get_backend", return_value=mock_backend):
+            from franktheunicorn.config.models import LLMBackendConfig
+
+            config = LLMBackendConfig(provider="stub")
+            result, rewritten = apply_tone_guard(finding, ctx, backend_config=config)
+
+        assert result.body == "The `getent` command uses `$X` inside a string passed to `ssh`."
+        assert rewritten is False
+
+    def test_genuine_rephrase_is_not_a_dropped_subject(self) -> None:
+        # A real rewrite replaces words rather than slicing off the front; it
+        # must still be accepted even though it is shorter than the original.
+        from franktheunicorn.review.tone_guard import _dropped_leading_subject
+
+        assert not _dropped_leading_subject(
+            "This is terrible code that nobody should ever write.",
+            "Consider refactoring this section.",
+        )
+        assert _dropped_leading_subject("The getent command uses $X here.", "command uses $X here.")
+
     def test_please_add_a_test_is_not_meta(self) -> None:
         # Guard against false positives: a legitimate "please add a test"
         # comment must survive the meta-response filter.

@@ -56,6 +56,10 @@ DROP a comment that is:
 - not clearly supported by the diff (the claim is speculative or wrong),
 - vague or non-actionable ("worth a thought", "a lot of manual state
   management", "we should ensure this is safe" with no specific concern),
+- a pure affirmation that asks for no change — it praises the code, confirms it
+  is correct, or only restates what it already does ("This looks solid", "The
+  finally block correctly releases the connection", "this is what we need").
+  Approval belongs in the review summary, not a line comment,
 - a malformed fragment (e.g. it starts mid-sentence with no subject),
 - redundant with another comment shown (keep the clearest one),
 - pure style noise the project would not want raised.

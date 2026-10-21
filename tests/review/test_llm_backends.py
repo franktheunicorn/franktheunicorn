@@ -131,6 +131,82 @@ class TestParseResponse:
         assert len(findings) == 1
         assert findings[0].confidence == 0.75
 
+    def test_confidence_from_severity_overrides_model_value(self) -> None:
+        # A weaker model is overconfident on trivia: a nit at 1.0. Severity is
+        # the steadier signal, so a known severity wins over the model's number.
+        data = [
+            {
+                "file_path": "a.py",
+                "title": "Dead init",
+                "body": "nit: this __init__ does nothing; drop it.",
+                "severity": "nit",
+                "confidence": 1.0,
+            }
+        ]
+        findings = parse_llm_response(json.dumps(data))
+        assert len(findings) == 1
+        assert findings[0].confidence == 0.3  # nit -> 0.3, not the model's 1.0
+
+    def test_drops_pure_affirmation(self) -> None:
+        data = [
+            {"file_path": "a.py", "title": "LGTM", "body": "This looks solid.", "severity": "nit"},
+            {
+                "file_path": "b.py",
+                "title": "Ok",
+                "body": "The finally block correctly releases the connection.",
+                "severity": "informational",
+            },
+            {
+                "file_path": "c.py",
+                "title": "Real",
+                "body": "This could leak on the error path.",
+                "severity": "important",
+            },
+        ]
+        findings = parse_llm_response(json.dumps(data))
+        # Both affirmations dropped; the real concern survives.
+        assert len(findings) == 1
+        assert findings[0].file_path == "c.py"
+
+    def test_keeps_praise_that_also_asks_for_a_change(self) -> None:
+        data = [
+            {
+                "file_path": "a.py",
+                "title": "Mixed",
+                "body": "Looks good, but should we guard the null path?",
+                "severity": "nit",
+            }
+        ]
+        findings = parse_llm_response(json.dumps(data))
+        assert len(findings) == 1  # a question + "should" is not pure praise
+
+
+class TestAffirmationFilter:
+    def test_plain_affirmations_match(self) -> None:
+        from franktheunicorn.review.backends.base import _is_affirmation_body
+
+        for body in [
+            "This looks solid.",
+            "LGTM",
+            "The finally block correctly releases the connection.",
+            "This is what we need for the polling actor.",
+            "Makes sense.",
+            "No concerns here.",
+        ]:
+            assert _is_affirmation_body(body), body
+
+    def test_real_comments_are_not_affirmations(self) -> None:
+        from franktheunicorn.review.backends.base import _is_affirmation_body
+
+        for body in [
+            "Why do we need this?",
+            "Looks good but could leak on the failure path.",
+            "This correctly handles the null case, but misses the empty one.",
+            "nit: inline this.",
+            "Should we target 4.3 instead?",
+        ]:
+            assert not _is_affirmation_body(body), body
+
 
 class TestCoerceProse:
     """A weaker model sometimes double-encodes the body as a JSON object;

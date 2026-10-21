@@ -329,6 +329,22 @@ copypasta_ignore_patterns:
 # false positive); demand near-verbatim structure instead. Same-directory floor;
 # cross-directory matches are held higher still.
 copypasta_winnow_min_overlap: 0.8
+# Files that are categorically lists of similar declarations (config registries)
+# or deliberately parallel per-backend test suites: structural overlap between
+# them is house idiom, not copy-paste to extract, and no threshold separates the
+# two. Skipped on both sides of a comparison. Globs match the full path or the
+# bare basename.
+copypasta_exclude_paths:
+  - "*SQLConf.scala"
+  - "*StaticSQLConf.scala"
+  - "*/internal/config/*.scala"
+  - "*JoinPushdownIntegrationSuite.scala"
+
+# Tone Guard off: the ASF model (gemma4-26b) already writes in the operator's
+# voice via the review prompt, and a second gemma pass over an already-in-voice
+# comment is net-negative — it drops leading subjects and can truncate a comment
+# to a fragment. Leave it on (the default) for a harsher review model.
+tone_guard_enabled: false
 
 # Poll cost control. A PR whose upstream updated_at hasn't moved — and whose
 # title/labels/reviewers/assignees/draft state are unchanged — is skipped

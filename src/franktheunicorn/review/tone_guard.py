@@ -84,6 +84,25 @@ def _looks_like_meta_response(text: str) -> bool:
     return any(marker in low for marker in _META_RESPONSE_MARKERS)
 
 
+def _dropped_leading_subject(original: str, rewritten: str) -> bool:
+    """Whether the rewrite silently dropped the comment's leading subject.
+
+    A weaker tone model sometimes returns the *tail* of the comment instead of
+    rewriting it: "The ``getent`` command uses ``$X``…" comes back as "command
+    uses ``$X``…", grammatical but with its subject gone. The shape is precise —
+    the rewrite is a trailing slice of the original, begins lower-case where the
+    original began upper-case — so detecting it costs no false positives on a
+    genuine rephrase (which replaces words rather than slicing off the front).
+    When it fires the caller keeps the original body, which is strictly better.
+    """
+    o, r = original.strip(), rewritten.strip()
+    if not o or not r or o == r:
+        return False
+    if not o.endswith(r):
+        return False
+    return o[:1].isupper() and r[:1].islower()
+
+
 def apply_tone_guard(
     finding: ReviewFinding,
     pr_context: PRContext,
@@ -150,6 +169,14 @@ def apply_tone_guard(
     # operator's voice from the main review prompt.
     if _looks_like_meta_response(rewritten):
         logger.debug("Tone guard returned a meta/non-rewrite response; keeping original body.")
+        return finding, False
+
+    # A weaker model sometimes returns the tail of the comment with its leading
+    # subject sliced off ("The getent command uses $X" -> "command uses $X").
+    # The original still carries the operator's voice from the review prompt, so
+    # keep it rather than posting a fragment.
+    if _dropped_leading_subject(finding.body, rewritten):
+        logger.debug("Tone guard dropped the leading subject; keeping original body.")
         return finding, False
 
     return ReviewFinding(

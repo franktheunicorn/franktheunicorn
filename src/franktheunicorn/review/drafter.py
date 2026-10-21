@@ -735,7 +735,8 @@ def draft_review(
         new_contributor_addendum = project_config.new_contributor_addendum
 
     tone_flags = [False] * len(deduped)
-    if tone_backend and tone_backend.provider != "stub":
+    tone_guard_enabled = getattr(project_config, "tone_guard_enabled", True)
+    if tone_backend and tone_backend.provider != "stub" and tone_guard_enabled:
         deduped, tone_flags = apply_tone_guard_batch(
             deduped,
             pr_context,
