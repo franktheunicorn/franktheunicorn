@@ -28,12 +28,19 @@ def build_context_strings(
     changed_files: Sequence[str],
     repo_path: Path | None,
     config: object,
+    diff: str = "",
 ) -> tuple[str, str]:
     """Return ``(full_file_context, imported_modules_context)``.
 
     Both empty strings when the feature is disabled, the checkout is missing,
     or no eligible content fits the budget. ``config`` is duck-typed against
     ``ContextConfig`` to avoid importing config at module load.
+
+    ``diff`` (the PR's unified diff) lets a file LARGER than ``per_file_cap``
+    contribute an excerpt around its changed hunks instead of nothing — on a
+    monorepo the interesting files are routinely 10x the cap, and skipping
+    them whole left the prompt with no surrounding code at all exactly where
+    it mattered most.
     """
     include_full = bool(getattr(config, "include_full_file", False))
     include_imports = bool(getattr(config, "include_first_party_imports", False))
@@ -50,10 +57,12 @@ def build_context_strings(
     if not package_roots:
         package_roots = _autodetect_package_roots(repo_path)
 
+    hunk_ranges = _hunk_ranges_by_file(diff)
     remaining = total_budget
     repo_path = Path(repo_path)
 
     # Stage 1: read changed files, smallest first, into the full-file pool.
+    # An over-cap file with known hunks becomes an excerpt around the change.
     candidates: list[tuple[str, str, int]] = []  # (rel_path, content, tokens)
     for rel in changed_files:
         if not rel:
@@ -66,7 +75,15 @@ def build_context_strings(
             continue
         tokens = estimate_tokens(content)
         if tokens > per_file_cap:
-            continue
+            ranges = hunk_ranges.get(_normalize_path(rel))
+            if not ranges:
+                continue
+            content = _excerpt_around(content, ranges, per_file_cap)
+            if not content:
+                continue
+            tokens = estimate_tokens(content)
+            if tokens > per_file_cap:
+                continue
         candidates.append((rel, content, tokens))
 
     candidates.sort(key=lambda x: x[2])
@@ -107,7 +124,14 @@ def build_context_strings(
                 if content is None:
                     continue
                 tokens = estimate_tokens(content)
-                if tokens > per_file_cap or tokens > remaining:
+                if tokens > per_file_cap:
+                    # No hunks to window around for an import; the head (doc,
+                    # constants, the module's shape) is the useful part. On a
+                    # monorepo the imports are big files too, and skipping
+                    # them whole kept this section empty everywhere it mattered.
+                    content = _head_truncated(content, per_file_cap)
+                    tokens = estimate_tokens(content)
+                if tokens > remaining:
                     continue
                 try:
                     rel_imp = imp_path.resolve().relative_to(repo_path.resolve())
@@ -119,6 +143,117 @@ def build_context_strings(
     return _render(full_files, "## Full file context"), _render(
         imported_files, "## Imported modules (first-party)"
     )
+
+
+#: Lines of context on each side of a hunk when excerpting an over-cap file.
+_EXCERPT_PAD_LINES = 40
+
+
+def _head_truncated(content: str, token_cap: int) -> str:
+    """The first ``token_cap`` tokens of a file, with a marker saying so."""
+    lines = content.splitlines()
+    total = len(lines)
+    kept: list[str] = []
+    used = 0
+    for line in lines:
+        if used + len(line) + 1 > token_cap * 4:
+            break
+        kept.append(line)
+        used += len(line) + 1
+    return "\n".join(kept) + f"\n… ({total - len(kept)} more lines)"
+
+
+def _normalize_path(path: str) -> str:
+    """A diff path and a changed_files entry for the same file, compared equal."""
+    return path.removeprefix("a/").removeprefix("b/")
+
+
+def _hunk_ranges_by_file(diff: str) -> dict[str, list[tuple[int, int]]]:
+    """Target-side (start, length_inclusive_end) ranges per file from a diff.
+
+    Returns ``{}`` on any parse problem — the caller then simply skips over-cap
+    files as before, so a malformed diff degrades to the previous behaviour.
+    """
+    if not diff.strip():
+        return {}
+    try:
+        from unidiff import PatchSet  # type: ignore[import-untyped]
+
+        patch = PatchSet(diff)
+    except Exception:
+        logger.debug("context: could not parse diff for hunk ranges", exc_info=True)
+        return {}
+    ranges: dict[str, list[tuple[int, int]]] = {}
+    for patched_file in patch:
+        spans = [
+            (hunk.target_start, hunk.target_start + hunk.target_length - 1)
+            for hunk in patched_file
+            if hunk.target_length > 0
+        ]
+        if spans:
+            ranges[_normalize_path(patched_file.path)] = spans
+    return ranges
+
+
+def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Merge overlapping or adjacent (start, end) line spans, in order."""
+    ordered = sorted(spans)
+    merged: list[tuple[int, int]] = []
+    for start, end in ordered:
+        if merged and start <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _excerpt_around(content: str, ranges: list[tuple[int, int]], token_cap: int) -> str:
+    """The changed lines plus padding, joined with omission markers.
+
+    Every part — markers and headers included — is counted against the cap,
+    so the caller's token check on the result cannot reject what this built.
+    When a window has to shrink, the padding goes first: the changed lines are
+    the point of the excerpt, the padding is context around them.
+    """
+    lines = content.splitlines()
+    n = len(lines)
+    # The trailing "… lines X-N omitted" marker is appended after the loop;
+    # reserve its worst-case length so the result cannot exceed the cap the
+    # caller re-checks.
+    tail_reserve = len(f"… lines 0-{n} omitted") + 1
+    budget_chars = token_cap * 4 - tail_reserve
+    parts = [f"(excerpt around the change; full file is {n} lines)"]
+    used = len(parts[0])
+    last_end = 0
+    for raw_start, raw_end in _merge_spans(ranges):
+        start, end = max(1, raw_start - _EXCERPT_PAD_LINES), min(n, raw_end + _EXCERPT_PAD_LINES)
+        gap = f"… lines {last_end + 1}-{start - 1} omitted\n" if start > last_end + 1 else ""
+        header = f"lines {start}-{end}:\n"
+        chunk = "\n".join(lines[start - 1 : end])
+        if used + len(gap) + len(header) + len(chunk) > budget_chars:
+            # Padding first; if even the bare change does not fit, cut it at
+            # a line boundary — a hunk larger than the whole per-file cap loses
+            # something however it is cut.
+            for pad in (10, 4, 0):
+                start = max(1, raw_start - pad)
+                end = min(n, raw_end + pad)
+                chunk = "\n".join(lines[start - 1 : end])
+                header = f"lines {start}-{end}:\n"
+                if used + len(gap) + len(header) + len(chunk) <= budget_chars:
+                    break
+            else:
+                room = budget_chars - used - len(gap) - len(header)
+                if room <= 0:
+                    break
+                chunk = chunk[:room].rsplit("\n", 1)[0]
+                if not chunk.strip():
+                    break
+        parts.extend((gap, header, chunk))
+        used += len(gap) + len(header) + len(chunk)
+        last_end = end
+    if last_end < n:
+        parts.append(f"\n… lines {last_end + 1}-{n} omitted")
+    return "\n".join(parts)
 
 
 def _render(files: list[tuple[str, str]], heading: str) -> str:
@@ -167,13 +302,13 @@ def _safe_read(path: Path) -> str | None:
 def _autodetect_package_roots(repo_path: Path) -> list[str]:
     """Best-effort discovery of first-party package names.
 
-    Looks under ``repo_path`` and ``repo_path/src`` for directories containing
-    ``__init__.py``. Returns sorted package names. Returns empty list if no
-    Python packages are discoverable — in which case the resolver will produce
-    no imports (graceful no-op).
+    Looks under ``repo_path``, ``repo_path/src``, and ``repo_path/python``
+    for directories containing ``__init__.py``. Returns sorted package names.
+    Returns empty list if no Python packages are discoverable — in which case
+    the resolver will produce no imports (graceful no-op).
     """
     roots: set[str] = set()
-    for parent in (repo_path, repo_path / "src"):
+    for parent in (repo_path, repo_path / "src", repo_path / "python"):
         if not parent.is_dir():
             continue
         try:

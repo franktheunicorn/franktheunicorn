@@ -164,6 +164,22 @@ class TestJudgeFindings:
         verify_calls = [c for c in fake.calls if c[0] == "judge-verify"]
         assert len(verify_calls) == 2
 
+    def test_max_reask_caps_unruled_reasks(self) -> None:
+        # Batch rules on index 0 only (small-model behaviour); 1-3 are unruled.
+        # The cap lets two re-asks fire; the rest are kept, never dropped.
+        findings = [_finding(f"f{i}") for i in range(4)]
+        batch = json.dumps([{"index": 0, "keep": False, "reason": "no", "revised": ""}])
+        one = json.dumps({"keep": True, "reason": "ok"})
+        fake = _FakeBackend([batch, one, one])
+        with patch("franktheunicorn.review.judge._get_metered_backend", return_value=fake):
+            verdicts = judge_findings(findings, _ctx(), _backend_cfg(), max_reask=2)
+        one_calls = [c for c in fake.calls if c[0] == "judge-one"]
+        assert len(one_calls) == 2
+        assert verdicts[0].keep is False
+        assert all(v.keep for v in verdicts[1:])
+        assert verdicts[3].tier == "unruled"
+        assert verdicts[3].reason == "re-ask cap reached"
+
     def test_unparseable_batch_keeps_all(self) -> None:
         findings = [_finding("x"), _finding("y")]
         fake = _FakeBackend(["not json at all"])

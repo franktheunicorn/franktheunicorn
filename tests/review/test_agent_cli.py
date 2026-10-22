@@ -230,6 +230,63 @@ class TestRunAgentCLIReview:
                 cwd="/tmp/repo", base_commit="origin/main", config=self._config(), executor=executor
             )
 
+    def test_cli_exit0_empty_stdout_with_auth_error_raises(self) -> None:
+        """codex on a dead login: retries, 401 on stderr, exits 0, no stdout.
+        That is a reviewer that never reviewed, not a clean pass."""
+        diff_result = ExecResult(returncode=0, stdout="diff --git a/x b/x\n", stderr="")
+        cli_result = ExecResult(
+            returncode=0,
+            stdout="",
+            stderr=(
+                "ERROR: Reconnecting... 5/5\n"
+                "ERROR: unexpected status 401 Unauthorized: Missing bearer or basic "
+                "authentication in header\n"
+                "Error waiting for command to finish: exit status 1\n"
+            ),
+        )
+        executor = _executor_returning(diff_result, cli_result)
+        with pytest.raises(AgentCLIRunError):
+            run_agent_cli_review(
+                cwd="/tmp/repo", base_commit="origin/main", config=self._config(), executor=executor
+            )
+
+    def test_cli_exit0_empty_stdout_names_the_login_fix(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        diff_result = ExecResult(returncode=0, stdout="diff --git a/x b/x\n", stderr="")
+        cli_result = ExecResult(returncode=0, stdout="", stderr="401 Unauthorized\n")
+        executor = _executor_returning(diff_result, cli_result)
+        with (
+            caplog.at_level("ERROR"),
+            pytest.raises(AgentCLIRunError),
+        ):
+            run_agent_cli_review(
+                cwd="/tmp/repo", base_commit="origin/main", config=self._config(), executor=executor
+            )
+        assert any(
+            "not logged in" in r.getMessage() and r.levelname == "ERROR" for r in caplog.records
+        )
+
+    def test_cli_exit0_empty_stdout_without_stderr_still_raises(self) -> None:
+        """No output at all is never a clean review: the prompt requires
+        "Review completed" or finding blocks, so silence is a failed run."""
+        diff_result = ExecResult(returncode=0, stdout="diff --git a/x b/x\n", stderr="")
+        cli_result = ExecResult(returncode=0, stdout="", stderr="")
+        executor = _executor_returning(diff_result, cli_result)
+        with pytest.raises(AgentCLIRunError):
+            run_agent_cli_review(
+                cwd="/tmp/repo", base_commit="origin/main", config=self._config(), executor=executor
+            )
+
+    def test_whitespace_only_stdout_still_raises(self) -> None:
+        diff_result = ExecResult(returncode=0, stdout="diff --git a/x b/x\n", stderr="")
+        cli_result = ExecResult(returncode=0, stdout="  \n\n", stderr="")
+        executor = _executor_returning(diff_result, cli_result)
+        with pytest.raises(AgentCLIRunError):
+            run_agent_cli_review(
+                cwd="/tmp/repo", base_commit="origin/main", config=self._config(), executor=executor
+            )
+
     def test_unparseable_output_returns_empty(self) -> None:
         diff_result = ExecResult(returncode=0, stdout="diff --git a/x b/x\n", stderr="")
         cli_result = ExecResult(returncode=0, stdout="Review completed", stderr="")

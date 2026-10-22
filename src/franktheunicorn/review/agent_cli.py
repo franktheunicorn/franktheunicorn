@@ -490,6 +490,35 @@ def run_agent_cli_review(
                 " " + workspace_trust_advice(config.name) if untrusted else "",
             )
             raise AgentCLIRunError(f"{cmd[0]} refused: {output.strip()[:120]}")
+        if not (result.stdout or "").strip():
+            # Exit 0 with literally no stdout is not a clean review: the prompt
+            # requires "Review completed" or finding blocks, so the CLI did not
+            # review. codex does exactly this on a dead login — it retries,
+            # prints "401 Unauthorized" to stderr, and still exits 0 — which
+            # read as a clean run and cost every PR a reviewer nobody noticed
+            # was dead.
+            from franktheunicorn.review.tool_executor import (
+                auth_failure_advice,
+                looks_like_auth_failure,
+            )
+
+            stderr = agent_stderr(result.stderr)
+            auth = (
+                " "
+                + auth_failure_advice(
+                    config.name, config.cli_argv[0], remote=config.remote.mode == "ssh"
+                )
+                if looks_like_auth_failure(stderr)
+                else ""
+            )
+            tail = stderr.strip()[-300:]
+            logger.error(
+                "%s CLI exited 0 but produced no output%s.%s",
+                config.name,
+                f" (stderr ends: {tail!r})" if tail else " (no stderr)",
+                auth,
+            )
+            raise AgentCLIRunError(f"{cmd[0]} produced no output")
     if not blocks:
         # Ran fine, said nothing parseable. Distinguishing "clean review" from
         # "the model ignored the output format" needs the raw head of stdout.

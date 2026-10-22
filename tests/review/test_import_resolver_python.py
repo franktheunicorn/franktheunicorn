@@ -68,6 +68,17 @@ class TestPythonImportResolver:
         result = resolver.resolve(src_pkg / "y.py", tmp_path, ["pkg"])
         assert (src_pkg / "x.py") in result
 
+    def test_python_dir_layout(self, tmp_path: Path) -> None:
+        # Spark's shape: the Python tree lives under python/ (python/pyspark/...).
+        pkg = tmp_path / "python" / "pyspark"
+        pkg.mkdir(parents=True)
+        (pkg / "__init__.py").write_text("")
+        (pkg / "types.py").write_text("X = 1\n")
+        (pkg / "conversion.py").write_text("from pyspark.types import X\n")
+        resolver = PythonImportResolver()
+        result = resolver.resolve(pkg / "conversion.py", tmp_path, ["pyspark"])
+        assert (pkg / "types.py") in result
+
 
 class TestRegistry:
     def test_get_resolver_for_python(self, tmp_path: Path) -> None:

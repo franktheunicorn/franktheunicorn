@@ -2117,6 +2117,11 @@ class JudgeConfig(BaseModel):
     #: Cap on tier-B verify calls per PR, so a flood of borderline findings
     #: cannot run up the bill.
     max_verify: int = 5
+    #: Cap on tier-A per-finding re-asks (findings the batch left unruled —
+    #: a small model often answers only the first comment of a batch). Beyond
+    #: the cap an unruled finding is kept as-is: silence is never a rejection,
+    #: so the cap bounds cost without dropping anything.
+    max_reask: int = 5
 
 
 class OperatorConfig(BaseModel):

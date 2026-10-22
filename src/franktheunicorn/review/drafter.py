@@ -156,6 +156,7 @@ def build_pr_context(
     sentry_context: str = "",
     repo_path: Path | None = None,
     prior_comments: str = "",
+    diff: str = "",
 ) -> PRContext:
     """Bundle PR + config data into a PRContext for the LLM."""
     anti_patterns: list[str] = []
@@ -180,6 +181,7 @@ def build_pr_context(
             changed_files=pr.changed_files or [],
             repo_path=repo_path,
             config=project_config.context,
+            diff=diff,
         )
     except Exception:
         logger.debug("Failed to build full-file context for PR #%d", pr.number, exc_info=True)
@@ -617,6 +619,9 @@ def draft_review(
 
     from franktheunicorn.review.prior_comments import format_prior_comments
 
+    # Resolved before the context build: an over-cap file excerpts around the
+    # diff's hunks, so the context builder needs the real diff, not a placeholder.
+    diff = _get_pr_diff(pr, diff)
     pr_context = build_pr_context(
         pr,
         project_config,
@@ -627,8 +632,8 @@ def draft_review(
         sentry_context=sentry_context,
         repo_path=repo_path,
         prior_comments=format_prior_comments(prior_comments or []),
+        diff=diff,
     )
-    diff = _get_pr_diff(pr, diff)
 
     # Resolve which backends to run.
     backend_configs = list(operator_config.llm_backends)
@@ -721,6 +726,7 @@ def draft_review(
             diff=diff,
             verify_borderline=judge_config.verify_borderline,
             max_verify=judge_config.max_verify,
+            max_reask=judge_config.max_reask,
             project_id=pr.project_id,
             pr_id=pr.pk,
         )

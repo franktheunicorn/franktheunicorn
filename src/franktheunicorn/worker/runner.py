@@ -53,7 +53,14 @@ def _raise_keyboard_interrupt(signum: int, frame: FrameType | None) -> None:
     raise KeyboardInterrupt
 
 
-logger = logging.getLogger(__name__)
+# Explicit name, not __name__: `python -m franktheunicorn.worker.runner` runs
+# this file as __main__, and a "__main__" logger sits outside the
+# franktheunicorn hierarchy, inherits the root logger's WARNING level, and
+# silently drops every INFO line this module emits — the startup preflight
+# verdicts, the per-reviewer outcomes, the cycle summary. Every other entry
+# point (manage.py run_worker, imports) already used this name, so both module
+# copies now share one logger under the project's INFO level.
+logger = logging.getLogger("franktheunicorn.worker.runner")
 
 _VALID_LOG_LEVELS = ("CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSET")
 

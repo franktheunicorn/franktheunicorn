@@ -85,6 +85,12 @@ class PythonImportResolver:
             repo_path / as_pkg,
             repo_path / "src" / as_file,
             repo_path / "src" / as_pkg,
+            # Monorepo layout where the language tree sits one level down
+            # (Spark: python/pyspark/...). Without this, a repo whose whole
+            # Python package lives there resolves none of its first-party
+            # imports, and the import context stays silently empty.
+            repo_path / "python" / as_file,
+            repo_path / "python" / as_pkg,
         ]
 
     @staticmethod

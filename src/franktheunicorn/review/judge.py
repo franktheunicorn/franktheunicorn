@@ -304,13 +304,17 @@ def judge_findings(
     diff: str = "",
     verify_borderline: bool = True,
     max_verify: int = 5,
+    max_reask: int = 5,
     project_id: int | None = None,
     pr_id: int | None = None,
 ) -> list[JudgeVerdict]:
     """Judge *findings*, returning a verdict per finding (aligned 1:1).
 
     Tier A runs one batch call; tier B re-checks each borderline finding when
-    ``verify_borderline`` is set, up to ``max_verify`` calls. Any failure keeps
+    ``verify_borderline`` is set, up to ``max_verify`` calls. A finding the
+    batch left unruled is re-asked one-on-one (a small model often answers
+    only the first comment of a batch), up to ``max_reask`` calls — beyond
+    that it is kept, since silence is never a rejection. Any failure keeps
     the finding unchanged — the judge only ever trims, it never blocks review.
     """
     if not findings:
@@ -343,10 +347,19 @@ def judge_findings(
         return _keep_all(findings, "unparseable batch response")
 
     # A finding the batch did not rule on (a small model often answers only the
-    # first) is re-asked one-on-one, which such models handle reliably.
+    # first) is re-asked one-on-one, which such models handle reliably — capped,
+    # because on a small judge model the unruled tail can be most of the batch
+    # and each re-ask costs what the batch call did. Past the cap the finding
+    # is kept as-is: silence is never a rejection.
+    reasked = 0
     for i, verdict in enumerate(verdicts):
-        if verdict.tier == "unruled":
-            verdicts[i] = _judge_one(backend, findings[i], diff, project_id=project_id, pr_id=pr_id)
+        if verdict.tier != "unruled":
+            continue
+        if reasked >= max_reask:
+            verdicts[i] = JudgeVerdict(keep=True, reason="re-ask cap reached", tier="unruled")
+            continue
+        reasked += 1
+        verdicts[i] = _judge_one(backend, findings[i], diff, project_id=project_id, pr_id=pr_id)
 
     if verify_borderline and max_verify > 0:
         spent = 0

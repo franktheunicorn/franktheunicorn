@@ -214,7 +214,8 @@ class TestClaudeCLICliArgv:
 
     def test_wrapper_propagates_to_subprocess(self) -> None:
         diff_result = ExecResult(returncode=0, stdout="diff --git a/x b/x\n+pass\n", stderr="")
-        cli_result = ExecResult(returncode=0, stdout="", stderr="")
+        # "Review completed": an empty stdout is a failed run, not a clean one.
+        cli_result = ExecResult(returncode=0, stdout="Review completed", stderr="")
         executor = _executor_returning(diff_result, cli_result)
 
         cfg = ClaudeCLIConfig(enabled=True, cli_path="corp-wrap claude --headless")

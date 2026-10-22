@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from franktheunicorn.review.backends.base import PRContext, ReviewFinding, parse_llm_response
@@ -21,8 +22,6 @@ from franktheunicorn.review.drafter import build_pr_context, create_drafts_from_
 from franktheunicorn.review.tone_guard import apply_tone_guard_batch
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from franktheunicorn.backends.base import ForgeClient
     from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig, ProjectConfig
     from franktheunicorn.core.models import PullRequest, ReviewDraft
@@ -128,11 +127,17 @@ def run_enabled_checks(
     registry = _get_registry()
     from franktheunicorn.review.prior_comments import format_prior_comments
 
+    # repo_path and diff both reach the context build: an over-cap file now
+    # excerpts around its hunks, and the checks were getting neither — no
+    # surrounding code at all, on the pass whose whole job is reading around
+    # the change.
     pr_context = build_pr_context(
         pr,
         project_config,
         operator_config,
         prior_comments=format_prior_comments(prior_comments or []),
+        repo_path=Path(repo_path) if repo_path is not None else None,
+        diff=diff,
     )
 
     if "issue-link" in enabled and not pr_context.linked_issues_context:

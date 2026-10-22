@@ -71,6 +71,96 @@ class TestFullFileSection:
         full, _imports = build_context_strings(["myapp/big.py"], fake_repo, cfg)
         assert "big.py" not in full
 
+
+class TestOversizedExcerpt:
+    """A file over per_file_token_cap contributes its changed hunks plus
+    padding, not nothing — on a monorepo the interesting files are routinely
+    10x the cap."""
+
+    DIFF_AT_1000 = (
+        "diff --git a/myapp/big.py b/myapp/big.py\n"
+        "--- a/myapp/big.py\n"
+        "+++ b/myapp/big.py\n"
+        "@@ -997,5 +997,5 @@\n"
+        " line 996\n"
+        " line 997\n"
+        "-old\n"
+        "+line 997 changed\n"
+        " line 998\n"
+        " line 999\n"
+    )
+
+    @staticmethod
+    def _write_big(repo: Path, lines: int = 2000) -> None:
+        (repo / "myapp" / "big.py").write_text(
+            "\n".join(f"line {i}" for i in range(1, lines + 1)) + "\n"
+        )
+
+    def test_oversized_file_excerpted_around_hunks(self, fake_repo: Path) -> None:
+        self._write_big(fake_repo)
+        cfg = ContextConfig(per_file_token_cap=100, include_first_party_imports=False)
+        full, _imports = build_context_strings(
+            ["myapp/big.py"], fake_repo, cfg, diff=self.DIFF_AT_1000
+        )
+        assert "big.py" in full
+        # Announces itself as an excerpt of a known-size file.
+        assert "(excerpt around the change; full file is 2000 lines)" in full
+        # The hunk's own lines are in the window (the excerpt reads the FILE,
+        # so the changed line is the file's line 997, not the diff's "+…").
+        assert "line 997\n" in full
+        # The window is bounded: a line 400 away from the hunk is omitted.
+        assert "line 400\n" not in full
+        assert "… lines 1-" in full
+        assert "omitted" in full
+
+    def test_oversized_without_hunk_info_still_skipped(self, fake_repo: Path) -> None:
+        self._write_big(fake_repo)
+        cfg = ContextConfig(per_file_token_cap=100, include_first_party_imports=False)
+        full, _imports = build_context_strings(
+            ["myapp/big.py"], fake_repo, cfg, diff="not a diff at all"
+        )
+        assert "big.py" not in full
+
+    def test_excerpt_respects_token_cap(self, fake_repo: Path) -> None:
+        self._write_big(fake_repo)
+        cfg = ContextConfig(per_file_token_cap=20, include_first_party_imports=False)
+        full, _imports = build_context_strings(
+            ["myapp/big.py"], fake_repo, cfg, diff=self.DIFF_AT_1000
+        )
+        # 20 tokens ≈ 80 chars: the window is cut to the budget, not past it.
+        excerpt = full.split("(excerpt around the change; full file is 2000 lines)", 1)[1]
+        assert estimate_tokens(excerpt) <= 20 + 2  # headers cost a few tokens
+
+    def test_two_hunks_two_windows(self, fake_repo: Path) -> None:
+        self._write_big(fake_repo)
+        diff = (
+            "diff --git a/myapp/big.py b/myapp/big.py\n"
+            "--- a/myapp/big.py\n"
+            "+++ b/myapp/big.py\n"
+            "@@ -100,2 +100,2 @@\n"
+            " line 99\n"
+            "-old\n"
+            "+line 100 changed\n"
+            "@@ -1500,2 +1500,2 @@\n"
+            " line 1499\n"
+            "-old\n"
+            "+line 1500 changed\n"
+        )
+        cfg = ContextConfig(per_file_token_cap=200, include_first_party_imports=False)
+        full, _imports = build_context_strings(["myapp/big.py"], fake_repo, cfg, diff=diff)
+        assert "line 100\n" in full
+        assert "line 1500\n" in full
+        assert "… lines " in full  # the gap between the windows is marked
+        assert "line 800\n" not in full
+
+    def test_small_file_unaffected_by_diff_param(self, fake_repo: Path) -> None:
+        cfg = ContextConfig(include_first_party_imports=False)
+        full, _imports = build_context_strings(
+            ["myapp/models.py"], fake_repo, cfg, diff=self.DIFF_AT_1000
+        )
+        assert "class User" in full
+        assert "(excerpt" not in full
+
     def test_total_budget_is_respected(self, fake_repo: Path) -> None:
         # Two ~100-token files (~400 chars each) with a 50-token budget
         # means only zero or one fits; the second must be dropped.
@@ -134,3 +224,15 @@ class TestAutodetectPackageRoots:
         cfg = ContextConfig()
         _full, imports = build_context_strings(["src/pkg/main.py"], tmp_path, cfg)
         assert "util.py" in imports
+
+    def test_autodetects_python_dir_layout(self, tmp_path: Path) -> None:
+        # Spark's shape: the Python package is nested under python/, which the
+        # top-level scan never saw, so first-party imports resolved to nothing.
+        pkg = tmp_path / "python" / "pyspark"
+        pkg.mkdir(parents=True)
+        (pkg / "__init__.py").write_text("")
+        (pkg / "types.py").write_text("X = 1\n")
+        (pkg / "conversion.py").write_text("from pyspark.types import X\n")
+        cfg = ContextConfig()
+        _full, imports = build_context_strings(["python/pyspark/conversion.py"], tmp_path, cfg)
+        assert "types.py" in imports
