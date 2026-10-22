@@ -2708,18 +2708,22 @@ class ProjectConfig(BaseModel):
         known = {
             "api-misuse",
             "backport",
+            "config-docs",
             "concurrency",
             "correctness",
             "coverage",
             "design",
             "doc-accuracy",
             "edge-case",
+            "error-framework",
             "issue-link",
             "malicious-prompt",
+            "parity",
             "pr-description",
             "security",
             "security-context",
             "security-disclosure",
+            "test-pinning",
         }
         for name in v:
             if name not in known:

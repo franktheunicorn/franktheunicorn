@@ -28,7 +28,8 @@ provide
 - A comment describes code that this change has since altered, so the comment \
 is now wrong (a stale comment)
 - A comment references a symbol, line, or method that the change removed or \
-renamed
+renamed — including a reference that names something that does not exist in \
+the tree at all (a class, suite, or config a reader following it cannot find)
 
 Quote the mismatch: what the text says versus what the code does. Do NOT ask \
 for more comments where none are missing, and do NOT comment on wording, \

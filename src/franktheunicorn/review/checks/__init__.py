@@ -54,33 +54,41 @@ def _get_registry() -> dict[str, type[BaseCheck]]:
     from franktheunicorn.review.checks.api_misuse import APIMisuseCheck
     from franktheunicorn.review.checks.backport import BackportCheck
     from franktheunicorn.review.checks.concurrency import ConcurrencyCheck
+    from franktheunicorn.review.checks.config_docs import ConfigDocsCheck
     from franktheunicorn.review.checks.correctness import CorrectnessCheck
     from franktheunicorn.review.checks.coverage import CoverageCheck
     from franktheunicorn.review.checks.design import DesignCheck
     from franktheunicorn.review.checks.doc_accuracy import DocAccuracyCheck
     from franktheunicorn.review.checks.edge_case import EdgeCaseCheck
+    from franktheunicorn.review.checks.error_framework import ErrorFrameworkCheck
     from franktheunicorn.review.checks.issue_link import IssueLinkCheck
     from franktheunicorn.review.checks.malicious_prompt import MaliciousPromptCheck
+    from franktheunicorn.review.checks.parity import ParityCheck
     from franktheunicorn.review.checks.pr_description import PRDescriptionCheck
     from franktheunicorn.review.checks.security import SecurityCheck
     from franktheunicorn.review.checks.security_context import SecurityContextCheck
     from franktheunicorn.review.checks.security_disclosure import SecurityDisclosureCheck
+    from franktheunicorn.review.checks.test_pinning import TestPinningCheck
 
     return {
         "api-misuse": APIMisuseCheck,
         "backport": BackportCheck,
+        "config-docs": ConfigDocsCheck,
         "concurrency": ConcurrencyCheck,
         "correctness": CorrectnessCheck,
         "coverage": CoverageCheck,
         "design": DesignCheck,
         "doc-accuracy": DocAccuracyCheck,
         "edge-case": EdgeCaseCheck,
+        "error-framework": ErrorFrameworkCheck,
         "issue-link": IssueLinkCheck,
         "malicious-prompt": MaliciousPromptCheck,
+        "parity": ParityCheck,
         "pr-description": PRDescriptionCheck,
         "security": SecurityCheck,
         "security-context": SecurityContextCheck,
         "security-disclosure": SecurityDisclosureCheck,
+        "test-pinning": TestPinningCheck,
     }
 
 

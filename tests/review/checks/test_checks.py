@@ -36,6 +36,19 @@ class TestRegistry:
         for cls in registry.values():
             assert issubclass(cls, BaseCheck)
 
+    def test_every_registry_key_is_known_to_config(self, caplog: pytest.LogCaptureFixture) -> None:
+        # The config validator warns on llm_checks it doesn't know, and the
+        # registry is the source of truth — a check that exists but isn't in
+        # the known list warns on every project that enables it.
+        import logging
+
+        registry = _get_registry()
+        with caplog.at_level(logging.WARNING, logger="franktheunicorn.config.models"):
+            ProjectConfig(owner="apache", repo="spark", llm_checks=sorted(registry))
+        assert not [r for r in caplog.records if "Unknown llm_check" in r.getMessage()], (
+            f"registry keys missing from config known list: {[r.getMessage() for r in caplog.records]}"
+        )
+
 
 @pytest.mark.django_db
 class TestRunEnabledChecks:

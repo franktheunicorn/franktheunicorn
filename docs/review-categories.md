@@ -21,6 +21,11 @@ noise the operator rejects one draft at a time.
   `Non-blocking (P2)`** house style. Those are counted separately from the
   clearly-human conversational comments below, because they inflate the
   "correctness" and "test" buckets well past what unaided humans write.
+- **HyukjinKwon agreed-corpus (2026-10-22):** 431 inline review comments by
+  HyukjinKwon on apache/spark PRs touched in the past month; 199 of them drew
+  an agreement signal (a reply that says done/fixed/addressed/good point, or a
+  👍). Those 199 are the ground truth for the second audit below — what a
+  maintainer actually says that other people act on.
 
 ## What frank already has
 
@@ -31,7 +36,8 @@ correctness, concurrency/resource, edge-cases, comment-vs-code accuracy, and
 design — are where reviewers spend the most effort; as of this writing they are
 **implemented** as the checks `correctness`, `concurrency`, `edge-case`,
 `doc-accuracy`, and `design` (enable via `llm_checks:` in project YAML). The
-prompts below are those checks' prompts.
+prompts below are those checks' prompts. The second audit added
+`test-pinning`, `parity`, `config-docs`, and `error-framework`.
 
 ---
 
@@ -279,3 +285,77 @@ Set category to "design". Return {"findings": [...]} matching {schema}.
   human reviewers on Spark actually spend their attention. Enabled on
   apache/spark; each was verified live to fire on a planted bug and to return
   an empty array on a clean PR.
+
+---
+
+# Second audit: the HyukjinKwon agreed-corpus (2026-10-22)
+
+431 inline comments by HyukjinKwon on Spark PRs in the month to 2026-10-22;
+199 drew an agreement signal — a non-author reply saying done / fixed /
+addressed / good point / applied, or a 👍 on the comment. Those are the
+comments that changed the PR, so they are the ones worth automating. Rough
+weights (comments can fit two buckets; the percentages are of the 199):
+
+| Bucket | Weight | New check | Example pattern |
+|---|---|---|---|
+| The test doesn't pin the change | ~40% | `test-pinning` | "if the guard were reverted, every test would still pass"; "no test reaches the recursive arm"; "the assertion only checks `isDefined`, so a wrong-but-defined tree passes"; "every value is null, so a swapped lookup is invisible"; "the only covering test is skipped in Connect mode" |
+| Semantic correctness | ~18% | (existing `correctness`) | "only a bare float attribute is exempt — `f > 1.5` is analyzed as `cast(f AS DOUBLE)`"; "counts the fraction twice for pre-1970 datetimes" |
+| Comment/doc vs code | ~13% | (existing `doc-accuracy`, prompt sharpened) | "read literally, this says the opposite of what the test checks"; "the docstring cites `BasePandasGroupExec.resolveArgOffsets`, no such class exists"; "'otherwise' reads as the opposite of the code" |
+| Concurrency / resource / process lifecycle | ~8% | (existing `concurrency`) | "this wait can block forever when run on the writer thread itself"; "a SIGKILLed launcher runs no shutdown hook, so the worker orphans" |
+| Dual-surface parity | ~5% | `parity` (new) | "the classic Py4J converter still drops `fold`, so classic and Connect disagree on the repeated hour"; "the parity suite skips `test_checkpoint`"; "JDK parity claim — `Double.toString` is shortest-digit only on JDK 19+, Spark runs 17" |
+| Config ↔ docs / versioning | ~4% | `config-docs` (new) | "user-facing conf missing from `docs/configuration.md`"; "`.internal()` conf the docs tell users to set"; "since-version should be 4.4.0, this ships first in branch-4.x" |
+| Error-framework hygiene | ~2% | `error-framework` (new) | "removes the last caller of `_LEGACY_ERROR_TEMP_3152` but leaves the entry in error-conditions.json"; "a client mistake maps to `INTERNAL_ERROR`" |
+| Suite hygiene / placement / drive-by diff | ~5% | none (style; the anti-patterns own it) | "move the test next to its fixture"; "restore the blank line so the guide diff only adds the note" |
+
+The headline: the dominant agreed comment is not "add a test" but **"the test
+you added does not pin the change"** — revert-survival, wrong-path coverage,
+vacuous assertions, skipped modes. The `coverage` check asks whether a test
+reaches the new path; `test-pinning` asks whether the suite fails when it
+should. They are separate passes on purpose.
+
+The four new checks follow the existing house style (emit-when / do-NOT, one–two
+sentence body, fixed category in the title, `{"findings": [...]}` with
+`{schema}`). `config-docs` and `error-framework` inject the project's
+`review_guidance` (the versioning and error-framework conventions are
+project-specific); `test-pinning` injects `test_expectations`; `parity` is
+guidance-free (the surfaces are named in the diff).
+
+## Live watch (2026-10-22) and what it changed
+
+The four checks, the glm-5.2-max reviewer (GLM-5.3 is not on any endpoint this
+box reaches; 5.2-max is the newest GLM cursor-agent offers), and the judge were
+watched on apache/spark #59298 and #59403 end to end. What the watch caught:
+
+- **A dead reviewer read as clean.** codex's login 401s; it retries, prints the
+  error to stderr, exits 0 with no stdout — and was recorded as an `ok` review
+  with no findings on every PR. Exit-0-with-no-stdout now raises: the prompt
+  requires "Review completed" or finding blocks, so silence is a failed run,
+  and the auth-failure advice names the fix.
+- **The worker's own INFO log never reached the log file.** `python -m
+  franktheunicorn.worker.runner` runs the module as `__main__`, whose logger
+  sits outside the `franktheunicorn` hierarchy and inherits the root WARNING
+  level — every startup verdict, per-reviewer outcome, and cycle summary was
+  dropped. Fixed with an explicit logger name.
+- **Review context was dead on Spark.** `per_file_token_cap` skipped any file
+  over the cap whole — on a monorepo that is every interesting file (types.py
+  is ~10x the cap), so `full_file_context` was 0 chars; the llm_checks path
+  never passed `repo_path` at all; and the import resolver had no candidate
+  path for Spark's `python/pyspark` layout. Over-cap files now contribute a
+  window around the diff's hunks (padding shrinks first — the changed lines
+  are the point), over-cap imports contribute their head, and the checks get
+  the same context as the main pipeline. On #59298 that took the checks from
+  0 to ~6K chars of changed-region context plus ~22K of first-party imports.
+- **The judge's tier-A re-ask had no cap.** qwen3.8-27b routinely answers only
+  the first comment of a batch; the unruled tail is re-asked one-on-one at
+  ~the batch call's cost each, and on a bad PR that is most of the batch.
+  `judge.max_reask` (default 5) now bounds it; past the cap an unruled finding
+  is kept, since silence is never a rejection.
+- **Division of labour, confirmed.** The deep cross-file findings (the classic
+  `DatetimeConverter` still using `time.mktime`, so classic and Connect
+  disagree on the repeated DST hour) came from the checkout-reading agents
+  (grok found it, at the exact spot); the diff-level checks own the
+  diff-visible categories. A sibling 3600 lines outside the excerpt window is
+  not a qwen-with-a-diff finding, and the parity prompt now says so by asking
+  for the sibling only when the diff itself shows the two surfaces.
+
+
