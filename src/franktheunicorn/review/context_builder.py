@@ -75,7 +75,7 @@ def build_context_strings(
             continue
         tokens = estimate_tokens(content)
         if tokens > per_file_cap:
-            ranges = hunk_ranges.get(_normalize_path(rel))
+            ranges = hunk_ranges.get(rel)
             if not ranges:
                 continue
             content = _excerpt_around(content, ranges, per_file_cap)
@@ -130,7 +130,11 @@ def build_context_strings(
                     # monorepo the imports are big files too, and skipping
                     # them whole kept this section empty everywhere it mattered.
                     content = _head_truncated(content, per_file_cap)
+                    if not content:
+                        continue
                     tokens = estimate_tokens(content)
+                    if tokens > per_file_cap:
+                        continue
                 if tokens > remaining:
                     continue
                 try:
@@ -150,22 +154,25 @@ _EXCERPT_PAD_LINES = 40
 
 
 def _head_truncated(content: str, token_cap: int) -> str:
-    """The first ``token_cap`` tokens of a file, with a marker saying so."""
+    """The first ``token_cap`` tokens of a file, with a marker saying so.
+
+    The marker is reserved against the cap so the joined result stays within
+    ``token_cap * 4`` characters. Empty when nothing fits (the caller skips).
+    """
     lines = content.splitlines()
     total = len(lines)
+    marker_worst = len(f"… ({total} more lines)")
+    budget_chars = token_cap * 4 - marker_worst
     kept: list[str] = []
     used = 0
     for line in lines:
-        if used + len(line) + 1 > token_cap * 4:
+        if used + len(line) + 1 > budget_chars:
             break
         kept.append(line)
         used += len(line) + 1
+    if not kept:
+        return ""
     return "\n".join(kept) + f"\n… ({total - len(kept)} more lines)"
-
-
-def _normalize_path(path: str) -> str:
-    """A diff path and a changed_files entry for the same file, compared equal."""
-    return path.removeprefix("a/").removeprefix("b/")
 
 
 def _hunk_ranges_by_file(diff: str) -> dict[str, list[tuple[int, int]]]:
@@ -173,6 +180,8 @@ def _hunk_ranges_by_file(diff: str) -> dict[str, list[tuple[int, int]]]:
 
     Returns ``{}`` on any parse problem — the caller then simply skips over-cap
     files as before, so a malformed diff degrades to the previous behaviour.
+    Keys are unidiff's own paths (it already strips the ``a/``/``b/`` prefixes,
+    so a repo with a literal top-level ``a/`` directory still matches).
     """
     if not diff.strip():
         return {}
@@ -191,7 +200,7 @@ def _hunk_ranges_by_file(diff: str) -> dict[str, list[tuple[int, int]]]:
             if hunk.target_length > 0
         ]
         if spans:
-            ranges[_normalize_path(patched_file.path)] = spans
+            ranges[patched_file.path] = spans
     return ranges
 
 
@@ -210,27 +219,49 @@ def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
 def _excerpt_around(content: str, ranges: list[tuple[int, int]], token_cap: int) -> str:
     """The changed lines plus padding, joined with omission markers.
 
-    Every part — markers and headers included — is counted against the cap,
-    so the caller's token check on the result cannot reject what this built.
-    When a window has to shrink, the padding goes first: the changed lines are
-    the point of the excerpt, the padding is context around them.
+    Every part — markers, headers, and the join separators — is counted against
+    the cap, so the caller's token check on the result cannot reject what this
+    built. Windows are merged AFTER padding, so two nearby hunks emit their
+    overlap once. When a window has to shrink, the padding goes first: the
+    changed lines are the point of the excerpt, the padding is context around
+    them.
     """
     lines = content.splitlines()
     n = len(lines)
-    # The trailing "… lines X-N omitted" marker is appended after the loop;
-    # reserve its worst-case length so the result cannot exceed the cap the
-    # caller re-checks.
-    tail_reserve = len(f"… lines 0-{n} omitted") + 1
-    budget_chars = token_cap * 4 - tail_reserve
-    parts = [f"(excerpt around the change; full file is {n} lines)"]
-    used = len(parts[0])
-    last_end = 0
+    # Reserve the trailing marker's exact worst case (separator included) so
+    # the final joined string stays within token_cap * 4 characters.
+    budget_chars = token_cap * 4 - len(f"\n… lines {n}-{n} omitted")
+    parts: list[str] = [f"(excerpt around the change; full file is {n} lines)"]
+    used = len(parts[0])  # length of "\n".join(parts) so far
+
+    def _add(part: str) -> None:
+        nonlocal used
+        parts.append(part)
+        used += len(part) + 1  # +1 for the join separator
+
+    # Merge the PADDED spans, keeping each window's raw (change) bounds so the
+    # shrink path can drop padding without touching the changed lines.
+    windows: list[tuple[int, int, int, int]] = []  # (padded_start, padded_end, raw_start, raw_end)
     for raw_start, raw_end in _merge_spans(ranges):
-        start, end = max(1, raw_start - _EXCERPT_PAD_LINES), min(n, raw_end + _EXCERPT_PAD_LINES)
-        gap = f"… lines {last_end + 1}-{start - 1} omitted\n" if start > last_end + 1 else ""
-        header = f"lines {start}-{end}:\n"
+        if raw_start > n:
+            # Hunk past EOF: the checkout is not at the diff's head commit.
+            continue
+        p_start = max(1, raw_start - _EXCERPT_PAD_LINES)
+        p_end = min(n, raw_end + _EXCERPT_PAD_LINES)
+        if windows and p_start <= windows[-1][1] + 1:
+            w = windows[-1]
+            windows[-1] = (w[0], max(w[1], p_end), min(w[2], raw_start), max(w[3], raw_end))
+        else:
+            windows.append((p_start, p_end, raw_start, raw_end))
+
+    last_end = 0
+    emitted = False
+    for start, end, raw_start, raw_end in windows:
+        gap = f"… lines {last_end + 1}-{start - 1} omitted" if start > last_end + 1 else ""
+        header = f"lines {start}-{end}:"
         chunk = "\n".join(lines[start - 1 : end])
-        if used + len(gap) + len(header) + len(chunk) > budget_chars:
+        cost = sum(len(p) + 1 for p in (gap, header, chunk) if p)
+        if used + cost > budget_chars:
             # Padding first; if even the bare change does not fit, cut it at
             # a line boundary — a hunk larger than the whole per-file cap loses
             # something however it is cut.
@@ -238,21 +269,29 @@ def _excerpt_around(content: str, ranges: list[tuple[int, int]], token_cap: int)
                 start = max(1, raw_start - pad)
                 end = min(n, raw_end + pad)
                 chunk = "\n".join(lines[start - 1 : end])
-                header = f"lines {start}-{end}:\n"
-                if used + len(gap) + len(header) + len(chunk) <= budget_chars:
+                header = f"lines {start}-{end}:"
+                gap = f"… lines {last_end + 1}-{start - 1} omitted" if start > last_end + 1 else ""
+                cost = sum(len(p) + 1 for p in (gap, header, chunk) if p)
+                if used + cost <= budget_chars:
                     break
             else:
-                room = budget_chars - used - len(gap) - len(header)
+                room = budget_chars - used - sum(len(p) + 1 for p in (gap, header) if p)
                 if room <= 0:
                     break
                 chunk = chunk[:room].rsplit("\n", 1)[0]
                 if not chunk.strip():
                     break
-        parts.extend((gap, header, chunk))
-        used += len(gap) + len(header) + len(chunk)
+        for part in (gap, header, chunk):
+            if part:
+                _add(part)
         last_end = end
+        emitted = True
+    if not emitted:
+        # Every hunk was past EOF (checkout not at the diff's head) — there is
+        # no windowable content here, not a marker-only "excerpt".
+        return ""
     if last_end < n:
-        parts.append(f"\n… lines {last_end + 1}-{n} omitted")
+        _add(f"… lines {last_end + 1}-{n} omitted")
     return "\n".join(parts)
 
 

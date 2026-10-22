@@ -112,8 +112,10 @@ class PythonImportResolver:
             return None
 
         parts = list(rel.parts[:-1])  # drop the filename
-        # Strip a leading "src" so the top-level package matches package_roots.
-        if parts and parts[0] == "src":
+        # Strip a leading layout directory ("src", "python") so the top-level
+        # package matches package_roots — "python" is the monorepo layout the
+        # candidate paths also handle (Spark: python/pyspark/...).
+        if parts and parts[0] in ("src", "python"):
             parts = parts[1:]
 
         # Walk up `level - 1` (level=1 means current package).

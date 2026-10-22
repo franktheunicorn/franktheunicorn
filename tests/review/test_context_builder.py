@@ -123,13 +123,75 @@ class TestOversizedExcerpt:
 
     def test_excerpt_respects_token_cap(self, fake_repo: Path) -> None:
         self._write_big(fake_repo)
-        cfg = ContextConfig(per_file_token_cap=20, include_first_party_imports=False)
+        # 40 tokens is enough for the bare hunk but not the padded window, so
+        # the padding shrinks — and everything must still fit inside the cap
+        # the caller re-checks.
+        cfg = ContextConfig(per_file_token_cap=40, include_first_party_imports=False)
         full, _imports = build_context_strings(
             ["myapp/big.py"], fake_repo, cfg, diff=self.DIFF_AT_1000
         )
-        # 20 tokens ≈ 80 chars: the window is cut to the budget, not past it.
         excerpt = full.split("(excerpt around the change; full file is 2000 lines)", 1)[1]
-        assert estimate_tokens(excerpt) <= 20 + 2  # headers cost a few tokens
+        assert estimate_tokens(excerpt) <= 40
+
+    def test_big_hunk_not_dropped_by_marker_overhead(self, fake_repo: Path) -> None:
+        # A hunk big enough that its window fills the whole budget: the
+        # trailing omission marker must still fit, or the caller's re-check
+        # drops the file whole and the excerpt silently vanishes.
+        self._write_big(fake_repo, lines=5000)
+        diff = (
+            "diff --git a/myapp/big.py b/myapp/big.py\n"
+            "--- a/myapp/big.py\n"
+            "+++ b/myapp/big.py\n"
+            "@@ -1000,201 +1000,201 @@\n" + " ctx\n" * 100 + "-old\n" + "+new\n" + " ctx\n" * 100
+        )
+        cfg = ContextConfig(per_file_token_cap=100, include_first_party_imports=False)
+        full, _imports = build_context_strings(["myapp/big.py"], fake_repo, cfg, diff=diff)
+        assert "big.py" in full  # not dropped by the caller's token re-check
+        excerpt = full.split("(excerpt around the change; full file is 5000 lines)", 1)[1]
+        assert estimate_tokens(excerpt) <= 100
+
+    def test_nearby_hunks_overlap_emitted_once(self, fake_repo: Path) -> None:
+        # Two hunks closer than the padding merge into one window; the
+        # overlap must not appear twice.
+        self._write_big(fake_repo, lines=300)
+        diff = (
+            "diff --git a/myapp/big.py b/myapp/big.py\n"
+            "--- a/myapp/big.py\n"
+            "+++ b/myapp/big.py\n"
+            "@@ -100,2 +100,2 @@\n"
+            " line 99\n"
+            "-old\n"
+            "+line 100 changed\n"
+            "@@ -131,2 +131,2 @@\n"
+            " line 130\n"
+            "-old\n"
+            "+line 131 changed\n"
+        )
+        cfg = ContextConfig(per_file_token_cap=200, include_first_party_imports=False)
+        full, _imports = build_context_strings(["myapp/big.py"], fake_repo, cfg, diff=diff)
+        excerpt = full.split("(excerpt around the change; full file is 300 lines)", 1)[1]
+        # No line appears twice in the excerpt body.
+        body_lines = [ln for ln in excerpt.splitlines() if ln.startswith("line ")]
+        assert len(body_lines) == len(set(body_lines))
+        assert "line 100\n" in full
+        assert "line 131\n" in full
+
+    def test_hunk_past_eof_skipped_not_inverted(self, fake_repo: Path) -> None:
+        # A checkout behind the diff's head can carry a hunk range past EOF;
+        # emitting it would produce an inverted "lines 5460-5000:" header.
+        self._write_big(fake_repo, lines=5000)
+        diff = (
+            "diff --git a/myapp/big.py b/myapp/big.py\n"
+            "--- a/myapp/big.py\n"
+            "+++ b/myapp/big.py\n"
+            "@@ -5500,2 +5500,2 @@\n"
+            " line 5499\n"
+            "-old\n"
+            "+line 5500 changed\n"
+        )
+        cfg = ContextConfig(per_file_token_cap=200, include_first_party_imports=False)
+        full, _imports = build_context_strings(["myapp/big.py"], fake_repo, cfg, diff=diff)
+        assert "big.py" not in full  # nothing windowable in this checkout
 
     def test_two_hunks_two_windows(self, fake_repo: Path) -> None:
         self._write_big(fake_repo)
@@ -184,6 +246,20 @@ class TestImportSection:
         assert "## Imported modules (first-party)" in imports
         assert "helpers.py" in imports
         assert "def helper" in imports
+
+    def test_oversized_import_head_truncated_within_cap(self, fake_repo: Path) -> None:
+        # A big import contributes its head; the truncation marker is part of
+        # the budget, so the section never exceeds per_file_token_cap per file.
+        big = fake_repo / "myapp" / "bigdep.py"
+        big.write_text("\n".join(f"dep_line_{i:05d}" for i in range(2000)) + "\n")
+        (fake_repo / "myapp" / "small.py").write_text("from myapp.bigdep import thing\n")
+        cfg = ContextConfig(package_roots=["myapp"], per_file_token_cap=50)
+        _full, imports = build_context_strings(["myapp/small.py"], fake_repo, cfg)
+        assert "bigdep.py" in imports
+        assert "more lines)" in imports
+        block = imports.split("### myapp/bigdep.py", 1)[1]
+        body = block.split("```python\n", 1)[1].split("```", 1)[0]
+        assert estimate_tokens(body) <= 50
 
     def test_no_imports_when_disabled(self, fake_repo: Path) -> None:
         cfg = ContextConfig(include_first_party_imports=False, package_roots=["myapp"])
