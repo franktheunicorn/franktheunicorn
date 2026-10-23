@@ -352,6 +352,7 @@ def judge_findings(
     # and each re-ask costs what the batch call did. Past the cap the finding
     # is kept as-is: silence is never a rejection.
     reasked = 0
+    unruled_total = sum(1 for v in verdicts if v.tier == "unruled")
     for i, verdict in enumerate(verdicts):
         if verdict.tier != "unruled":
             continue
@@ -360,6 +361,16 @@ def judge_findings(
             continue
         reasked += 1
         verdicts[i] = _judge_one(backend, findings[i], diff, project_id=project_id, pr_id=pr_id)
+    if unruled_total > reasked:
+        # A gate that stopped configured work says so at INFO, naming the
+        # setting that changes it — the alternative is findings kept for a
+        # reason nobody can see in the log.
+        logger.info(
+            "Judge: %d unruled finding(s) kept without a re-ask (cap %d); "
+            "raise judge.max_reask to screen them individually.",
+            unruled_total - reasked,
+            max_reask,
+        )
 
     if verify_borderline and max_verify > 0:
         spent = 0

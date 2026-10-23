@@ -298,8 +298,8 @@ def run_agent_cli_review(
     by ``RemoteSSHExecutor.prepare_repo``. Returns an empty list when the
     diff is empty or the review found nothing; raises ``AgentCLIRunError``
     when the CLI didn't review at all (git diff failed, CLI missing, timed
-    out, non-zero exit, or an exit-0 refusal), so the caller records a
-    failure rather than a clean run.
+    out, non-zero exit, an exit-0 refusal, or exit 0 with no output at all),
+    so the caller records a failure rather than a clean run.
 
     Argv assembly is delegated to ``config.build_invocation`` so the same
     body serves flag-style agents (claude, pi) and subcommand-style agents

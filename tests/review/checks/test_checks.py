@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -593,3 +594,36 @@ class TestDiffCap:
         assert len(backend.user_messages) == 1
         assert "[...diff truncated" in backend.user_messages[0]
         assert len(backend.user_messages[0]) <= _MAX_CHECK_PROMPT_CHARS + 2_000
+
+
+class TestContextPassthrough:
+    @pytest.mark.django_db
+    def test_checks_context_receives_repo_path_and_real_diff(
+        self, db_pr: PullRequest, tmp_path: Path
+    ) -> None:
+        """The checks path used to pass neither: no surrounding code at all,
+        on the pass whose whole job is reading around the change. Pin both,
+        so a refactor of run_enabled_checks cannot silently drop them again."""
+        from tests.conftest import make_pr_context
+
+        seen: dict[str, object] = {}
+
+        def spy(pr: object, pc: object, op: object, **kwargs: object) -> object:
+            seen.update(kwargs)
+            return make_pr_context()
+
+        config = ProjectConfig(owner="apache", repo="spark", llm_checks=["coverage"])
+        op_config = OperatorConfig(llm_backends=[LLMBackendConfig(provider="stub")])
+        with (
+            patch("franktheunicorn.review.checks.build_pr_context", side_effect=spy),
+            patch("franktheunicorn.review.checks._run_check_dispatch", return_value=[]),
+        ):
+            run_enabled_checks(
+                db_pr,
+                "the real diff",
+                project_config=config,
+                operator_config=op_config,
+                repo_path=tmp_path,
+            )
+        assert seen.get("diff") == "the real diff"
+        assert seen.get("repo_path") == tmp_path

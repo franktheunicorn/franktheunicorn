@@ -363,8 +363,10 @@ watched on apache/spark #59298 and #59403 end to end. What the watch caught:
   disagree on the repeated DST hour) came from the checkout-reading agents
   (grok found it, at the exact spot); the diff-level checks own the
   diff-visible categories. A sibling 3600 lines outside the excerpt window is
-  not a qwen-with-a-diff finding, and the parity prompt now says so by asking
-  for the sibling only when the diff itself shows the two surfaces.
+  not a qwen-with-a-diff finding — the parity prompt still asks for it (naming
+  the file and symbol is exactly the corpus's comment), but in practice the
+  model only delivers when the diff itself shows both surfaces; everything
+  past the window is the agent lane's job.
 
 ---
 

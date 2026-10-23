@@ -178,30 +178,68 @@ def _head_truncated(content: str, token_cap: int) -> str:
 def _hunk_ranges_by_file(diff: str) -> dict[str, list[tuple[int, int]]]:
     """Target-side (start, length_inclusive_end) ranges per file from a diff.
 
-    Returns ``{}`` on any parse problem — the caller then simply skips over-cap
-    files as before, so a malformed diff degrades to the previous behaviour.
-    Keys are unidiff's own paths (it already strips the ``a/``/``b/`` prefixes,
-    so a repo with a literal top-level ``a/`` directory still matches).
+    TARGET side on purpose: the excerpt is read from the worker's checkout,
+    which at review time holds the PR head merged onto the base (the review
+    scaffold checks the merged head out and detaches at it), so the applied
+    hunks live at their target lines. SOURCE-side numbers would name lines
+    of the pre-change file that the worktree no longer contains. A hunk with
+    ``target_length == 0`` (pure deletion) has no lines in the head file and
+    is skipped for the same reason. If the base tip has moved past the PR's
+    merge base the merged file drifts from the PR head and both sides are
+    approximations; the ±_EXCERPT_PAD_LINES window absorbs small drift.
+
+    One malformed file does not sink the rest: the diff is parsed per
+    ``diff --git`` section, and a section that fails to parse is logged at
+    INFO and skipped (a single bad hunk used to raise for the whole diff,
+    silently dropping every file's excerpt at DEBUG).
     """
     if not diff.strip():
         return {}
-    try:
-        from unidiff import PatchSet  # type: ignore[import-untyped]
-
-        patch = PatchSet(diff)
-    except Exception:
-        logger.debug("context: could not parse diff for hunk ranges", exc_info=True)
-        return {}
     ranges: dict[str, list[tuple[int, int]]] = {}
-    for patched_file in patch:
-        spans = [
-            (hunk.target_start, hunk.target_start + hunk.target_length - 1)
-            for hunk in patched_file
-            if hunk.target_length > 0
-        ]
-        if spans:
-            ranges[patched_file.path] = spans
+    for section in _diff_sections(diff):
+        try:
+            from unidiff import PatchSet  # type: ignore[import-untyped]
+
+            patch = PatchSet(section)
+        except Exception:
+            logger.info(
+                "context: one diff section failed to parse; its file gets no excerpt",
+                exc_info=True,
+            )
+            continue
+        for patched_file in patch:
+            spans = [
+                (hunk.target_start, hunk.target_start + hunk.target_length - 1)
+                for hunk in patched_file
+                if hunk.target_length > 0
+            ]
+            if spans:
+                ranges[patched_file.path] = spans
     return ranges
+
+
+def _diff_sections(diff: str) -> list[str]:
+    """The diff split into per-file sections at ``diff --git`` line starts.
+
+    Line starts only: a hunk body can quote the marker mid-line (a test
+    fixture that contains a diff), and a raw string split would cut the
+    section there. Each section keeps its own header so it parses alone.
+    """
+    if not diff.strip():
+        return []
+    sections: list[list[str]] = []
+    for line in diff.splitlines(keepends=True):
+        if line.startswith("diff --git ") and sections:
+            sections.append([line])
+        elif line.startswith("diff --git "):
+            sections = [[line]]
+        elif sections:
+            sections[-1].append(line)
+        else:
+            # Text before the first header: kept as one section so the
+            # caller's parse fails and skips it, loudly.
+            sections = [[line]]
+    return ["".join(s) for s in sections if "".join(s).strip()]
 
 
 def _excerpt_around(content: str, ranges: list[tuple[int, int]], token_cap: int) -> str:

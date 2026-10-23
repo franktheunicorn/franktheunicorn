@@ -105,8 +105,9 @@ class TestOversizedExcerpt:
         assert "big.py" in full
         # Announces itself as an excerpt of a known-size file.
         assert "(excerpt around the change; full file is 2000 lines)" in full
-        # The hunk's own lines are in the window (the excerpt reads the FILE,
-        # so the changed line is the file's line 997, not the diff's "+…").
+        # Target-side line numbers name lines of the checked-out file (the PR
+        # head merged onto the base — see _hunk_ranges_by_file); the fixture's
+        # hunk is symmetric, so source and target numbers coincide here.
         assert "line 997\n" in full
         # The window is bounded: a line 400 away from the hunk is omitted.
         assert "line 400\n" not in full
@@ -236,6 +237,56 @@ class TestOversizedExcerpt:
         )
         assert "class User" in full
         assert "(excerpt" not in full
+
+    def test_one_malformed_section_does_not_sink_the_rest(self, fake_repo: Path) -> None:
+        # The diff is parsed per `diff --git` section: a single bad hunk
+        # (here: a hunk header that promises more lines than follow) used to
+        # raise for the whole diff and silently drop every file's excerpt.
+        self._write_big(fake_repo)
+        good = (
+            "diff --git a/myapp/big.py b/myapp/big.py\n"
+            "--- a/myapp/big.py\n"
+            "+++ b/myapp/big.py\n"
+            "@@ -997,4 +997,4 @@\n"
+            " line 996\n"
+            " line 997\n"
+            "-old\n"
+            "+line 997 changed\n"
+            " line 998\n"
+        )
+        bad = (
+            "diff --git a/myapp/other.py b/myapp/other.py\n"
+            "--- a/myapp/other.py\n"
+            "+++ b/myapp/other.py\n"
+            "@@ -1,99 +1,99 @@\n"
+            " only one line follows, not 99\n"
+        )
+        cfg = ContextConfig(per_file_token_cap=200, include_first_party_imports=False)
+        full, _imports = build_context_strings(
+            ["myapp/big.py"], fake_repo, cfg, diff=bad + "\n" + good
+        )
+        assert "big.py" in full  # the good section still windows
+        assert "line 997\n" in full
+
+    def test_marker_quoted_inside_a_hunk_does_not_split(self, fake_repo: Path) -> None:
+        # A hunk body can quote `diff --git` (a test fixture that contains a
+        # diff); sections split at LINE STARTS only, so this stays one section.
+        self._write_big(fake_repo)
+        diff = (
+            "diff --git a/myapp/big.py b/myapp/big.py\n"
+            "--- a/myapp/big.py\n"
+            "+++ b/myapp/big.py\n"
+            "@@ -997,4 +997,4 @@\n"
+            " line 996\n"
+            " line 997\n"
+            "-diff --git a/quoted.py b/quoted.py\n"
+            "+line 997 changed\n"
+            " line 998\n"
+        )
+        cfg = ContextConfig(per_file_token_cap=200, include_first_party_imports=False)
+        full, _imports = build_context_strings(["myapp/big.py"], fake_repo, cfg, diff=diff)
+        assert "big.py" in full
+        assert "line 997\n" in full
 
     def test_total_budget_is_respected(self, fake_repo: Path) -> None:
         # Two ~100-token files (~400 chars each) with a 50-token budget

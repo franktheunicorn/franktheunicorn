@@ -205,6 +205,10 @@ digest_enabled: false
 #   enabled: true
 #   verify_borderline: true
 #   max_verify: 5
+#   # Cap on per-finding re-asks (findings the batch left unruled). Past the
+#   # cap an unruled finding is KEPT — silence is never a rejection — so the
+#   # cap bounds cost without dropping anything. INFO-logged when hit.
+#   max_reask: 5
 #   backend:
 #     provider: "openai"
 #     model: "qwen3-8b"
