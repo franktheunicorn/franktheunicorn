@@ -900,6 +900,13 @@ class LLMBackendConfig(BaseModel):
     base_url: str = ""
     temperature: float = 0.3
     max_tokens: int = 4096
+    #: Extra request fields for OpenAI-compatible gateways (passed as the
+    #: SDK's ``extra_body``). For a thinking-mode model served behind such a
+    #: gateway, ``chat_template_kwargs: {enable_thinking: false}`` stops the
+    #: reasoning from consuming the whole output budget and returning an empty
+    #: completion — observed on qwen3.8 at llm.apache.org, where prompts over
+    #: ~100K chars reliably came back empty with thinking on.
+    extra_body: dict[str, object] = Field(default_factory=dict)
     # Only consulted when ``provider == "claude-code"``: talks to a local
     # Claude Code agent instead of calling the Anthropic API, so no API key
     # is needed (billed via the agent's own logged-in auth). ``transport``

@@ -96,6 +96,10 @@ class OpenAIBackend(BaseLLMBackend):
                 ],
                 self._token_param: self._config.max_tokens,
             }
+            if self._config.extra_body:
+                # Gateway-specific request fields (e.g. disabling a thinking
+                # mode whose reasoning eats the output budget).
+                request_kwargs["extra_body"] = dict(self._config.extra_body)
             if self._supports_json_object:
                 request_kwargs["response_format"] = {"type": "json_object"}
             return client.chat.completions.create(**request_kwargs)

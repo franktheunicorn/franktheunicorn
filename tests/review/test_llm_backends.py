@@ -499,9 +499,39 @@ class TestOpenAIBackend:
             kwargs = create.call_args.kwargs
             assert "max_completion_tokens" in kwargs
             assert "max_tokens" not in kwargs
+            # No gateway extras unless configured.
+            assert "extra_body" not in kwargs
 
         assert len(findings) == 1
         assert findings[0].confidence == 0.8  # high -> 0.8
+
+    @patch.dict("os.environ", {"TEST_OPENAI_KEY": "sk-test"})
+    def test_extra_body_passed_through_for_gateway_quirks(self) -> None:
+        """A thinking-mode model behind an OpenAI-compatible gateway can burn
+        the whole output budget on reasoning and return an empty completion;
+        ``extra_body`` is how the config turns that off (qwen3.8 at
+        llm.apache.org, verified 2026-10-23)."""
+        config = LLMBackendConfig(
+            provider="openai",
+            api_key_env="TEST_OPENAI_KEY",
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        from franktheunicorn.review.backends.openai_backend import OpenAIBackend
+
+        backend = OpenAIBackend(config)
+        ctx = make_pr_context()
+
+        mock_choice = MagicMock()
+        mock_choice.message.content = json.dumps({"findings": []})
+        mock_response = MagicMock()
+        mock_response.choices = [mock_choice]
+
+        with patch("openai.OpenAI") as mock_client_cls:
+            create = mock_client_cls.return_value.chat.completions.create
+            create.return_value = mock_response
+            backend.generate_findings(_SAMPLE_DIFF, ctx)
+            kwargs = create.call_args.kwargs
+            assert kwargs["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
 
     @patch.dict("os.environ", {"TEST_OPENAI_KEY": "sk-test"})
     def test_falls_back_to_max_tokens_for_legacy_server(self) -> None:
