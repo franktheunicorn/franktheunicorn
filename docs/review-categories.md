@@ -187,6 +187,12 @@ gated). **Dead code / no-op: partly** — an added line that can't execute (afte
 `return`, a `<script src>` body, a default re-applied) is rule-checkable in the
 obvious cases. **"This is now redundant given the other change": LLM.**
 
+Implemented as the `simplification` check (third audit, 2026-10-22): the
+redundancy-created-by-this-change cases above, plus the patterns the
+Dongjoon-Hyun corpus added — the lockstep edit (the PR had to change the same
+rule in two places), the hand-rolled copy of a utility the project already
+has, the forward-only wrapper, duplicated state, and recomputed values.
+
 ```
 You are checking whether code this pull request adds is redundant: a block that
 duplicates existing logic, a line that has no effect, or a loop/branch whose
@@ -284,7 +290,9 @@ Set category to "design". Return {"findings": [...]} matching {schema}.
   `edge-case` (C), `doc-accuracy` (G-in-code), `design` (J) — matching where
   human reviewers on Spark actually spend their attention. Enabled on
   apache/spark; each was verified live to fire on a planted bug and to return
-  an empty array on a clean PR.
+  an empty array on a clean PR. The second and third audits added
+  `test-pinning`, `parity`, `config-docs`, `error-framework`, and
+  `simplification` (F).
 
 ---
 
@@ -357,5 +365,87 @@ watched on apache/spark #59298 and #59403 end to end. What the watch caught:
   diff-visible categories. A sibling 3600 lines outside the excerpt window is
   not a qwen-with-a-diff finding, and the parity prompt now says so by asking
   for the sibling only when the diff itself shows the two surfaces.
+
+---
+
+# Third audit: Dongjoon-Hyun and holdenk agreed-corpora (2026-10-22)
+
+Same method, two more reviewers, one question each time: what do they catch
+that frank does not?
+
+## Dongjoon-Hyun (282 PRs, 1907 inline comments, 1249 agreed)
+
+His agreed volume is 6x HyukjinKwon's and spreads differently. The bulk maps
+onto the checks the second audit built (test-pinning, doc-accuracy, parity,
+semantics all confirm at scale), with three things frank did not have:
+
+| Bucket | Weight | What it actually is | Disposition |
+|---|---|---|---|
+| "Not earning its keep" | ~18% | Not style nits — the comment names a specific redundancy: a condition the change made always-true, a wrapper that only forwards, a hand-rolled copy of a utility the project already has (`Uninterruptibles.awaitUninterruptibly`, the suite's own fixture), state duplicated with a sibling, a rule the PR had to edit in two places, a value recomputed per call | **`simplification` check (new)** — category F of the original audit, drafted in this doc but never implemented until two corpora asked for it |
+| CI-matrix test portability | (inside test buckets) | A test that passes the default job and fails a scheduled one: non-ANSI mode, Connect-only packaging, Janino message wording under the JDK-backend build, a `pyspark.zip` guard that skips in every CI job, branch-default confs on backport | **`test-pinning` emit-case (new bullet)** — name the configuration axis and the dependence |
+| Parallel bookkeeping | (inside build/parity buckets) | `pom.xml` dependency added but `dev/sparktestsupport/modules.py` not; a Python module added to classic `setup.py` but not the connect client's packaging list, so the Connect-only CI job fails; a workflow calling a secret the referenced workflow no longer declares | **`parity` emit-cases (new bullets)** — build/packaging files are dual surfaces too, and so is "handle X the way the sibling handles the analogous case" |
+| Released-config behavior change | (inside config bucket) | "this conf shipped in 4.2.0 and this PR changes what it does" — a user who enabled the old behavior sees silent change | **`config-docs` emit-case (new bullet)** |
+| Unbounded silent waits | (inside semantics bucket) | "This wait has no time bound, ignores interrupts, and logs nothing" | **`concurrency` emit-case (new bullet)** |
+| Misleading names | (inside nit bucket) | A local helper named like a sibling method it must NOT be used interchangeably with; a format-agnostic comment naming a bloom-specific hash | **`doc-accuracy` emit-case (new bullet)** — a name is text; if it says X and the code does Y, that is a doc mismatch |
+
+Cross-PR interactions ("this copy and #59332's are no longer the same class",
+"merge order with #59282, still open", "this spot now conflicts with master")
+are real in his corpus but need cross-PR state a per-PR check does not have;
+the merge-conflict rule and the backport check own the mechanical slices.
+Not automated; noted here so the next audit does not re-discover them.
+
+## holdenk (35 PRs, 24 inline comments, 7 agreed)
+
+Small corpus, hers by design — frank is modeled on her voice, and the
+`REVIEWING_GUIDANCE` already carries several of her patterns (release
+targeting, string-conf validation, config-vs-param, deferral with a JIRA).
+What it added:
+
+- **Definition drift** — "numeric is 'an unknown numeric type' here but the
+  tightest of them elsewhere; that changes the logic needed in both
+  functions." The same term defined two ways, the change follows one. →
+  `parity` emit-case.
+- **Graceful degradation that doesn't degrade** — "we're going to warn and
+  then throw a hard error, but we just want to warn and keep going." →
+  `correctness` emit-case.
+- Confirmation at n=1 of the value of everything else: her one comment on
+  #59403 is the `ArrowAggregatePythonExec` parity gap (Hyukjin's corpus found
+  the same one), handled her way — non-blocking, follow-up JIRA filed so it
+  is not lost.
+- One of her comments ("add a test for the executor path") is signed
+  *Generated with assistance of franktheunicorn* — she is already posting
+  frank's drafts on PRs, which makes closing these gaps self-reinforcing.
+
+## What changed in the checks
+
+- New: `simplification` (registered, known-listed, category word, tested).
+- Sharpened prompts, each pinned by a test so a rewrite cannot drop it:
+  `test-pinning` (CI-matrix portability), `parity` (bookkeeping files,
+  analogous-case handling, definition drift), `config-docs` (released-config
+  behavior change), `correctness` (warn-and-keep-going), `concurrency`
+  (unbounded silent waits), `doc-accuracy` (misleading/shadowing names).
+
+Watching the new check live caught two transport bugs in the checks path,
+both now fixed and tested:
+
+- **Empty completions read as clean checks.** llm.apache.org's qwen3.8 (served
+  with thinking mode) intermittently returns HTTP 200 with no content — the
+  same prompt succeeds and fails across calls. `parse_llm_response("")` gave
+  zero findings and the check recorded `ok`: a check that never answered read
+  as "the PR is fine". An empty completion now gets one retry
+  (`_metered_call_with_retry`, also used by `pr-description`'s own LLM call)
+  and then a loud failure. `max_tokens` on the backend was raised to 8192 for
+  thinking headroom.
+- **Monster diffs made the check prompt unanswerable.** #58978's diff alone
+  is 400K chars; the checks' prompts were unbounded and mostly came back
+  empty. The diff is now capped for the PROMPT path only (~120K chars
+  budgeted against the built context, with a marker telling the model what it
+  did not see) — the `scan()` checks and draft creation keep the full diff,
+  because a security pre-filter that reads the diff must not be handed a
+  truncated one, and the diff is re-parsed per finding for code context,
+  where the marker would break the parse. (A first cut capped before
+  dispatch and did exactly both of those things; the cross-review caught it.)
+
+
 
 

@@ -408,3 +408,188 @@ class TestChecksSeePriorComments:
             )
 
         assert drafts == []
+
+
+class _FakeMeteredBackend:
+    """Stands in for a BaseLLMBackend: scripted metered_call responses."""
+
+    def __init__(self, responses: list[str]) -> None:
+        self._responses = list(responses)
+        self.calls: list[str] = []
+
+    def metered_call(self, system: str, user: str, **kwargs: object) -> str:
+        self.calls.append(user)
+        return self._responses.pop(0) if self._responses else ""
+
+
+class _FakePR:
+    """Just the attrs _metered_call_with_retry reads off the PR."""
+
+    project_id = 1
+    pk = 1
+
+
+class TestEmptyCompletionRetry:
+    """A 200 with empty content is a real backend behaviour (qwen3.8 with
+    thinking mode spends the output budget on reasoning). It used to parse to
+    zero findings and record a CLEAN check — a check that never answered."""
+
+    def _run(self, responses: list[str]) -> str:
+        from franktheunicorn.review.checks import _metered_call_with_retry
+
+        backend = _FakeMeteredBackend(responses)
+        cfg = LLMBackendConfig(provider="openai", model="qwen3.8-27b")
+        return _metered_call_with_retry(
+            backend,
+            cfg,
+            "system",
+            "user",
+            check_name="coverage",
+            pr=_FakePR(),
+        )
+
+    def test_empty_then_answer_retries_once(self) -> None:
+        assert self._run(["", '{"findings": []}']) == '{"findings": []}'
+
+    def test_nonempty_first_try_no_retry(self) -> None:
+        backend = _FakeMeteredBackend(["text"])
+        cfg = LLMBackendConfig(provider="openai", model="qwen3.8-27b")
+        from franktheunicorn.review.checks import _metered_call_with_retry
+
+        out = _metered_call_with_retry(
+            backend,
+            cfg,
+            "system",
+            "user",
+            check_name="coverage",
+            pr=_FakePR(),
+        )
+        assert out == "text"
+        assert len(backend.calls) == 1
+
+    def test_empty_twice_raises(self) -> None:
+        from franktheunicorn.review.checks import _metered_call_with_retry
+
+        backend = _FakeMeteredBackend(["", ""])
+        cfg = LLMBackendConfig(provider="openai", model="qwen3.8-27b")
+        with pytest.raises(RuntimeError, match="empty completion"):
+            _metered_call_with_retry(
+                backend,
+                cfg,
+                "system",
+                "user",
+                check_name="coverage",
+                pr=_FakePR(),
+            )
+        assert len(backend.calls) == 2
+
+
+class TestDiffCap:
+    """The checks run on the first configured backend; a monster diff made
+    the prompt unanswerable. The cap keeps the whole prompt bounded and says
+    so in the prompt itself."""
+
+    def _ctx(self, full: str = "", imported: str = "", prior: str = "") -> object:
+        from tests.conftest import make_pr_context
+
+        return make_pr_context(
+            full_file_context=full, imported_modules_context=imported, prior_comments=prior
+        )
+
+    def test_small_diff_untouched(self) -> None:
+        from franktheunicorn.review.checks import _cap_diff_for_checks
+
+        diff = "+ a\n" * 100
+        assert _cap_diff_for_checks(diff, self._ctx()) is diff
+
+    def test_huge_diff_truncated_with_marker(self) -> None:
+        from franktheunicorn.review.checks import (
+            _MAX_CHECK_PROMPT_CHARS,
+            _cap_diff_for_checks,
+        )
+
+        diff = "+ line\n" * 40_000  # ~280K chars
+        capped = _cap_diff_for_checks(diff, self._ctx())
+        assert len(capped) < len(diff)
+        assert "[...diff truncated" in capped
+        # Bounded by the cap (allowing the marker itself).
+        assert len(capped) <= _MAX_CHECK_PROMPT_CHARS
+
+    def test_context_shrinks_the_diff_room_but_not_below_floor(self) -> None:
+        from franktheunicorn.review.checks import (
+            _MIN_DIFF_ROOM_CHARS,
+            _cap_diff_for_checks,
+        )
+
+        big_context = "x" * 110_000
+        diff = "+ line\n" * 40_000
+        capped = _cap_diff_for_checks(diff, self._ctx(full=big_context))
+        # Context ate most of the budget; the diff still keeps its floor.
+        assert len(capped) >= _MIN_DIFF_ROOM_CHARS
+        assert "[...diff truncated" in capped
+
+    def test_truncation_lands_on_a_line_boundary(self) -> None:
+        from franktheunicorn.review.checks import _cap_diff_for_checks
+
+        diff = ("+ " + "y" * 99 + "\n") * 40_000
+        capped = _cap_diff_for_checks(diff, self._ctx())
+        body = capped.split("\n[...diff truncated", 1)[0]
+        assert body.endswith("\n") or body == diff  # cut between lines, not mid-line
+
+    @pytest.mark.django_db
+    def test_dispatch_and_drafts_get_the_full_diff(self, db_pr: PullRequest) -> None:
+        """The cap lives in the prompt path only. scan()-based checks (one is
+        a security pre-filter that reads the diff) and draft creation (which
+        re-parses the diff) must see the WHOLE diff — truncating them would
+        blind a security control and break code-context extraction."""
+        config = ProjectConfig(owner="apache", repo="spark", llm_checks=["coverage"])
+        op_config = OperatorConfig(llm_backends=[LLMBackendConfig(provider="stub")])
+        monster = "+ line\n" * 40_000
+        seen: dict[str, str] = {}
+
+        def fake_dispatch(
+            check: object, pr: object, diff: str, *args: object
+        ) -> list[ReviewFinding]:
+            seen["diff"] = diff
+            return []
+
+        with patch("franktheunicorn.review.checks._run_check_dispatch", side_effect=fake_dispatch):
+            run_enabled_checks(db_pr, monster, project_config=config, operator_config=op_config)
+        assert seen["diff"] is monster  # uncapped, unmarker-ed
+
+    def test_prompt_path_caps_the_diff(self) -> None:
+        """_run_single_check caps before build_prompt, so the model's prompt
+        is bounded and the model is told what it did not see."""
+        from franktheunicorn.review.backends.base import BaseLLMBackend
+        from franktheunicorn.review.checks import (
+            _MAX_CHECK_PROMPT_CHARS,
+            _run_single_check,
+        )
+        from franktheunicorn.review.checks.coverage import CoverageCheck
+        from tests.conftest import make_pr_context
+
+        class _RecordingBackend(BaseLLMBackend):
+            def __init__(self) -> None:
+                from franktheunicorn.config.models import LLMBackendConfig as Cfg
+
+                super().__init__(Cfg(provider="openai", model="qwen"))
+                self.user_messages: list[str] = []
+
+            def _call_api(
+                self, system_prompt: str, user_message: str, api_key: str
+            ) -> str:  # pragma: no cover - not reached; metered_call is patched
+                raise AssertionError
+
+        monster = "+ line\n" * 40_000
+        ctx = make_pr_context()
+        check = CoverageCheck()
+        backend = _RecordingBackend()
+        backend.metered_call = lambda system, user, **kw: (  # type: ignore[method-assign]
+            backend.user_messages.append(user) or '{"findings": []}'
+        )
+        cfg = LLMBackendConfig(provider="openai", model="qwen")
+        with patch("franktheunicorn.review.backends.get_backend", return_value=backend):
+            _run_single_check(check, _FakePR(), monster, ctx, cfg)  # type: ignore[arg-type]
+        assert len(backend.user_messages) == 1
+        assert "[...diff truncated" in backend.user_messages[0]
+        assert len(backend.user_messages[0]) <= _MAX_CHECK_PROMPT_CHARS + 2_000

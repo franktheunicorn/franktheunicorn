@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from franktheunicorn.backends.base import ForgeClient
     from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig, ProjectConfig
     from franktheunicorn.core.models import PullRequest, ReviewDraft
+    from franktheunicorn.review.backends.base import BaseLLMBackend
     from franktheunicorn.review.prior_comments import PriorComment
 
 logger = logging.getLogger(__name__)
@@ -147,6 +148,21 @@ def run_enabled_checks(
 
         pr_context.linked_issues_context = fetch_linked_issues_context(pr)
 
+    # The prompt-based checks cap the diff themselves (in _run_single_check)
+    # so the whole check prompt stays bounded; the scan()-based checks and
+    # draft creation keep the FULL diff — a security pre-filter that reads the
+    # diff must not be handed a truncated one, and the diff is re-parsed for
+    # each draft's code context, where the cap's marker would break the parse.
+    # One line here so a capped run is visible at a glance.
+    capped = _cap_diff_for_checks(diff, pr_context)
+    if len(capped) < len(diff):
+        logger.info(
+            "LLM checks see a truncated diff: %d of %d chars (prompt capped at ~%d with context).",
+            len(capped),
+            len(diff),
+            _MAX_CHECK_PROMPT_CHARS,
+        )
+
     # Use first configured backend (or stub fallback).
     backend_configs = operator_config.llm_backends or [LLMBackendConfig()]
     backend_config = backend_configs[0]
@@ -237,6 +253,52 @@ def _instantiate_check(
     return check_cls()
 
 
+#: Total prompt size a check may build, in chars (~4 chars per token). The
+#: checks all run on the FIRST configured backend; a monster diff made the
+#: prompt unanswerable and the response came back empty — see
+#: :func:`_metered_call_with_retry` for the other half of that fix.
+_MAX_CHECK_PROMPT_CHARS = 120_000
+
+#: The diff always keeps at least this much room, even when the built context
+#: is large: the diff is the check's primary input.
+_MIN_DIFF_ROOM_CHARS = 20_000
+
+
+def _cap_diff_for_checks(diff: str, pr_context: PRContext) -> str:
+    """Truncate the diff so a prompt-based check's prompt stays bounded, with a
+    marker.
+
+    Bounded unless the built context alone exceeds the cap (the diff then keeps
+    only its floor) — in that residual case the empty-completion retry in
+    :func:`_metered_call_with_retry` fails loudly rather than silently. The
+    marker tells the model what it did not see, so a clean result on a
+    truncated diff cannot read as "the rest of the PR was checked".
+
+    Only the PROMPT path may use the capped diff: ``scan()`` checks (one reads
+    the diff as a security pre-filter) and draft creation (which re-parses the
+    diff per finding) always receive the full diff.
+    """
+    room = (
+        _MAX_CHECK_PROMPT_CHARS
+        - len(pr_context.full_file_context or "")
+        - len(pr_context.imported_modules_context or "")
+        - len(pr_context.prior_comments or "")
+        - 8_000  # system prompts, PR header, fences, body preview
+    )
+    room = max(room, _MIN_DIFF_ROOM_CHARS)
+    if len(diff) <= room:
+        return diff
+    cutoff = diff.rfind("\n", 0, room)
+    if cutoff <= 0:
+        cutoff = room
+    else:
+        cutoff += 1  # keep the newline the cut lands on
+    return (
+        diff[:cutoff] + "\n[...diff truncated: the checks reviewed the first part; "
+        "the agent CLI reviewers see the full diff in the checkout...]"
+    )
+
+
 def _run_check_dispatch(
     check: BaseCheck,
     pr: PullRequest,
@@ -274,15 +336,67 @@ def _run_single_check(
     backend = get_backend(backend_config)
 
     if isinstance(backend, BaseLLMBackend):
+        # The prompt path caps the diff; scan()-based checks above received
+        # the full diff (a security pre-filter reads it, and the dispatcher's
+        # draft creation re-parses it).
+        diff = _cap_diff_for_checks(diff, pr_context)
         system_prompt, user_message = check.build_prompt(diff, pr_context)
-        raw_text = backend.metered_call(
+        raw_text = _metered_call_with_retry(
+            backend,
+            backend_config,
             system_prompt,
             user_message,
-            action_type=f"check:{check.name}",
-            project_id=pr.project_id,
-            pr_id=pr.pk,
+            check_name=check.name,
+            pr=pr,
         )
         return check.parse_response(raw_text)
 
     # Fallback for backends without _call_api (e.g. StubBackend).
     return backend.generate_findings(diff, pr_context)
+
+
+def _metered_call_with_retry(
+    backend: BaseLLMBackend,
+    backend_config: LLMBackendConfig,
+    system_prompt: str,
+    user_message: str,
+    *,
+    check_name: str,
+    pr: PullRequest,
+) -> str:
+    """metered_call + one retry when the completion comes back empty.
+
+    A 200 with empty content is real for the current first backend: qwen3.8
+    served with thinking mode can spend the whole output budget on reasoning
+    and return no content, and it is intermittent on the same prompt. An
+    empty response parsed to zero findings recorded a *clean* check — a check
+    that never answered read as "the PR is fine", so it gets one retry and
+    then a loud failure instead.
+    """
+    raw = backend.metered_call(
+        system_prompt,
+        user_message,
+        action_type=f"check:{check_name}",
+        project_id=pr.project_id,
+        pr_id=pr.pk,
+    )
+    if raw.strip():
+        return raw
+    logger.warning(
+        "LLM check '%s' got an empty completion from %s/%s (%d-char prompt); retrying once.",
+        check_name,
+        backend_config.provider,
+        backend_config.model,
+        len(system_prompt) + len(user_message),
+    )
+    raw = backend.metered_call(
+        system_prompt,
+        user_message,
+        action_type=f"check:{check_name}",
+        project_id=pr.project_id,
+        pr_id=pr.pk,
+    )
+    if raw.strip():
+        return raw
+    msg = f"backend returned an empty completion for check '{check_name}'"
+    raise RuntimeError(msg)

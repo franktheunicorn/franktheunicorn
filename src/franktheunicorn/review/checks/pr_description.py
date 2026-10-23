@@ -122,12 +122,17 @@ class PRDescriptionCheck(BaseCheck):
             return []
 
         try:
-            raw_text = backend.metered_call(
+            # Through the retry helper: an empty completion (qwen with thinking
+            # mode) parsed to zero findings and recorded a clean check.
+            from franktheunicorn.review.checks import _metered_call_with_retry
+
+            raw_text = _metered_call_with_retry(
+                backend,
+                backend_config,
                 system_prompt,
                 user_message,
-                action_type="check:pr-description",
-                project_id=pr.project_id,
-                pr_id=pr.pk,
+                check_name="pr-description",
+                pr=pr,
             )
         except Exception:
             logger.exception("pr-description: LLM call failed for %s/%s#%d", owner, repo, pr.number)

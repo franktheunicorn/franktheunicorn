@@ -204,6 +204,8 @@ data/repos/
 data/run/
 data/staticfiles/
 data/rate_limits.sqlite
+# Spark sbt/docker test-execution boot residue from the worker's warm builds.
+data/test-cache/
 
 # Agent session transcripts (.claude/hooks and friends stay tracked)
 .claude/projects/
