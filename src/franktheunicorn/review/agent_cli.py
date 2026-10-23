@@ -267,6 +267,18 @@ def _ends_with_sentinel(stdout: str) -> bool:
     return bool(lines) and lines[-1].rstrip(".").lower() == _CLEAN_SENTINEL
 
 
+def _auth_hint(config: AgentCLIReviewerConfig, stderr: str) -> str:
+    """The log-in advice suffix for a failed CLI, or "" — shared by the
+    non-zero-exit and the exit-0-no-output paths."""
+    from franktheunicorn.review.tool_executor import auth_failure_advice, looks_like_auth_failure
+
+    if not looks_like_auth_failure(stderr):
+        return ""
+    return " " + auth_failure_advice(
+        config.name, config.cli_argv[0], remote=config.remote.mode == "ssh"
+    )
+
+
 def run_agent_cli_review(
     cwd: str,
     base_commit: str,
@@ -438,8 +450,6 @@ def run_agent_cli_review(
         raise AgentCLIRunError(f"{cmd[0]} returned nothing after {elapsed:.0f}s")
     if not result.ok:
         from franktheunicorn.review.tool_executor import (
-            auth_failure_advice,
-            looks_like_auth_failure,
             looks_like_workspace_trust_refusal,
             workspace_trust_advice,
         )
@@ -452,14 +462,7 @@ def run_agent_cli_review(
             if looks_like_workspace_trust_refusal(stderr, result.stdout)
             else ""
         )
-        auth = (
-            " "
-            + auth_failure_advice(
-                config.name, config.cli_argv[0], remote=config.remote.mode == "ssh"
-            )
-            if looks_like_auth_failure(stderr)
-            else ""
-        )
+        auth = _auth_hint(config, stderr)
         logger.error(
             "%s CLI exited with code %d: %s%s%s",
             config.name,
@@ -497,26 +500,13 @@ def run_agent_cli_review(
             # prints "401 Unauthorized" to stderr, and still exits 0 — which
             # read as a clean run and cost every PR a reviewer nobody noticed
             # was dead.
-            from franktheunicorn.review.tool_executor import (
-                auth_failure_advice,
-                looks_like_auth_failure,
-            )
-
             stderr = agent_stderr(result.stderr)
-            auth = (
-                " "
-                + auth_failure_advice(
-                    config.name, config.cli_argv[0], remote=config.remote.mode == "ssh"
-                )
-                if looks_like_auth_failure(stderr)
-                else ""
-            )
             tail = stderr.strip()[-300:]
             logger.error(
                 "%s CLI exited 0 but produced no output%s.%s",
                 config.name,
                 f" (stderr ends: {tail!r})" if tail else " (no stderr)",
-                auth,
+                _auth_hint(config, stderr),
             )
             raise AgentCLIRunError(f"{cmd[0]} produced no output")
     if not blocks:

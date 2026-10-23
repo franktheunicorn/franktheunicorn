@@ -204,18 +204,6 @@ def _hunk_ranges_by_file(diff: str) -> dict[str, list[tuple[int, int]]]:
     return ranges
 
 
-def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
-    """Merge overlapping or adjacent (start, end) line spans, in order."""
-    ordered = sorted(spans)
-    merged: list[tuple[int, int]] = []
-    for start, end in ordered:
-        if merged and start <= merged[-1][1] + 1:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
-        else:
-            merged.append((start, end))
-    return merged
-
-
 def _excerpt_around(content: str, ranges: list[tuple[int, int]], token_cap: int) -> str:
     """The changed lines plus padding, joined with omission markers.
 
@@ -239,10 +227,12 @@ def _excerpt_around(content: str, ranges: list[tuple[int, int]], token_cap: int)
         parts.append(part)
         used += len(part) + 1  # +1 for the join separator
 
-    # Merge the PADDED spans, keeping each window's raw (change) bounds so the
-    # shrink path can drop padding without touching the changed lines.
+    # Merge the PADDED spans (the merge fires strictly more often than a raw
+    # merge would, so sorting the raw spans is all the pre-work needed),
+    # keeping each window's raw (change) bounds so the shrink path can drop
+    # padding without touching the changed lines.
     windows: list[tuple[int, int, int, int]] = []  # (padded_start, padded_end, raw_start, raw_end)
-    for raw_start, raw_end in _merge_spans(ranges):
+    for raw_start, raw_end in sorted(ranges):
         if raw_start > n:
             # Hunk past EOF: the checkout is not at the diff's head commit.
             continue
@@ -264,7 +254,10 @@ def _excerpt_around(content: str, ranges: list[tuple[int, int]], token_cap: int)
         if used + cost > budget_chars:
             # Padding first; if even the bare change does not fit, cut it at
             # a line boundary — a hunk larger than the whole per-file cap loses
-            # something however it is cut.
+            # something however it is cut. The header then says the lines that
+            # were actually DELIVERED, never the window that was asked for:
+            # the model grounds line citations in these headers, so a header
+            # claiming lines that were silently cut is worse than the cut.
             for pad in (10, 4, 0):
                 start = max(1, raw_start - pad)
                 end = min(n, raw_end + pad)
@@ -275,12 +268,25 @@ def _excerpt_around(content: str, ranges: list[tuple[int, int]], token_cap: int)
                 if used + cost <= budget_chars:
                     break
             else:
-                room = budget_chars - used - sum(len(p) + 1 for p in (gap, header) if p)
+                # -3 for the chunk's own join separator and the trailing "…"
+                # marker, so the joined result can never exceed the cap even
+                # by a character.
+                room = budget_chars - used - sum(len(p) + 1 for p in (gap, header) if p) - 3
                 if room <= 0:
                     break
-                chunk = chunk[:room].rsplit("\n", 1)[0]
-                if not chunk.strip():
+                chunk = chunk[:room].rsplit("\n", 1)[0] + "\n…"
+                if not chunk.rstrip("\n…").strip():
+                    # Only the marker survived the cut — nothing to show.
                     break
+                # The header says the lines actually delivered, never the
+                # window that was asked for: the model grounds line citations
+                # in these headers.
+                if "\n" in chunk.rstrip("\n…"):
+                    end = start + chunk.rstrip("\n…").count("\n")
+                    header = f"lines {start}-{end}:"
+                else:
+                    end = start
+                    header = f"line {start}:"
         for part in (gap, header, chunk):
             if part:
                 _add(part)

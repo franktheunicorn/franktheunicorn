@@ -103,8 +103,8 @@ class PythonImportResolver:
 
         Walks up ``node.level`` directories from ``file_path`` and joins with
         ``node.module``. Returns the dotted path relative to ``repo_path`` (or
-        ``repo_path/src``) — that lets the top-level component pass the
-        package_root filter.
+        its ``src``/``python`` layout directory) — that lets the top-level
+        component pass the package_root filter.
         """
         try:
             rel = file_path.resolve().relative_to(repo_path.resolve())

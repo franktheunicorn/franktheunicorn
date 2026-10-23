@@ -193,6 +193,20 @@ class TestOversizedExcerpt:
         full, _imports = build_context_strings(["myapp/big.py"], fake_repo, cfg, diff=diff)
         assert "big.py" not in full  # nothing windowable in this checkout
 
+    def test_cut_window_header_names_only_delivered_lines(self, fake_repo: Path) -> None:
+        # A hunk bigger than the remaining budget gets cut mid-window; the
+        # header must say the lines actually delivered, never the window that
+        # was asked for — the model grounds line citations in these headers.
+        from franktheunicorn.review.context_builder import _excerpt_around
+
+        content = "\n".join(f"line {i}" for i in range(1, 22))
+        out = _excerpt_around(content, [(16, 19)], 34)
+        assert "lines 16-18:" in out  # 19 did not fit…
+        assert "…" in out  # …and the cut is marked
+        assert "lines 16-19" not in out  # the lie is gone
+        # The trailing marker resumes from the delivered end, not the asked one.
+        assert "… lines 19-21 omitted" in out
+
     def test_two_hunks_two_windows(self, fake_repo: Path) -> None:
         self._write_big(fake_repo)
         diff = (

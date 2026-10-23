@@ -17,7 +17,12 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from franktheunicorn.review.backends.base import PRContext, ReviewFinding, parse_llm_response
+from franktheunicorn.review.backends.base import (
+    BaseLLMBackend,
+    PRContext,
+    ReviewFinding,
+    parse_llm_response,
+)
 from franktheunicorn.review.drafter import build_pr_context, create_drafts_from_findings
 from franktheunicorn.review.tone_guard import apply_tone_guard_batch
 
@@ -25,7 +30,6 @@ if TYPE_CHECKING:
     from franktheunicorn.backends.base import ForgeClient
     from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig, ProjectConfig
     from franktheunicorn.core.models import PullRequest, ReviewDraft
-    from franktheunicorn.review.backends.base import BaseLLMBackend
     from franktheunicorn.review.prior_comments import PriorComment
 
 logger = logging.getLogger(__name__)
@@ -148,20 +152,18 @@ def run_enabled_checks(
 
         pr_context.linked_issues_context = fetch_linked_issues_context(pr)
 
-    # The prompt-based checks cap the diff themselves (in _run_single_check)
-    # so the whole check prompt stays bounded; the scan()-based checks and
-    # draft creation keep the FULL diff — a security pre-filter that reads the
-    # diff must not be handed a truncated one, and the diff is re-parsed for
-    # each draft's code context, where the cap's marker would break the parse.
-    # One line here so a capped run is visible at a glance.
-    capped = _cap_diff_for_checks(diff, pr_context)
-    if len(capped) < len(diff):
-        logger.info(
-            "LLM checks see a truncated diff: %d of %d chars (prompt capped at ~%d with context).",
-            len(capped),
-            len(diff),
-            _MAX_CHECK_PROMPT_CHARS,
-        )
+    # One visibility line for a capped run — only when a prompt-based check is
+    # enabled (see _cap_diff_for_checks for what caps and what must not).
+    if any(not hasattr(registry.get(name), "scan") for name in enabled if name in registry):
+        capped = _cap_diff_for_checks(diff, pr_context)
+        if len(capped) < len(diff):
+            logger.info(
+                "LLM checks see a truncated diff: %d of %d chars "
+                "(prompt capped at ~%d with context).",
+                len(capped),
+                len(diff),
+                _MAX_CHECK_PROMPT_CHARS,
+            )
 
     # Use first configured backend (or stub fallback).
     backend_configs = operator_config.llm_backends or [LLMBackendConfig()]
@@ -331,14 +333,11 @@ def _run_single_check(
     the check pipeline.
     """
     from franktheunicorn.review.backends import get_backend
-    from franktheunicorn.review.backends.base import BaseLLMBackend
 
     backend = get_backend(backend_config)
 
     if isinstance(backend, BaseLLMBackend):
-        # The prompt path caps the diff; scan()-based checks above received
-        # the full diff (a security pre-filter reads it, and the dispatcher's
-        # draft creation re-parses it).
+        # The prompt path caps the diff (see _cap_diff_for_checks).
         diff = _cap_diff_for_checks(diff, pr_context)
         system_prompt, user_message = check.build_prompt(diff, pr_context)
         raw_text = _metered_call_with_retry(

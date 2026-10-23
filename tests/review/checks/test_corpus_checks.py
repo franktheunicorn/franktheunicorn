@@ -1,5 +1,6 @@
 """Tests for the corpus sub-checks: test-pinning, parity, config-docs,
-error-framework (see docs/review-categories.md, HyukjinKwon corpus audit)."""
+error-framework, simplification (see docs/review-categories.md, the three
+maintainer-corpus audits)."""
 
 from __future__ import annotations
 
@@ -91,11 +92,6 @@ class TestCorpusCategoryDerivation:
     @pytest.mark.parametrize(("_cls", "_key", "cat"), CORPUS_CHECKS)
     def test_category_word_maps_back(self, _cls: type, _key: str, cat: str) -> None:
         assert _derive_category(f"{cat}: something is off at line 5") == cat
-
-    def test_test_pinning_not_shadowed_by_test_coverage(self) -> None:
-        # "test-pinning" must not fall into "test-coverage" (ordering in
-        # _derive_category): the two checks own different asks.
-        assert _derive_category("test-pinning: suite stays green if reverted") == "test-pinning"
 
 
 class TestCorpusPromptPatterns:

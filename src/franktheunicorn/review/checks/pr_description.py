@@ -121,22 +121,19 @@ class PRDescriptionCheck(BaseCheck):
         if not isinstance(backend, BaseLLMBackend):
             return []
 
-        try:
-            # Through the retry helper: an empty completion (qwen with thinking
-            # mode) parsed to zero findings and recorded a clean check.
-            from franktheunicorn.review.checks import _metered_call_with_retry
+        # Through the retry helper, NOT under a swallowing try: the raise is
+        # what records status="failed" (see _metered_call_with_retry). The
+        # template no-op paths above are legitimate skips and keep returning [].
+        from franktheunicorn.review.checks import _metered_call_with_retry
 
-            raw_text = _metered_call_with_retry(
-                backend,
-                backend_config,
-                system_prompt,
-                user_message,
-                check_name="pr-description",
-                pr=pr,
-            )
-        except Exception:
-            logger.exception("pr-description: LLM call failed for %s/%s#%d", owner, repo, pr.number)
-            return []
+        raw_text = _metered_call_with_retry(
+            backend,
+            backend_config,
+            system_prompt,
+            user_message,
+            check_name="pr-description",
+            pr=pr,
+        )
 
         return parse_llm_response(raw_text)
 

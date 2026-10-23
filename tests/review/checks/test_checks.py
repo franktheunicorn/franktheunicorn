@@ -534,7 +534,7 @@ class TestDiffCap:
         diff = ("+ " + "y" * 99 + "\n") * 40_000
         capped = _cap_diff_for_checks(diff, self._ctx())
         body = capped.split("\n[...diff truncated", 1)[0]
-        assert body.endswith("\n") or body == diff  # cut between lines, not mid-line
+        assert body.endswith("\n")  # cut between lines, not mid-line
 
     @pytest.mark.django_db
     def test_dispatch_and_drafts_get_the_full_diff(self, db_pr: PullRequest) -> None:

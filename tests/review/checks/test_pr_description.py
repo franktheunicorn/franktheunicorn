@@ -118,6 +118,37 @@ class TestPRDescriptionCheckScan:
 
         assert findings == []
 
+    def test_empty_completion_raises_through_scan(self, db: Any) -> None:
+        """scan() must not swallow the retry helper's loud failure: a broad
+        except here returned [] and the dispatcher recorded a CLEAN
+        pr-description check — the exact failure mode the helper exists to
+        eliminate. The raise is what turns it into status="failed"."""
+        from franktheunicorn.config.models import LLMBackendConfig
+        from franktheunicorn.review.backends.base import BaseLLMBackend
+        from tests.factories import PullRequestFactory
+
+        pr = PullRequestFactory(body="I fixed something.")
+        check = PRDescriptionCheck()
+
+        mock_backend = MagicMock(spec=BaseLLMBackend)
+        mock_backend._resolve_api_key.return_value = "fake-key"
+        mock_backend.metered_call.return_value = ""
+
+        config = LLMBackendConfig(provider="claude")
+        with (
+            patch(
+                "franktheunicorn.review.checks.pr_description._fetch_template",
+                return_value="## Summary\n\n## Changes\n",
+            ),
+            patch(
+                "franktheunicorn.review.backends.get_backend",
+                return_value=mock_backend,
+            ),
+            pytest.raises(RuntimeError, match="empty completion"),
+        ):
+            check.scan(pr, "", backend_config=config)
+        assert mock_backend.metered_call.call_count == 2  # the one retry
+
     def test_llm_backend_called_with_template_content(self, db: Any) -> None:
         from franktheunicorn.config.models import LLMBackendConfig
         from franktheunicorn.review.backends.base import BaseLLMBackend
@@ -194,7 +225,11 @@ class TestPRDescriptionCheckScan:
         assert findings[0].severity == "important"
         assert "placeholder" in findings[0].body
 
-    def test_llm_exception_returns_empty(self, db: Any) -> None:
+    def test_llm_exception_raises_to_the_dispatcher(self, db: Any) -> None:
+        """A backend exception propagates out of scan() so the dispatcher
+        records status="failed" — the same contract as every other check.
+        The old test asserted the swallow, which recorded a clean check on a
+        dead backend."""
         from franktheunicorn.config.models import LLMBackendConfig
         from franktheunicorn.review.backends.base import BaseLLMBackend
         from tests.factories import PullRequestFactory
@@ -216,10 +251,9 @@ class TestPRDescriptionCheckScan:
                 "franktheunicorn.review.backends.get_backend",
                 return_value=mock_backend,
             ),
+            pytest.raises(RuntimeError, match="API down"),
         ):
-            findings = check.scan(pr, "", backend_config=config)
-
-        assert findings == []
+            check.scan(pr, "", backend_config=config)
 
 
 class TestRegistry:
