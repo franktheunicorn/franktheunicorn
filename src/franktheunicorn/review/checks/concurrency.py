@@ -30,6 +30,9 @@ actually held or released
 - A field read or written from more than one thread has no synchronization, \
 or a lock is acquired on a path that can return or throw before releasing it
 - A listener or callback can run before the thing it cleans up has stopped
+- A wait with no time bound, no interrupt handling, or no log line at the \
+point it can stall — a hang here is invisible until somebody notices the job \
+never finished
 
 Name the sequence of events that triggers it — which thread, which batch, \
 which error path. Do NOT emit a generic "this could have a race"; if you \

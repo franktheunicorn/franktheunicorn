@@ -43,6 +43,12 @@ instead of the representation the change actually alters, so reverting the \
 change leaves the assertion green
 - The only test covering a path is skipped, or runs exclusively in a mode \
 the change does not affect (the skipped/other-mode case is the coverage gap)
+- The test holds only under the default CI configuration: it depends on ANSI \
+mode being on or off, a specific compiler backend or its message wording, \
+classic-only packaging, or a JDK version — so it fails, or silently skips \
+itself, in a scheduled build or on a backport branch where those differ. \
+Name the configuration axis (non-ANSI, connect-only, JDK-backend, \
+branch-default conf) and how the assertion depends on it
 
 Name the specific test and what would have to happen for it to fail — the \
 input, branch, or assertion that should carry the change but does not. Do \

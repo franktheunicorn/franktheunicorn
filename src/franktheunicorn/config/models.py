@@ -2728,6 +2728,7 @@ class ProjectConfig(BaseModel):
             "security",
             "security-context",
             "security-disclosure",
+            "simplification",
             "test-pinning",
         }
         for name in v:

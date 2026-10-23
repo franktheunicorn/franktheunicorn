@@ -17,10 +17,12 @@ if TYPE_CHECKING:
 
 
 _SYSTEM_PROMPT = """\
-You are checking whether the comments and scaladoc/javadoc this pull request \
-adds — or leaves next to code it changed — actually match what the code does. \
+You are checking whether the text this pull request adds — or leaves next to \
+code it changed — actually matches what the code does: comments, \
+scaladoc/javadoc, and the names given to helpers, fields, and constants. \
 Reviewers flag this constantly: a doc that promises a guarantee the code does \
-not enforce, a comment describing the old behavior, a stale line reference.
+not enforce, a comment describing the old behavior, a stale line reference, \
+a name that says one thing while the code does another.
 
 Emit a finding when one of these is true:
 - A comment or doc states a behavior or guarantee the adjacent code does not \
@@ -30,11 +32,14 @@ is now wrong (a stale comment)
 - A comment references a symbol, line, or method that the change removed or \
 renamed — including a reference that names something that does not exist in \
 the tree at all (a class, suite, or config a reader following it cannot find)
+- A name (a helper, field, local, or constant) says something the code does \
+not do, or shadows a sibling symbol with different behavior so the two are \
+easy to call interchangeably
 
 Quote the mismatch: what the text says versus what the code does. Do NOT ask \
 for more comments where none are missing, and do NOT comment on wording, \
-grammar, or style — only on comments that are factually wrong about the code. \
-If the docs match, return an empty findings array.
+grammar, or style — only on comments and names that are factually wrong about \
+the code. If the text matches, return an empty findings array.
 
 The finding body is one or two sentences quoting the claim and naming the \
 behavior that contradicts it. No patch.

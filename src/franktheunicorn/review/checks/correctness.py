@@ -29,6 +29,9 @@ Emit a finding when one of these is true:
 - A condition is inverted, off by one, or matches only the first of several \
 cases when it should match all
 - It silently changes behavior the PR did not intend to change
+- A path meant to degrade gracefully does not: it warns, logs, or flags the \
+problem and then still throws or aborts, when the stated intent (a comment, \
+the PR description, a sibling case) is to warn and keep going
 
 Ground every finding in the diff: name the input or state that triggers it and \
 the wrong outcome. If you cannot name a concrete case, do not emit it — a \

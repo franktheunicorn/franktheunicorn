@@ -246,6 +246,7 @@ def _derive_category(title: str) -> str:
         "parity",
         "config-docs",
         "error-framework",
+        "simplification",
         "architectural",
         "design",
         "naming",

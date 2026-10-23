@@ -40,6 +40,9 @@ branch the PR targets (a patch release that documents a feature as added in \
 the next major, or a since-version naming a different branch's release)
 - A default flip or user-visible behavior change has no migration-guide \
 entry where the project requires one
+- A config that already SHIPPED in a release changes what it does in this \
+PR — the doc, the migration guide, or the PR description must say what a \
+user who enabled the old behavior will now see
 - A config whose default is derived from another config does not say where \
 the effective value comes from
 

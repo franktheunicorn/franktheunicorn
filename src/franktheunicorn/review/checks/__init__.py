@@ -67,6 +67,7 @@ def _get_registry() -> dict[str, type[BaseCheck]]:
     from franktheunicorn.review.checks.security import SecurityCheck
     from franktheunicorn.review.checks.security_context import SecurityContextCheck
     from franktheunicorn.review.checks.security_disclosure import SecurityDisclosureCheck
+    from franktheunicorn.review.checks.simplification import SimplificationCheck
     from franktheunicorn.review.checks.test_pinning import TestPinningCheck
 
     return {
@@ -87,6 +88,7 @@ def _get_registry() -> dict[str, type[BaseCheck]]:
         "security": SecurityCheck,
         "security-context": SecurityContextCheck,
         "security-disclosure": SecurityDisclosureCheck,
+        "simplification": SimplificationCheck,
         "test-pinning": TestPinningCheck,
     }
 

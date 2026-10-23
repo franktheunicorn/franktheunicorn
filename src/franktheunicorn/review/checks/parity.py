@@ -42,6 +42,16 @@ difference is not stated. The sibling is usually OUTSIDE the hunks: name the \
 file and the symbol so the author can go straight there
 - A test that would catch divergence between the surfaces is skipped, or \
 exists in only one mode, so the divergence is invisible to CI
+- The change handles a case differently from how a sibling handles the \
+analogous case (the NaN check, the null fallback, the warning) when the two \
+are supposed to agree — name the sibling and its treatment
+- The same term or rule is defined one way here and differently where it is \
+also used (a type name, a mode, a "widest vs tightest" rule), and the change \
+follows only one definition
+- Parallel bookkeeping files that must change together with a build or \
+packaging change were not all updated: the module/dependency definition and \
+the build system's module list, a library's classic and connect packaging \
+lists, a workflow's declared secrets and the names the job passes
 - A parity claim the PR makes (in docs, comments, or test assertions) holds \
 only under a runtime, JDK, or library version the project does not require
 - Two copies of the same logic (a type matrix, a conversion, a constant) now \

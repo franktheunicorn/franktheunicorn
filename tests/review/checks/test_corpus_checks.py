@@ -6,9 +6,13 @@ from __future__ import annotations
 import pytest
 
 from franktheunicorn.review.checks import _get_registry
+from franktheunicorn.review.checks.concurrency import ConcurrencyCheck
 from franktheunicorn.review.checks.config_docs import ConfigDocsCheck
+from franktheunicorn.review.checks.correctness import CorrectnessCheck
+from franktheunicorn.review.checks.doc_accuracy import DocAccuracyCheck
 from franktheunicorn.review.checks.error_framework import ErrorFrameworkCheck
 from franktheunicorn.review.checks.parity import ParityCheck
+from franktheunicorn.review.checks.simplification import SimplificationCheck
 from franktheunicorn.review.checks.test_pinning import TestPinningCheck
 from franktheunicorn.review.drafter import _derive_category
 from tests.conftest import make_pr_context
@@ -19,6 +23,7 @@ CORPUS_CHECKS = [
     (ParityCheck, "parity", "parity"),
     (ConfigDocsCheck, "config-docs", "config-docs"),
     (ErrorFrameworkCheck, "error-framework", "error-framework"),
+    (SimplificationCheck, "simplification", "simplification"),
 ]
 
 
@@ -91,3 +96,42 @@ class TestCorpusCategoryDerivation:
         # "test-pinning" must not fall into "test-coverage" (ordering in
         # _derive_category): the two checks own different asks.
         assert _derive_category("test-pinning: suite stays green if reverted") == "test-pinning"
+
+
+class TestCorpusPromptPatterns:
+    """Pin the corpus-derived emit-cases so a prompt rewrite cannot drop one
+    silently. Each string is the load-bearing phrase of a bucket that had no
+    check before the second audit (Dongjoon-Hyun + holdenk corpora)."""
+
+    def test_simplification_pins_lockstep_and_utility_cases(self) -> None:
+        system, _ = SimplificationCheck().build_prompt("+ diff", make_pr_context())
+        assert "two or more places" in system  # the lockstep-edit tell
+        assert "utility" in system  # hand-rolled copy of an existing one
+        assert "no-op" in system
+
+    def test_test_pinning_pins_ci_matrix_portability(self) -> None:
+        system, _ = TestPinningCheck().build_prompt("+ diff", make_pr_context())
+        assert "default CI configuration" in system
+        assert "backport branch" in system
+
+    def test_parity_pins_bookkeeping_and_definition_cases(self) -> None:
+        system, _ = ParityCheck().build_prompt("+ diff", make_pr_context())
+        assert "bookkeeping" in system  # build/packaging files that move together
+        assert "analogous" in system  # handle X as the sibling handles it
+        assert "differently where it is also used" in system  # definition drift
+
+    def test_config_docs_pins_released_config_case(self) -> None:
+        system, _ = ConfigDocsCheck().build_prompt("+ diff", make_pr_context())
+        assert "SHIPPED" in system
+
+    def test_correctness_pins_degradation_case(self) -> None:
+        system, _ = CorrectnessCheck().build_prompt("+ diff", make_pr_context())
+        assert "warn and keep going" in system
+
+    def test_concurrency_pins_unbounded_wait_case(self) -> None:
+        system, _ = ConcurrencyCheck().build_prompt("+ diff", make_pr_context())
+        assert "no time bound" in system
+
+    def test_doc_accuracy_pins_misleading_name_case(self) -> None:
+        system, _ = DocAccuracyCheck().build_prompt("+ diff", make_pr_context())
+        assert "shadows a sibling" in system
