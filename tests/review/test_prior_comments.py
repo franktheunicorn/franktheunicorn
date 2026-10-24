@@ -33,7 +33,7 @@ def _comment(**kwargs: object) -> PriorComment:
 
 class TestAdjustForPriorComments:
     def test_a_disputed_agreement_becomes_a_plus_one(self) -> None:
-        comment = _comment(disputed=True)
+        comment = _comment(disputed_by=("carol",))
         action, body = adjust_for_prior_comments(
             "sql/foo.scala",
             42,
@@ -98,7 +98,7 @@ class TestAdjustForPriorComments:
         assert action == "drop"
 
     def test_a_second_finding_does_not_plus_one_twice(self) -> None:
-        comment = _comment(disputed=True)
+        comment = _comment(disputed_by=("carol",))
         seen: set[str] = set()
         body = "getInt returns 0 on null, so this check hides the null."
         first, _ = adjust_for_prior_comments(
@@ -138,7 +138,7 @@ class TestAdjustForPriorComments:
         assert message.index("@cloud-fan") < message.index("diff")
 
     def test_the_prompt_marks_a_disputed_comment(self) -> None:
-        text = format_prior_comments([_comment(disputed=True)])
+        text = format_prior_comments([_comment(disputed_by=("carol",))])
 
         assert "(disputed)" in text
 
@@ -171,7 +171,7 @@ class TestDisputeDetection:
             ]
         )
 
-        assert parsed[0].disputed is True
+        assert parsed[0].disputed_by != ()
 
     def test_a_short_reply_still_disputes(self) -> None:
         """A "-1" reply is under _MIN_BODY; disputes are read before that filter."""
@@ -182,7 +182,7 @@ class TestDisputeDetection:
             ]
         )
 
-        assert parsed[0].disputed is True
+        assert parsed[0].disputed_by != ()
 
     def test_a_reply_from_the_same_author_does_not_dispute(self) -> None:
         parsed = comments_from_review_payload(
@@ -197,7 +197,7 @@ class TestDisputeDetection:
             ]
         )
 
-        assert parsed[0].disputed is False
+        assert parsed[0].disputed_by == ()
 
     def test_an_agreeing_reply_does_not_dispute(self) -> None:
         parsed = comments_from_review_payload(
@@ -212,7 +212,7 @@ class TestDisputeDetection:
             ]
         )
 
-        assert parsed[0].disputed is False
+        assert parsed[0].disputed_by == ()
 
     def test_a_payload_without_ids_is_never_disputed(self) -> None:
         parsed = comments_from_review_payload(
@@ -226,7 +226,7 @@ class TestDisputeDetection:
             ]
         )
 
-        assert parsed[0].disputed is False
+        assert parsed[0].disputed_by == ()
 
 
 class TestModelAuthoredPlusOne:
@@ -245,7 +245,7 @@ class TestModelAuthoredPlusOne:
         assert action == "drop"
 
     def test_kept_when_the_named_comment_is_disputed(self) -> None:
-        comment = _comment(disputed=True)
+        comment = _comment(disputed_by=("carol",))
         action, body = adjust_for_prior_comments(
             "sql/foo.scala",
             40,
@@ -259,7 +259,7 @@ class TestModelAuthoredPlusOne:
         assert body == plus_one_text(comment)
 
     def test_kept_when_the_body_carries_the_disputed_comment_url(self) -> None:
-        comment = _comment(disputed=True)
+        comment = _comment(disputed_by=("carol",))
         action, body = adjust_for_prior_comments(
             "sql/foo.scala",
             40,
@@ -288,7 +288,7 @@ class TestModelAuthoredPlusOne:
 @pytest.mark.django_db
 class TestDraftsPlusOne:
     def test_a_duplicate_finding_is_stored_as_a_plus_one(self, db_pr: object) -> None:
-        comment = _comment(disputed=True)
+        comment = _comment(disputed_by=("carol",))
         drafts = create_drafts_from_findings(
             db_pr,  # type: ignore[arg-type]
             [
@@ -399,7 +399,7 @@ class TestTheGatesSeeTheOriginalBody:
             [self._finding()],
             source="llm",
             project=db_pr.project,
-            prior_comments=[_comment(disputed=True)],
+            prior_comments=[_comment(disputed_by=("carol",))],
             operator="holdenk",
         )
 
@@ -419,7 +419,7 @@ class TestTheGatesSeeTheOriginalBody:
             [self._finding()],
             source="llm",
             project=db_pr.project,
-            prior_comments=[_comment(disputed=True)],
+            prior_comments=[_comment(disputed_by=("carol",))],
             operator="holdenk",
         )
 
@@ -450,7 +450,7 @@ class TestAgentCLIGatesSeeTheOriginalBody:
             [self._finding()],
             project=db_pr.project,
             source="claude",
-            prior_comments=[_comment(disputed=True)],
+            prior_comments=[_comment(disputed_by=("carol",))],
             operator="holdenk",
         )
 
@@ -472,7 +472,7 @@ class TestAgentCLIGatesSeeTheOriginalBody:
             [moved],
             project=db_pr.project,
             source="claude",
-            prior_comments=[_comment(disputed=True)],
+            prior_comments=[_comment(disputed_by=("carol",))],
             operator="holdenk",
         )
 
@@ -523,7 +523,7 @@ class TestPositionlessComparison:
             "sql/foo.scala",
             None,
             "getInt returns 0 on null, so this check hides the null.",
-            [_comment(line=None, disputed=True)],
+            [_comment(line=None, disputed_by=("carol",))],
             operator="holdenk",
             seen=set(),
         )
@@ -536,7 +536,7 @@ class TestPositionlessComparison:
             "sql/foo.scala",
             42,
             self._LOOSE,
-            [_comment(disputed=True)],
+            [_comment(disputed_by=("carol",))],
             operator="holdenk",
             seen=set(),
         )
@@ -574,7 +574,7 @@ class TestOnePlusOnePerComment:
     def test_a_later_source_does_not_file_a_second_plus_one(self, db_pr: Any) -> None:
         from franktheunicorn.review.agent_cli import AgentCLIFinding, create_drafts_from_agent_cli
 
-        comment = _comment(file_path="", line=None, disputed=True)
+        comment = _comment(file_path="", line=None, disputed_by=("carol",))
         create_drafts_from_findings(
             db_pr,
             [
@@ -623,3 +623,76 @@ class TestOnePlusOnePerComment:
 
         assert seen_keys_from_drafts([body]) == {comment.url}
         assert seen_keys_from_drafts(["a normal finding body, not a +1"]) == set()
+
+
+class TestWhoseDisputeCounts:
+    """Review findings on the first cut of the dispute rule."""
+
+    @staticmethod
+    def _adjust(body: str, comments: list[PriorComment]) -> tuple[str, str]:
+        return adjust_for_prior_comments(
+            "sql/foo.scala", 40, body, comments, operator="holdenk", seen=set()
+        )
+
+    def test_a_model_plus_one_never_backs_the_operator(self) -> None:
+        mine = _comment(author="holdenk", disputed_by=("carol",))
+        assert self._adjust(f"+1 @holdenk ({mine.url})", [mine]) == ("drop", "")
+
+    def test_a_dispute_by_the_operator_is_not_backed(self) -> None:
+        comment = _comment(disputed_by=("holdenk",))
+        assert self._adjust(comment.body, [comment]) == ("drop", "")
+
+    def test_a_bot_reply_does_not_dispute(self) -> None:
+        parsed = comments_from_review_payload(
+            [
+                {
+                    "id": 1,
+                    "path": "sql/foo.scala",
+                    "line": 40,
+                    "body": "This null check returns 0 from getInt, which hides the null.",
+                    "user": {"login": "cloud-fan"},
+                },
+                {"id": 2, "in_reply_to_id": 1, "body": "-1", "user": {"login": "coderabbitai"}},
+            ]
+        )
+        assert parsed[0].disputed_by == ()
+
+    @pytest.mark.parametrize(
+        "reply",
+        [
+            "Good catch, unintentional. Fixing.",
+            "Yes! No need to thank me, fixed",
+            "I don't think I would have caught that, thanks",
+            "Agreed, this copy is unnecessary, removing",
+        ],
+    )
+    def test_agreeing_replies_do_not_dispute(self, reply: str) -> None:
+        parsed = comments_from_review_payload(
+            [
+                {
+                    "id": 1,
+                    "path": "sql/foo.scala",
+                    "line": 40,
+                    "body": "This null check returns 0 from getInt, which hides the null.",
+                    "user": {"login": "cloud-fan"},
+                },
+                {"id": 2, "in_reply_to_id": 1, "body": reply, "user": {"login": "author"}},
+            ]
+        )
+        assert parsed[0].disputed_by == ()
+
+    def test_a_url_prefix_does_not_capture_the_target(self) -> None:
+        alice = _comment(author="alice", url="https://g/pull/1#discussion_r1")
+        bob = _comment(author="bob", url="https://g/pull/1#discussion_r12", disputed_by=("x",))
+        action, body = self._adjust(f"+1 @bob ({bob.url})", [alice, bob])
+        assert (action, body) == ("plus_one", plus_one_text(bob))
+
+    def test_a_mention_finds_the_authors_disputed_comment(self) -> None:
+        first = _comment(author="bob", url="https://g/pull/1#discussion_r1")
+        second = _comment(author="bob", url="https://g/pull/1#discussion_r2", disputed_by=("x",))
+        assert self._adjust("+1 @bob", [first, second]) == ("plus_one", plus_one_text(second))
+
+    def test_content_match_skips_an_undisputed_comment_for_a_disputed_one(self) -> None:
+        first = _comment(url="https://g/pull/1#discussion_r1")
+        second = _comment(author="bob", url="https://g/pull/1#discussion_r2", disputed_by=("x",))
+        assert self._adjust(first.body, [first, second]) == ("plus_one", plus_one_text(second))

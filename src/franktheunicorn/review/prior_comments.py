@@ -40,9 +40,9 @@ class PriorComment:
     file_path: str = ""
     line: int | None = None
     url: str = ""
-    #: Someone other than the author replied in disagreement. A +1 is only
+    #: Who replied in disagreement (not the author, not a bot). A +1 is only
     #: useful backup on a point that's contested.
-    disputed: bool = False
+    disputed_by: tuple[str, ...] = ()
 
     def key(self) -> str:
         """Stable identity so two findings don't both +1 the same comment."""
@@ -69,30 +69,37 @@ def _line(raw: dict[str, object]) -> int | None:
 #: A reply disagreeing with its parent. Modest on purpose: a false negative
 #: just means a useful +1 is dropped, not a wrong one kept.
 _DISAGREE_RE = re.compile(
-    r"disagree"
-    r"|don'?t\s+think|do\s+not\s+think"
-    r"|not\s+need(ed)?|not\s+necessary|unnecessary|no\s+need"
-    r"|won'?t\s+fix|wontfix|rather\s+not|prefer\s+not"
-    r"|intentional|by\s+design|not\s+a\s+bug"
+    r"\bdisagree"
+    r"|\b(?:don'?t|do\s+not)\s+think\s+(?:so|we|that|this|it)\b"
+    r"|\bnot\s+(?:needed|necessary)\b"
+    r"|\bwon'?t\s+fix\b|\bwontfix\b|\brather\s+not\b|\bprefer\s+not\b"
+    r"|(?<!un)\bintentional\b|\bby\s+design\b|\bnot\s+a\s+bug\b"
     r"|^\s*-1\b|^\s*no[,.]|^\s*nope\b",
     re.IGNORECASE,
 )
 
+#: "Good catch, not needed, removing" agrees despite the words above.
+_AGREE_RE = re.compile(
+    r"\b(?:agreed?|good\s+catch|you'?re\s+right|fixed|done|thanks|will\s+fix)\b",
+    re.IGNORECASE,
+)
 
-def _disputed_ids(raw_comments: list[dict[str, object]]) -> set[int]:
-    """ids of review comments a *different* author replied to in disagreement."""
+
+def _disputers(raw_comments: list[dict[str, object]]) -> dict[int, tuple[str, ...]]:
+    """Review comment id -> who replied disagreeing (not its author, not a bot)."""
     by_id = {raw["id"]: raw for raw in raw_comments if isinstance(raw.get("id"), int)}
-    disputed: set[int] = set()
+    found: dict[int, tuple[str, ...]] = {}
     for raw in raw_comments:
         parent_id = raw.get("in_reply_to_id")
         if not isinstance(parent_id, int) or parent_id not in by_id:
             continue
-        parent = by_id[parent_id]
-        if _author(raw) == _author(parent):
+        who = _author(raw)
+        if not who or who == _author(by_id[parent_id]) or _is_bot(who):
             continue
-        if _DISAGREE_RE.search(str(raw.get("body") or "")):
-            disputed.add(parent_id)
-    return disputed
+        body = str(raw.get("body") or "")
+        if _DISAGREE_RE.search(body) and not _AGREE_RE.search(body):
+            found[parent_id] = (*found.get(parent_id, ()), who)
+    return found
 
 
 def comments_from_review_payload(raw_comments: list[dict[str, object]]) -> list[PriorComment]:
@@ -102,12 +109,13 @@ def comments_from_review_payload(raw_comments: list[dict[str, object]]) -> list[
     Payloads without ``id``/``in_reply_to_id`` (other forges) are never
     disputed.
     """
-    disputed = _disputed_ids(raw_comments)
+    disputers = _disputers(raw_comments)
     parsed: list[PriorComment] = []
     for raw in raw_comments:
         body = str(raw.get("body") or "").strip()
         if len(body) < _MIN_BODY:
             continue
+        raw_id = raw.get("id")
         parsed.append(
             PriorComment(
                 author=_author(raw),
@@ -115,7 +123,7 @@ def comments_from_review_payload(raw_comments: list[dict[str, object]]) -> list[
                 file_path=str(raw.get("path") or ""),
                 line=_line(raw),
                 url=str(raw.get("html_url") or ""),
-                disputed=raw.get("id") in disputed,
+                disputed_by=disputers.get(raw_id, ()) if isinstance(raw_id, int) else (),
             )
         )
     return parsed
@@ -237,59 +245,61 @@ def adjust_for_prior_comments(
     agreement is ``drop``, same as our own comment or a bot's. ``keep``
     means nothing on the PR said this.
     """
-    if body.lstrip().lower().startswith("+1"):
-        # The model was told to write "+1 @author" itself rather than citing
-        # a comment we matched by content.
-        return _adjust_model_plus_one(body, comments, seen)
-
     operator_login = operator.lower()
+    if body.lstrip().lower().startswith("+1"):
+        # The model wrote "+1 @author" itself; back it only if it names a
+        # comment worth backing.
+        return _plus_one_first(_plus_one_targets(body, comments), operator_login, seen)
+
+    matched: list[PriorComment] = []
     for comment in comments:
         if not _agrees(file_path, line, body, comment):
             continue
         author = comment.author.lower()
         if author and (author == operator_login or _is_bot(comment.author)):
             return "drop", ""
-        if comment.body.lstrip().lower().startswith("+1") or not comment.disputed:
-            return "drop", ""
-        key = comment.key()
-        if key in seen:
-            return "drop", ""
-        seen.add(key)
-        return "plus_one", plus_one_text(comment)
-    return "keep", body
+        matched.append(comment)
+    if not matched:
+        return "keep", body
+    return _plus_one_first(matched, operator_login, seen)
+
+
+def _backable(comment: PriorComment, operator_login: str) -> bool:
+    """Someone else's point that someone other than us pushed back on."""
+    author = comment.author.lower()
+    if author == operator_login or _is_bot(comment.author):
+        return False
+    if comment.body.lstrip().lower().startswith("+1"):
+        return False
+    return any(who.lower() != operator_login for who in comment.disputed_by)
+
+
+def _plus_one_first(
+    candidates: list[PriorComment], operator_login: str, seen: set[str]
+) -> tuple[Action, str]:
+    for comment in candidates:
+        if _backable(comment, operator_login) and comment.key() not in seen:
+            seen.add(comment.key())
+            return "plus_one", plus_one_text(comment)
+    return "drop", ""
 
 
 _MENTION_RE = re.compile(r"@([\w-]+)")
+_URL_RE = re.compile(r"https?://[^\s)]+")
 
 
-def _plus_one_target(body: str, comments: list[PriorComment]) -> PriorComment | None:
-    """Which prior comment a model-written "+1 @author (url)" body names."""
-    for comment in comments:
-        if comment.url and comment.url in body:
-            return comment
+def _plus_one_targets(body: str, comments: list[PriorComment]) -> list[PriorComment]:
+    """The comments a model-written "+1 @author (url)" body names: by exact URL,
+    else every comment by the mentioned author."""
+    urls = {u.rstrip(".,") for u in _URL_RE.findall(body)}
+    by_url = [c for c in comments if c.url and c.url in urls]
+    if by_url:
+        return by_url
     mention = _MENTION_RE.search(body)
-    if mention:
-        login = mention.group(1).lower()
-        for comment in comments:
-            if comment.author.lower() == login:
-                return comment
-    return None
-
-
-def _adjust_model_plus_one(
-    body: str, comments: list[PriorComment], seen: set[str]
-) -> tuple[Action, str]:
-    """A model-authored "+1" body. Keep it only for a disputed comment it
-    actually names; otherwise it's the model restating someone's point.
-    """
-    target = _plus_one_target(body, comments)
-    if target is None or not target.disputed:
-        return "drop", ""
-    key = target.key()
-    if key in seen:
-        return "drop", ""
-    seen.add(key)
-    return "plus_one", plus_one_text(target)
+    if not mention:
+        return []
+    login = mention.group(1).lower()
+    return [c for c in comments if c.author.lower() == login]
 
 
 #: The URL a ``+1`` body carries, so an already-filed one can be recognised.
@@ -338,7 +348,7 @@ def format_prior_comments(comments: list[PriorComment]) -> str:
             loc = (
                 f"{comment.file_path}:{comment.line} " if comment.line else f"{comment.file_path} "
             )
-        tag = " (disputed)" if comment.disputed else ""
+        tag = " (disputed)" if comment.disputed_by else ""
         excerpt = " ".join(comment.body.split())[:_EXCERPT]
         lines.append(f"- {loc}{who}{tag}: {excerpt}")
     return "\n".join(lines)

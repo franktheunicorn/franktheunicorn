@@ -6,6 +6,8 @@ import json
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
 from franktheunicorn.config.models import LLMBackendConfig
 from franktheunicorn.review.backends.base import PRContext, ReviewFinding
 from franktheunicorn.review.judge import (
@@ -336,3 +338,10 @@ class TestApplyVerdicts:
         finding.severity = "nit"
         kept, _ = apply_verdicts([finding], [JudgeVerdict(keep=True, severity=None)])
         assert kept[0].severity == "nit"
+
+
+@pytest.mark.parametrize("raw", ["NaN", float("nan"), float("inf"), "-inf"])
+def test_non_finite_confidence_is_ignored(raw: object) -> None:
+    from franktheunicorn.review.judge import _parse_confidence
+
+    assert _parse_confidence(raw) is None

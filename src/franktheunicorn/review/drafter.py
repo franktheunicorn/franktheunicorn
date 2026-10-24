@@ -84,7 +84,12 @@ def _coerce_severity(raw_severity: str, finding_title: str = "") -> str:
     return "nit"
 
 
-_NIT_PREFIX_RE = re.compile(r"^nit\s*[:-]\s*", re.IGNORECASE)
+#: "nit:", "**Nit:**", "nitpick -", "nit-pick:". A dash only counts with a space
+#: after it, so "nit-pick foo" is not read as "nit" + "-".
+_NIT_PREFIX_RE = re.compile(
+    r"^\s*(?:\*\*|__)?nit(?:-?pick)?(?:\*\*|__)?\s*(?::|-(?=\s))\s*(?:\*\*|__)?\s*",
+    re.IGNORECASE,
+)
 
 
 def _strip_nit_prefix_if_severe(body: str, severity: str) -> str:
@@ -422,6 +427,7 @@ def create_drafts_from_findings(
             # a re-run's dedup gate compares a fresh "nit: ..." body against
             # the stripped body already on disk and refiles it.
             coerced_severity = _coerce_severity(finding.severity, finding.title)
+            original_body = finding.body
             stripped_body = _strip_nit_prefix_if_severe(finding.body, coerced_severity)
             if stripped_body != finding.body:
                 finding = finding.model_copy(update={"body": stripped_body})
@@ -432,6 +438,11 @@ def create_drafts_from_findings(
             # same PR — Force Run Agents, or a cycle chasing one missing reviewer —
             # filed a fresh copy of every finding it had already filed.
             duplicate = _find_existing_draft(existing_drafts, finding)
+            if duplicate is None and stripped_body != original_body:
+                # Filed before the strip existed, still carrying its "nit:".
+                duplicate = _find_existing_draft(
+                    existing_drafts, finding.model_copy(update={"body": original_body})
+                )
             if duplicate is None and plus_one_body:
                 # A draft filed on an earlier pass carries the +1 text, not the
                 # original. Both spellings are the same finding.

@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -163,7 +164,8 @@ def _parse_confidence(raw: object) -> float | None:
             return None
     else:
         return None
-    return max(0.0, min(1.0, value))
+    # The clamp would turn NaN into 1.0.
+    return max(0.0, min(1.0, value)) if math.isfinite(value) else None
 
 
 def _parse_severity(raw: object) -> str | None:

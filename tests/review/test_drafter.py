@@ -432,6 +432,18 @@ class TestStripNitPrefixIfSevere:
         body = "nit: trailing whitespace"
         assert _strip_nit_prefix_if_severe(body, "informational") == body
 
+    @pytest.mark.parametrize(
+        ("body", "expected"),
+        [
+            ("nit-pick: foo is null", "Foo is null"),
+            ("**nit:** foo is null", "Foo is null"),
+            ("Nitpick - foo is null", "Foo is null"),
+            ("nit-pick foo is null", "nit-pick foo is null"),
+        ],
+    )
+    def test_nit_prefix_variants(self, body: str, expected: str) -> None:
+        assert _strip_nit_prefix_if_severe(body, "critical") == expected
+
     def test_no_prefix_is_a_no_op(self) -> None:
         body = "This will NPE at runtime."
         assert _strip_nit_prefix_if_severe(body, "critical") == body
@@ -518,6 +530,17 @@ class TestSeverityCoercionInDrafts:
         )
         assert second == []
         assert ReviewDraft.objects.filter(pull_request=db_pr).count() == 1
+
+    def test_a_pre_strip_draft_is_not_refiled(self, db_pr) -> None:
+        """A draft stored before the strip existed still carries its "nit:"."""
+        body = "nit: `$regex.equals(...)` throws NPE"
+        ReviewDraft.objects.create(
+            pull_request=db_pr, file_path="src/main.py", line_number=10, comment_body=body
+        )
+        finding = ReviewFinding(
+            file_path="src/main.py", line_number=10, title="x", body=body, severity="important"
+        )
+        assert create_drafts_from_findings(db_pr, [finding], source="agent") == []
 
 
 @pytest.mark.django_db

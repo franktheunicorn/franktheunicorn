@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from franktheunicorn.core.models import ReviewDraft
@@ -600,14 +600,7 @@ def create_drafts_from_agent_cli(
         coerced_severity = _coerce_severity(finding.severity, finding.title)
         stripped_body = _strip_nit_prefix_if_severe(finding.body, coerced_severity)
         if stripped_body != finding.body:
-            finding = AgentCLIFinding(
-                file_path=finding.file_path,
-                line_number=finding.line_number,
-                severity=finding.severity,
-                title=finding.title,
-                body=stripped_body,
-                suggestion=finding.suggestion,
-            )
+            finding = replace(finding, body=stripped_body)
 
         matches = check_against_anti_patterns(finding.body, project)
         if matches:
