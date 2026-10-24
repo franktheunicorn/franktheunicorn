@@ -1,7 +1,10 @@
 # Apache Magpie and franktheunicorn
 
 > **Status:** Living document. First written 2026-10-12 against Magpie commit
-> `dadb315caa8b881fc1d2195bef03223dac25915a` (2026-10-11).
+> `dadb315caa8b881fc1d2195bef03223dac25915a` (2026-10-11). Re-pinned
+> 2026-10-24 to `27268f28a253978137e0cfa17bc19ef6e8897c28` (2026-10-23);
+> provenance citations of `dadb315caa8b` name the commit each port was taken
+> from and do not move with the pin.
 >
 > **Audience:** The operator deciding what to borrow from Magpie, and the agents
 > implementing it. Every claim names a file on both sides so it can be re-checked
@@ -275,6 +278,8 @@ discussed. "All four" means claude, codex, cursor-agent and pi.
 | `stale-nudge-then-close-for-consider-closing-queue` | Tier 2 (5.23) | worker | none | none | none involved | comment fetch fails: stored flag kept |
 | `skill-evals-harness-for-frank-prompts` | Tier 2 (5.24) | developer or worker host; agent host through frank's own backend | the configured reviewer's existing `executor.run()`, prompt in argv | the CLI binary | any configured reviewer | remote unreachable: recorded as an error, not a failure |
 | `cve-title-normalize-cascade` | Tier 2 (5.25) | web | none | none | none involved | under three words: original kept with a warning |
+| `offer-operator-fixup-for-mechanical-nits` | Tier 2 (5.26) | web (one Cursor cloud POST) | none on any agent host | none | Cursor cloud fix agent only | a gate or finding shape missing: no offer, INFO |
+| `hand-probably-addressed-drafts-to-operator` | Tier 2 (5.27) | worker (mark at poll) and web (dismiss/keep row) | none | none | none involved | head-sha unreadable: drafts stay pending, nothing auto-dismissed |
 | `fix-prompt-rederive-untrusted-patch` | Tier 3 (6.1) | model (Cursor cloud POST body) | none on any agent host | none | Cursor cloud agents only | no runtime dependency |
 | `magpie-principles-map-in-design-doc` | Tier 3 (6.2) | docs | none | none | n/a | n/a |
 | `reporter-reply-canned-drafts` | Tier 3 (6.3) | web; a `quotes` key in the triage prompt | argv when triage uses an agent-cli backend | none | all four | template missing: frank's example; drafts are never sent |
@@ -1912,6 +1917,73 @@ Done on this branch; see 4.20.
 - **Tests.** Each pattern; an over-stripped title keeps the original.
 - **Risks.** Over-stripping, which the warning covers.
 
+### 5.26 Offer an operator fixup when only mechanical nits remain
+
+- **What.** Upstream added a fixup disposition (apache/magpie `e6e5c2e3`,
+  #1743, 2026-10-22): when every approval gate holds and the remaining findings
+  are all `minor`/`nit` with a mechanical fix, the reviewer defaults to offering
+  `[F]ixup` — commit exactly those changes on confirmation, wait for CI, then
+  approve listing what the fixup changed — instead of sending the contributor
+  a round trip. A `major` finding is never fixed up and no approval gate is
+  skipped. frank's counterpart: a button on the almost-ready merge queue
+  (`scoring/merge_readiness.py`) and the PR detail page that launches the
+  existing Cursor cloud fix agent (`security/fix_agent.py` infra) with the
+  pending `nit`-severity drafts inlined, one branch per fixup, draft-only gates
+  unchanged — the operator confirms before anything lands, and frank still
+  never approves or merges on its own.
+- **Why.** Frank's queue is dominated by exactly the findings this is for:
+  1,891 of 4,389 pending drafts are `nit` severity (1,235 of those also
+  `confidence<=0.3`), and each one costs a contributor round trip it will
+  rarely win.
+- **Files.** frank: `scoring/merge_readiness.py`, `security/fix_agent.py`
+  (launch shape), `dashboard/views.py` + a template button,
+  `review/drafter.py` (findings already carry severity). Magpie:
+  `plugins/magpie-pr-management/skills/code-review/classifications/disposition-fixup.md`,
+  `review-flow.md` step 6, `scope.md`.
+- **Pin.** None (port of a rule; the upstream flow assumes `gh` and a tracker).
+- **Remote path:** web process (one Cursor cloud POST, as today).
+- **Steps.** Eligibility port: all gates green (real CI, no unresolved
+  operator question), every pending draft `nit` severity, at least one with a
+  mechanical fix shape (a suggestion or a one-line body).
+- **Tests.** Eligibility matrix (a major finding blocks the offer; a failing
+  gate blocks it); the launch body carries the drafts; no auto-approve path.
+- **Risks.** An over-eager eligibility rule turning frank into an auto-editor;
+  the gate stays "the operator clicked".
+
+### 5.27 Hand probably-addressed drafts to the operator instead of letting them block
+
+- **What.** Upstream stopped letting outdated threads block approval
+  (apache/magpie `27268f28`, #1758, 2026-10-23): a thread GitHub marks
+  `isOutdated` is checked against the current diff, and one the diff addresses
+  is handed to the maintainer — "resolve it to unblock the merge" — never
+  resolved by the tool, because the sign-off is the maintainer's. frank's
+  counterpart: when a PR's `head_sha` changes, the pending drafts filed against
+  the previous sha are marked `probably-addressed` (the diff moved past their
+  target lines), surfaced in a dismiss/keep row on the detail page, and excluded
+  from the merge-readiness blockers. Frank never deletes them: the operator's
+  click is the verdict.
+- **Why.** Frank's drafts never age out. 4,389 pending rows sit across 808 PRs,
+  every one still gating the merge-readiness checklist as if current; the
+  operator's real review pass has to re-litigate drafts the contributor already
+  answered with a push.
+- **Files.** frank: `core/models.py` (`ReviewDraft` has no filed-against sha
+  column; a port adds one or keys off `code_context`, which was extracted from
+  the diff the draft was filed against), `backends/poller.py` (head-sha change
+  hook), `scoring/merge_readiness.py` (exclude probably-addressed),
+  `dashboard/views.py` + template row. Magpie:
+  `classifications/outdated-thread.md`,
+  `tools/pr-management/src/pr_management/code_review/disposition.py`.
+- **Pin.** None (port; upstream's thread ids are GitHub review threads, frank's
+  are draft rows).
+- **Remote path:** worker (poll-time mark) and web (the dismiss/keep row).
+- **Steps.** Mark-only: line moved out of the diff, or the draft's file no
+  longer in `changed_files`. The operator confirms or restores; nothing is
+  auto-dismissed.
+- **Tests.** A push that fixes the line marks the draft; a push that keeps it
+  leaves it; a marked draft does not block merge readiness; restoring works.
+- **Risks.** A line that moved but was not fixed reads as addressed; that is why
+  it is a question for the operator, not a silent drop.
+
 ---
 
 ## 6. Tier 3: Borrow the Text or the Design
@@ -2607,8 +2679,9 @@ the reason, so nobody re-evaluates it.
 ## 10. Sources
 
 - Apache Magpie repository: https://github.com/apache/magpie, pinned at
-  `dadb315caa8b881fc1d2195bef03223dac25915a` (2026-10-11, dev version
-  `0.9.0.dev202610111534`). Only release tag: `0.1.0` at
+  `27268f28a253978137e0cfa17bc19ef6e8897c28` (2026-10-23, dev version
+  `0.9.0.dev202610221403`; first written against `dadb315caa8b`
+  2026-10-11). Only release tag: `0.1.0` at
   `1890a13d0d3a3b0b2a9c83efb7dcdc837a07795d` (2026-07-13).
 - Project site: https://magpie.apache.org/
 - ASF announcement of Magpie as a Top-Level Project (2026-06-29):
