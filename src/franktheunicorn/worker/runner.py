@@ -2306,13 +2306,45 @@ def _checkout_pr_head_with_merge(
         timeout=300,
     )
     if fetch is None or not fetch.ok:
-        logger.warning(
-            "Failed to fetch PR #%d head %s in %s; review tools will be skipped.",
-            pr.number,
-            head_sha[:12],
-            cwd,
+        # The stored head SHA can be stale — a force-pushed PR makes it
+        # unreachable, and the server then answers "couldn't find remote
+        # ref" even though the PR's own ref is alive. Fetch the PR ref and
+        # follow it to whatever the head is now, rather than skipping the
+        # whole local review for a commit nobody can fetch.
+        pr_ref = f"refs/pull/{pr.number}/head"
+        refetch = executor.run(  # type: ignore[attr-defined]
+            ["git", "fetch", "--quiet", "origin", pr_ref],
+            cwd=cwd,
+            timeout=300,
         )
-        return False, None
+        recovered = False
+        if refetch is not None and refetch.ok:
+            resolved = executor.run(  # type: ignore[attr-defined]
+                ["git", "rev-parse", "FETCH_HEAD"],
+                cwd=cwd,
+                timeout=_GIT_QUERY_TIMEOUT_SECONDS,
+            )
+            if resolved is not None and resolved.ok:
+                current = resolved.stdout.strip()
+                if current and current != head_sha:
+                    logger.warning(
+                        "PR #%d's stored head %s is unreachable (likely force-pushed); "
+                        "reviewing the current head %s instead.",
+                        pr.number,
+                        head_sha[:12],
+                        current[:12],
+                    )
+                    head_sha = current
+                recovered = True
+        if not recovered:
+            logger.warning(
+                "Failed to fetch PR #%d head %s in %s; review tools will be skipped.%s",
+                pr.number,
+                head_sha[:12],
+                cwd,
+                f" git said: {(fetch.stderr or fetch.stdout).strip()[:200]}" if fetch else "",
+            )
+            return False, None
 
     branch_name = f"franktheunicorn-review-{pr.number}"
     # -B (force-reset) rather than -b: a worker killed mid-review leaves the

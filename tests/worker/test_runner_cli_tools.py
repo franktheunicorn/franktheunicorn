@@ -187,12 +187,36 @@ class TestCheckoutPrHeadWithMerge:
     def test_returns_false_on_fetch_failure(self) -> None:
         executor = MagicMock()
         executor.run.side_effect = [
-            ExecResult(returncode=128, stdout="", stderr="not found"),
+            ExecResult(returncode=128, stdout="", stderr="not found"),  # sha fetch
+            ExecResult(returncode=128, stdout="", stderr="not found"),  # PR ref fetch
         ]
         ok, branch = _checkout_pr_head_with_merge(executor, "/srv/repo", self._pr(), "origin/main")
         assert ok is False
         assert branch is None
-        assert executor.run.call_count == 1
+        assert executor.run.call_count == 2
+
+    def test_stale_head_sha_falls_back_to_current_pr_head(self) -> None:
+        # A force-pushed PR makes the stored head SHA unreachable ("couldn't
+        # find remote ref"), but the PR's own ref still names the new head.
+        # The checkout must follow it, not skip the whole local review.
+        executor = MagicMock()
+        ok_result = ExecResult(returncode=0, stdout="", stderr="")
+        executor.run.side_effect = [
+            ExecResult(returncode=128, stdout="", stderr="couldn't find remote ref"),
+            ok_result,  # refs/pull/42/head fetch
+            ExecResult(returncode=0, stdout="cafe9876543210\n", stderr=""),  # rev-parse
+            ok_result,  # checkout -B on the new head
+            ok_result,  # merge
+        ]
+        ok, branch = _checkout_pr_head_with_merge(
+            executor, "/srv/repo", self._pr("deadbeef00"), "origin/main"
+        )
+        assert ok is True
+        assert branch == "franktheunicorn-review-42"
+        refetch_cmd = executor.run.call_args_list[1].args[0]
+        assert "refs/pull/42/head" in refetch_cmd
+        checkout_cmd = executor.run.call_args_list[3].args[0]
+        assert "cafe9876543210" in checkout_cmd
 
     def test_returns_false_on_checkout_failure(self) -> None:
         executor = MagicMock()
