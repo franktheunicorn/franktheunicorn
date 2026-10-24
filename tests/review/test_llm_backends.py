@@ -291,6 +291,17 @@ class TestCoerceProse:
         raw = '{"_type":"tool_use","id":"toolu_bdrk_012o","input":{"comments":[{"comment":"nit'
         assert _coerce_prose(raw) == ""
 
+    def test_bare_error_literal_is_dropped(self) -> None:
+        """Observed on PR 59769: the model emitted the word 'error' as a whole
+        finding body. A bare literal is never a review comment."""
+        from franktheunicorn.review.backends.base import _is_nonsense_body
+
+        assert _is_nonsense_body("error")
+        assert _is_nonsense_body(" true ")
+        # A genuinely short comment is never caught.
+        assert not _is_nonsense_body("nit: inline this")
+        assert not _is_nonsense_body("+1 @author")
+
     def test_parse_review_salvages_json_body(self) -> None:
         data = {
             "findings": [

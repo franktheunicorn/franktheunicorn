@@ -655,11 +655,12 @@ def _coerce_prose(text: str) -> str:
 
 
 #: Bodies that are a bare literal rather than a comment — a weaker model
-#: occasionally emits ``"true"`` / ``"{}"`` / ``"n/a"`` as a finding body. These
-#: are noise, not review. Kept deliberately tiny and exact so a genuinely short
-#: comment ("+1 @author", "nit: inline this") is never caught.
+#: occasionally emits ``"true"`` / ``"{}"`` / ``"n/a"`` / a bare ``"error"`` as a
+#: finding body (observed on PR 59769). These are noise, not review. Kept
+#: deliberately tiny and exact so a genuinely short comment ("+1 @author",
+#: "nit: inline this") is never caught.
 _NONSENSE_BODIES: frozenset[str] = frozenset(
-    {"true", "false", "null", "none", "n/a", "na", "{}", "[]", "nil", "undefined"}
+    {"true", "false", "null", "none", "n/a", "na", "{}", "[]", "nil", "undefined", "error"}
 )
 
 #: A lone code token — no whitespace, and carrying an unambiguous code signal:
