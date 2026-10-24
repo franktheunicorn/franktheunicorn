@@ -568,27 +568,28 @@ def create_drafts_from_agent_cli(
         # the body both of them key on. An anti-pattern written to kill this
         # finding does not match "+1 @bob", and the dedup compares the short +1
         # against the old long body and falls under the similarity threshold.
-        plus_one_body = ""
-        if prior_comments:
-            from franktheunicorn.review.prior_comments import adjust_for_prior_comments
+        # Called even with no prior comments: a model-authored "+1" body with
+        # nothing to point at still needs dropping.
+        from franktheunicorn.review.prior_comments import adjust_for_prior_comments
 
-            action, rewritten = adjust_for_prior_comments(
-                finding.file_path,
-                finding.line_number,
-                finding.body,
-                prior_comments,
-                operator=operator,
-                seen=seen_comments,
+        action, rewritten = adjust_for_prior_comments(
+            finding.file_path,
+            finding.line_number,
+            finding.body,
+            prior_comments or [],
+            operator=operator,
+            seen=seen_comments,
+        )
+        plus_one_body = ""
+        if action == "drop":
+            logger.info(
+                "Dropped %s finding '%s' — already on the PR",
+                source,
+                finding.title,
             )
-            if action == "drop":
-                logger.info(
-                    "Dropped %s finding '%s' — already on the PR",
-                    source,
-                    finding.title,
-                )
-                continue
-            if action == "plus_one":
-                plus_one_body = rewritten
+            continue
+        if action == "plus_one":
+            plus_one_body = rewritten
 
         # Severity coerced here, not at persistence time, so the nit-strip
         # rewrite is in effect for the gates below — otherwise a re-run's

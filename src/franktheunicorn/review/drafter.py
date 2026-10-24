@@ -382,27 +382,28 @@ def create_drafts_from_findings(
             # replaces the body those gates key on: an anti-pattern the operator
             # wrote to kill this finding no longer matches "+1 @bob", and the
             # exact-body dedup stops recognising its own earlier draft.
-            plus_one_body = ""
-            if prior_comments:
-                from franktheunicorn.review.prior_comments import adjust_for_prior_comments
+            # Called even with no prior comments: a model-authored "+1" body
+            # with nothing to point at still needs dropping.
+            from franktheunicorn.review.prior_comments import adjust_for_prior_comments
 
-                action, rewritten = adjust_for_prior_comments(
-                    finding.file_path,
-                    finding.line_number,
-                    finding.body,
-                    prior_comments,
-                    operator=operator,
-                    seen=seen_comments,
+            action, rewritten = adjust_for_prior_comments(
+                finding.file_path,
+                finding.line_number,
+                finding.body,
+                prior_comments or [],
+                operator=operator,
+                seen=seen_comments,
+            )
+            plus_one_body = ""
+            if action == "drop":
+                logger.info(
+                    "Dropped %s finding '%s' — already on the PR",
+                    source,
+                    finding.title[:40],
                 )
-                if action == "drop":
-                    logger.info(
-                        "Dropped %s finding '%s' — already on the PR",
-                        source,
-                        finding.title[:40],
-                    )
-                    continue
-                if action == "plus_one":
-                    plus_one_body = rewritten
+                continue
+            if action == "plus_one":
+                plus_one_body = rewritten
             # Resolve attribution for this specific finding. When dedup merged
             # findings from multiple backends, sources_per_finding[idx] holds
             # all contributors as a comma-joined string.
