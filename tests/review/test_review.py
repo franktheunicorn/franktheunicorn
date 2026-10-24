@@ -133,6 +133,19 @@ class TestAntiPattern:
         matches = check_against_anti_patterns("Great improvement!", db_project)
         assert len(matches) == 0
 
+    def test_global_pattern_matches_when_a_project_is_passed(self, db_project: Project) -> None:
+        """``project__in=[p, None]`` can never match the NULL half, so global
+        rows silently never fired once a project was passed — the docstring
+        promised "both project-specific and global"."""
+        AntiPatternFactory(
+            pattern_text="here are my findings",
+            project=None,
+        )
+        matches = check_against_anti_patterns(
+            "Review completed. Here are my findings: ...", db_project
+        )
+        assert len(matches) == 1
+
 
 class TestFineTunedModelInjection:
     def test_no_injection_when_disabled(self) -> None:

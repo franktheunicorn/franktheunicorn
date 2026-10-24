@@ -554,6 +554,17 @@ class TestCreateDraftsFromAgentCLI:
         drafts = create_drafts_from_agent_cli(db_pr, [finding], source="codex")
         assert drafts[0].comment_body == "nit: trailing whitespace"
 
+    def test_title_echo_stripped_from_body(self, db_pr: PullRequest) -> None:
+        """Observed live (90 drafts, every agent-CLI backend): the title line
+        repeated inside the body slot. The title already names the finding."""
+        finding = self._finding(
+            severity="high",
+            title="Missing null check",
+            body="Missing null check\n\nThis will NPE when the cache misses.",
+        )
+        drafts = create_drafts_from_agent_cli(db_pr, [finding], source="cursor-agent")
+        assert drafts[0].comment_body == "This will NPE when the cache misses."
+
     def test_dedup_matches_across_runs_after_nit_strip(self, db_pr: PullRequest) -> None:
         """The dedup gate must compare against the stripped body both times,
         or a second pass over the same PR refiles the same finding."""

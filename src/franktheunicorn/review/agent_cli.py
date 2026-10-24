@@ -595,14 +595,20 @@ def create_drafts_from_agent_cli(
         if action == "plus_one":
             plus_one_body = rewritten
 
-        # Severity coerced here, not at persistence time, so the nit-strip
-        # rewrite is in effect for the gates below — otherwise a re-run's
-        # similarity dedup compares a fresh "nit: ..." body against the
-        # stripped body already on disk.
-        from franktheunicorn.review.drafter import _coerce_severity, _strip_nit_prefix_if_severe
+        # Severity coerced here, not at persistence time, so the title-echo
+        # and nit-strip rewrites are in effect for the gates below —
+        # otherwise a re-run's similarity dedup compares a fresh raw body
+        # against the stripped body already on disk.
+        from franktheunicorn.review.drafter import (
+            _coerce_severity,
+            _strip_nit_prefix_if_severe,
+            _strip_title_echo,
+        )
 
         coerced_severity = _coerce_severity(finding.severity, finding.title)
-        stripped_body = _strip_nit_prefix_if_severe(finding.body, coerced_severity)
+        stripped_body = _strip_nit_prefix_if_severe(
+            _strip_title_echo(finding.title, finding.body), coerced_severity
+        )
         if stripped_body != finding.body:
             finding = replace(finding, body=stripped_body)
 

@@ -12,6 +12,7 @@ the interface.
 
 from __future__ import annotations
 
+from django.db.models import Q
 from django.utils import timezone
 
 from franktheunicorn.core.models import AntiPattern, Project
@@ -32,8 +33,10 @@ def check_against_anti_patterns(
     """
     queryset = AntiPattern.objects.filter(is_active=True)
     if project is not None:
-        # Check both project-specific and global anti-patterns
-        queryset = queryset.filter(project__in=[project, None])
+        # Check both project-specific and global anti-patterns. __in=[p, None]
+        # cannot express the global half: NULL never matches an IN list, so
+        # every global row silently never fired once a project was passed.
+        queryset = queryset.filter(Q(project=project) | Q(project__isnull=True))
 
     matches: list[AntiPattern] = []
     comment_lower = comment_body.lower()

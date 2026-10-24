@@ -18,6 +18,7 @@ from franktheunicorn.review.drafter import (
     _coerce_severity,
     _maybe_inject_fine_tuned_model,
     _strip_nit_prefix_if_severe,
+    _strip_title_echo,
     build_pr_context,
     create_drafts_from_findings,
     draft_review,
@@ -447,6 +448,48 @@ class TestStripNitPrefixIfSevere:
     def test_no_prefix_is_a_no_op(self) -> None:
         body = "This will NPE at runtime."
         assert _strip_nit_prefix_if_severe(body, "critical") == body
+
+
+class TestStripTitleEcho:
+    """Agent CLIs sometimes repeat the finding's title inside the body."""
+
+    @pytest.mark.parametrize(
+        ("title", "body", "expected"),
+        [
+            (
+                "Missing null check",
+                "Missing null check\n\nThis will NPE when row is null.",
+                "This will NPE when row is null.",
+            ),
+            (
+                "Missing null check",
+                "Missing null check:\n\nThis will NPE when row is null.",
+                "This will NPE when row is null.",
+            ),
+            (
+                "Missing null check",
+                "missing null check\n\nThis will NPE when row is null.",
+                "This will NPE when row is null.",
+            ),
+            # A differing first line is a real first sentence, not an echo.
+            (
+                "Missing null check",
+                "Actually about ordering.\n\nThis will NPE when row is null.",
+                "Actually about ordering.\n\nThis will NPE when row is null.",
+            ),
+            # No blank line: the first line is prose, not a title slot.
+            (
+                "Missing null check",
+                "Missing null check and the map lookup too.",
+                "Missing null check and the map lookup too.",
+            ),
+            # Only the echo: stripping would empty the comment.
+            ("Missing null check", "Missing null check", "Missing null check"),
+            ("", "Anything\n\ngoes", "Anything\n\ngoes"),
+        ],
+    )
+    def test_title_echo_variants(self, title: str, body: str, expected: str) -> None:
+        assert _strip_title_echo(title, body) == expected
 
 
 @pytest.mark.django_db

@@ -46,6 +46,13 @@ _HEADER_PATTERN = re.compile(
     r"^(?P<file_path>[^\s:]+):(?P<line>\d+)\s*-\s*\[(?P<severity>[^\]]+)\]\s*(?P<title>.+)$",
 )
 
+#: The same header appearing INSIDE a block's body — the narrated-dump shape:
+#: the agent wrote "Review completed. Here are my findings:", "Two
+#: findings." or "I have everything I need:" and pasted its blocks as prose.
+#: 12 of 12 live drafts with this shape were dumps; a real comment never
+#: carries another finding's header line.
+_EMBEDDED_HEADER_RE = re.compile(_HEADER_PATTERN.pattern, re.MULTILINE)
+
 
 @dataclass
 class CodeRabbitFinding:
@@ -163,6 +170,15 @@ def _parse_single_block(block: str) -> CodeRabbitFinding | None:
     if not match:
         # Short blocks are likely summary lines ("Review completed").
         if len(block) < 40:
+            return None
+        # A body carrying finding headers is the narrated dump, not a
+        # comment; capturing it files the model's preamble as a review.
+        if _EMBEDDED_HEADER_RE.search(block):
+            logger.info(
+                "Dropped a narrated dump — block embeds %d finding header(s); "
+                "the agent pasted its blocks as prose.",
+                len(_EMBEDDED_HEADER_RE.findall(block)),
+            )
             return None
         # Unparseable but substantial block — capture rather than drop.
         logger.debug("Could not parse CodeRabbit header: %s", header_line[:80])

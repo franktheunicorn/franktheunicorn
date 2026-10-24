@@ -106,6 +106,23 @@ def _strip_nit_prefix_if_severe(body: str, severity: str) -> str:
     return stripped[0].upper() + stripped[1:]
 
 
+def _strip_title_echo(title: str, body: str) -> str:
+    """Drop a leading echo of the finding's title from its body.
+
+    The agent CLIs sometimes repeat the title line inside the body slot
+    ("Title\\n\\ncomment" as well as the header line): the title already
+    names the finding, so the echo is a line of padding on the posted
+    comment. 90 live drafts carry the shape.
+    """
+    head = " ".join((title or "").split()).lower().rstrip(":")
+    if not head:
+        return body
+    first, sep, rest = body.partition("\n\n")
+    if not sep or " ".join(first.split()).lower().rstrip(":") != head:
+        return body
+    return rest.lstrip("\n") if rest.strip() else body
+
+
 def ensure_conflict_draft(pr: PullRequest) -> ReviewDraft:
     """Get or create the single rebase-needed draft for a conflicted PR.
 
@@ -422,13 +439,15 @@ def create_drafts_from_findings(
                 finding_sources = [source]
             primary_source = finding_sources[0]
 
-            # Severity coerced here, not at persistence time, so the nit-strip
-            # rewrite below is in effect for the gates that follow — otherwise
-            # a re-run's dedup gate compares a fresh "nit: ..." body against
-            # the stripped body already on disk and refiles it.
+            # Severity coerced here, not at persistence time, so the title-echo
+            # and nit-strip rewrites below are in effect for the gates that
+            # follow — otherwise a re-run's dedup gate compares a fresh raw
+            # body against the stripped body already on disk and refiles it.
             coerced_severity = _coerce_severity(finding.severity, finding.title)
             original_body = finding.body
-            stripped_body = _strip_nit_prefix_if_severe(finding.body, coerced_severity)
+            stripped_body = _strip_nit_prefix_if_severe(
+                _strip_title_echo(finding.title, finding.body), coerced_severity
+            )
             if stripped_body != finding.body:
                 finding = finding.model_copy(update={"body": stripped_body})
 

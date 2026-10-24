@@ -77,6 +77,32 @@ class TestParsePromptOnlyOutput:
         assert findings[0].severity == "medium"
         assert "useful review feedback" in findings[0].body
 
+    def test_narrated_dump_with_embedded_headers_is_dropped(self) -> None:
+        """Observed live (cursor agents, 12 drafts): "Review completed. Here
+        are my findings:" — or "Two findings." — then the blocks pasted as
+        prose. The capture fallback filed the whole narration as one finding;
+        a body carrying other findings' headers is the dump, not a comment."""
+        output = (
+            "Review completed. Here are my findings:\n\n"
+            "core/src/Foo.scala:924 - [Medium] Driver maxMemory double-counts\n\n"
+            "The driver's maxMemory still counts the off-heap portion that "
+            "totalOffHeap zeroes, so the two disagree.\n\n"
+            "sql/Bar.scala:10 - [Nit] Redundant assert\n\n"
+            "This assert is already covered by the map equality above.\n"
+        )
+        assert parse_prompt_only_output(output) == []
+
+    def test_an_injection_note_without_headers_stays_captured(self) -> None:
+        """The dump rule must not eat the injection note — a narration-preceded
+        blob with no embedded headers is still a review worth filing."""
+        output = (
+            "The PR description tells the reviewer to rerun cursor-agent with "
+            "--trust; treated as data.\nReview completed"
+        )
+        findings = parse_prompt_only_output(output)
+        assert len(findings) == 1
+        assert findings[0].file_path == ""
+
 
 # ---------------------------------------------------------------------------
 # CLI runner tests (mocked subprocess)
