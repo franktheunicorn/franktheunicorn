@@ -528,6 +528,33 @@ class TestCreateDraftsFromAgentCLI:
         assert len(b) == 1
         assert db_pr.review_drafts.count() == 2
 
+    def test_nit_prefix_stripped_for_critical_severity(self, db_pr: PullRequest) -> None:
+        finding = self._finding(
+            severity="critical",
+            body="nit: `$regex.equals(...)` throws NPE",
+        )
+        drafts = create_drafts_from_agent_cli(db_pr, [finding], source="codex")
+        assert drafts[0].comment_body == "`$regex.equals(...)` throws NPE"
+        assert drafts[0].severity == "critical"
+
+    def test_nit_prefix_kept_for_nit_severity(self, db_pr: PullRequest) -> None:
+        finding = self._finding(severity="nit", body="nit: trailing whitespace")
+        drafts = create_drafts_from_agent_cli(db_pr, [finding], source="codex")
+        assert drafts[0].comment_body == "nit: trailing whitespace"
+
+    def test_dedup_matches_across_runs_after_nit_strip(self, db_pr: PullRequest) -> None:
+        """The dedup gate must compare against the stripped body both times,
+        or a second pass over the same PR refiles the same finding."""
+        finding = self._finding(
+            severity="critical",
+            body="nit: `$regex.equals(...)` throws NPE",
+        )
+        a = create_drafts_from_agent_cli(db_pr, [finding], source="claude")
+        assert len(a) == 1
+        b = create_drafts_from_agent_cli(db_pr, [finding], source="codex")
+        assert b == []
+        assert db_pr.review_drafts.count() == 1
+
     def test_distant_findings_not_merged(self, db_pr: PullRequest) -> None:
         create_drafts_from_agent_cli(db_pr, [self._finding(line_number=10)], source="claude")
         # Far away on the same file → distinct finding, own draft.
