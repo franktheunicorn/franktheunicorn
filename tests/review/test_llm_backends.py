@@ -265,6 +265,32 @@ class TestCoerceProse:
 
         assert _coerce_prose("nit: inline this helper") == "nit: inline this helper"
 
+    def test_tool_use_envelope_dropped_not_salvaged(self) -> None:
+        from franktheunicorn.review.backends.base import _coerce_prose
+
+        # Observed real shape (PR 59613): the model answered with a tool call
+        # whose longest string was its own narration. Salvaging that posts the
+        # narration as a review comment; it must come back empty instead.
+        raw = (
+            '{"_type":"tool_use","id":"toolu_bdrk_01Mm","input":{"name":"thinker",'
+            '"input":{"text":"The user wants me to rewrite a code review comment"}}}'
+        )
+        assert _coerce_prose(raw) == ""
+
+    def test_function_call_envelope_dropped(self) -> None:
+        from franktheunicorn.review.backends.base import _coerce_prose
+
+        raw = '{"type": "function", "name": "StructuredOutput", "input": "anything"}'
+        assert _coerce_prose(raw) == ""
+
+    def test_truncated_tool_use_envelope_dropped(self) -> None:
+        from franktheunicorn.review.backends.base import _coerce_prose
+
+        # Unparseable (truncated) protocol JSON must not fall through to the
+        # strip-the-wrapper salvage.
+        raw = '{"_type":"tool_use","id":"toolu_bdrk_012o","input":{"comments":[{"comment":"nit'
+        assert _coerce_prose(raw) == ""
+
     def test_parse_review_salvages_json_body(self) -> None:
         data = {
             "findings": [

@@ -144,6 +144,43 @@ class TestApplyToneGuard:
         assert result.body == "This might miss the subqueries."
         assert rewritten is False
 
+    def test_wants_me_to_rewrite_meta_response_keeps_original(self) -> None:
+        # The qwen backend's exact phrasing of the same failure: it narrates
+        # the task ("The user wants me to rewrite...") instead of doing it.
+        # Observed as a posted draft on PR 59613; must not become a body.
+        finding = ReviewFinding(body="This might miss the subqueries.", file_path="a.scala")
+        ctx = make_pr_context()
+
+        mock_backend = MagicMock()
+        mock_backend.metered_call.return_value = (
+            "The user wants me to rewrite a code review comment to be less abrasive, "
+            "so I will rewrite it now: [rewritten text]"
+        )
+        mock_backend._resolve_api_key.return_value = "key"
+
+        with patch("franktheunicorn.review.backends.get_backend", return_value=mock_backend):
+            from franktheunicorn.config.models import LLMBackendConfig
+
+            config = LLMBackendConfig(provider="stub")
+            result, rewritten = apply_tone_guard(finding, ctx, backend_config=config)
+
+        assert result.body == "This might miss the subqueries."
+        assert rewritten is False
+
+    def test_meta_marker_matcher_covers_common_narrations(self) -> None:
+        from franktheunicorn.review.tone_guard import _looks_like_meta_response
+
+        for text in (
+            "The user wants me to rewrite this comment to be kinder.",
+            "I will rewrite the comment as requested.",
+            "as an AI language model, I cannot",
+        ):
+            assert _looks_like_meta_response(text), text
+        # A real finding that happens to mention rewriting must not trip it.
+        assert not _looks_like_meta_response(
+            "This is rewriting the config twice; move it into the loader."
+        )
+
     def test_dropped_leading_subject_keeps_original(self) -> None:
         # The model returns the tail of the comment with its subject sliced off.
         # The fragment must be rejected and the original (in-voice) body kept.

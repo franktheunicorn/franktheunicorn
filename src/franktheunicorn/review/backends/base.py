@@ -597,6 +597,17 @@ def json_object_candidates(text: str) -> Iterator[str]:
 #: A leading JSON-object-key prefix inside a salvaged body: `"key":` or `key:`.
 _LEADING_KEY_RE = re.compile(r'\s*(?:"(?:[^"\\]|\\.)*"|[\w.]+)\s*:\s*')
 
+#: A tool-call envelope the model emitted instead of prose — the shape the
+#: agent protocol uses (`_type: tool_use`, an Anthropic `toolu_*` id) or the
+#: function-call spelling (`"type": "function"` / `"function"` as a lone
+#: value). Salvaging its longest string posts a fragment of the model's
+#: internal narration as a review comment, so these are dropped, not unwrapped.
+_PROTOCOL_ENVELOPE_RE = re.compile(
+    r'"_type"\s*:\s*"tool_use"'
+    r'|"id"\s*:\s*"toolu_'
+    r'|"type"\s*:\s*"function"'
+)
+
 
 def _coerce_prose(text: str) -> str:
     """Unwrap a finding body a weaker model double-encoded as a JSON object.
@@ -609,6 +620,8 @@ def _coerce_prose(text: str) -> str:
     JSON blob. This salvages the human sentence:
 
     * a parseable object → its longest string value (``{}`` → ``""``);
+    * a protocol envelope (a tool call the model emitted instead of prose),
+      parseable or not → ``""`` so the caller drops it, never its longest string;
     * an unparseable ``{...}`` → strip the outer brace and a leading ``key:``;
     * anything else (ordinary prose, which is the common case) → unchanged.
 
@@ -618,6 +631,10 @@ def _coerce_prose(text: str) -> str:
     s = text.strip()
     if not s.startswith("{"):
         return text
+    if _PROTOCOL_ENVELOPE_RE.search(s):
+        # A protocol envelope is never a comment, however it parses; check
+        # before the dict branch so a truncated one is caught too.
+        return ""
     try:
         obj = json.loads(s)
     except json.JSONDecodeError:
