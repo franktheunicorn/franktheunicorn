@@ -18,11 +18,14 @@ Two tiers, both opt-in via :class:`JudgeConfig`:
   call asks whether that single claim is actually true of the code it targets.
   Capped per PR so a flood of borderline findings cannot run up the bill.
 
-The judge never *adds* findings and never rewrites a claim into something new;
-the worst it can do when it misbehaves is drop a good comment or keep a weak
-one, both of which the operator still sees and can act on (drafts are
-draft-only). Every failure path returns "keep unchanged", so a dead or
-misconfigured judge backend degrades to the pre-judge behaviour.
+The judge never *adds* findings and never rewrites a claim into something new
+— the one exception is turning a question the diff already answers into a
+direct statement of what the diff shows, which answers the comment's own
+question rather than adding a new one. The worst it can do when it misbehaves
+is drop a good comment or keep a weak one, both of which the operator still
+sees and can act on (drafts are draft-only). Every failure path returns "keep
+unchanged", so a dead or misconfigured judge backend degrades to the
+pre-judge behaviour.
 """
 
 from __future__ import annotations
@@ -62,17 +65,30 @@ DROP a comment that is:
   Approval belongs in the review summary, not a line comment,
 - a malformed fragment (e.g. it starts mid-sentence with no subject),
 - redundant with another comment shown (keep the clearest one),
-- pure style noise the project would not want raised.
+- pure style noise the project would not want raised,
+- a question the diff shown already answers, and the answer shows no problem.
 
 KEEP a comment that makes a specific, correct, actionable point — a real bug,
-a concrete risk, a question a reviewer would genuinely ask.
+a concrete risk, or a genuine question the diff cannot answer.
 
 You MAY lightly tighten a kept comment's wording: fix a dropped subject, cut a
-redundant clause. Do NOT change its technical claim, add praise or hedges, or
-turn it into a different comment. Leave it unchanged if it is already fine.
+redundant clause, or — only when a question's answer is already in the diff
+shown and shows a real problem — turn it into a direct statement of that
+problem. That revision states what the diff already shows, nothing more; it
+is not licence to add a new claim. Otherwise do not change a comment's
+technical claim, add praise or hedges, or turn it into a different comment.
+Leave it unchanged if it is already fine.
 
 Mark "borderline": true when you are not sure and a closer look at the code
-would settle it."""
+would settle it.
+
+For each comment also return:
+- "confidence": 0.0-1.0, how sure you are this verdict and body are correct
+  and worth posting as-is (1.0 = certain; lower for a plausible but unverified
+  claim),
+- "severity": one of "critical" (will break something or lose data),
+  "important" (a real bug or risk worth fixing before merge), "nit" (minor or
+  optional), "informational" (no action needed, FYI only)."""
 
 _BATCH_SYSTEM = f"""\
 You are a senior engineer screening draft code-review comments before a
@@ -83,8 +99,10 @@ posting on THIS pull request.
 
 Return ONLY a JSON array with EXACTLY ONE object per comment — if there are N
 comments, return N objects — each carrying the comment's 0-based "index":
-[{{"index": 0, "keep": true, "reason": "...", "revised": "", "borderline": false}},
- {{"index": 1, "keep": false, "reason": "...", "revised": "", "borderline": false}}]
+[{{"index": 0, "keep": true, "reason": "...", "revised": "", "borderline": false,
+  "confidence": 0.8, "severity": "important"}},
+ {{"index": 1, "keep": false, "reason": "...", "revised": "", "borderline": false,
+  "confidence": 0.9, "severity": "nit"}}]
 Use "revised": "" to keep the wording unchanged. Output only the array — no
 markdown fences, no commentary, no reasoning before or after it."""
 
@@ -95,7 +113,8 @@ maintainer sees it. Decide whether it is worth posting on THIS pull request.
 {_CRITERIA}
 
 Return ONLY a JSON object, nothing else:
-{{"keep": true, "reason": "...", "revised": "", "borderline": false}}"""
+{{"keep": true, "reason": "...", "revised": "", "borderline": false,
+  "confidence": 0.8, "severity": "important"}}"""
 
 _VERIFY_SYSTEM = """\
 You are verifying one draft code-review comment against the code it targets.
@@ -103,7 +122,9 @@ Decide whether the comment's claim is actually correct and worth posting on
 this pull request. Be adversarial: if the claim is speculative, already handled
 by the surrounding code, or cannot be judged from what is shown, drop it.
 
-Return ONLY a JSON object: {"keep": true|false, "reason": "..."}."""
+Return ONLY a JSON object: {"keep": true|false, "reason": "...",
+"confidence": 0.0-1.0, "severity": "critical"|"important"|"nit"|"informational"}.
+confidence and severity are optional — omit either if you are not sure."""
 
 
 @dataclass
@@ -119,6 +140,38 @@ class JudgeVerdict:
     borderline: bool = False
     #: Which tier produced this verdict, for logging/telemetry.
     tier: str = "batch"
+    #: The judge's own confidence, 0.0-1.0. None when absent/unparseable —
+    #: apply_verdicts then leaves the finding's existing value alone.
+    confidence: float | None = None
+    #: One of critical/important/nit/informational. None when absent/invalid.
+    severity: str | None = None
+
+
+_VALID_SEVERITIES = frozenset({"critical", "important", "nit", "informational"})
+
+
+def _parse_confidence(raw: object) -> float | None:
+    """Coerce a judge-supplied confidence into [0, 1], or None if unusable."""
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int | float):
+        value = float(raw)
+    elif isinstance(raw, str):
+        try:
+            value = float(raw.strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    return max(0.0, min(1.0, value))
+
+
+def _parse_severity(raw: object) -> str | None:
+    """A canonical severity string, or None if *raw* isn't one."""
+    if not isinstance(raw, str):
+        return None
+    value = raw.strip().lower()
+    return value if value in _VALID_SEVERITIES else None
 
 
 def _keep_all(findings: list[ReviewFinding], reason: str) -> list[JudgeVerdict]:
@@ -201,6 +254,8 @@ def _parse_batch_verdicts(raw: str, n: int) -> list[JudgeVerdict] | None:
             reason=str(item.get("reason", "") or ""),
             revised_body=revised,
             borderline=bool(item.get("borderline", False)),
+            confidence=_parse_confidence(item.get("confidence")),
+            severity=_parse_severity(item.get("severity")),
             tier="batch",
         )
     # A finding the batch said nothing about is marked "unruled" so the caller
@@ -257,6 +312,8 @@ def _judge_one(
         reason=str(blob.get("reason", "") or ""),
         revised_body=revised,
         borderline=bool(blob.get("borderline", False)),
+        confidence=_parse_confidence(blob.get("confidence")),
+        severity=_parse_severity(blob.get("severity")),
         tier="one",
     )
 
@@ -292,6 +349,8 @@ def _verify_one(
         keep=bool(blob.get("keep", True)),
         reason=str(blob.get("reason", "") or ""),
         borderline=True,
+        confidence=_parse_confidence(blob.get("confidence")),
+        severity=_parse_severity(blob.get("severity")),
         tier="verify",
     )
 
@@ -383,8 +442,13 @@ def judge_findings(
                 break
             spent += 1
             check = _verify_one(backend, findings[i], diff, project_id=project_id, pr_id=pr_id)
-            # Keep the batch tier's tightened wording even if verify confirms it.
+            # Keep the batch tier's tightened wording, and its confidence/severity
+            # where verify didn't offer its own, even if verify confirms the keep.
             check.revised_body = verdict.revised_body
+            if check.confidence is None:
+                check.confidence = verdict.confidence
+            if check.severity is None:
+                check.severity = verdict.severity
             verdicts[i] = check
 
     dropped = sum(1 for v in verdicts if not v.keep)
@@ -412,8 +476,15 @@ def apply_verdicts(
     for i, (finding, verdict) in enumerate(zip(findings, verdicts, strict=False)):
         if not verdict.keep:
             continue
+        updates: dict[str, object] = {}
         if verdict.revised_body:
-            finding = finding.model_copy(update={"body": verdict.revised_body})
+            updates["body"] = verdict.revised_body
+        if verdict.confidence is not None:
+            updates["confidence"] = verdict.confidence
+        if verdict.severity is not None:
+            updates["severity"] = verdict.severity
+        if updates:
+            finding = finding.model_copy(update=updates)
         kept.append(finding)
         kept_indices.append(i)
     return kept, kept_indices

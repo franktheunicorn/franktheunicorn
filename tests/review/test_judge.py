@@ -211,6 +211,94 @@ class TestJudgeFindings:
         assert verdicts[1].keep is True
 
 
+class TestJudgeConfidenceAndSeverity:
+    def test_batch_parses_confidence_and_severity(self) -> None:
+        findings = [_finding("real bug")]
+        batch = json.dumps(
+            [{"index": 0, "keep": True, "reason": "", "confidence": 0.75, "severity": "critical"}]
+        )
+        fake = _FakeBackend([batch])
+        with patch("franktheunicorn.review.judge._get_metered_backend", return_value=fake):
+            verdicts = judge_findings(findings, _ctx(), _backend_cfg())
+        assert verdicts[0].confidence == 0.75
+        assert verdicts[0].severity == "critical"
+
+    def test_confidence_clamped_out_of_range(self) -> None:
+        findings = [_finding("x")]
+        batch = json.dumps([{"index": 0, "keep": True, "confidence": 5}])
+        fake = _FakeBackend([batch])
+        with patch("franktheunicorn.review.judge._get_metered_backend", return_value=fake):
+            verdicts = judge_findings(findings, _ctx(), _backend_cfg())
+        assert verdicts[0].confidence == 1.0
+
+    def test_confidence_parsed_from_string(self) -> None:
+        findings = [_finding("x")]
+        batch = json.dumps([{"index": 0, "keep": True, "confidence": "0.7"}])
+        fake = _FakeBackend([batch])
+        with patch("franktheunicorn.review.judge._get_metered_backend", return_value=fake):
+            verdicts = judge_findings(findings, _ctx(), _backend_cfg())
+        assert verdicts[0].confidence == 0.7
+
+    def test_confidence_missing_or_unparseable_is_none(self) -> None:
+        findings = [_finding("x"), _finding("y")]
+        batch = json.dumps(
+            [
+                {"index": 0, "keep": True},
+                {"index": 1, "keep": True, "confidence": "not a number"},
+            ]
+        )
+        fake = _FakeBackend([batch])
+        with patch("franktheunicorn.review.judge._get_metered_backend", return_value=fake):
+            verdicts = judge_findings(findings, _ctx(), _backend_cfg())
+        assert verdicts[0].confidence is None
+        assert verdicts[1].confidence is None
+
+    def test_invalid_severity_is_ignored(self) -> None:
+        findings = [_finding("x")]
+        batch = json.dumps([{"index": 0, "keep": True, "severity": "super-urgent"}])
+        fake = _FakeBackend([batch])
+        with patch("franktheunicorn.review.judge._get_metered_backend", return_value=fake):
+            verdicts = judge_findings(findings, _ctx(), _backend_cfg())
+        assert verdicts[0].severity is None
+
+    def test_per_finding_tier_carries_confidence_and_severity(self) -> None:
+        findings = [_finding(f"f{i}") for i in range(2)]
+        batch = json.dumps([{"index": 0, "keep": False}])
+        one = json.dumps({"keep": True, "confidence": 0.6, "severity": "nit"})
+        fake = _FakeBackend([batch, one])
+        with patch("franktheunicorn.review.judge._get_metered_backend", return_value=fake):
+            verdicts = judge_findings(findings, _ctx(), _backend_cfg(), max_reask=1)
+        assert verdicts[1].confidence == 0.6
+        assert verdicts[1].severity == "nit"
+
+    def test_verify_tier_can_supply_its_own(self) -> None:
+        findings = [_finding("maybe a race here")]
+        batch = json.dumps([{"index": 0, "keep": True, "borderline": True, "severity": "nit"}])
+        verify = json.dumps({"keep": True, "confidence": 0.95, "severity": "important"})
+        fake = _FakeBackend([batch, verify])
+        with patch("franktheunicorn.review.judge._get_metered_backend", return_value=fake):
+            verdicts = judge_findings(findings, _ctx(), _backend_cfg(), verify_borderline=True)
+        assert verdicts[0].confidence == 0.95
+        assert verdicts[0].severity == "important"
+
+    def test_verify_tier_falls_back_to_batch_values(self) -> None:
+        findings = [_finding("maybe a race here")]
+        batch = json.dumps(
+            [{"index": 0, "keep": True, "borderline": True, "confidence": 0.5, "severity": "nit"}]
+        )
+        verify = json.dumps({"keep": True})
+        fake = _FakeBackend([batch, verify])
+        with patch("franktheunicorn.review.judge._get_metered_backend", return_value=fake):
+            verdicts = judge_findings(findings, _ctx(), _backend_cfg(), verify_borderline=True)
+        assert verdicts[0].confidence == 0.5
+        assert verdicts[0].severity == "nit"
+
+    def test_prompt_contains_question_rule(self) -> None:
+        from franktheunicorn.review.judge import _BATCH_SYSTEM
+
+        assert "already answers" in _BATCH_SYSTEM
+
+
 class TestApplyVerdicts:
     def test_filters_and_applies_revision(self) -> None:
         findings = [_finding("keep me"), _finding("drop me"), _finding("revise me")]
@@ -229,3 +317,22 @@ class TestApplyVerdicts:
         kept, indices = apply_verdicts(findings, [JudgeVerdict(keep=False)])
         assert kept == []
         assert indices == []
+
+    def test_applies_confidence_and_severity(self) -> None:
+        findings = [_finding("a")]
+        verdicts = [JudgeVerdict(keep=True, confidence=0.95, severity="critical")]
+        kept, _ = apply_verdicts(findings, verdicts)
+        assert kept[0].confidence == 0.95
+        assert kept[0].severity == "critical"
+
+    def test_missing_confidence_leaves_findings_value(self) -> None:
+        finding = _finding("a")
+        finding.confidence = 0.42
+        kept, _ = apply_verdicts([finding], [JudgeVerdict(keep=True)])
+        assert kept[0].confidence == 0.42
+
+    def test_invalid_severity_not_applied(self) -> None:
+        finding = _finding("a")
+        finding.severity = "nit"
+        kept, _ = apply_verdicts([finding], [JudgeVerdict(keep=True, severity=None)])
+        assert kept[0].severity == "nit"
