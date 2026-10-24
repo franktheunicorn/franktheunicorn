@@ -1828,6 +1828,27 @@ class TestAgentRunSummary:
         assert openai_rows[0]["did_run"] is True
         assert openai_rows[0]["run_status"] == "failed"
 
+    def test_model_tagged_sources_group_into_the_provider_row(self, db_pr: PullRequest) -> None:
+        """draft_review tags sources/backend_used "provider/model" so Qwen and
+        Sonnet drafts are distinguishable; the summary must still fold them
+        into one "openai" row, not a separate row per model."""
+        from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig
+        from franktheunicorn.dashboard.views import build_agent_run_summary
+
+        ReviewDraftFactory(
+            pull_request=db_pr, sources=["openai/qwen3.8-27b"], backend_used="openai/qwen3.8-27b"
+        )
+        ReviewDraftFactory(
+            pull_request=db_pr, sources=["openai/sonnet"], backend_used="openai/sonnet"
+        )
+        op_cfg = OperatorConfig(llm_backends=[LLMBackendConfig(provider="openai", model="qwen")])
+
+        result = build_agent_run_summary(db_pr, op_cfg, None)
+
+        openai_rows = [e for e in result if e["source"] == "openai"]
+        assert len(openai_rows) == 1
+        assert openai_rows[0]["total"] == 2
+
     def test_drafts_prove_a_run_without_a_record(self, db_pr: PullRequest) -> None:
         from franktheunicorn.config.models import ProjectConfig
         from franktheunicorn.dashboard.views import build_agent_run_summary
@@ -2018,6 +2039,23 @@ class TestAgentRunSummaryHelpers:
         draft_nothing.sources = []
         draft_nothing.backend_used = ""
         assert _draft_source_key(draft_nothing) == "unknown"
+
+    def test_draft_source_key_strips_model_suffix(self) -> None:
+        """A "provider/model" source tag groups by provider, matching
+        build_agent_run_summary's models_by_source keys."""
+        from unittest.mock import MagicMock
+
+        from franktheunicorn.dashboard.views import _draft_source_key
+
+        draft = MagicMock()
+        draft.sources = ["openai/qwen3.8-27b"]
+        draft.backend_used = "openai/qwen3.8-27b"
+        assert _draft_source_key(draft) == "openai"
+
+        draft_no_sources = MagicMock()
+        draft_no_sources.sources = []
+        draft_no_sources.backend_used = "openai/sonnet"
+        assert _draft_source_key(draft_no_sources) == "openai"
 
 
 @pytest.mark.django_db

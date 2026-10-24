@@ -410,12 +410,14 @@ def _draft_source_key(draft: ReviewDraft) -> str:
     """Return the primary source identifier for a draft.
 
     Prefers the first entry in ``draft.sources``; falls back to
-    ``backend_used`` and then ``"unknown"``.
+    ``backend_used`` and then ``"unknown"``. LLM-backend sources carry a
+    "provider/model" tag — strip the model so drafts group by provider,
+    matching ``models_by_source`` in ``build_agent_run_summary``.
     """
     if draft.sources:
-        return str(draft.sources[0])
+        return str(draft.sources[0]).split("/", 1)[0]
     if draft.backend_used:
-        return draft.backend_used
+        return draft.backend_used.split("/", 1)[0]
     return "unknown"
 
 

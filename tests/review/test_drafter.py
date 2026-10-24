@@ -17,6 +17,7 @@ from franktheunicorn.review.backends.base import PRContext, ReviewFinding
 from franktheunicorn.review.drafter import (
     _coerce_severity,
     _maybe_inject_fine_tuned_model,
+    _strip_nit_prefix_if_severe,
     build_pr_context,
     create_drafts_from_findings,
     draft_review,
@@ -411,6 +412,31 @@ class TestCoerceSeverity:
         assert _coerce_severity("") == "nit"
 
 
+class TestStripNitPrefixIfSevere:
+    """A "nit:" title contradicts an important/critical severity."""
+
+    def test_strips_and_recapitalizes_for_important(self) -> None:
+        body = "nit: `$regex.equals(...)` throws NPE"
+        assert _strip_nit_prefix_if_severe(body, "important") == "`$regex.equals(...)` throws NPE"
+
+    def test_strips_for_critical(self) -> None:
+        assert _strip_nit_prefix_if_severe("Nit - missing null check", "critical") == (
+            "Missing null check"
+        )
+
+    def test_leaves_nit_severity_untouched(self) -> None:
+        body = "nit: trailing whitespace"
+        assert _strip_nit_prefix_if_severe(body, "nit") == body
+
+    def test_leaves_informational_untouched(self) -> None:
+        body = "nit: trailing whitespace"
+        assert _strip_nit_prefix_if_severe(body, "informational") == body
+
+    def test_no_prefix_is_a_no_op(self) -> None:
+        body = "This will NPE at runtime."
+        assert _strip_nit_prefix_if_severe(body, "critical") == body
+
+
 @pytest.mark.django_db
 class TestSeverityCoercionInDrafts:
     """End-to-end: a finding with severity='high' must persist as 'important'."""
@@ -445,6 +471,53 @@ class TestSeverityCoercionInDrafts:
         )
         assert len(drafts) == 1
         assert drafts[0].severity == "nit"
+
+    def test_nit_prefix_stripped_when_severity_is_important(self, db_pr) -> None:
+        finding = ReviewFinding(
+            file_path="src/main.py",
+            line_number=10,
+            title="style: nit",
+            body="nit: `$regex.equals(...)` throws NPE",
+            severity="important",
+        )
+        drafts = create_drafts_from_findings(
+            db_pr, [finding], source="agent", project=db_pr.project
+        )
+        assert len(drafts) == 1
+        assert drafts[0].comment_body == "`$regex.equals(...)` throws NPE"
+
+    def test_nit_prefix_kept_when_severity_is_nit(self, db_pr) -> None:
+        finding = ReviewFinding(
+            file_path="src/main.py",
+            line_number=10,
+            title="style: nit",
+            body="nit: trailing whitespace",
+            severity="nit",
+        )
+        drafts = create_drafts_from_findings(
+            db_pr, [finding], source="agent", project=db_pr.project
+        )
+        assert drafts[0].comment_body == "nit: trailing whitespace"
+
+    def test_rerun_still_recognizes_its_own_stripped_draft(self, db_pr) -> None:
+        """A re-run sees the same raw "nit: ..." finding every time; the
+        already-filed gate must still match it against the stripped body
+        stored on the first pass, not create a duplicate."""
+        finding = ReviewFinding(
+            file_path="src/main.py",
+            line_number=10,
+            title="style: nit",
+            body="nit: `$regex.equals(...)` throws NPE",
+            severity="important",
+        )
+        first = create_drafts_from_findings(db_pr, [finding], source="agent", project=db_pr.project)
+        assert len(first) == 1
+
+        second = create_drafts_from_findings(
+            db_pr, [finding], source="agent", project=db_pr.project
+        )
+        assert second == []
+        assert ReviewDraft.objects.filter(pull_request=db_pr).count() == 1
 
 
 @pytest.mark.django_db
@@ -582,3 +655,51 @@ class TestDraftReviewMultiBackendAttribution:
         db_pr.refresh_from_db()
         assert db_pr.agent_runs["llm:openai"]["status"] == "failed"
         assert db_pr.agent_runs["llm:claude"]["status"] == "ok"
+
+    def test_model_tagged_attribution_keeps_bare_provider_bookkeeping(
+        self, db_pr, spark_project_config
+    ) -> None:
+        """Two openai backends with different models: drafts carry
+        "provider/model" attribution, but agent_runs is still keyed on the
+        bare provider — changing that would re-review every PR."""
+        from franktheunicorn.config.models import LLMBackendConfig
+        from franktheunicorn.review.backends.base import ReviewResult
+        from franktheunicorn.worker.runner import llm_run_key
+
+        operator_config = OperatorConfig(
+            llm_backends=[
+                LLMBackendConfig(provider="openai", model="qwen3.8-27b"),
+                LLMBackendConfig(provider="openai", model="sonnet"),
+            ],
+        )
+        finding_a = ReviewFinding(
+            file_path="src/a.py",
+            line_number=1,
+            title="correctness: a",
+            body="finding from qwen",
+            severity="important",
+        )
+        finding_b = ReviewFinding(
+            file_path="src/b.py",
+            line_number=1,
+            title="correctness: b",
+            body="finding from sonnet",
+            severity="important",
+        )
+        call_results = [
+            ("openai", ReviewResult(findings=[finding_a]), False),
+            ("openai", ReviewResult(findings=[finding_b]), False),
+        ]
+
+        with patch("franktheunicorn.review.drafter._run_single_backend", side_effect=call_results):
+            drafts = draft_review(db_pr, spark_project_config, operator_config)
+
+        backend_used = {d.backend_used for d in drafts}
+        assert backend_used == {"openai/qwen3.8-27b", "openai/sonnet"}
+        for d in drafts:
+            assert d.sources == [d.backend_used]
+
+        db_pr.refresh_from_db()
+        assert db_pr.agent_runs[llm_run_key("openai")]["status"] == "ok"
+        assert "openai/qwen3.8-27b" not in db_pr.agent_runs
+        assert "openai/sonnet" not in db_pr.agent_runs

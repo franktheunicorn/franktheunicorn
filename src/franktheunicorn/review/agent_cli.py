@@ -590,6 +590,24 @@ def create_drafts_from_agent_cli(
             if action == "plus_one":
                 plus_one_body = rewritten
 
+        # Severity coerced here, not at persistence time, so the nit-strip
+        # rewrite is in effect for the gates below — otherwise a re-run's
+        # similarity dedup compares a fresh "nit: ..." body against the
+        # stripped body already on disk.
+        from franktheunicorn.review.drafter import _coerce_severity, _strip_nit_prefix_if_severe
+
+        coerced_severity = _coerce_severity(finding.severity, finding.title)
+        stripped_body = _strip_nit_prefix_if_severe(finding.body, coerced_severity)
+        if stripped_body != finding.body:
+            finding = AgentCLIFinding(
+                file_path=finding.file_path,
+                line_number=finding.line_number,
+                severity=finding.severity,
+                title=finding.title,
+                body=stripped_body,
+                suggestion=finding.suggestion,
+            )
+
         matches = check_against_anti_patterns(finding.body, project)
         if matches:
             record_anti_pattern_matches(matches)
@@ -641,8 +659,6 @@ def create_drafts_from_agent_cli(
 
         confidence = _SEVERITY_CONFIDENCE.get(finding.severity, 0.5)
 
-        from franktheunicorn.review.drafter import _coerce_severity
-
         draft = ReviewDraft.objects.create(
             pull_request=pr,
             file_path=finding.file_path,
@@ -650,7 +666,7 @@ def create_drafts_from_agent_cli(
             comment_body=finding.body,
             suggestion=finding.suggestion,
             confidence=confidence,
-            severity=_coerce_severity(finding.severity, finding.title),
+            severity=coerced_severity,
             status="pending",
             sources=[source],
             backend_used=source,

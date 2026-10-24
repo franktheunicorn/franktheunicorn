@@ -10,6 +10,7 @@ Multiple backends can run in parallel; their findings are combined.
 from __future__ import annotations
 
 import logging
+import re
 from typing import TYPE_CHECKING
 
 from franktheunicorn.core.models import AgentVibe, ReviewDraft
@@ -81,6 +82,23 @@ def _coerce_severity(raw_severity: str, finding_title: str = "") -> str:
         finding_title[:60],
     )
     return "nit"
+
+
+_NIT_PREFIX_RE = re.compile(r"^nit\s*[:-]\s*", re.IGNORECASE)
+
+
+def _strip_nit_prefix_if_severe(body: str, severity: str) -> str:
+    """Drop a stale "nit:"/"nit -" prefix when severity is important/critical.
+
+    The model's stated severity wins over a leftover "nit:" title — a
+    critical NPE finding shouldn't read like a style nit.
+    """
+    if severity not in ("important", "critical") or not body:
+        return body
+    stripped = _NIT_PREFIX_RE.sub("", body, count=1)
+    if stripped == body or not stripped:
+        return body
+    return stripped[0].upper() + stripped[1:]
 
 
 def ensure_conflict_draft(pr: PullRequest) -> ReviewDraft:
@@ -398,6 +416,15 @@ def create_drafts_from_findings(
                 finding_sources = [source]
             primary_source = finding_sources[0]
 
+            # Severity coerced here, not at persistence time, so the nit-strip
+            # rewrite below is in effect for the gates that follow — otherwise
+            # a re-run's dedup gate compares a fresh "nit: ..." body against
+            # the stripped body already on disk and refiles it.
+            coerced_severity = _coerce_severity(finding.severity, finding.title)
+            stripped_body = _strip_nit_prefix_if_severe(finding.body, coerced_severity)
+            if stripped_body != finding.body:
+                finding = finding.model_copy(update={"body": stripped_body})
+
             # Already-filed gate, before any of the expensive work below. The
             # agent-CLI path has deduped against existing drafts since it was
             # written; this path was a bare create(), so any second pass over the
@@ -448,7 +475,6 @@ def create_drafts_from_findings(
             # Rejection predictor scoring (v1.75).
             rejection_probability: float | None = None
             is_auto_suppressed = False
-            coerced_severity = _coerce_severity(finding.severity, finding.title)
             if predictor is not None:
                 features = predictor.extract_features(
                     category=category,
@@ -550,6 +576,16 @@ def _maybe_inject_fine_tuned_model(
 
     # Insert at the beginning (first-pass slot).
     return [ft_backend, *backend_configs]
+
+
+def _attribution_tag(source: str, model: str) -> str:
+    """Build a "provider/model" draft attribution tag.
+
+    Bare provider (or "agent" for stub) when no model is configured.
+    Truncated to fit backend_used / AgentVibe.backend
+    (both CharField(max_length=100))."""
+    tag = f"{source}/{model}" if model else source
+    return tag[:100]
 
 
 def _run_single_backend(
@@ -662,18 +698,21 @@ def draft_review(
         if failed:
             model_name = backend_config.model or "<default>"
             failed_backends.append(f"{backend_config.provider}/{model_name}")
+        attribution = _attribution_tag(source, backend_config.model)
         if result.overall_vibe:
-            vibe_backend = f"{source}/{backend_config.model}" if backend_config.model else source
             try:
                 AgentVibe.objects.update_or_create(
                     pull_request=pr,
-                    backend=vibe_backend,
+                    backend=attribution,
                     defaults={"vibe_text": result.overall_vibe},
                 )
             except Exception:
-                logger.debug("Failed to persist agent vibe for %s", vibe_backend, exc_info=True)
+                logger.debug("Failed to persist agent vibe for %s", attribution, exc_info=True)
         for f in result.findings:
-            all_findings.append((source, f))
+            # Attribution (sources/backend_used) carries the model; per_source
+            # bookkeeping above stays on the bare provider so the "already
+            # reviewed" skip and the dashboard run-key don't churn per model.
+            all_findings.append((attribution, f))
 
     if failed_backends:
         logger.warning(
