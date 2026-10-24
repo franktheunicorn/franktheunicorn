@@ -688,6 +688,46 @@ class TestBackfillEligibility:
 
         assert seen == [pr.pk]
 
+    def test_backfill_receives_the_projects_clone(self) -> None:
+        """Without a repo_path the backfill's agent CLIs skip and every
+        backfilled PR records no-checkout forever — a phantom dark backend
+        indistinguishable from a real outage."""
+        from pathlib import Path
+
+        from franktheunicorn.config.models import ProjectConfig
+        from franktheunicorn.worker import runner
+
+        PullRequestFactory(
+            project=ProjectFactory(owner="apache", repo="spark"),
+            number=43,
+            title="backfill needs the clone",
+            state="open",
+            base_sha="a" * 40,
+            score_breakdown={"x": 1},
+        )
+        pc = ProjectConfig(owner="apache", repo="spark")
+
+        paths: list[object] = []
+
+        def fake_process_pr(pr_arg, *args: Any, **kwargs: Any):
+            paths.append(kwargs.get("repo_path"))
+            return []
+
+        with (
+            patch("franktheunicorn.config.loader.get_project_config", return_value=pc),
+            patch("franktheunicorn.worker.runner.process_pr", side_effect=fake_process_pr),
+        ):
+            runner._backfill_unreviewed_prs(
+                already_polled_pks=set(),
+                project_configs=[pc],
+                operator_config=None,
+                disabled_backends=frozenset(),
+                diff_http=MagicMock(),
+                repo_paths={"apache/spark": Path("/repos/apache/spark")},
+            )
+
+        assert paths == [Path("/repos/apache/spark")]
+
 
 @pytest.mark.django_db
 class TestStuckCommands:

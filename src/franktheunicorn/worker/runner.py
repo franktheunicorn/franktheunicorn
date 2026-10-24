@@ -1601,6 +1601,8 @@ def _run_cycle(
     decisions: Counter[str] = Counter()
     seen_prs = 0
     refreshed_prs = 0
+    # Per-project local clone, kept for the backfill pass after the poll loop.
+    repo_paths: dict[str, Path | None] = {}
 
     for pc in project_configs:
         if not isinstance(pc, ProjectConfig) or not pc.enabled:
@@ -1642,6 +1644,10 @@ def _run_cycle(
                     pc.repo,
                     exc_info=True,
                 )
+            # The backfill reviews PRs after this loop and needs the same
+            # clones the per-PR reviews used — without one its agent CLIs
+            # skip and every backfilled PR records no-checkout forever.
+            repo_paths[f"{pc.owner}/{pc.repo}"] = repo_path
 
             # Repo health analysis: run (or refresh) when stale or missing.
             logger.debug("Checking repo health snapshot for %s/%s ...", pc.owner, pc.repo)
@@ -1775,6 +1781,7 @@ def _run_cycle(
         diff_http=diff_http,
         clients=clients,
         decisions=decisions,
+        repo_paths=repo_paths,
     )
 
     # Alert mode: working-overlap + security-report alerts, batched email.
@@ -1983,6 +1990,7 @@ def _backfill_unreviewed_prs(
     diff_http: httpx.Client,
     clients: Mapping[str, object] | None = None,
     decisions: Counter[str] | None = None,
+    repo_paths: Mapping[str, Path | None] | None = None,
 ) -> None:
     """Draft reviews for open PRs in the DB that have no review drafts yet.
 
@@ -1991,7 +1999,11 @@ def _backfill_unreviewed_prs(
 
     ``clients`` maps forge-name → ``ForgeClient`` so the diff is fetched from
     each PR's configured forge; when absent, ``process_pr`` falls back to the
-    public-GitHub dual-path fetcher.
+    public-GitHub dual-path fetcher. ``repo_paths`` maps full name → the
+    project's local clone from this cycle's poll loop: without it the agent
+    CLIs skip ("no usable checkout") and every backfilled PR records a
+    no-checkout that no later pass can distinguish from a real outage —
+    phantom dark backends, forever.
     """
     from django.db.models import Count
 
@@ -2061,6 +2073,7 @@ def _backfill_unreviewed_prs(
                 forge_client=forge_client,  # type: ignore[arg-type]
                 diff_http=diff_http,
                 decisions=decisions,
+                repo_path=(repo_paths or {}).get(full_name),
             )
             logger.info("  Backfill PR #%d: %d drafts generated", pr.number, len(drafts))
         except Exception:
