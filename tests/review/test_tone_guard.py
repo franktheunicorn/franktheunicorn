@@ -167,6 +167,29 @@ class TestApplyToneGuard:
         assert result.body == "This might miss the subqueries."
         assert rewritten is False
 
+    def test_safety_system_refusal_wrapper_keeps_original(self) -> None:
+        # Observed on a live draft: the qwen rewrite answered with "The
+        # following input was rejected by the safety system:" followed by the
+        # original comment — the wrapper replaced a good body. Must keep the
+        # original instead.
+        finding = ReviewFinding(body="This might miss the subqueries.", file_path="a.scala")
+        ctx = make_pr_context()
+
+        mock_backend = MagicMock()
+        mock_backend.metered_call.return_value = (
+            "The following input was rejected by the safety system: This might miss the subqueries."
+        )
+        mock_backend._resolve_api_key.return_value = "key"
+
+        with patch("franktheunicorn.review.backends.get_backend", return_value=mock_backend):
+            from franktheunicorn.config.models import LLMBackendConfig
+
+            config = LLMBackendConfig(provider="stub")
+            result, rewritten = apply_tone_guard(finding, ctx, backend_config=config)
+
+        assert result.body == "This might miss the subqueries."
+        assert rewritten is False
+
     def test_meta_marker_matcher_covers_common_narrations(self) -> None:
         from franktheunicorn.review.tone_guard import _looks_like_meta_response
 
@@ -174,6 +197,7 @@ class TestApplyToneGuard:
             "The user wants me to rewrite this comment to be kinder.",
             "I will rewrite the comment as requested.",
             "as an AI language model, I cannot",
+            "The following input was rejected by the safety system: ...",
         ):
             assert _looks_like_meta_response(text), text
         # A real finding that happens to mention rewriting must not trip it.

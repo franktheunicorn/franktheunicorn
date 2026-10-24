@@ -87,7 +87,9 @@ File paths must be relative to the repository root, exactly as they appear
 in the diff. Line numbers must refer to the new file.
 
 If there are no substantive issues, output exactly: Review completed
-Do not include any other text outside the blocks.
+When there are findings, the blocks are your ENTIRE output — no opening
+summary ("Here are my findings", "Two findings"), no closing remark. Your
+first line is either a block header or "Review completed", never both.
 
 {fence_note}
 
@@ -141,7 +143,9 @@ File paths must be relative to the repository root, exactly as they appear
 in the diff. Line numbers must refer to the new file.
 
 If there are no security issues, output exactly: Review completed
-Do not include any other text outside the blocks.
+When there are findings, the blocks are your ENTIRE output — no opening
+summary ("Here are my findings", "Two findings"), no closing remark. Your
+first line is either a block header or "Review completed", never both.
 
 {fence_note}
 

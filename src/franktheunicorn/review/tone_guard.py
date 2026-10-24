@@ -38,6 +38,10 @@ the voice. Leave them.
 {addendum}
 
 Return ONLY the rewritten comment text. Do not add preamble or explanation.
+Your reply IS the rewritten comment — not a description of the task ("The
+user wants me to rewrite..."), not an analysis of the comment, and not a
+report that an input was rejected. If you cannot improve it, return the
+comment unchanged.
 If the comment is already in that voice, return it unchanged."""
 
 
@@ -79,6 +83,7 @@ _META_RESPONSE_MARKERS: tuple[str, ...] = (
     "there is no comment",
     "no comment was provided",
     "as an ai language model",
+    "rejected by the safety system",
 )
 
 

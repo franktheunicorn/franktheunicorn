@@ -444,6 +444,18 @@ class TestSecurityFocus:
         )
         assert "Areas of interest" not in prompt
 
+    def test_prompts_forbid_a_narrated_preamble(self) -> None:
+        """Observed on live drafts: the agent emitted "Review completed.
+        Here are my findings:" then its blocks, and the parser filed the whole
+        narration as one finding. Both prompts must rule the preamble out."""
+        for config in (
+            AgentCLIReviewerConfig(name="cursor-agent"),
+            AgentCLIReviewerConfig(name="cursor-agent", review_focus="security"),
+        ):
+            prompt = build_review_prompt(config, "DIFF")
+            assert 'first line is either a block header or "Review completed"' in prompt
+            assert "Here are my findings" in prompt
+
     def test_security_findings_parse_with_the_shared_parser(self) -> None:
         """The security prompt keeps the block-format output contract, and the
         "security:" title prefix the prompt asks for lands in the finding body —
