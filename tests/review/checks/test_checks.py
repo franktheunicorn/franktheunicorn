@@ -332,6 +332,7 @@ class TestChecksSeePriorComments:
             file_path="src/main.py",
             line=10,
             url="https://github.com/apache/spark/pull/1#discussion_r1",
+            disputed=True,
         )
 
     def _finding(self) -> ReviewFinding:
