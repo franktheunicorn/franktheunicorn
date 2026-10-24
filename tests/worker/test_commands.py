@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import timedelta
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -444,6 +445,42 @@ class TestCommandPriority:
         assert processed == MAX_COMMANDS_PER_DRAIN
         assert WorkerCommand.objects.filter(status="pending").count() == 5
 
+    def test_deadline_stops_claiming_new_commands(self) -> None:
+        """A count budget cannot express "hand the worker back after N seconds":
+        a re-review sweep is 20 minutes per row, and a 20-row count-budgeted
+        drain in the poll sleep window wedges the next poll behind the whole
+        backlog. The deadline bounds *starts*, so the drain takes at most the
+        budget plus one command that overruns it."""
+        operator_config = MagicMock()
+        for _ in range(4):
+            WorkerCommand.objects.create(
+                command="run_security_triage", security_report=SecurityReportFactory()
+            )
+
+        def slow_dispatch(cmd: WorkerCommand, _op: Any) -> None:
+            time.sleep(0.25)
+
+        with (
+            patch("franktheunicorn.worker.commands._dispatch", side_effect=slow_dispatch),
+            patch("franktheunicorn.security.triage.triage_backends_alive", return_value=True),
+        ):
+            processed = process_pending_commands(operator_config, deadline_seconds=0.1)
+
+        # The first claim starts before the deadline; the 0.25s run blows past
+        # it, and the second claim must not happen.
+        assert processed == 1
+        assert WorkerCommand.objects.filter(status="pending").count() == 3
+
+    def test_deadline_none_keeps_the_count_budget(self) -> None:
+        operator_config = MagicMock()
+        for _ in range(3):
+            WorkerCommand.objects.create(
+                command="run_security_triage", security_report=SecurityReportFactory()
+            )
+        with patch("franktheunicorn.worker.commands._dispatch"):
+            processed = process_pending_commands(operator_config)
+        assert processed == 3
+
     def test_the_backlog_still_drains_across_calls(self) -> None:
         operator_config = MagicMock()
         for _ in range(3):
@@ -551,7 +588,9 @@ class TestMidCycleDrain:
         ) as mock_process:
             runner._drain_worker_commands(operator_config)
 
-        mock_process.assert_called_once_with(operator_config)
+        mock_process.assert_called_once_with(
+            operator_config, min_priority=None, deadline_seconds=None
+        )
 
     @pytest.mark.django_db
     def test_the_drain_sweeps_stuck_commands_before_claiming_new_ones(self) -> None:
@@ -774,6 +813,26 @@ class TestInteractiveDrain:
         assert ran == [interactive.pk]
         bulk.refresh_from_db()
         assert bulk.status == "pending"
+
+    def test_mid_cycle_drain_forwards_its_filters(self, db_pr: PullRequest) -> None:
+        """The in-cycle drains pass min_priority (interactive) and the sleep
+        window passes deadline_seconds (bulk, bounded); neither is optional in
+        the wiring, so a regression here shows up as starvation again."""
+        from franktheunicorn.security.queue import PRIORITY_INTERACTIVE
+        from franktheunicorn.worker.runner import _drain_worker_commands
+
+        with (
+            patch("franktheunicorn.worker.commands.fail_stuck_commands"),
+            patch("franktheunicorn.worker.commands.process_pending_commands") as process,
+        ):
+            _drain_worker_commands(MagicMock(), min_priority=PRIORITY_INTERACTIVE)
+            _drain_worker_commands(MagicMock(), deadline_seconds=300)
+            _drain_worker_commands(None)  # no config: no call at all
+
+        first, second = process.call_args_list[:2]
+        assert first.kwargs["min_priority"] == PRIORITY_INTERACTIVE
+        assert second.kwargs["deadline_seconds"] == 300
+        assert process.call_count == 2
 
     def test_each_pass_closes_its_connection_then_the_event_stops_the_loop(self) -> None:
         """A per-thread SQLite handle left open sits across the cycle's writes."""

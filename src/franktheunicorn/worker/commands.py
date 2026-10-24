@@ -112,6 +112,7 @@ def process_pending_commands(
     *,
     limit: int | None = None,
     min_priority: int | None = None,
+    deadline_seconds: float | None = None,
 ) -> int:
     """Run pending WorkerCommands, best first, up to *limit* of them.
 
@@ -123,6 +124,16 @@ def process_pending_commands(
     interactive thread worth having: it must not pick up a bulk row, because a
     bulk row takes exactly as long as the poll cycle it is trying to jump.
 
+    *deadline_seconds* stops *claiming new commands* once that much wall time
+    has passed since the call started. The command already running when the
+    deadline hits runs to completion — a budget can only bound starts, not
+    finishes — so the drain takes at most *deadline_seconds* plus one command.
+    The count budget cannot express that: ``MAX_COMMANDS_PER_DRAIN`` is 20, a
+    full re-review run takes minutes to tens of minutes, and a count-budgeted
+    drain in the poll sleep window therefore wedges the next poll behind the
+    whole backlog. Checked before each claim; None (the default) keeps the
+    old behaviour for the drains that have no deadline to respect.
+
     Re-queries between commands rather than taking one snapshot of the pending
     set up front, and that is the point: a snapshot fixes the running order at
     the moment the drain started, so "Force Run Agents" clicked while a hundred
@@ -132,10 +143,13 @@ def process_pending_commands(
     against work that takes tens of seconds.
     """
     budget = MAX_COMMANDS_PER_DRAIN if limit is None else limit
+    deadline = time.monotonic() + deadline_seconds if deadline_seconds is not None else None
     processed = 0
     from franktheunicorn.security.triage import triage_backends_alive
 
     while processed < budget:
+        if deadline is not None and time.monotonic() >= deadline:
+            break
         pending = WorkerCommand.objects.filter(status="pending")
         if min_priority is not None:
             pending = pending.filter(priority__gte=min_priority)

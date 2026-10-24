@@ -304,13 +304,28 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
             # test runs, force-run agents, security sandbox). This keeps
             # web-triggered actions responsive even when poll_interval is
             # several minutes.
+            #
+            # Drain time counts against the window: a bulk row is minutes
+            # (a full re-review sweep is ~20 per PR), so a window that only
+            # counted its sleeps would stay open across the entire backlog
+            # and the worker would not poll again for hours — fresh PRs sat
+            # unreviewed while stale ones were re-reviewed. Counting it
+            # bounds a window to its short commands plus at most one long
+            # command that overruns the budget, and the next poll follows.
             command_poll_interval = 5
-            elapsed = 0
+            elapsed = 0.0
             while elapsed < poll_interval:
-                _drain_worker_commands(operator_config)
+                window_start = time.monotonic()
+                _drain_worker_commands(
+                    operator_config,
+                    # Bulk rows drain here, bounded by the window: short
+                    # commands pack into it, one long command overruns and
+                    # the window ends. The in-cycle drains stay interactive.
+                    deadline_seconds=poll_interval,
+                )
                 wait = min(command_poll_interval, poll_interval - elapsed)
                 time.sleep(wait)
-                elapsed += wait
+                elapsed += time.monotonic() - window_start
             logger.info("Next poll cycle...")
     except KeyboardInterrupt:
         logger.info("Worker shutting down.")
@@ -1425,7 +1440,12 @@ def _refresh_merge_readiness_after_review(
         logger.debug("Merge readiness re-score failed for PR #%d", pr.number, exc_info=True)
 
 
-def _drain_worker_commands(operator_config: OperatorConfig | None) -> None:
+def _drain_worker_commands(
+    operator_config: OperatorConfig | None,
+    *,
+    min_priority: int | None = None,
+    deadline_seconds: float | None = None,
+) -> None:
     """Run any queued ``WorkerCommand`` rows without waiting for the cycle to end.
 
     The dashboard tells the operator that a queued action (security triage, a
@@ -1433,6 +1453,14 @@ def _drain_worker_commands(operator_config: OperatorConfig | None) -> None:
     only gets a turn once the whole poll cycle is done — minutes on a busy
     repo. Draining between PRs keeps that promise. Never raises: a bad command
     must not abort the poll.
+
+    ``min_priority`` is ``PRIORITY_INTERACTIVE`` at every in-cycle call site:
+    those drains exist so operator clicks don't wait behind the cycle, and a
+    bulk row (a 577-command re-review sweep) takes exactly as long as the
+    work it is trying to jump — claimed here it wedges the cycle for hours
+    between polls. Bulk rows drain through the poll-loop's sleep window,
+    whose ``deadline_seconds`` bounds each window to its short commands plus
+    at most one long command that overruns the budget.
     """
     if operator_config is None:
         return
@@ -1446,7 +1474,9 @@ def _drain_worker_commands(operator_config: OperatorConfig | None) -> None:
         # finish. Swept every cycle because that is how often the situation can
         # arise, and it is one indexed query.
         fail_stuck_commands()
-        processed = process_pending_commands(operator_config)
+        processed = process_pending_commands(
+            operator_config, min_priority=min_priority, deadline_seconds=deadline_seconds
+        )
         if processed:
             logger.info("Drained %d worker command(s) mid-cycle", processed)
     except Exception:
@@ -1531,6 +1561,7 @@ def _run_cycle(
     from franktheunicorn.config.models import ProjectConfig
     from franktheunicorn.data_access.github.diff_fetcher import DiffFetcher
     from franktheunicorn.review.copypasta import check_copypasta
+    from franktheunicorn.security.queue import PRIORITY_INTERACTIVE
     from franktheunicorn.worker.test_runner import TestRunner
 
     # Shared HTTP client for diff fetching (copypasta + dependency changelogs).
@@ -1698,15 +1729,17 @@ def _run_cycle(
                 logger.debug("Finished processing PR #%d (%s/%s)", pr.number, pc.owner, pc.repo)
 
                 # Operator-triggered work (security triage, forced test runs)
-                # shouldn't sit behind the rest of the cycle.
-                _drain_worker_commands(operator_config)
+                # shouldn't sit behind the rest of the cycle. Interactive
+                # priority only: a bulk row takes as long as the PR loop it
+                # would interrupt — it drains in the poll sleep window.
+                _drain_worker_commands(operator_config, min_priority=PRIORITY_INTERACTIVE)
         except Exception:
             logger.exception("Error polling %s/%s", pc.owner, pc.repo)
 
         # Also drain per project, not only per PR: in the steady state the
         # unchanged-PR skip leaves `prs` empty, so the per-PR drain above never
         # runs while the cycle still does plenty of work below.
-        _drain_worker_commands(operator_config)
+        _drain_worker_commands(operator_config, min_priority=PRIORITY_INTERACTIVE)
 
     # Fetch dependency changelogs reusing the same HTTP client.
     _fetch_dependency_changelogs_for_cycle(
@@ -1717,7 +1750,7 @@ def _run_cycle(
     if operator_config is not None:
         _run_shepherding_pass(all_prs, pr_to_config, operator_config)
 
-    _drain_worker_commands(operator_config)
+    _drain_worker_commands(operator_config, min_priority=PRIORITY_INTERACTIVE)
 
     # Security email ingestion.
     if operator_config is not None:
@@ -1728,7 +1761,7 @@ def _run_cycle(
 
     # The mention scan can be 100 ingests and the backfill can be many LLM
     # reviews; don't make a queued triage wait behind either.
-    _drain_worker_commands(operator_config)
+    _drain_worker_commands(operator_config, min_priority=PRIORITY_INTERACTIVE)
 
     # Backfill pass: draft reviews for open PRs that were ingested (e.g. via
     # lookup_pr) or skipped as unchanged, and still have no drafts. Cheap for
