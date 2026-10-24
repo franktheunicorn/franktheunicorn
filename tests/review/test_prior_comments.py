@@ -642,6 +642,12 @@ class TestWhoseDisputeCounts:
         comment = _comment(disputed_by=("holdenk",))
         assert self._adjust(comment.body, [comment]) == ("drop", "")
 
+    def test_a_dispute_the_operator_joined_is_still_not_backed(self) -> None:
+        """Carol disputed it too, but the operator did as well — frank must
+        not +1 a point its own voice argued against, whoever else piled on."""
+        comment = _comment(disputed_by=("holdenk", "carol"))
+        assert self._adjust(comment.body, [comment]) == ("drop", "")
+
     def test_a_bot_reply_does_not_dispute(self) -> None:
         parsed = comments_from_review_payload(
             [

@@ -265,13 +265,18 @@ def adjust_for_prior_comments(
 
 
 def _backable(comment: PriorComment, operator_login: str) -> bool:
-    """Someone else's point that someone other than us pushed back on."""
+    """Someone else's point that someone other than us pushed back on.
+
+    Our own pushback vetoes it: a +1 backed by a second disputer would
+    side against the operator's own reply in the operator's voice.
+    """
     author = comment.author.lower()
     if author == operator_login or _is_bot(comment.author):
         return False
     if comment.body.lstrip().lower().startswith("+1"):
         return False
-    return any(who.lower() != operator_login for who in comment.disputed_by)
+    disputers = {who.lower() for who in comment.disputed_by}
+    return bool(disputers) and operator_login not in disputers
 
 
 def _plus_one_first(
