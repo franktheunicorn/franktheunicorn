@@ -78,7 +78,7 @@ _META_RESPONSE_MARKERS: tuple[str, ...] = (
     "the user wants me to",
     "wants me to rewrite",
     "asked me to rewrite",
-    "i will rewrite",
+    "i will rewrite the comment",
     "i need the comment",
     "there is no comment",
     "no comment was provided",

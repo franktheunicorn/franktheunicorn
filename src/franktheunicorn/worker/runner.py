@@ -321,7 +321,10 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
                     # Bulk rows drain here, bounded by the window: short
                     # commands pack into it, one long command overruns and
                     # the window ends. The in-cycle drains stay interactive.
-                    deadline_seconds=poll_interval,
+                    # The budget is what's LEFT of the window — a fresh full
+                    # budget per drain would let the backlog stretch the
+                    # window to nearly twice the interval.
+                    deadline_seconds=poll_interval - elapsed,
                 )
                 wait = min(command_poll_interval, poll_interval - elapsed)
                 time.sleep(wait)

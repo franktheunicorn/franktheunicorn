@@ -200,6 +200,12 @@ class TestApplyToneGuard:
             "The following input was rejected by the safety system: ...",
         ):
             assert _looks_like_meta_response(text), text
+        # A genuine rewrite preserving a first-person claim must not trip it
+        # ("i will rewrite" alone was too blunt — a reviewer can promise
+        # their own follow-up in a comment).
+        assert not _looks_like_meta_response(
+            "I will rewrite this handler to use the new API before merging."
+        )
         # A real finding that happens to mention rewriting must not trip it.
         assert not _looks_like_meta_response(
             "This is rewriting the config twice; move it into the loader."

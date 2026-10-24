@@ -670,6 +670,8 @@ class TestWhoseDisputeCounts:
             "Yes! No need to thank me, fixed",
             "I don't think I would have caught that, thanks",
             "Agreed, this copy is unnecessary, removing",
+            "No disagreement here — checked, it's fine",
+            "Reviewed; no disagreement from me",
         ],
     )
     def test_agreeing_replies_do_not_dispute(self, reply: str) -> None:

@@ -68,8 +68,9 @@ def _line(raw: dict[str, object]) -> int | None:
 
 #: A reply disagreeing with its parent. Modest on purpose: a false negative
 #: just means a useful +1 is dropped, not a wrong one kept.
+#: (?!ment) so "no disagreement" — an agreement — doesn't count as a dispute.
 _DISAGREE_RE = re.compile(
-    r"\bdisagree"
+    r"\bdisagree(?!ment)"
     r"|\b(?:don'?t|do\s+not)\s+think\s+(?:so|we|that|this|it)\b"
     r"|\bnot\s+(?:needed|necessary)\b"
     r"|\bwon'?t\s+fix\b|\bwontfix\b|\brather\s+not\b|\bprefer\s+not\b"
