@@ -31,6 +31,7 @@
     {% if pr.merge_intent_excerpt %}<br><span class="intent-excerpt" title="The {{ pr.merge_intent_source }} that counted as the approval">&ldquo;{{ pr.merge_intent_excerpt }}&rdquo;</span>{% endif %}
     {% endif %}
     &middot; Queue: {{ pr.queue }}
+    {% if run_in_flight %}&middot; <span class="badge-queued" title="A run_agents command is pending or running — findings will appear when the worker finishes">Queued for Run</span>{% endif %}
     {% if pr.github_updated_at %}&middot; Updated upstream: <span title="{{ pr.github_updated_at|date:'Y-m-d H:i:s' }} UTC">{{ pr.github_updated_at|timesince }} ago</span>{% endif %}
     &middot; Reviewed locally: <span {% if pr.last_local_action_at %}title="{{ pr.last_local_action_at|date:'Y-m-d H:i:s' }} UTC"{% endif %}>{% if pr.last_local_action_at %}{{ pr.last_local_action_at|timesince }} ago{% else %}never{% endif %}</span>
     &middot; <a href="{{ pr.url }}" target="_blank" rel="noopener noreferrer">View on GitHub &nearr;</a>
@@ -347,7 +348,12 @@
 {% else %}
 <div class="empty-state">
     <img src="{% static 'dashboard/img/rubber-duck.svg' %}" alt="" width="80" height="64">
+    {% if run_in_flight %}
+    <p>Queued for Run/Eval — the worker will generate findings.</p>
+    <p class="faint" style="font-size: 0.85rem;">Last agent run: <strong>{{ last_agent_command.status }}</strong>{% if last_agent_command.created_at %} · queued {{ last_agent_command.created_at|timesince }} ago{% endif %}. Reload in a minute or two.</p>
+    {% else %}
     <p>No review findings yet.</p>
+    {% endif %}
 </div>
 {% endif %}
 

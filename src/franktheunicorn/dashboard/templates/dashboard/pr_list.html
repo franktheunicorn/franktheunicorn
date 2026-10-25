@@ -109,6 +109,7 @@
                 {% if pr.moved_since_approval %}· <span class="badge-conflict" title="The PR head moved after the approval — new commits to look at">Pushed since approval</span>{% endif %}
             {% endif %}
             {% if pr.mergeable == False %}· <span class="badge-conflict" title="PR has merge conflicts — needs rebase">Needs Rebase</span>{% endif %}
+            {% if pr.run_in_flight %}· <span class="badge-queued" title="A run_agents command is pending or running — findings will appear when the worker finishes">Queued for Run</span>{% endif %}
             {% if pr.findings_count %}· <span class="findings-badge" title="Draft line-level concerns">{{ pr.findings_count }} finding{{ pr.findings_count|pluralize }}</span>{% endif %}
             {% if pr.latest_test_verdict %}·
                 {% if pr.latest_test_verdict == "good" %}

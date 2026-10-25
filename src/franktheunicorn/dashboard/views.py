@@ -273,10 +273,24 @@ def index(request: HttpRequest) -> HttpResponse:
                 a.pull_request_id: a
                 for a in ZombieAssessment.objects.filter(pull_request_id__in=pr_ids)
             }
+        # PRs with an in-flight run_agents — one set, not a per-row query, so a
+        # 100-row list doesn't become 100 lookups. Lets the row show "Queued for
+        # Run" the same way the detail page does (a wiped-then-deduped PR is
+        # otherwise indistinguishable from one nobody's looked at).
+        run_in_flight_pr_ids = set(
+            WorkerCommand.objects.filter(
+                command="run_agents",
+                status__in=("pending", "running"),
+                pull_request_id__in=pr_ids,
+            )
+            .values_list("pull_request_id", flat=True)
+            .distinct()
+        )
         for pr in pr_list:
             pr.findings_count = finding_counts.get(pr.pk, 0)  # type: ignore[attr-defined]
             pr.latest_test_verdict = latest_verdicts.get(pr.pk)  # type: ignore[attr-defined]
             pr.zombie = zombies.get(pr.pk)  # type: ignore[attr-defined]
+            pr.run_in_flight = pr.pk in run_in_flight_pr_ids  # type: ignore[attr-defined]
 
     # The almost-ready tab carries its own per-PR panel (verdict, reasons,
     # buttons) and a header of what the queue has learned from past verdicts.
@@ -668,6 +682,12 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
         .order_by("-created_at")
         .first()
     )
+    # The dedup constraint keeps one in-flight run_agents per PR, so the latest
+    # row is the in-flight one when there is one. Surfaced so the empty-state
+    # can tell "findings are coming" from "no findings yet" — a wiped-then-
+    # deduped PR (regenerate pressed while a bulk run was already pending) reads
+    # as the latter otherwise.
+    run_in_flight = bool(last_agent_command and last_agent_command.status in ("pending", "running"))
 
     prev_pr, next_pr = _adjacent_prs(pr)
 
@@ -697,6 +717,7 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
             "jira_server": jira_server,
             "agent_run_summary": agent_run_summary,
             "last_agent_command": last_agent_command,
+            "run_in_flight": run_in_flight,
             "prev_pr": prev_pr,
             "next_pr": next_pr,
         },

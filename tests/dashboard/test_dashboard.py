@@ -56,6 +56,26 @@ class TestDashboardViews:
         assert response.status_code == 200
         assert b"Consider adding a test" in response.content
 
+    def test_pr_detail_shows_queued_when_run_in_flight(
+        self, client: Client, db_pr: PullRequest
+    ) -> None:
+        # No drafts + a pending run_agents: the empty-state must say "Queued",
+        # not "No review findings yet" — otherwise a wiped-then-deduped PR
+        # (regenerate pressed while a bulk run was already pending) reads as
+        # broken instead of "findings are coming".
+        WorkerCommand.objects.create(command="run_agents", pull_request=db_pr, status="pending")
+        response = client.get(f"/pr/{db_pr.pk}/")
+        assert response.status_code == 200
+        assert b"Queued for Run/Eval" in response.content
+        assert b'class="badge-queued"' in response.content
+        assert b"No review findings yet." not in response.content
+
+    def test_pr_detail_plain_empty_when_no_run(self, client: Client, db_pr: PullRequest) -> None:
+        response = client.get(f"/pr/{db_pr.pk}/")
+        assert response.status_code == 200
+        assert b"No review findings yet." in response.content
+        assert b"Queued for Run/Eval" not in response.content
+
     def test_pr_detail_404(self, client: Client) -> None:
         response = client.get("/pr/99999/")
         assert response.status_code == 404
@@ -184,6 +204,19 @@ class TestDashboardViews:
         response = client.get("/")
         assert response.status_code == 200
         assert b'class="findings-badge"' not in response.content
+
+    def test_index_shows_queued_badge_when_run_in_flight(
+        self, client: Client, db_pr: PullRequest
+    ) -> None:
+        WorkerCommand.objects.create(command="run_agents", pull_request=db_pr, status="pending")
+        response = client.get("/")
+        assert response.status_code == 200
+        assert b'class="badge-queued"' in response.content
+
+    def test_index_omits_queued_badge_when_no_run(self, client: Client, db_pr: PullRequest) -> None:
+        response = client.get("/")
+        assert response.status_code == 200
+        assert b'class="badge-queued"' not in response.content
 
 
 @pytest.mark.django_db
