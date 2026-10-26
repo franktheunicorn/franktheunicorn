@@ -10,10 +10,14 @@ triage system prompts (see ``security/prompt.py::build_triage_prompt`` and
 
 from __future__ import annotations
 
+import csv
+import io
 import logging
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from django.db.models import Q
+from django.db.models import Count, Q
+from django.utils import timezone
 
 from franktheunicorn.core.models import (
     Project,
@@ -232,3 +236,124 @@ def _render_rulings_for_distillation(rulings: list[SecurityReport]) -> str:
         if report.operator_notes:
             lines.append(f"  - Notes: {report.operator_notes[:400]}")
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# Agreement export — how often the operator agreed with the machine's verdict
+# --------------------------------------------------------------------------- #
+
+#: Label for feedback rows that were never assigned a project. The
+#: :class:`SecurityTriageFeedback` ``project`` FK is ``CASCADE``, so a row
+#: does NOT outlive its project — but the ``report`` FK is ``SET_NULL``, so a
+#: row does outlive its report and keeps its own ``project`` FK to stay
+#: groupable after the report is gone. Rows with ``project=None`` (never
+#: assigned, e.g. a paste with no project picked) still count toward the
+#: overall rate and get their own line.
+_NO_PROJECT_LABEL = "(no project)"
+
+#: The label of the roll-up line. Reserved so a project can't collide with it:
+#: ``Project.full_name`` is always ``owner/repo`` and so always contains a slash.
+_OVERALL_LABEL = "ALL PROJECTS"
+
+
+@dataclass(frozen=True)
+class TriageAgreementRow:
+    """One line of the agreement export.
+
+    A project (or the overall roll-up) with how many triage verdicts the
+    operator agreed vs. disagreed with. The denominator is feedback *events*,
+    not reports: every agree/disagree — the feedback widget, the Agree button,
+    and a verdict save that matched or overrode the staged suggestion — is one
+    :class:`SecurityTriageFeedback` row (see
+    ``dashboard.views.security_report_set_verdict``), so a report re-ruled twice
+    contributes twice, which is the honest denominator for "how often do we
+    agree when I rule".
+    """
+
+    label: str
+    agreed: int
+    disagreed: int
+
+    @property
+    def total(self) -> int:
+        return self.agreed + self.disagreed
+
+    @property
+    def agree_pct(self) -> float | None:
+        """Agreement rate, or ``None`` when there's nothing to divide by."""
+        return 100.0 * self.agreed / self.total if self.total else None
+
+    @property
+    def disagree_pct(self) -> float | None:
+        return 100.0 * self.disagreed / self.total if self.total else None
+
+
+def triage_agreement_rows() -> list[TriageAgreementRow]:
+    """Per-project agree/disagree tallies plus an overall roll-up.
+
+    Pure read. One grouped query over every :class:`SecurityTriageFeedback` row,
+    bounded by the number of projects, so it never streams: the result is one
+    line per project (ordered ``owner/repo``), rows with no project folded into
+    :data:`_NO_PROJECT_LABEL`, and a final :data:`_OVERALL_LABEL` line summing
+    them. An install with no feedback yet returns a single zero overall line, so
+    the export is always a valid, self-explaining CSV rather than a bare header.
+    """
+    # The annotation aliases are deliberately *not* ``agreed``/``disagreed``: the
+    # model field is ``agreed``, and an alias of the same name makes the second
+    # filter's ``Q(agreed=False)`` resolve to the first annotation instead of the
+    # column, which SQLite rejects as a nested aggregate ("misuse of COUNT()").
+    grouped = (
+        SecurityTriageFeedback.objects.values("project__owner", "project__repo")
+        .annotate(
+            n_agreed=Count("pk", filter=Q(agreed=True)),
+            n_disagreed=Count("pk", filter=Q(agreed=False)),
+        )
+        .order_by("project__owner", "project__repo")
+    )
+
+    rows: list[TriageAgreementRow] = []
+    total_agreed = 0
+    total_disagreed = 0
+    for entry in grouped:
+        owner = entry["project__owner"]
+        repo = entry["project__repo"]
+        label = f"{owner}/{repo}" if owner else _NO_PROJECT_LABEL
+        rows.append(TriageAgreementRow(label, entry["n_agreed"], entry["n_disagreed"]))
+        total_agreed += entry["n_agreed"]
+        total_disagreed += entry["n_disagreed"]
+
+    rows.append(TriageAgreementRow(_OVERALL_LABEL, total_agreed, total_disagreed))
+    return rows
+
+
+_AGREEMENT_HEADER = ["project", "agreed", "disagreed", "total", "agree_pct", "disagree_pct"]
+
+
+def agreement_csv() -> str:
+    """Render :func:`triage_agreement_rows` as a CSV string.
+
+    Small and bounded (one line per project), so it's built whole rather than
+    streamed like the report export. ``agree_pct``/``disagree_pct`` are blank
+    rather than ``0`` for a row with no feedback, so an empty tally reads as "no
+    data" instead of "we never agree".
+    """
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\n")
+    writer.writerow(_AGREEMENT_HEADER)
+    for row in triage_agreement_rows():
+        writer.writerow(
+            [
+                row.label,
+                row.agreed,
+                row.disagreed,
+                row.total,
+                "" if row.agree_pct is None else f"{row.agree_pct:.1f}",
+                "" if row.disagree_pct is None else f"{row.disagree_pct:.1f}",
+            ]
+        )
+    return buffer.getvalue()
+
+
+def agreement_export_filename() -> str:
+    """Dated filename for the agreement export, matching the report export's shape."""
+    return f"security-triage-agreement-{timezone.now().date().isoformat()}.csv"

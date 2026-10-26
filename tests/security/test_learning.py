@@ -273,3 +273,80 @@ class TestResolveTriageGuidance:
         SecurityTriageGuidanceFactory(project=project, guidance_text="stale", is_active=False)
 
         assert resolve_triage_guidance(project) == ""
+
+
+@pytest.mark.django_db
+class TestTriageAgreementExport:
+    """The agree/disagree-rate export built from feedback rows."""
+
+    def test_empty_backlog_is_one_zero_overall_row(self) -> None:
+        from franktheunicorn.security.learning import triage_agreement_rows
+
+        rows = triage_agreement_rows()
+
+        assert len(rows) == 1
+        overall = rows[0]
+        assert overall.label == "ALL PROJECTS"
+        assert overall.total == 0
+        assert overall.agree_pct is None
+        assert overall.disagree_pct is None
+
+    def test_per_project_tallies_plus_overall(self) -> None:
+        from franktheunicorn.security.learning import triage_agreement_rows
+
+        spark = ProjectFactory(owner="apache", repo="spark")
+        other = ProjectFactory(owner="apache", repo="arrow")
+        SecurityTriageFeedbackFactory.create_batch(3, project=spark, agreed=True)
+        SecurityTriageFeedbackFactory(project=spark, agreed=False)
+        SecurityTriageFeedbackFactory(project=other, agreed=False)
+
+        rows = triage_agreement_rows()
+        by_label = {row.label: row for row in rows}
+
+        assert by_label["apache/arrow"].agreed == 0
+        assert by_label["apache/arrow"].disagreed == 1
+        assert by_label["apache/spark"].agreed == 3
+        assert by_label["apache/spark"].disagreed == 1
+        assert by_label["apache/spark"].agree_pct == pytest.approx(75.0)
+
+        overall = rows[-1]
+        assert overall.label == "ALL PROJECTS"
+        assert overall.agreed == 3
+        assert overall.disagreed == 2
+        assert overall.agree_pct == pytest.approx(60.0)
+        assert overall.disagree_pct == pytest.approx(40.0)
+
+    def test_projectless_feedback_folded_into_own_row(self) -> None:
+        from franktheunicorn.security.learning import triage_agreement_rows
+
+        SecurityTriageFeedbackFactory(project=None, agreed=True)
+        rows = triage_agreement_rows()
+        by_label = {row.label: row for row in rows}
+
+        assert by_label["(no project)"].agreed == 1
+        assert rows[-1].agreed == 1
+
+    def test_csv_shape_and_blank_pct_for_zero(self) -> None:
+        import csv as _csv
+        import io as _io
+
+        from franktheunicorn.security.learning import agreement_csv
+
+        spark = ProjectFactory(owner="apache", repo="spark")
+        SecurityTriageFeedbackFactory.create_batch(2, project=spark, agreed=True)
+
+        reader = list(_csv.reader(_io.StringIO(agreement_csv())))
+        assert reader[0] == [
+            "project",
+            "agreed",
+            "disagreed",
+            "total",
+            "agree_pct",
+            "disagree_pct",
+        ]
+        spark_row = next(r for r in reader if r[0] == "apache/spark")
+        assert spark_row == ["apache/spark", "2", "0", "2", "100.0", "0.0"]
+        # Empty install rows would blank the percentage rather than print 0.0.
+        overall = reader[-1]
+        assert overall[0] == "ALL PROJECTS"
+        assert overall[1:] == ["2", "0", "2", "100.0", "0.0"]

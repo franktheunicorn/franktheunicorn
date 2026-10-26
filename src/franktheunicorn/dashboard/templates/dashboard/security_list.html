@@ -375,6 +375,14 @@
            title="Also include the raw report text and any proposed patch — bigger, and a good deal more sensitive to leave in a shared Drive">
             ⬇ Export CSV (full text)
         </a>
+        {# Not a slice of this list: the agree/disagree rate is a property of the #}
+        {# operator-plus-model pair across every project, so it takes no status or #}
+        {# agent filter and sits on its own. Counts only, no report text. #}
+        <a class="action-btn"
+           href="{% url 'dashboard:security_agreement_csv' %}"
+           title="How often you agreed vs. disagreed with the machine's triage verdict, per project and overall — counts only, no report text">
+            ⬇ Export agreement stats
+        </a>
     </div>
 
     <form method="post" action="{% url 'dashboard:security_import_csv' %}"
