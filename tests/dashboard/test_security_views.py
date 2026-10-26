@@ -4279,3 +4279,35 @@ class TestReporterClaimedSeverity:
         report = SecurityReportFactory(claimed_severity="critical", assessed_severity="low")
         prompt = _build_prompt(report, "master", SecurityVerifierConfig())
         assert "Reported severity: critical" in prompt
+
+
+@pytest.mark.django_db
+class TestTriageAgreementExport:
+    """The agree/disagree-rate CSV served at /security/agreement.csv."""
+
+    def test_serves_counts_and_percentages(self, client: Client) -> None:
+        from tests.factories import SecurityTriageFeedbackFactory
+
+        spark = ProjectFactory(owner="apache", repo="spark")
+        SecurityTriageFeedbackFactory.create_batch(3, project=spark, agreed=True)
+        SecurityTriageFeedbackFactory(project=spark, agreed=False)
+
+        response = client.get("/security/agreement.csv")
+
+        assert response.status_code == 200
+        assert response["Content-Type"].startswith("text/csv")
+        assert response["Cache-Control"] == "no-store"
+        assert "attachment" in response["Content-Disposition"]
+        assert "security-triage-agreement-" in response["Content-Disposition"]
+
+        body = response.content.decode()
+        assert "apache/spark,3,1,4,75.0,25.0" in body
+        assert "ALL PROJECTS,3,1,4,75.0,25.0" in body
+
+    def test_empty_backlog_still_valid_csv(self, client: Client) -> None:
+        response = client.get("/security/agreement.csv")
+
+        assert response.status_code == 200
+        lines = response.content.decode().strip().splitlines()
+        assert lines[0] == "project,agreed,disagreed,total,agree_pct,disagree_pct"
+        assert lines[-1] == "ALL PROJECTS,0,0,0,,"

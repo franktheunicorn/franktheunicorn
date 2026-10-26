@@ -2952,6 +2952,33 @@ def security_report_export_csv(request: HttpRequest) -> HttpResponseBase:
     return response
 
 
+def security_triage_agreement_csv(request: HttpRequest) -> HttpResponse:
+    """Export how often the operator agreed vs. disagreed with machine triage.
+
+    One row per project plus an overall roll-up: agreed / disagreed counts and
+    the agreement percentage, over every :class:`SecurityTriageFeedback` event.
+    This is the learning loop's raw signal made legible — the same agree/disagree
+    the guidance distiller runs on — so "how often does the robot get it right"
+    is one download rather than a SQL session.
+
+    Deliberately global: unlike the report export, it takes no ``status`` or
+    ``agent`` filter. The agreement rate is a property of the operator-plus-model
+    pair, not of a slice of the backlog, and a feedback row outlives the report
+    it was about (the FK is ``SET_NULL``), so there's often no report left to
+    filter on anyway. In-request and unstreamed because the result is one line
+    per project — bounded, tiny, no LLM call, no container, no write.
+    """
+    from franktheunicorn.security.learning import agreement_csv, agreement_export_filename
+
+    response = HttpResponse(agreement_csv(), content_type="text/csv; charset=utf-8")
+    response["Content-Disposition"] = f'attachment; filename="{agreement_export_filename()}"'
+    # Counts only — no report text — so this is far less sensitive than the report
+    # export, but it's still the operator's private backlog telemetry and cheap to
+    # keep out of the laptop's disk cache.
+    response["Cache-Control"] = "no-store"
+    return response
+
+
 @require_POST
 def security_report_import_csv(request: HttpRequest) -> HttpResponse:
     """Apply a reviewed CSV back onto the reports it was exported from.
