@@ -69,6 +69,7 @@ from franktheunicorn.scoring.merge_readiness import (
     refresh_review_and_ci_state,
 )
 from franktheunicorn.security import agent_source
+from franktheunicorn.security.queue import in_flight_statuses
 
 logger = logging.getLogger(__name__)
 
@@ -280,7 +281,7 @@ def index(request: HttpRequest) -> HttpResponse:
         run_in_flight_pr_ids = set(
             WorkerCommand.objects.filter(
                 command="run_agents",
-                status__in=("pending", "running"),
+                status__in=in_flight_statuses(),
                 pull_request_id__in=pr_ids,
             )
             .values_list("pull_request_id", flat=True)
@@ -687,7 +688,7 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
     # can tell "findings are coming" from "no findings yet" — a wiped-then-
     # deduped PR (regenerate pressed while a bulk run was already pending) reads
     # as the latter otherwise.
-    run_in_flight = bool(last_agent_command and last_agent_command.status in ("pending", "running"))
+    run_in_flight = bool(last_agent_command and last_agent_command.status in in_flight_statuses())
 
     prev_pr, next_pr = _adjacent_prs(pr)
 
@@ -2367,7 +2368,7 @@ def project_wipe_prs(request: HttpRequest, project_id: int) -> HttpResponse:
     target = reverse("dashboard:stats")
     prs = PullRequest.objects.filter(project=project)
     in_flight = WorkerCommand.objects.filter(
-        pull_request__project=project, status__in=("pending", "running")
+        pull_request__project=project, status__in=in_flight_statuses()
     ).count()
     if in_flight:
         # The worker holds those PRs; a save() after the delete re-inserts one.

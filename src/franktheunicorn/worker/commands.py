@@ -507,6 +507,7 @@ def _run_security_triage(cmd: WorkerCommand, operator_config: OperatorConfig) ->
     # live across versions", fix-landed asks "did this branch's fix land".
     # Git only, so it is cheap; gating on a branch existing keeps no-op
     # commands out of the queue.
+    branch_desc = report.fix_branch or report.fix_branch_sha or "<confirmed>"
     if (
         report.auto_triage_status == "valid"
         and report.status in ("new", "triaging", "valid")
@@ -520,7 +521,7 @@ def _run_security_triage(cmd: WorkerCommand, operator_config: OperatorConfig) ->
             logger.info(
                 "Queued fix-landed check for report #%d after triage (branch=%s)",
                 report.pk,
-                report.fix_branch or report.fix_branch_sha or "<confirmed>",
+                branch_desc,
             )
 
 

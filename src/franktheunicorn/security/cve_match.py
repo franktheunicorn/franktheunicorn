@@ -1,18 +1,25 @@
-"""Match a security report to a published ASF CVE.
+"""Match a security report to an ASF CVE — published or allocated.
 
-``cve_api.list_public_cves`` fetches the ASF CVE process's public list — every
-CVE the ASF has published for a PMC, with its title. This module answers the
-dedup question the NVD lookup in ``security.triage`` does not: has the ASF
-*already* opened a CVE for this issue? A published CVE that matches the report
-is strong evidence the report is a real, known hole, so a match stages the
-report as ``valid`` (tentatively — ``status`` stays the operator's field; the
-machine only stages ``auto_triage_status``).
+Two questions, two answers:
 
-Title-similarity only, no model call: the public list is small (a handful per
-PMC) and the titles are short, so a token-overlap score over the report's title
-and parsed component is enough. The threshold is high on purpose — a false
-match stages a real report as a known CVE and points the operator at the wrong
-record, and the operator's Agree click is the one that applies it.
+* **Published** (``cve_api.list_public_cves`` over the unauthenticated
+  ``/publicjson`` list, state=PUBLIC): the ASF has already published a CVE
+  for this issue. That is a *duplicate* signal, not a "stage valid" — the
+  report is likely a dupe of an already-public CVE, and the operator decides
+  (dupe → close, or the published fix was incomplete → keep valid). Mirrors
+  ``_check_duplicates``: surface the link, never set ``status``. Title
+  similarity only, no model call; the public list is small and the titles are
+  short.
+* **Allocated but not published** (``cve_api.fetch_record`` over the
+  Bearer-token ``/cve5/json/<id>`` endpoint, state in RESERVED/DRAFT/REVIEW/
+  READY): the ASF has accepted the vuln and is processing it. That *is* the
+  "tentatively set validated" — stronger than any model hedge, because the
+  ASF already accepted it. Stage ``valid``. Frank cannot *list* these (the
+  list routes need a browser session the Bearer token cannot reach), so it
+  looks up candidate ids the report itself names or the operator linked.
+
+``status`` stays the operator's field in both cases; the machine only stages
+``auto_triage_status``.
 """
 
 from __future__ import annotations
@@ -31,11 +38,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-#: Above this, a report is tentatively staged ``valid`` on an ASF title match.
-#: High on purpose: a false positive points the operator at the wrong CVE
-#: record; 0.6 is "most meaningful tokens shared" measured against the spark
-#: public list.
+#: Above this, a published CVE's title is treated as a dupe signal for the
+#: report. High on purpose: a false positive points the operator at the wrong
+#: CVE record; 0.6 is "most meaningful tokens shared" measured against the
+#: spark public list.
 ASF_MATCH_THRESHOLD = 0.6
+
+#: States that mean "the ASF has accepted this vuln but not published it yet".
+#: PUBLIC is the dupe case (handled by the public match); REJECT is not.
+ALLOCATED_STATES = frozenset({"RESERVED", "DRAFT", "REVIEW", "READY"})
 
 #: Present in every Spark title, so they dilute Jaccard without discriminating.
 _STOPWORDS = frozenset(
@@ -61,15 +72,26 @@ _STOPWORDS = frozenset(
     }
 )
 
+#: CVE ids the report text itself names — the candidate set for the allocated
+#: lookup. The reporter often cites the CVE they're reporting against.
+_CVE_ID_RE = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)
+
 
 @dataclass(frozen=True)
-class ASFPublicCVEMatch:
-    """The best published ASF CVE that matches a report, or None below threshold."""
+class ASFCVEMatch:
+    """One ASF CVE that matches a report, published or allocated.
+
+    ``kind`` is "public" (a title-similarity match against a published CVE —
+    a dupe signal) or "allocated" (an exact-id match against an
+    allocated-but-not-published CVE — stages valid). ``score`` is the
+    title-similarity score for public matches; 0.0 for allocated (exact id).
+    """
 
     cve_id: str
-    title: str
-    score: float
+    kind: str
+    title: str = ""
     state: str = ""
+    score: float = 0.0
 
 
 def _tokenize(text: str) -> frozenset[str]:
@@ -104,7 +126,7 @@ def match_report_to_asf_cve(
     operator_config: OperatorConfig,
     *,
     project_config: ProjectConfig | None = None,
-) -> ASFPublicCVEMatch | None:
+) -> ASFCVEMatch | None:
     """The best published ASF CVE for *report*'s project, or None below threshold.
 
     ``project_config`` is taken from the caller when triage already has it and
@@ -129,14 +151,18 @@ def match_report_to_asf_cve(
     if not public_cves:
         return None
 
-    best: ASFPublicCVEMatch | None = None
+    best: ASFCVEMatch | None = None
     for cve in public_cves:
         if not cve.title:
             continue
         score = _similarity(haystack, cve.title)
         if best is None or score > best.score:
-            best = ASFPublicCVEMatch(
-                cve_id=cve.cve_id, title=cve.title, score=score, state=cve.state
+            best = ASFCVEMatch(
+                cve_id=cve.cve_id,
+                kind="public",
+                title=cve.title,
+                state=cve.state,
+                score=score,
             )
 
     if best is None or best.score < ASF_MATCH_THRESHOLD:
@@ -158,12 +184,26 @@ def match_report_to_asf_cve(
     return best
 
 
-def public_cve_to_match_entry(match: ASFPublicCVEMatch) -> dict[str, object]:
-    """The ``cve_matches`` row shape for an ASF public-CVE match.
+def extract_candidate_cve_ids(report: SecurityReport) -> list[str]:
+    """CVE ids the report itself names, plus the operator's ``matched_cve_id``.
 
-    Mirrors the NVD entries' shape plus a ``source`` marker so the CVE-matches
-    table can tell the two apart.
+    The candidate set for the allocated-but-not-published lookup: the reporter
+    often cites the CVE they're reporting against, and the operator may have
+    linked one. Deduped, upper-cased, in CVE-YYYY-NNNNN form.
     """
+    seen: set[str] = set()
+    ids: list[str] = []
+    for source in (report.matched_cve_id, report.title, report.raw_text or ""):
+        for match in _CVE_ID_RE.finditer(source):
+            cve_id = match.group(0).upper()
+            if cve_id not in seen:
+                seen.add(cve_id)
+                ids.append(cve_id)
+    return ids
+
+
+def public_cve_to_match_entry(match: ASFCVEMatch) -> dict[str, object]:
+    """The ``cve_matches`` row for a published-ASF-CVE dupe signal."""
     return {
         "cve_id": match.cve_id,
         "description": match.title,
@@ -172,4 +212,16 @@ def public_cve_to_match_entry(match: ASFPublicCVEMatch) -> dict[str, object]:
         "published": "",
         "source": "asf-public",
         "match_score": round(match.score, 3),
+    }
+
+
+def allocated_cve_to_match_entry(cve_id: str, state: str, title: str) -> dict[str, object]:
+    """The ``cve_matches`` row for an allocated-but-not-published ASF CVE."""
+    return {
+        "cve_id": cve_id,
+        "description": title,
+        "cvss_score": None,
+        "status": state,
+        "published": "",
+        "source": "asf-allocated",
     }

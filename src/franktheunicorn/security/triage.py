@@ -16,7 +16,10 @@ from typing import TYPE_CHECKING, NamedTuple
 from franktheunicorn.config.models import LLMBackendConfig
 from franktheunicorn.security.cve_lookup import search_cves
 from franktheunicorn.security.cve_match import (
-    ASFPublicCVEMatch,
+    ALLOCATED_STATES,
+    ASFCVEMatch,
+    allocated_cve_to_match_entry,
+    extract_candidate_cve_ids,
     match_report_to_asf_cve,
     public_cve_to_match_entry,
 )
@@ -44,10 +47,6 @@ _VALID_SEVERITIES: frozenset[str] = frozenset(
 # The learning loop still works: a re-triage writes a fresh suggestion to
 # ``auto_triage_status`` for the operator to agree to.
 _AUTO_MANAGED_STATUSES: frozenset[str] = frozenset({"new", "triaging"})
-
-#: Model verdicts an ASF title-match must not override. The model read the full
-#: report; the matcher saw only the title — a non-vuln ruling is stronger.
-_ASF_NON_OVERRIDABLE_STATUSES: frozenset[str] = frozenset({"invalid", "expected-behavior"})
 
 
 #: A cheap-close pattern plus how the guards treat it — see _ACTOR_GUARD_RE.
@@ -313,7 +312,8 @@ def triage_report(
     no_verdict_reason = ""
     attempts = 0
     context_checked = False
-    asf_match: ASFPublicCVEMatch | None = None
+    public_match: ASFCVEMatch | None = None
+    allocated_match: ASFCVEMatch | None = None
     try:
         project_context = _load_project_context(report, project_config)
         security_model = resolve_security_model(project_config)
@@ -375,21 +375,30 @@ def triage_report(
                         report.pk,
                         exc_info=True,
                     )
-                # The ASF public-CVE match is the third context step: has the
-                # ASF already published a CVE for this issue? A match is strong
-                # evidence the report is a real, known hole, recorded in
-                # cve_matches now (as context for the analysis prompt) and
-                # staged ``valid`` after the analysis step — see
-                # _stage_asf_match_verdict. Guarded like the two above: a
-                # network blip at cveprocess.apache.org must not abort the run.
+                # The ASF CVE match is the third context step: has the ASF
+                # already *published* a CVE (dupe signal) or *allocated* one the
+                # report names (stages valid)? Guarded like the two above — a
+                # network blip must not abort the run after the parse was billed.
                 try:
-                    asf_match = _check_asf_public_cves(report, operator_config, project_config)
+                    public_match = _check_asf_public_cves(report, operator_config, project_config)
                 except Exception:
                     logger.warning(
                         "ASF public-CVE match failed for report #%d; triaging without it",
                         report.pk,
                         exc_info=True,
                     )
+                    public_match = None
+                try:
+                    allocated_match = _check_asf_allocated_cves(
+                        report, operator_config, project_config
+                    )
+                except Exception:
+                    logger.warning(
+                        "ASF allocated-CVE lookup failed for report #%d; triaging without it",
+                        report.pk,
+                        exc_info=True,
+                    )
+                    allocated_match = None
 
             logger.info("Analyzing report #%d via LLM (%s)", report.pk, backend.label)
             outcome = _analyze_report(
@@ -411,14 +420,15 @@ def triage_report(
     finally:
         _restore_untriaged_status(report)
 
-    # An ASF public-CVE match completes a run the model left inconclusive: the
-    # ASF has already published a CVE for this issue, so stage ``valid``
-    # tentatively — the user's "tentatively set validated on a matching CVE".
-    # The helper guards against overriding a model ``invalid``/``expected-behavior``
-    # verdict or an operator's mid-run ruling; the match is in ``cve_matches``
-    # either way for the operator to read.
-    if asf_match is not None:
-        staged = _stage_asf_match_verdict(report, asf_match)
+    # The ASF notes are appended *after* the analyze step (the public dupe note
+    # used to be appended in _check_asf_public_cves and was overwritten by the
+    # model's triage_summary write). A public match is a dupe signal — its note
+    # is always appended when present (even when an allocated match also exists,
+    # so the operator sees both "likely a duplicate of CVE-X" and "the ASF
+    # accepted CVE-Y"). An allocated match stages ``valid`` — the helper honors
+    # an operator's mid-run ruling in both cases.
+    if public_match is not None or allocated_match is not None:
+        staged = _stage_asf_match_verdict(report, public_match, allocated_match)
         if staged and not produced_verdict:
             produced_verdict = True
             no_verdict_reason = ""
@@ -1305,89 +1315,197 @@ def _check_cves(report: SecurityReport, operator_config: OperatorConfig) -> None
     report.save(update_fields=["cve_matches", "updated_at"])
 
 
+def _merge_cve_match(report: SecurityReport, entry: dict[str, object]) -> None:
+    """Append *entry* to ``cve_matches`` unless a row with its ``cve_id`` is there.
+
+    The ASF checks merge (dedup on cve_id) rather than overwriting the way NVD's
+    ``_check_cves`` does, so an ASF row sits next to the NVD rows already on the
+    report and a re-run doesn't pile up duplicates.
+    """
+    existing = [m for m in (report.cve_matches or []) if isinstance(m, dict)]
+    if any(m.get("cve_id") == entry.get("cve_id") for m in existing):
+        return
+    existing.append(entry)
+    report.cve_matches = existing
+    report.save(update_fields=["cve_matches", "updated_at"])
+
+
 def _check_asf_public_cves(
     report: SecurityReport,
     operator_config: OperatorConfig,
     project_config: ProjectConfig | None,
-) -> ASFPublicCVEMatch | None:
-    """Match *report* to a published ASF CVE for its project, if any.
+) -> ASFCVEMatch | None:
+    """Match *report* to a published ASF CVE — a dupe signal, not a verdict.
 
-    The match is recorded in ``cve_matches`` (with ``source: "asf-public"`` so
-    the table can tell it from an NVD hit); the verdict is staged ``valid``
-    after the analysis step — see :func:`_stage_asf_match_verdict`. Runs in
-    the context block so the ASF match is context for the analysis prompt.
+    A published CVE that matches the report's title means the report is
+    likely a duplicate of an already-public CVE (the published fix may be
+    incomplete, so the operator decides: dupe → close, or incomplete fix →
+    keep valid). The match is recorded in ``cve_matches`` (``source:
+    "asf-public"``) here; the dupe note is appended to ``triage_summary`` in
+    :func:`_stage_asf_match_verdict` *after* the analysis step — appending it
+    here would be overwritten by the model's own summary. Nothing is staged.
+    Mirrors ``_check_duplicates``: surface the link, never set ``status``.
     """
     match = match_report_to_asf_cve(report, operator_config, project_config=project_config)
     if match is None:
-        return None  # Merge the ASF entry into the NVD matches already on the row, rather than
-    # overwriting them: both are context, and the operator sees both in the
-    # CVE-matches table. Dedup on cve_id so a re-run doesn't pile up duplicates.
-    existing = [m for m in (report.cve_matches or []) if isinstance(m, dict)]
-    if not any(m.get("cve_id") == match.cve_id for m in existing):
-        existing.append(public_cve_to_match_entry(match))
-        report.cve_matches = existing
-        report.save(update_fields=["cve_matches", "updated_at"])
-        logger.info(
-            "Staged ASF public-CVE match for report #%d: %s (%.2f)",
-            report.pk,
-            match.cve_id,
-            match.score,
-        )
+        return None
+    _merge_cve_match(report, public_cve_to_match_entry(match))
+    logger.info(
+        "Recorded ASF public-CVE dupe signal for report #%d: %s (%.2f)",
+        report.pk,
+        match.cve_id,
+        match.score,
+    )
     return match
 
 
-def _stage_asf_match_verdict(report: SecurityReport, match: ASFPublicCVEMatch) -> bool:
-    """Stage ``valid`` on *report* when an ASF public-CVE match was found.
+def _check_asf_allocated_cves(
+    report: SecurityReport,
+    operator_config: OperatorConfig,
+    project_config: ProjectConfig | None,
+) -> ASFCVEMatch | None:
+    """Match *report* to an allocated-but-not-published ASF CVE, if any.
 
-    The ASF has already published a CVE for this issue — strong evidence the
-    report is a real, known hole — so the machine's suggestion becomes
-    ``valid``. Two guards keep that from clobbering a verdict that's already
-    been reached:
+    Frank cannot *list* these (the list routes need a browser session the
+    Bearer token cannot reach), so it looks up candidate ids the report
+    itself names (``extract_candidate_cve_ids``) plus the operator's
+    ``matched_cve_id``. A read-scoped token for the project's PMC is required;
+    no token, no PMC, no candidates → None (skipped silently, like every
+    graceful gate). A record in RESERVED/DRAFT/REVIEW/READY (not PUBLIC, not
+    REJECT) is an allocated-but-not-published match — the ASF accepted the
+    vuln — recorded in ``cve_matches`` (``source: "asf-allocated"``) and
+    staged ``valid`` after the analysis step.
+    """
+    from franktheunicorn.security.cve_api import (
+        CVETokenExpiredError,
+        fetch_record,
+        get_token,
+        resolve_pmc,
+    )
 
-    - ``status`` is the operator's field. A non-auto status means the operator
-      ruled mid-run; keep it (the match is already in ``cve_matches`` for them
-      to read) and don't re-stage over their verdict.
-    - The model read the full report; the matcher saw only the title. If the
-      analysis step already staged ``invalid`` or ``expected-behavior``, a
-      title-similarity hit is weaker evidence and must not override it — the
-      match is still recorded, the operator can disagree by hand.
+    if report.project is None:
+        return None
+    if project_config is None:
+        from franktheunicorn.config.loader import get_project_config
+
+        project_config = get_project_config(report.project.full_name)
+    pmc = resolve_pmc(report.project, project_config)
+    if not pmc:
+        return None
+    token = get_token(pmc, "read")
+    if not token:
+        logger.debug(
+            "ASF allocated-CVE lookup skipped for report #%d: no read token for pmc=%r",
+            report.pk,
+            pmc,
+        )
+        return None
+    candidate_ids = extract_candidate_cve_ids(report)
+    if not candidate_ids:
+        return None
+    base_url = operator_config.security_triage.cve_api.base_url
+    for cve_id in candidate_ids:
+        try:
+            record = fetch_record(cve_id, token=token, base_url=base_url)
+        except CVETokenExpiredError:
+            # A dead token fails every id the same way — stop at the first
+            # rather than logging one warning per candidate. The view's CVE
+            # buttons drop the token on the next paste; the worker can't.
+            logger.warning(
+                "ASF allocated-CVE lookup for report #%d aborted: read token for "
+                "pmc=%r is expired (failed on %s)",
+                report.pk,
+                pmc,
+                cve_id,
+            )
+            return None
+        except Exception:
+            # A 404/5xx is a per-id transport failure — log and try the next
+            # id rather than aborting the run.
+            logger.warning(
+                "ASF allocated-CVE lookup for %s on report #%d failed",
+                cve_id,
+                report.pk,
+                exc_info=True,
+            )
+            continue
+        if not record.found or record.state not in ALLOCATED_STATES:
+            continue
+        _merge_cve_match(report, allocated_cve_to_match_entry(cve_id, record.state, record.title))
+        logger.info(
+            "ASF allocated-CVE match for report #%d: %s (state=%s)",
+            report.pk,
+            cve_id,
+            record.state,
+        )
+        return ASFCVEMatch(cve_id=cve_id, kind="allocated", title=record.title, state=record.state)
+    return None
+
+
+def _stage_asf_match_verdict(
+    report: SecurityReport,
+    public_match: ASFCVEMatch | None,
+    allocated_match: ASFCVEMatch | None,
+) -> bool:
+    """Append the ASF-match notes and stage ``valid`` for an allocated match.
+
+    Runs *after* the analysis step, so notes appended here survive the
+    model's own ``triage_summary`` write (the public dupe note used to be
+    appended in :func:`_check_asf_public_cves` and was overwritten).
+
+    A *public* match is a dupe signal: its note is appended whenever present
+    — even when an allocated match also exists, so the operator sees both
+    "likely a duplicate of CVE-X" and "the ASF accepted CVE-Y". An *allocated*
+    match (exact id, the ASF accepted the vuln) stages ``valid`` — stronger
+    than any model hedge, including a model ``invalid``: the ASF already
+    accepted the underlying vuln, so a model that read a bad PoC for a real
+    vuln is wrong about the vuln. One guard remains for the allocated path:
+    ``status`` is the operator's field, and a non-auto status means the
+    operator ruled mid-run — keep it.
 
     Returns whether ``valid`` was staged (used as ``produced_verdict`` so an
-    ASF match completes a run the model left inconclusive).
+    allocated match completes a run the model left inconclusive).
     """
+    if public_match is not None:
+        note = (
+            f"Likely a duplicate of {public_match.cve_id} — the ASF has already published "
+            f"this as a CVE (title match {public_match.score:.2f}: "
+            f"{public_match.title[:120]}). The published fix may be incomplete, so this "
+            "is a suggestion, not a ruling: mark the report duplicate if it is, or keep "
+            "it valid if the fix is incomplete."
+        )
+        _append_triage_note(report, note)
+    if allocated_match is None:
+        return False
     stored = _current_status(report)
     if stored not in _AUTO_MANAGED_STATUSES:
         logger.info(
-            "ASF public-CVE match for report #%d not staged: operator ruled status=%r mid-run",
+            "ASF allocated-CVE match for report #%d not staged: operator ruled status=%r mid-run",
             report.pk,
             stored,
         )
         return False
-    current = report.auto_triage_status or ""
-    if current in _ASF_NON_OVERRIDABLE_STATUSES:
-        # The model read the report and ruled it a non-vuln; a title match is
-        # weaker evidence and must not flip it. The match is in cve_matches.
-        logger.info(
-            "ASF public-CVE match for report #%d not staged: model staged %r",
-            report.pk,
-            current,
-        )
-        return False
     report.auto_triage_status = "valid"
     note = (
-        f"ASF has already published {match.cve_id} for this issue "
-        f"(title match {match.score:.2f}: {match.title[:120]}). Staged valid — "
+        f"The ASF has already accepted {allocated_match.cve_id} for this issue "
+        f"(state={allocated_match.state}: allocated but not yet published). Staged valid — "
         "Agree to mark the report valid and link the CVE in the verdict form."
     )
     report.triage_summary = f"{report.triage_summary}\n\n{note}" if report.triage_summary else note
     report.save(update_fields=["auto_triage_status", "triage_summary", "updated_at"])
     logger.info(
-        "Staged valid for report #%d on ASF public-CVE match %s (%.2f)",
+        "Staged valid for report #%d on ASF allocated-CVE match %s (state=%s)",
         report.pk,
-        match.cve_id,
-        match.score,
+        allocated_match.cve_id,
+        allocated_match.state,
     )
     return True
+
+
+def _append_triage_note(report: SecurityReport, note: str) -> None:
+    """Append *note* to ``triage_summary`` (creating it if empty) and save."""
+    report.triage_summary = f"{report.triage_summary}\n\n{note}" if report.triage_summary else note
+    report.save(update_fields=["triage_summary", "updated_at"])
 
 
 def _check_duplicates(

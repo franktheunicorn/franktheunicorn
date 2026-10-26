@@ -21,8 +21,11 @@ from franktheunicorn.config.models import (
 )
 from franktheunicorn.security.cve_api import PublicCVE
 from franktheunicorn.security.cve_match import (
+    ALLOCATED_STATES,
     ASF_MATCH_THRESHOLD,
-    ASFPublicCVEMatch,
+    ASFCVEMatch,
+    allocated_cve_to_match_entry,
+    extract_candidate_cve_ids,
     match_report_to_asf_cve,
     public_cve_to_match_entry,
 )
@@ -120,11 +123,80 @@ class TestMatchReportToASFCVE:
 class TestPublicCVEToMatchEntry:
     def test_marks_asf_public_source_and_score(self) -> None:
         entry = public_cve_to_match_entry(
-            ASFPublicCVEMatch(
-                cve_id="CVE-2021-38296", title="Key Negotiation", score=0.82, state="PUBLIC"
+            ASFCVEMatch(
+                cve_id="CVE-2021-38296",
+                kind="public",
+                title="Key Negotiation",
+                score=0.82,
+                state="PUBLIC",
             )
         )
         assert entry["source"] == "asf-public"
         assert entry["cve_id"] == "CVE-2021-38296"
         assert entry["match_score"] == 0.82
         assert entry["status"] == "PUBLIC"
+
+
+class TestAllocatedCVEToMatchEntry:
+    def test_marks_asf_allocated_source_and_state(self) -> None:
+        entry = allocated_cve_to_match_entry("CVE-2026-5001", "REVIEW", "Spark shell injection")
+        assert entry["source"] == "asf-allocated"
+        assert entry["cve_id"] == "CVE-2026-5001"
+        assert entry["status"] == "REVIEW"
+        assert entry["description"] == "Spark shell injection"
+        # An allocated match has no similarity score — it's an exact id.
+        assert "match_score" not in entry
+
+
+class TestExtractCandidateCVEIds:
+    def _report(self, db: Any, **kwargs: Any):
+        from tests.factories import SecurityReportFactory
+
+        defaults = {"raw_text": "r", "title": "t", "status": "new"}
+        defaults.update(kwargs)
+        return SecurityReportFactory(**defaults)
+
+    def test_pulls_id_from_matched_cve_id(self, db: Any) -> None:
+        report = self._report(db, matched_cve_id="CVE-2026-5001")
+        assert extract_candidate_cve_ids(report) == ["CVE-2026-5001"]
+
+    def test_pulls_id_from_title(self, db: Any) -> None:
+        report = self._report(db, title="Spark shell injection (CVE-2026-5001)")
+        assert extract_candidate_cve_ids(report) == ["CVE-2026-5001"]
+
+    def test_pulls_id_from_raw_text(self, db: Any) -> None:
+        report = self._report(db, raw_text="See CVE-2026-5001 for context.")
+        assert extract_candidate_cve_ids(report) == ["CVE-2026-5001"]
+
+    def test_dedups_and_uppercases(self, db: Any) -> None:
+        report = self._report(
+            db,
+            matched_cve_id="cve-2026-5001",
+            title="Also cve-2026-5001 mentioned",
+            raw_text="CVE-2026-5001 again",
+        )
+        assert extract_candidate_cve_ids(report) == ["CVE-2026-5001"]
+
+    def test_no_ids_returns_empty(self, db: Any) -> None:
+        report = self._report(db, raw_text="no cve here", title="nothing")
+        assert extract_candidate_cve_ids(report) == []
+
+    def test_multiple_ids_preserved_in_order(self, db: Any) -> None:
+        report = self._report(
+            db,
+            raw_text="CVE-2026-5001 and CVE-2025-40404 both apply",
+            title="",
+            matched_cve_id="",
+        )
+        assert extract_candidate_cve_ids(report) == ["CVE-2026-5001", "CVE-2025-40404"]
+
+
+class TestAllocatedStates:
+    def test_public_is_not_allocated(self) -> None:
+        assert "PUBLIC" not in ALLOCATED_STATES
+
+    def test_reserved_through_ready_are_allocated(self) -> None:
+        assert frozenset({"RESERVED", "DRAFT", "REVIEW", "READY"}) == ALLOCATED_STATES
+
+    def test_reject_is_not_allocated(self) -> None:
+        assert "REJECT" not in ALLOCATED_STATES

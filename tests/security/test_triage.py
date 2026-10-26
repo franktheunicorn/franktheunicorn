@@ -12,7 +12,8 @@ from django.test import override_settings
 
 from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig, SecurityTriageConfig
 from franktheunicorn.review.backends.base import BaseLLMBackend
-from franktheunicorn.security.cve_match import ASFPublicCVEMatch
+from franktheunicorn.security.cve_api import CVERecord
+from franktheunicorn.security.cve_match import ASFCVEMatch
 from franktheunicorn.security.triage import (
     _AnalysisOutcome,
     _safe_json_parse,
@@ -1676,10 +1677,18 @@ class TestClaimedSeverityBackfill:
 
 
 @pytest.mark.django_db
-class TestASFPublicCVEMatchStep:
-    """The "find CVE" step: a published ASF CVE that matches the report stages
-    ``valid`` (tentatively) and is recorded in ``cve_matches`` with
-    ``source: "asf-public"``. ``status`` stays the operator's field."""
+class TestASFCVEMatchStep:
+    """The "find CVE" step has two halves with different verdicts.
+
+    * **Public** match (title similarity against a published CVE): a *dupe
+      signal* — recorded in ``cve_matches`` + a dupe note in
+      ``triage_summary``, never staged. The operator decides (dupe → close,
+      or the published fix was incomplete → keep valid).
+    * **Allocated** match (exact id the report names, state in
+      RESERVED/DRAFT/REVIEW/READY): stage ``valid`` — the ASF accepted the
+      vuln. Overrides a model ``invalid`` (ASF acceptance > a PoC read), but
+      honors an operator's mid-run ruling.
+    """
 
     def _analyze_json(self, plausible: bool = False, expected: bool = False) -> str:
         import json
@@ -1694,18 +1703,55 @@ class TestASFPublicCVEMatchStep:
             }
         )
 
-    def _patch_match(self, cve_id: str = "CVE-2022-33891", score: float = 0.8):
+    def _public_match(self, cve_id: str = "CVE-2022-33891", score: float = 0.8):
+        # Patch the matcher so the real _check_asf_public_cves runs and records
+        # the match + dupe note. Report need not have a project (patched matcher
+        # doesn't check).
         return patch(
             "franktheunicorn.security.triage.match_report_to_asf_cve",
-            return_value=ASFPublicCVEMatch(
+            return_value=ASFCVEMatch(
                 cve_id=cve_id,
+                kind="public",
                 title="Apache Spark shell command injection via Spark UI",
-                score=score,
                 state="PUBLIC",
+                score=score,
             ),
         )
 
-    def test_match_confirms_model_valid_and_records_cve(
+    def _allocated_match(self, cve_id: str = "CVE-2026-5001", state: str = "REVIEW"):
+        # Patch the cve_api calls so the real _check_asf_allocated_cves runs and
+        # records. The test must give the report an apache/spark project, pass a
+        # ProjectConfig(owner="apache", repo="spark") to triage_report, and put
+        # the cve_id in the report text (so extract_candidate_cve_ids finds it).
+        # Returns an ExitStack (a single context manager) so it composes in a
+        # parenthesized `with` — `*` spread is not valid syntax in with-items.
+        import contextlib
+
+        stack = contextlib.ExitStack()
+        stack.enter_context(
+            patch("franktheunicorn.security.cve_api.get_token", return_value="fake-token")
+        )
+        stack.enter_context(
+            patch(
+                "franktheunicorn.security.cve_api.fetch_record",
+                return_value=CVERecord(
+                    cve_id=cve_id, found=True, state=state, title="Spark shell injection"
+                ),
+            )
+        )
+        return stack
+
+    def _no_asf_matches(self):
+        import contextlib
+
+        stack = contextlib.ExitStack()
+        stack.enter_context(
+            patch("franktheunicorn.security.triage.match_report_to_asf_cve", return_value=None)
+        )
+        stack.enter_context(patch("franktheunicorn.security.cve_api.get_token", return_value=""))
+        return stack
+
+    def test_public_match_records_dupe_note_and_does_not_stage(
         self, db: Any, operator_config_with_llm: OperatorConfig
     ) -> None:
         import json
@@ -1722,27 +1768,28 @@ class TestASFPublicCVEMatchStep:
         with (
             patch("franktheunicorn.security.triage._get_triage_backends", return_value=[backend]),
             patch("franktheunicorn.security.triage.search_cves", return_value=[]),
-            self._patch_match(),
+            self._public_match(),
         ):
             triage_report(report, None, operator_config_with_llm)
 
         report.refresh_from_db()
-        # The model's valid verdict stands; the ASF match confirms it and the
-        # note is appended so the operator sees the published CVE.
+        # The model's valid verdict stands; the public match did not stage over it.
         assert report.auto_triage_status == "valid"
         assert any(
             m.get("cve_id") == "CVE-2022-33891" and m.get("source") == "asf-public"
             for m in report.cve_matches
             if isinstance(m, dict)
         )
-        assert "CVE-2022-33891" in report.triage_summary
+        # The dupe note is appended, not a "Staged valid" note.
+        assert "duplicate of CVE-2022-33891" in report.triage_summary
+        assert "Staged valid" not in report.triage_summary
 
-    def test_match_does_not_override_model_invalid(
+    def test_public_match_does_not_override_model_invalid(
         self, db: Any, operator_config_with_llm: OperatorConfig
     ) -> None:
-        """The model read the full report and ruled it a non-vuln; a title
-        match is weaker evidence and must not flip it. The match is still
-        recorded in cve_matches for the operator to see and disagree by hand."""
+        """A public match is a dupe signal, not a verdict — it never stages, so
+        it cannot flip a model ``invalid``. The dupe note is still appended for
+        the operator to read (the published fix may be incomplete)."""
         import json
 
         from tests.factories import SecurityReportFactory
@@ -1756,7 +1803,7 @@ class TestASFPublicCVEMatchStep:
         with (
             patch("franktheunicorn.security.triage._get_triage_backends", return_value=[backend]),
             patch("franktheunicorn.security.triage.search_cves", return_value=[]),
-            self._patch_match(),
+            self._public_match(),
         ):
             triage_report(report, None, operator_config_with_llm)
 
@@ -1767,14 +1814,15 @@ class TestASFPublicCVEMatchStep:
             for m in report.cve_matches
             if isinstance(m, dict)
         )
-        # No ASF "staged valid" note appended over the model's invalid verdict.
+        assert "duplicate of CVE-2022-33891" in report.triage_summary
         assert "Staged valid" not in report.triage_summary
 
-    def test_match_does_not_override_model_expected_behavior(
+    def test_public_match_does_not_override_model_expected_behavior(
         self, db: Any, operator_config_with_llm: OperatorConfig
     ) -> None:
-        """Same guard for ``expected-behavior``: the model said this isn't a
-        vulnerability at all, and a title match doesn't change that."""
+        """Same posture for ``expected-behavior``: the model said this isn't a
+        vulnerability at all, and a public dupe signal doesn't change that. The
+        match is still recorded for the operator."""
         import json
 
         from tests.factories import SecurityReportFactory
@@ -1788,33 +1836,37 @@ class TestASFPublicCVEMatchStep:
         with (
             patch("franktheunicorn.security.triage._get_triage_backends", return_value=[backend]),
             patch("franktheunicorn.security.triage.search_cves", return_value=[]),
-            self._patch_match(),
+            self._public_match(),
         ):
             triage_report(report, None, operator_config_with_llm)
 
         report.refresh_from_db()
         assert report.auto_triage_status == "expected-behavior"
         assert any(
-            m.get("cve_id") == "CVE-2022-33891" for m in report.cve_matches if isinstance(m, dict)
+            m.get("cve_id") == "CVE-2022-33891" and m.get("source") == "asf-public"
+            for m in report.cve_matches
+            if isinstance(m, dict)
         )
+        assert "Staged valid" not in report.triage_summary
 
-    def test_match_respects_operator_ruling_mid_run(
+    def test_public_match_respects_operator_ruling_mid_run(
         self, db: Any, operator_config_with_llm: OperatorConfig
     ) -> None:
+        """An operator ruling wins over a public match too — the public match
+        never stages, so the operator's ``invalid`` stands untouched and the
+        dupe note is still appended for the operator to read."""
         import json
 
         from tests.factories import SecurityReportFactory
 
         parse_json = json.dumps({"title": "t", "component": "c", "poc": "p", "impact": "i"})
-        # The model read the report and ruled it valid; the operator ruled
-        # invalid while the worker was fetching. The operator wins.
         backend = _MockLLMBackend(responses=[parse_json, self._analyze_json(plausible=True)])
         report = SecurityReportFactory(raw_text="Spark shell injection", title="", status="invalid")
 
         with (
             patch("franktheunicorn.security.triage._get_triage_backends", return_value=[backend]),
             patch("franktheunicorn.security.triage.search_cves", return_value=[]),
-            self._patch_match(),
+            self._public_match(),
         ):
             triage_report(report, None, operator_config_with_llm)
 
@@ -1825,17 +1877,23 @@ class TestASFPublicCVEMatchStep:
         )
         # ... the operator's verdict stands ...
         assert report.status == "invalid"
-        # ... and the ASF match did not append its "Staged valid" note over the ruling.
+        # ... the dupe note is appended (a suggestion, not a verdict) ...
+        assert "duplicate of CVE-2022-33891" in report.triage_summary
+        # ... and the ASF match did not add its own "Staged valid" note. (The
+        # model may stage its own suggestion on a re-triage — that's the model's
+        # job, not the ASF's; the operator's status is what wins.)
         assert "Staged valid" not in report.triage_summary
 
-    def test_match_completes_an_inconclusive_model_run(
+    def test_public_match_does_not_complete_an_inconclusive_run(
         self, db: Any, operator_config_with_llm: OperatorConfig
     ) -> None:
+        """A public match is a dupe signal, not a verdict — so it does not
+        rescue a run the model left inconclusive (no staging)."""
         import json
 
+        from franktheunicorn.security.triage import TriageIncompleteError
         from tests.factories import SecurityReportFactory
 
-        # The model returns a parse but no verdict fields — normally raises.
         backend = _MockLLMBackend(responses=[json.dumps({"title": "t", "component": "c"})])
         report = SecurityReportFactory(
             raw_text="Spark shell injection via UI", title="", status="new"
@@ -1844,14 +1902,156 @@ class TestASFPublicCVEMatchStep:
         with (
             patch("franktheunicorn.security.triage._get_triage_backends", return_value=[backend]),
             patch("franktheunicorn.security.triage.search_cves", return_value=[]),
-            self._patch_match(),
+            self._public_match(),
+            pytest.raises(TriageIncompleteError),
         ):
-            # Would raise TriageIncompleteError without the ASF match; completing
-            # here is the user's "tentatively set validated on a matching CVE".
             triage_report(report, None, operator_config_with_llm)
+
+    def test_allocated_match_stages_valid_and_records_cve(
+        self, db: Any, operator_config_with_llm: OperatorConfig
+    ) -> None:
+        """An allocated match (exact id, ASF accepted the vuln) stages valid
+        and records the CVE with ``source: "asf-allocated"``."""
+        import json
+
+        from franktheunicorn.config.models import ProjectConfig
+        from tests.factories import ProjectFactory, SecurityReportFactory
+
+        parse_json = json.dumps({"title": "t", "component": "c", "poc": "p", "impact": "i"})
+        backend = _MockLLMBackend(responses=[parse_json, self._analyze_json(plausible=True)])
+        project = ProjectFactory(owner="apache", repo="spark")
+        report = SecurityReportFactory(
+            project=project,
+            raw_text="Spark shell command injection via UI (CVE-2026-5001)",
+            title="",
+            status="new",
+        )
+        project_config = ProjectConfig(owner="apache", repo="spark")
+
+        with (
+            patch("franktheunicorn.security.triage._get_triage_backends", return_value=[backend]),
+            patch("franktheunicorn.security.triage.search_cves", return_value=[]),
+            self._allocated_match(),
+        ):
+            triage_report(report, project_config, operator_config_with_llm)
 
         report.refresh_from_db()
         assert report.auto_triage_status == "valid"
+        assert any(
+            m.get("cve_id") == "CVE-2026-5001" and m.get("source") == "asf-allocated"
+            for m in report.cve_matches
+            if isinstance(m, dict)
+        )
+        assert "CVE-2026-5001" in report.triage_summary
+
+    def test_allocated_match_completes_an_inconclusive_model_run(
+        self, db: Any, operator_config_with_llm: OperatorConfig
+    ) -> None:
+        """An allocated match is the 'tentatively set validated' — the ASF
+        accepted the vuln, so it completes a run the model left inconclusive."""
+        import json
+
+        from franktheunicorn.config.models import ProjectConfig
+        from tests.factories import ProjectFactory, SecurityReportFactory
+
+        backend = _MockLLMBackend(responses=[json.dumps({"title": "t", "component": "c"})])
+        project = ProjectFactory(owner="apache", repo="spark")
+        report = SecurityReportFactory(
+            project=project,
+            raw_text="Spark shell injection via UI (CVE-2026-5001)",
+            title="",
+            status="new",
+        )
+        project_config = ProjectConfig(owner="apache", repo="spark")
+
+        with (
+            patch("franktheunicorn.security.triage._get_triage_backends", return_value=[backend]),
+            patch("franktheunicorn.security.triage.search_cves", return_value=[]),
+            self._allocated_match(),
+        ):
+            # Would raise TriageIncompleteError without the allocated match.
+            triage_report(report, project_config, operator_config_with_llm)
+
+        report.refresh_from_db()
+        assert report.auto_triage_status == "valid"
+
+    def test_allocated_match_overrides_model_invalid(
+        self, db: Any, operator_config_with_llm: OperatorConfig
+    ) -> None:
+        """An allocated match (exact id, ASF accepted the vuln) overrides a
+        model ``invalid`` — the ASF's acceptance is stronger evidence than a
+        PoC read that didn't match. The operator can still disagree by hand."""
+        import json
+
+        from franktheunicorn.config.models import ProjectConfig
+        from tests.factories import ProjectFactory, SecurityReportFactory
+
+        parse_json = json.dumps({"title": "t", "component": "c", "poc": "p", "impact": "i"})
+        backend = _MockLLMBackend(responses=[parse_json, self._analyze_json(plausible=False)])
+        project = ProjectFactory(owner="apache", repo="spark")
+        report = SecurityReportFactory(
+            project=project,
+            raw_text="Spark shell injection (CVE-2026-5001)",
+            title="",
+            status="new",
+        )
+        project_config = ProjectConfig(owner="apache", repo="spark")
+
+        with (
+            patch("franktheunicorn.security.triage._get_triage_backends", return_value=[backend]),
+            patch("franktheunicorn.security.triage.search_cves", return_value=[]),
+            self._allocated_match(),
+        ):
+            triage_report(report, project_config, operator_config_with_llm)
+
+        report.refresh_from_db()
+        # The model said invalid; the ASF accepted the vuln → staged valid.
+        assert report.auto_triage_status == "valid"
+        assert any(
+            m.get("cve_id") == "CVE-2026-5001" and m.get("source") == "asf-allocated"
+            for m in report.cve_matches
+            if isinstance(m, dict)
+        )
+
+    def test_allocated_match_respects_operator_ruling_mid_run(
+        self, db: Any, operator_config_with_llm: OperatorConfig
+    ) -> None:
+        """Even an allocated match honors an operator's mid-run ruling — the
+        operator is the final gate. The match is still recorded for the
+        operator to see, but no valid is staged over the ruling."""
+        import json
+
+        from franktheunicorn.config.models import ProjectConfig
+        from tests.factories import ProjectFactory, SecurityReportFactory
+
+        parse_json = json.dumps({"title": "t", "component": "c", "poc": "p", "impact": "i"})
+        backend = _MockLLMBackend(responses=[parse_json, self._analyze_json(plausible=True)])
+        project = ProjectFactory(owner="apache", repo="spark")
+        report = SecurityReportFactory(
+            project=project,
+            raw_text="Spark shell injection (CVE-2026-5001)",
+            title="",
+            status="invalid",
+        )
+        project_config = ProjectConfig(owner="apache", repo="spark")
+
+        with (
+            patch("franktheunicorn.security.triage._get_triage_backends", return_value=[backend]),
+            patch("franktheunicorn.security.triage.search_cves", return_value=[]),
+            self._allocated_match(),
+        ):
+            triage_report(report, project_config, operator_config_with_llm)
+
+        report.refresh_from_db()
+        # The match is still recorded ...
+        assert any(
+            m.get("cve_id") == "CVE-2026-5001" for m in report.cve_matches if isinstance(m, dict)
+        )
+        # ... but the operator's ruling stands, and the ASF did not add its
+        # "Staged valid" note over it. (The model may stage its own suggestion
+        # on a re-triage — that's the model's job, not the ASF's.)
+        assert report.status == "invalid"
+        assert "Staged valid" not in report.triage_summary
 
     def test_no_match_no_model_verdict_still_raises(
         self, db: Any, operator_config_with_llm: OperatorConfig
@@ -1867,7 +2067,95 @@ class TestASFPublicCVEMatchStep:
         with (
             patch("franktheunicorn.security.triage._get_triage_backends", return_value=[backend]),
             patch("franktheunicorn.security.triage.search_cves", return_value=[]),
-            patch("franktheunicorn.security.triage.match_report_to_asf_cve", return_value=None),
+            self._no_asf_matches(),
             pytest.raises(TriageIncompleteError),
         ):
             triage_report(report, None, operator_config_with_llm)
+
+    def test_both_matches_appends_dupe_note_and_stages_valid(
+        self, db: Any, operator_config_with_llm: OperatorConfig
+    ) -> None:
+        """When a report names an allocated id AND title-matches a published CVE,
+        both notes land: the public dupe note AND the allocated "staged valid"
+        note. The allocated match wins the staging decision (valid), but the
+        public context is not lost — the operator sees both CVEs."""
+        import json
+
+        from franktheunicorn.config.models import ProjectConfig
+        from tests.factories import ProjectFactory, SecurityReportFactory
+
+        parse_json = json.dumps({"title": "t", "component": "c", "poc": "p", "impact": "i"})
+        backend = _MockLLMBackend(responses=[parse_json, self._analyze_json(plausible=True)])
+        project = ProjectFactory(owner="apache", repo="spark")
+        # Title matches the public CVE; raw_text names the allocated id.
+        report = SecurityReportFactory(
+            project=project,
+            raw_text="Spark shell command injection via UI (CVE-2026-5001)",
+            title="Spark shell command injection via UI",
+            status="new",
+        )
+        project_config = ProjectConfig(owner="apache", repo="spark")
+
+        with (
+            patch("franktheunicorn.security.triage._get_triage_backends", return_value=[backend]),
+            patch("franktheunicorn.security.triage.search_cves", return_value=[]),
+            self._public_match(cve_id="CVE-2022-33891"),
+            self._allocated_match(cve_id="CVE-2026-5001"),
+        ):
+            triage_report(report, project_config, operator_config_with_llm)
+
+        report.refresh_from_db()
+        # Allocated wins the staging decision.
+        assert report.auto_triage_status == "valid"
+        # Both CVE rows are in cve_matches.
+        cve_ids = {m.get("cve_id") for m in report.cve_matches if isinstance(m, dict)}
+        assert "CVE-2022-33891" in cve_ids  # public
+        assert "CVE-2026-5001" in cve_ids  # allocated
+        # Both notes are in triage_summary.
+        assert "duplicate of CVE-2022-33891" in report.triage_summary
+        assert "CVE-2026-5001" in report.triage_summary
+        assert "Staged valid" in report.triage_summary
+
+    def test_allocated_lookup_stops_at_first_expired_token(
+        self, db: Any, operator_config_with_llm: OperatorConfig
+    ) -> None:
+        """An expired token fails every candidate id the same way — the lookup
+        stops at the first rather than logging one warning per candidate."""
+        import json
+
+        from franktheunicorn.config.models import ProjectConfig
+        from franktheunicorn.security.cve_api import CVETokenExpiredError
+        from tests.factories import ProjectFactory, SecurityReportFactory
+
+        parse_json = json.dumps({"title": "t", "component": "c", "poc": "p", "impact": "i"})
+        backend = _MockLLMBackend(responses=[parse_json, self._analyze_json(plausible=True)])
+        project = ProjectFactory(owner="apache", repo="spark")
+        # Two candidate ids in the text — both would hit the dead token.
+        report = SecurityReportFactory(
+            project=project,
+            raw_text="See CVE-2026-5001 and CVE-2026-5002.",
+            title="",
+            status="new",
+        )
+        project_config = ProjectConfig(owner="apache", repo="spark")
+
+        call_count = 0
+
+        def _fail_with_expired(*args: Any, **kwargs: Any):
+            nonlocal call_count
+            call_count += 1
+            raise CVETokenExpiredError("dead token")
+
+        with (
+            patch("franktheunicorn.security.triage._get_triage_backends", return_value=[backend]),
+            patch("franktheunicorn.security.triage.search_cves", return_value=[]),
+            # No public match, and no network call to /publicjson.
+            patch("franktheunicorn.security.triage.match_report_to_asf_cve", return_value=None),
+            patch("franktheunicorn.security.cve_api.get_token", return_value="dead-token"),
+            patch("franktheunicorn.security.cve_api.fetch_record", side_effect=_fail_with_expired),
+        ):
+            triage_report(report, project_config, operator_config_with_llm)
+
+        # fetch_record called once (stopped at the first expired-token error),
+        # not twice (once per candidate id).
+        assert call_count == 1
