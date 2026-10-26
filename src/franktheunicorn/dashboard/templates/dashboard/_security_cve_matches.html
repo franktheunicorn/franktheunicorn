@@ -14,7 +14,9 @@
         <tbody>
             {% for cve in report.cve_matches %}
             <tr>
-                <td style="white-space: nowrap; font-weight: 600;">{{ cve.cve_id }}</td>
+                <td style="white-space: nowrap; font-weight: 600;">{{ cve.cve_id }}
+                    {% if cve.source == "asf-public" %}<span class="badge badge-asf" title="Matched against the ASF CVE process's published list (cveprocess.apache.org/publicjson)">ASF</span>{% endif %}
+                </td>
                 <td>{% if cve.cvss_score %}{{ cve.cvss_score }}{% else %}&mdash;{% endif %}</td>
                 <td>{{ cve.status|default:"&mdash;" }}</td>
                 <td style="font-size: 0.8rem;">{{ cve.description|truncatewords:30 }}</td>

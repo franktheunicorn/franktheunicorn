@@ -129,6 +129,90 @@ class CVERecord:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class PublicCVE:
+    """One published CVE record from the ASF ``/publicjson`` list."""
+
+    cve_id: str
+    title: str = ""
+    state: str = ""
+    owner: str = ""
+    updated: str = ""
+
+
+def list_public_cves(
+    pmc: str = "",
+    *,
+    base_url: str = DEFAULT_BASE_URL,
+    http_client: httpx.Client | None = None,
+) -> list[PublicCVE]:
+    """List published CVE records from the ASF CVE process service.
+
+    ``GET /publicjson`` is unauthenticated (see ``custom/asf.js::asfpublicjsonlist``
+    in apache/security-vulnogram) and returns every published ASF CVE as
+    ``[{ID, title, state, owner, updated}, ...]``. Filtered to *pmc*
+    (lowercased owner) when given — the matchable set for one project, not
+    the whole ASF. No token: this is the public list, not the per-PMC
+    ``/cve5/list/`` (which needs a browser session frank's Bearer auth cannot
+    produce).
+
+    Returns ``[]`` on transport/parse failure rather than raising — the
+    triage step that calls this treats "no match" and "service unreachable"
+    the same way (the report is not retired on a network blip), and a raised
+    exception would abort the triage run after the parse call was already billed.
+    """
+    pmc = pmc.strip().lower()
+    own_client = http_client is None
+    client = http_client or httpx.Client(timeout=_DEFAULT_TIMEOUT, follow_redirects=False)
+    try:
+        response = client.get(f"{base_url}/publicjson")
+        if response.status_code != 200:
+            logger.warning(
+                "ASF /publicjson returned HTTP %d; cannot match report to published CVEs",
+                response.status_code,
+            )
+            return []
+        docs = response.json()
+    except httpx.TimeoutException:
+        logger.warning("ASF /publicjson timed out after %ds", _DEFAULT_TIMEOUT)
+        return []
+    except (httpx.HTTPError, ValueError):
+        logger.warning("ASF /publicjson request or parse failed", exc_info=True)
+        return []
+    finally:
+        if own_client:
+            client.close()
+
+    if not isinstance(docs, list):
+        logger.warning("ASF /publicjson returned JSON that is not a list")
+        return []
+    matches: list[PublicCVE] = []
+    for doc in docs:
+        if not isinstance(doc, dict):
+            continue
+        owner = str(doc.get("owner", "") or "").strip().lower()
+        if pmc and owner != pmc:
+            continue
+        cve_id = str(doc.get("ID", "") or "").strip().upper()
+        if not _CVE_ID_FULL_RE.match(cve_id):
+            continue
+        matches.append(
+            PublicCVE(
+                cve_id=cve_id,
+                title=str(doc.get("title", "") or ""),
+                state=str(doc.get("state", "") or ""),
+                owner=owner,
+                updated=str(doc.get("updated", "") or ""),
+            )
+        )
+    logger.info(
+        "ASF /publicjson: %d public CVE(s)%s",
+        len(matches),
+        f" for pmc={pmc!r}" if pmc else " (all PMCs)",
+    )
+    return matches
+
+
 def resolve_pmc(project: Project | None, project_config: ProjectConfig | None) -> str:
     """The PMC a project maps to at the CVE process service, or "".
 

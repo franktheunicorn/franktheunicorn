@@ -19,10 +19,12 @@ from franktheunicorn.core.models import CVEAPIToken
 from franktheunicorn.security.cve_api import (
     CVEAPIError,
     CVETokenExpiredError,
+    PublicCVE,
     allocate_cve,
     drop_token,
     fetch_record,
     get_token,
+    list_public_cves,
     resolve_pmc,
     save_token,
     update_record,
@@ -347,3 +349,69 @@ class TestResolvePMC:
 
     def test_no_project_no_config_means_empty(self) -> None:
         assert resolve_pmc(None, None) == ""
+
+
+class TestListPublicCVEs:
+    """``list_public_cves`` reads the unauthenticated ``/publicjson`` list.
+
+    The fixture is transcribed from ``custom/asf.js::asfpublicjsonlist`` in
+    apache/security-vulnogram: an array of ``{ID, title, state, owner, updated}``.
+    """
+
+    def _list_handler(self, docs: list[dict[str, object]]) -> object:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/publicjson"
+            assert "Authorization" not in request.headers  # public, no token
+            return httpx.Response(200, json=docs)
+
+        return handler
+
+    def test_filters_to_pmc_and_normalises_ids(self) -> None:
+        docs = [
+            {
+                "ID": "CVE-2021-38296",
+                "title": "Apache Spark Key Negotiation",
+                "state": "PUBLIC",
+                "owner": "spark",
+            },
+            {
+                "ID": "cve-2022-33891",
+                "title": "Apache Spark shell command injection",
+                "state": "PUBLIC",
+                "owner": "Spark",
+            },
+            {
+                "ID": "CVE-2020-17515",
+                "title": "Airflow deserialization",
+                "state": "PUBLIC",
+                "owner": "airflow",
+            },
+        ]
+        matches = list_public_cves("spark", http_client=_client(self._list_handler(docs)))
+        assert [m.cve_id for m in matches] == ["CVE-2021-38296", "CVE-2022-33891"]
+        assert all(m.owner == "spark" for m in matches)
+        assert isinstance(matches[0], PublicCVE)
+
+    def test_no_pmc_returns_everything_with_a_valid_id(self) -> None:
+        docs = [
+            {"ID": "CVE-2021-38296", "title": "spark", "state": "PUBLIC", "owner": "spark"},
+            {"ID": "not-a-cve", "title": "junk", "state": "PUBLIC", "owner": "spark"},
+        ]
+        matches = list_public_cves("", http_client=_client(self._list_handler(docs)))
+        assert [m.cve_id for m in matches] == ["CVE-2021-38296"]
+
+    def test_empty_list(self) -> None:
+        matches = list_public_cves("spark", http_client=_client(self._list_handler([])))
+        assert matches == []
+
+    def test_non_200_returns_empty(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(503, text="down")
+
+        assert list_public_cves("spark", http_client=_client(handler)) == []
+
+    def test_non_list_json_returns_empty(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"not": "a list"})
+
+        assert list_public_cves("spark", http_client=_client(handler)) == []

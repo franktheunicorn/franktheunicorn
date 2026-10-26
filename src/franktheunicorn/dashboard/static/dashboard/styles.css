@@ -785,6 +785,7 @@ thead th { border-bottom: 2px solid var(--border); }
 .badge-ci.fail { background: var(--red-bg); color: var(--red); }
 .badge-ci.pending { background: var(--yellow-bg); color: var(--yellow); }
 .badge-queued { display: inline-block; background: var(--yellow-bg); color: var(--yellow); padding: 0.05rem 0.35rem; border-radius: 3px; font-weight: 600; font-size: 0.75rem; }
+.badge-asf { display: inline-block; background: var(--card); color: var(--muted); padding: 0.05rem 0.3rem; border-radius: 3px; font-weight: 600; font-size: 0.7rem; border: 1px solid var(--border); margin-left: 0.25rem; }
 .intent-excerpt { color: var(--muted); font-style: italic; }
 
 /* Attachment manifest on the security report page: metadata only. */

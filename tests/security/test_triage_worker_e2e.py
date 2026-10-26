@@ -377,3 +377,62 @@ class TestTriageChainsVersionFollowOn:
             WorkerCommand.objects.filter(security_report=report).values_list("command", flat=True)
         )
         assert cmds == {"run_security_triage"}
+
+    def test_a_valid_report_with_a_fix_branch_queues_fix_landed(self, no_cve_lookup: Any) -> None:
+        """The "verify if fixed" step: a valid report that already has a fix
+        branch (frank's agent pushed one, or the operator recorded one) gets
+        ``check_fix_landed`` queued automatically alongside the version
+        follow-on — the operator sees "did the fix land?" without pressing the
+        button. The complement of the version follow-on: that fires when there
+        is no branch, this fires when there is one."""
+        from franktheunicorn.security.queue import queue_triage
+        from franktheunicorn.worker.commands import process_pending_commands
+
+        config = _operator_config()
+        report = SecurityReportFactory(
+            title="real hole",
+            raw_text="...",
+            parsed_component="core/Foo.scala",
+            fix_branch="fix/real-hole",
+            status="new",
+        )
+        queue_triage(report)
+        with patch(
+            "franktheunicorn.security.triage._call_llm",
+            return_value=dict(_VALID_ANALYSIS),
+        ):
+            assert process_pending_commands(config, limit=1) == 1
+
+        report.refresh_from_db()
+        assert report.auto_triage_status == "valid"
+        cmds = set(
+            WorkerCommand.objects.filter(security_report=report).values_list("command", flat=True)
+        )
+        assert "check_fix_landed" in cmds
+
+    def test_a_valid_report_with_no_fix_branch_does_not_queue_fix_landed(
+        self, no_cve_lookup: Any
+    ) -> None:
+        """No fix branch → no fix-landed check: queuing a command that no-ops
+        is noise in the queue. The version follow-on still fires (no branch
+        means map the hole across versions)."""
+        from franktheunicorn.security.queue import queue_triage
+        from franktheunicorn.worker.commands import process_pending_commands
+
+        config = _operator_config()
+        report = SecurityReportFactory(
+            title="real hole",
+            raw_text="...",
+            parsed_component="core/Foo.scala",
+        )
+        queue_triage(report)
+        with patch(
+            "franktheunicorn.security.triage._call_llm",
+            return_value=dict(_VALID_ANALYSIS),
+        ):
+            assert process_pending_commands(config, limit=1) == 1
+
+        cmds = set(
+            WorkerCommand.objects.filter(security_report=report).values_list("command", flat=True)
+        )
+        assert "check_fix_landed" not in cmds

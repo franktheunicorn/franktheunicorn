@@ -497,6 +497,32 @@ def _run_security_triage(cmd: WorkerCommand, operator_config: OperatorConfig) ->
         else:
             cmd.log += f" follow-on: version_map={vm} verify={verify}"
 
+    # The "verify if fixed" step: a report that already has a fix branch
+    # (frank's agent pushed one, the operator typed one, or branch_scan tied
+    # one) gets the fix-landed check queued automatically, so the operator
+    # sees "did the fix land upstream?" without pressing the button. Not the
+    # complement of the version follow-on above — both can fire when the fix
+    # agent pushed a branch (fix_branch set) but the operator hasn't vouched
+    # (has_confirmed_branch False): the version map asks "where does the hole
+    # live across versions", fix-landed asks "did this branch's fix land".
+    # Git only, so it is cheap; gating on a branch existing keeps no-op
+    # commands out of the queue.
+    if (
+        report.auto_triage_status == "valid"
+        and report.status in ("new", "triaging", "valid")
+        and (report.fix_branch or report.fix_branch_sha or report.has_confirmed_branch)
+    ):
+        from franktheunicorn.security.queue import queue_fix_landed
+
+        queued = queue_fix_landed(report)
+        if queued:
+            cmd.log += " follow-on: fix_landed"
+            logger.info(
+                "Queued fix-landed check for report #%d after triage (branch=%s)",
+                report.pk,
+                report.fix_branch or report.fix_branch_sha or "<confirmed>",
+            )
+
 
 def _verify_security_report(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
     """Send one report to the deep verifier: is the vulnerability actually there?

@@ -12,6 +12,7 @@ from django.test import override_settings
 
 from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig, SecurityTriageConfig
 from franktheunicorn.review.backends.base import BaseLLMBackend
+from franktheunicorn.security.cve_match import ASFPublicCVEMatch
 from franktheunicorn.security.triage import (
     _AnalysisOutcome,
     _safe_json_parse,
@@ -1672,3 +1673,201 @@ class TestClaimedSeverityBackfill:
         assert (parse_only.claimed_severity, parse_only.assessed_severity) == ("high", "high")
         assert (analysed.claimed_severity, analysed.assessed_severity) == ("unknown", "low")
         assert unrated.claimed_severity == "unknown"
+
+
+@pytest.mark.django_db
+class TestASFPublicCVEMatchStep:
+    """The "find CVE" step: a published ASF CVE that matches the report stages
+    ``valid`` (tentatively) and is recorded in ``cve_matches`` with
+    ``source: "asf-public"``. ``status`` stays the operator's field."""
+
+    def _analyze_json(self, plausible: bool = False, expected: bool = False) -> str:
+        import json
+
+        return json.dumps(
+            {
+                "poc_plausible": plausible,
+                "poc_assessment": "looked at it",
+                "is_expected_behavior": expected,
+                "expected_behavior_explanation": "yes" if expected else "",
+                "triage_summary": "Assessed.",
+            }
+        )
+
+    def _patch_match(self, cve_id: str = "CVE-2022-33891", score: float = 0.8):
+        return patch(
+            "franktheunicorn.security.triage.match_report_to_asf_cve",
+            return_value=ASFPublicCVEMatch(
+                cve_id=cve_id,
+                title="Apache Spark shell command injection via Spark UI",
+                score=score,
+                state="PUBLIC",
+            ),
+        )
+
+    def test_match_confirms_model_valid_and_records_cve(
+        self, db: Any, operator_config_with_llm: OperatorConfig
+    ) -> None:
+        import json
+
+        from tests.factories import SecurityReportFactory
+
+        parse_json = json.dumps({"title": "t", "component": "c", "poc": "p", "impact": "i"})
+        # Model read the report and ruled it a real vuln (plausible=True → valid).
+        backend = _MockLLMBackend(responses=[parse_json, self._analyze_json(plausible=True)])
+        report = SecurityReportFactory(
+            raw_text="Spark shell command injection via UI", title="", status="new"
+        )
+
+        with (
+            patch("franktheunicorn.security.triage._get_triage_backends", return_value=[backend]),
+            patch("franktheunicorn.security.triage.search_cves", return_value=[]),
+            self._patch_match(),
+        ):
+            triage_report(report, None, operator_config_with_llm)
+
+        report.refresh_from_db()
+        # The model's valid verdict stands; the ASF match confirms it and the
+        # note is appended so the operator sees the published CVE.
+        assert report.auto_triage_status == "valid"
+        assert any(
+            m.get("cve_id") == "CVE-2022-33891" and m.get("source") == "asf-public"
+            for m in report.cve_matches
+            if isinstance(m, dict)
+        )
+        assert "CVE-2022-33891" in report.triage_summary
+
+    def test_match_does_not_override_model_invalid(
+        self, db: Any, operator_config_with_llm: OperatorConfig
+    ) -> None:
+        """The model read the full report and ruled it a non-vuln; a title
+        match is weaker evidence and must not flip it. The match is still
+        recorded in cve_matches for the operator to see and disagree by hand."""
+        import json
+
+        from tests.factories import SecurityReportFactory
+
+        parse_json = json.dumps({"title": "t", "component": "c", "poc": "p", "impact": "i"})
+        backend = _MockLLMBackend(responses=[parse_json, self._analyze_json(plausible=False)])
+        report = SecurityReportFactory(
+            raw_text="Spark shell command injection via UI", title="", status="new"
+        )
+
+        with (
+            patch("franktheunicorn.security.triage._get_triage_backends", return_value=[backend]),
+            patch("franktheunicorn.security.triage.search_cves", return_value=[]),
+            self._patch_match(),
+        ):
+            triage_report(report, None, operator_config_with_llm)
+
+        report.refresh_from_db()
+        assert report.auto_triage_status == "invalid"
+        assert any(
+            m.get("cve_id") == "CVE-2022-33891" and m.get("source") == "asf-public"
+            for m in report.cve_matches
+            if isinstance(m, dict)
+        )
+        # No ASF "staged valid" note appended over the model's invalid verdict.
+        assert "Staged valid" not in report.triage_summary
+
+    def test_match_does_not_override_model_expected_behavior(
+        self, db: Any, operator_config_with_llm: OperatorConfig
+    ) -> None:
+        """Same guard for ``expected-behavior``: the model said this isn't a
+        vulnerability at all, and a title match doesn't change that."""
+        import json
+
+        from tests.factories import SecurityReportFactory
+
+        parse_json = json.dumps({"title": "t", "component": "c", "poc": "p", "impact": "i"})
+        backend = _MockLLMBackend(responses=[parse_json, self._analyze_json(expected=True)])
+        report = SecurityReportFactory(
+            raw_text="Spark shell command injection via UI", title="", status="new"
+        )
+
+        with (
+            patch("franktheunicorn.security.triage._get_triage_backends", return_value=[backend]),
+            patch("franktheunicorn.security.triage.search_cves", return_value=[]),
+            self._patch_match(),
+        ):
+            triage_report(report, None, operator_config_with_llm)
+
+        report.refresh_from_db()
+        assert report.auto_triage_status == "expected-behavior"
+        assert any(
+            m.get("cve_id") == "CVE-2022-33891" for m in report.cve_matches if isinstance(m, dict)
+        )
+
+    def test_match_respects_operator_ruling_mid_run(
+        self, db: Any, operator_config_with_llm: OperatorConfig
+    ) -> None:
+        import json
+
+        from tests.factories import SecurityReportFactory
+
+        parse_json = json.dumps({"title": "t", "component": "c", "poc": "p", "impact": "i"})
+        # The model read the report and ruled it valid; the operator ruled
+        # invalid while the worker was fetching. The operator wins.
+        backend = _MockLLMBackend(responses=[parse_json, self._analyze_json(plausible=True)])
+        report = SecurityReportFactory(raw_text="Spark shell injection", title="", status="invalid")
+
+        with (
+            patch("franktheunicorn.security.triage._get_triage_backends", return_value=[backend]),
+            patch("franktheunicorn.security.triage.search_cves", return_value=[]),
+            self._patch_match(),
+        ):
+            triage_report(report, None, operator_config_with_llm)
+
+        report.refresh_from_db()
+        # The match is still recorded for the operator to see ...
+        assert any(
+            m.get("cve_id") == "CVE-2022-33891" for m in report.cve_matches if isinstance(m, dict)
+        )
+        # ... the operator's verdict stands ...
+        assert report.status == "invalid"
+        # ... and the ASF match did not append its "Staged valid" note over the ruling.
+        assert "Staged valid" not in report.triage_summary
+
+    def test_match_completes_an_inconclusive_model_run(
+        self, db: Any, operator_config_with_llm: OperatorConfig
+    ) -> None:
+        import json
+
+        from tests.factories import SecurityReportFactory
+
+        # The model returns a parse but no verdict fields — normally raises.
+        backend = _MockLLMBackend(responses=[json.dumps({"title": "t", "component": "c"})])
+        report = SecurityReportFactory(
+            raw_text="Spark shell injection via UI", title="", status="new"
+        )
+
+        with (
+            patch("franktheunicorn.security.triage._get_triage_backends", return_value=[backend]),
+            patch("franktheunicorn.security.triage.search_cves", return_value=[]),
+            self._patch_match(),
+        ):
+            # Would raise TriageIncompleteError without the ASF match; completing
+            # here is the user's "tentatively set validated on a matching CVE".
+            triage_report(report, None, operator_config_with_llm)
+
+        report.refresh_from_db()
+        assert report.auto_triage_status == "valid"
+
+    def test_no_match_no_model_verdict_still_raises(
+        self, db: Any, operator_config_with_llm: OperatorConfig
+    ) -> None:
+        import json
+
+        from franktheunicorn.security.triage import TriageIncompleteError
+        from tests.factories import SecurityReportFactory
+
+        backend = _MockLLMBackend(responses=[json.dumps({"title": "t", "component": "c"})])
+        report = SecurityReportFactory(raw_text="Spark shuffle OOM", title="", status="new")
+
+        with (
+            patch("franktheunicorn.security.triage._get_triage_backends", return_value=[backend]),
+            patch("franktheunicorn.security.triage.search_cves", return_value=[]),
+            patch("franktheunicorn.security.triage.match_report_to_asf_cve", return_value=None),
+            pytest.raises(TriageIncompleteError),
+        ):
+            triage_report(report, None, operator_config_with_llm)
