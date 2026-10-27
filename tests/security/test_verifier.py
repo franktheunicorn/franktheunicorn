@@ -709,39 +709,37 @@ class TestBranchPatternValidation:
 
 
 @pytest.mark.django_db
-class TestAutoVerifyFanOutCap:
-    def test_a_huge_archive_is_refused_rather_than_queueing_thousands(self) -> None:
-        """One tick could otherwise enqueue MAX_ENTRIES reports x (max_branches+1)
-        agent runs at up to 1800s each, serialised through a worker that stops
-        polling PRs meanwhile. Refused, not truncated: verifying an arbitrary 25 of
-        a 200-report archive would be its own kind of wrong."""
+class TestAutoVerifyFanOutNoCap:
+    """The cap is gone — the bulk pool drains a whole archive N-wide.
+
+    The old 25-report wall refused anything bigger, on the theory that a
+    single-threaded worker verifying 200 reports x (max_branches+1) agent runs
+    at 1800s each would stop polling PRs for days. That was right about the
+    single thread and wrong about the answer: the worker is multi-threaded now,
+    each pool thread gets its own git worktree, and a 200-report archive is
+    bounded by the pool, not refused. Refusing was its own kind of wrong —
+    verifying an arbitrary 25 of a 200-report archive tells you about 25.
+    """
+
+    def test_a_large_archive_queues_everything_not_a_cap(self) -> None:
         from franktheunicorn.core.models import WorkerCommand
-        from franktheunicorn.security.zip_import import MAX_AUTO_VERIFY
 
         project = ProjectFactory(owner="apache", repo="spark")
-        result = TestAutoVerifyOnImport()._import(
-            enabled=True, project=project, count=MAX_AUTO_VERIFY + 1
-        )
+        result = TestAutoVerifyOnImport()._import(enabled=True, project=project, count=50)
 
-        assert result.imported == MAX_AUTO_VERIFY + 1
-        assert result.queued_verifications == 0
-        assert str(MAX_AUTO_VERIFY) in result.verify_skipped_reason
-        assert WorkerCommand.objects.filter(command="verify_security_report").count() == 0
+        assert result.imported == 50
+        assert result.queued_verifications == 50
+        assert result.verify_skipped_reason == ""
+        assert WorkerCommand.objects.filter(command="verify_security_report").count() == 50
 
-    def test_an_archive_inside_the_cap_still_queues(self) -> None:
+    def test_a_small_archive_queues_all_of_it(self) -> None:
         from franktheunicorn.core.models import WorkerCommand
-        from franktheunicorn.security.zip_import import MAX_AUTO_VERIFY
 
         project = ProjectFactory(owner="apache", repo="spark")
-        result = TestAutoVerifyOnImport()._import(
-            enabled=True, project=project, count=MAX_AUTO_VERIFY
-        )
+        result = TestAutoVerifyOnImport()._import(enabled=True, project=project, count=3)
 
-        assert result.queued_verifications == MAX_AUTO_VERIFY
-        assert (
-            WorkerCommand.objects.filter(command="verify_security_report").count()
-            == MAX_AUTO_VERIFY
-        )
+        assert result.queued_verifications == 3
+        assert WorkerCommand.objects.filter(command="verify_security_report").count() == 3
 
 
 class TestParseVerdictIsBounded:

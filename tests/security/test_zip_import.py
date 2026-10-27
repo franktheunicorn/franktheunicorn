@@ -938,6 +938,169 @@ class TestImportAutoTriage:
 
 
 @pytest.mark.django_db
+class TestImportAutoVerifyExploit:
+    """The exploit-verify follow-on from a bulk import.
+
+    Mirrors the deep-verifier follow-on, but for the "does it actually fire"
+    question. No report cap: the bulk pool drains it N-wide, and the old
+    25-report wall forced splitting an archive into chunks that no longer need
+    to exist.
+    """
+
+    @patch("franktheunicorn.config.loader.get_operator_config")
+    def test_bulk_import_does_not_exploit_verify_by_default(self, mock_config: MagicMock) -> None:
+        """The box has to be ticked; the config alone never authorises it."""
+        from franktheunicorn.config.models import (
+            AgentCLIReviewerConfig,
+            OperatorConfig,
+            SecurityTriageConfig,
+        )
+
+        mock_config.return_value = OperatorConfig(
+            github_username="testuser",
+            security_triage=SecurityTriageConfig(enabled=True, auto_triage=False),
+            agent_cli_reviewers=[AgentCLIReviewerConfig(name="claude")],
+        )
+
+        result = import_reports_from_zip(make_zip({"a.txt": REPORT_TEXT}))
+
+        assert result.imported == 1
+        assert result.queued_exploit_verifications == 0
+        assert WorkerCommand.objects.filter(command="verify_exploit").count() == 0
+
+    @patch("franktheunicorn.config.loader.get_operator_config")
+    def test_queues_exploit_verification_when_the_caller_opts_in(
+        self, mock_config: MagicMock
+    ) -> None:
+        from franktheunicorn.config.models import (
+            AgentCLIReviewerConfig,
+            OperatorConfig,
+            SecurityTriageConfig,
+        )
+
+        mock_config.return_value = OperatorConfig(
+            github_username="testuser",
+            security_triage=SecurityTriageConfig(enabled=True, auto_triage=False),
+            agent_cli_reviewers=[AgentCLIReviewerConfig(name="claude")],
+        )
+        project = ProjectFactory(owner="apache", repo="spark")
+
+        result = import_reports_from_zip(
+            make_zip({"a.txt": REPORT_TEXT}), project=project, auto_verify_exploit=True
+        )
+
+        assert result.imported == 1
+        assert result.queued_exploit_verifications == 1
+        assert WorkerCommand.objects.filter(command="verify_exploit").count() == 1
+        assert "queued for exploit verification" in result.summary()
+
+    @patch("franktheunicorn.config.loader.get_operator_config")
+    def test_no_report_cap_queues_everything(self, mock_config: MagicMock) -> None:
+        """A 50-report archive queues all 50, not the old 25-report wall.
+
+        The bulk pool (multi-threaded worker) drains it N-wide, so the cap that
+        forced splitting the archive is gone. This test is the regression line:
+        if the cap ever comes back, this fails.
+        """
+        from franktheunicorn.config.models import (
+            AgentCLIReviewerConfig,
+            OperatorConfig,
+            SecurityTriageConfig,
+        )
+
+        mock_config.return_value = OperatorConfig(
+            github_username="testuser",
+            security_triage=SecurityTriageConfig(enabled=True, auto_triage=False),
+            agent_cli_reviewers=[AgentCLIReviewerConfig(name="claude")],
+        )
+        project = ProjectFactory(owner="apache", repo="spark")
+        # Distinct text per entry — the importer dedups on body, so identical
+        # reports collapse to one row and the test would prove nothing.
+        entries = {f"report-{i}.txt": f"{REPORT_TEXT} Case #{i}.\n" for i in range(50)}
+
+        result = import_reports_from_zip(
+            make_zip(entries), project=project, auto_verify_exploit=True
+        )
+
+        assert result.imported == 50
+        assert result.queued_exploit_verifications == 50
+        assert WorkerCommand.objects.filter(command="verify_exploit").count() == 50
+
+    @patch("franktheunicorn.config.loader.get_operator_config")
+    def test_disabled_exploit_verify_says_so(self, mock_config: MagicMock) -> None:
+        from franktheunicorn.config.models import (
+            AgentCLIReviewerConfig,
+            ExploitVerifyConfig,
+            OperatorConfig,
+            SecurityTriageConfig,
+        )
+
+        mock_config.return_value = OperatorConfig(
+            github_username="testuser",
+            security_triage=SecurityTriageConfig(enabled=True, auto_triage=False),
+            agent_cli_reviewers=[AgentCLIReviewerConfig(name="claude")],
+        )
+        mock_config.return_value.security_triage.exploit_verify = ExploitVerifyConfig(enabled=False)
+
+        result = import_reports_from_zip(make_zip({"a.txt": REPORT_TEXT}), auto_verify_exploit=True)
+
+        assert result.imported == 1
+        assert result.queued_exploit_verifications == 0
+        assert "exploit_verify.enabled is false" in result.exploit_skipped_reason
+
+    @patch("franktheunicorn.config.loader.get_operator_config")
+    def test_no_resolvable_reviewer_says_so(self, mock_config: MagicMock) -> None:
+        from franktheunicorn.config.models import (
+            AgentCLIReviewerConfig,
+            OperatorConfig,
+            SecurityTriageConfig,
+            SecurityVerifierConfig,
+        )
+
+        # OperatorConfig seeds default reviewers (claude/codex/pi) when the list
+        # is empty, so an empty list resolves claude just fine. A name nothing
+        # matches is the real "no reviewer" case.
+        mock_config.return_value = OperatorConfig(
+            github_username="testuser",
+            security_triage=SecurityTriageConfig(
+                enabled=True,
+                auto_triage=False,
+                verifier=SecurityVerifierConfig(enabled=True, reviewer="nobody"),
+            ),
+            agent_cli_reviewers=[AgentCLIReviewerConfig(name="claude")],
+        )
+
+        result = import_reports_from_zip(make_zip({"a.txt": REPORT_TEXT}), auto_verify_exploit=True)
+
+        assert result.imported == 1
+        assert result.queued_exploit_verifications == 0
+        assert "no agent_cli_reviewers entry named 'nobody'" in result.exploit_skipped_reason
+
+    @patch("franktheunicorn.config.loader.get_operator_config")
+    def test_reports_without_a_project_are_skipped(self, mock_config: MagicMock) -> None:
+        from franktheunicorn.config.models import (
+            AgentCLIReviewerConfig,
+            OperatorConfig,
+            SecurityTriageConfig,
+        )
+
+        mock_config.return_value = OperatorConfig(
+            github_username="testuser",
+            security_triage=SecurityTriageConfig(enabled=True, auto_triage=False),
+            agent_cli_reviewers=[AgentCLIReviewerConfig(name="claude")],
+        )
+
+        result = import_reports_from_zip(
+            make_zip({"a.txt": REPORT_TEXT}),
+            auto_verify_exploit=True,  # no project
+        )
+
+        assert result.imported == 1
+        assert result.queued_exploit_verifications == 0
+        assert "no project" in result.exploit_skipped_reason
+
+
+@pytest.mark.django_db
 class TestBudgetAndHonesty:
     """Two holes the single-transaction / scan-expansion rework opened."""
 

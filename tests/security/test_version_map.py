@@ -417,18 +417,14 @@ class TestVersionMapImport:
 
     def test_queues_one_map_per_imported_report_with_no_cap(self) -> None:
         from franktheunicorn.core.models import WorkerCommand
-        from franktheunicorn.security.zip_import import MAX_AUTO_VERIFY
 
         project = ProjectFactory()
-        result = self._import(count=MAX_AUTO_VERIFY + 1, project=project)
+        result = self._import(count=50, project=project)
 
-        assert result.imported == MAX_AUTO_VERIFY + 1
-        assert result.queued_version_maps == MAX_AUTO_VERIFY + 1
+        assert result.imported == 50
+        assert result.queued_version_maps == 50
         assert result.version_map_skipped_reason == ""
-        assert (
-            WorkerCommand.objects.filter(command="map_report_versions").count()
-            == MAX_AUTO_VERIFY + 1
-        )
+        assert WorkerCommand.objects.filter(command="map_report_versions").count() == 50
         assert "queued for version mapping" in result.summary()
 
     def test_not_asking_queues_nothing(self) -> None:

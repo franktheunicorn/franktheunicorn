@@ -1090,6 +1090,16 @@ class SecurityReport(models.Model):
     sandbox_result = models.TextField(blank=True, default="")
     sandbox_verdict = models.CharField(max_length=20, blank=True, default="")
 
+    # Exploit verification (optional follow-up). A coding agent attempts to
+    # reproduce the exploit — set up the preconditions, run the PoC, observe.
+    # Sibling of the sandbox (which runs parsed_poc as a bare script) and the
+    # deep verifier (which reads the code without running anything). Driven by
+    # the "Attempt to verify exploit" button or --verify-exploit at import.
+    exploit_requested = models.BooleanField(default=False)
+    exploit_verdict = models.CharField(max_length=20, blank=True, default="")
+    exploit_result = models.TextField(blank=True, default="")
+    exploit_checked_at = models.DateTimeField(null=True, blank=True)
+
     # CVE dedup — against the *public* record.
     cve_matches = models.JSONField(default=list, blank=True)
     matched_cve_id = models.CharField(max_length=50, blank=True, default="")

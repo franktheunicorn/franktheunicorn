@@ -418,10 +418,49 @@
                 Verify likely introduction from git history
             </button>
         </div>
+        <div>
+            <button class="action-btn"
+                    hx-post="{% url 'dashboard:security_verify_exploit' report.pk %}"
+                    hx-target="#exploit-result"
+                    hx-swap="innerHTML"
+                    hx-confirm="Attempt to reproduce the exploit? This runs a coding agent over a checkout on the default branch — it sets up the preconditions, runs the PoC, and observes. Minutes, and it may run code.">
+                🧪 Attempt to verify exploit
+            </button>
+        </div>
     </div>
     <div id="verify-result"></div>
     <div id="version-map-result"></div>
     <div id="introduction-result"></div>
+    <div id="exploit-result">
+        {% if report.exploit_requested %}
+        <div class="exploit-summary">
+            <h3>Exploit verification</h3>
+            <p>
+                <strong>Verdict:</strong>
+                {% if report.exploit_verdict == "reproduced" %}
+                <span class="badge badge-danger">reproduced</span>
+                {% elif report.exploit_verdict == "not-reproduced" %}
+                <span class="badge badge-success">not-reproduced</span>
+                {% elif report.exploit_verdict == "inconclusive" %}
+                <span class="badge badge-warning">inconclusive</span>
+                {% elif report.exploit_verdict == "error" %}
+                <span class="badge badge-warning">error</span>
+                {% else %}
+                <span class="badge">{{ report.exploit_verdict|default:"(none)" }}</span>
+                {% endif %}
+                {% if report.exploit_checked_at %}
+                <span class="muted">at {{ report.exploit_checked_at|date:"Y-m-d H:i" }}</span>
+                {% endif %}
+            </p>
+            {% if report.exploit_result %}
+            <details>
+                <summary>Agent output</summary>
+                <pre class="verify-evidence">{{ report.exploit_result }}</pre>
+            </details>
+            {% endif %}
+        </div>
+        {% endif %}
+    </div>
 
     {% if report.introduced_commit %}
     <div class="introduction-summary">

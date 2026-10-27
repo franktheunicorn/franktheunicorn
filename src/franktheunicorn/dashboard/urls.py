@@ -243,6 +243,13 @@ urlpatterns = [
         views.security_report_verify,
         name="security_verify",
     ),
+    # Exploit verification: an agent attempts to reproduce the exploit on the
+    # default branch — set up the preconditions, run the PoC, observe.
+    path(
+        "security/<int:report_id>/verify-exploit/",
+        views.security_report_verify_exploit,
+        name="security_verify_exploit",
+    ),
     # One-click fix: a Cursor cloud agent applies the scanner's patch, scrubs
     # the wording, and pushes an innocuously-named branch to the fork. The
     # refresh asks the API and the fork where the run got to.

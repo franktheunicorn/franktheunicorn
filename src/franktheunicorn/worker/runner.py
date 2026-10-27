@@ -275,6 +275,30 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
         INTERACTIVE_POLL_SECONDS,
     )
 
+    # The bulk pool: N threads, each in its own checkout lane, draining everything
+    # below interactive priority. This is what makes a large import with --verify
+    # feasible — a 142-report archive at one thread is days of serial agent time;
+    # at N it's a fraction of that, and the poll cycle keeps running on the main
+    # thread because the pool is separate. See WorkerPoolConfig for the knobs.
+    pool_concurrency = max(1, operator_config.worker_pool.concurrency)
+    stop_pool = threading.Event()
+    pool_threads: list[threading.Thread] = []
+    for i in range(pool_concurrency):
+        t = threading.Thread(
+            target=_bulk_drain_loop,
+            args=(operator_config, stop_pool, i),
+            name=f"bulk-commands-{i}",
+            daemon=True,
+        )
+        t.start()
+        pool_threads.append(t)
+    logger.info(
+        "Bulk command pool started: %d thread(s), each in its own checkout lane "
+        "(bulk-0..bulk-%d). Large imports drain N-wide instead of one-at-a-time.",
+        pool_concurrency,
+        pool_concurrency - 1,
+    )
+
     try:
         while True:
             # A cycle failure (e.g. transient "database is locked" from the
@@ -305,22 +329,26 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
             # web-triggered actions responsive even when poll_interval is
             # several minutes.
             #
-            # Drain time counts against the window: a bulk row is minutes
-            # (a full re-review sweep is ~20 per PR), so a window that only
-            # counted its sleeps would stay open across the entire backlog
-            # and the worker would not poll again for hours — fresh PRs sat
-            # unreviewed while stale ones were re-reviewed. Counting it
-            # bounds a window to its short commands plus at most one long
-            # command that overruns the budget, and the next poll follows.
+            # Interactive-only since the bulk pool landed: the pool threads
+            # handle everything below PRIORITY_INTERACTIVE, so this window only
+            # helps the interactive thread when it is busy with a long command
+            # and another button press lands. Drain time still counts against
+            # the window so a long interactive command can't wedge the next
+            # poll behind it.
+            from franktheunicorn.security.queue import PRIORITY_INTERACTIVE
+
             command_poll_interval = 5
             elapsed = 0.0
             while elapsed < poll_interval:
                 window_start = time.monotonic()
                 _drain_worker_commands(
                     operator_config,
-                    # Bulk rows drain here, bounded by the window: short
-                    # commands pack into it, one long command overruns and
-                    # the window ends. The in-cycle drains stay interactive.
+                    # Interactive-only: the bulk pool (separate threads) handles
+                    # everything below PRIORITY_INTERACTIVE, so this in-cycle window
+                    # only helps the interactive thread when it is busy with a long
+                    # command and another button press lands. Without this bound the
+                    # window would grab a bulk row and wedge the next poll behind it.
+                    min_priority=PRIORITY_INTERACTIVE,
                     # The budget is what's LEFT of the window — a fresh full
                     # budget per drain would let the backlog stretch the
                     # window to nearly twice the interval.
@@ -364,6 +392,22 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
                 logger.info(
                     "Interactive command still running at shutdown; leaving it to the "
                     "next worker's stuck-command sweep."
+                )
+            # The bulk pool gets the same treatment as the interactive thread:
+            # signal, join with a short timeout, and leave anything still running
+            # to the next worker's stuck-command sweep. Each pool thread holds its
+            # own checkout lane (a git worktree); a run abandoned mid-flight leaves
+            # the worktree behind, but it is rebuilt on demand by the next pool
+            # thread that needs it.
+            stop_pool.set()
+            for t in pool_threads:
+                t.join(timeout=BULK_POOL_SHUTDOWN_SECONDS)
+            alive = [t for t in pool_threads if t.is_alive()]
+            if alive:
+                logger.info(
+                    "%d bulk pool thread(s) still running at shutdown; leaving them to "
+                    "the next worker's stuck-command sweep.",
+                    len(alive),
                 )
         # Close each unique client exactly once (mock mode reuses one instance).
         for c in {id(v): v for v in clients.values()}.values():
@@ -1461,9 +1505,10 @@ def _drain_worker_commands(
     those drains exist so operator clicks don't wait behind the cycle, and a
     bulk row (a 577-command re-review sweep) takes exactly as long as the
     work it is trying to jump — claimed here it wedges the cycle for hours
-    between polls. Bulk rows drain through the poll-loop's sleep window,
-    whose ``deadline_seconds`` bounds each window to its short commands plus
-    at most one long command that overruns the budget.
+    between polls. Bulk rows drain through the bulk pool (separate threads,
+    each in its own checkout lane); the sleep-window drain is interactive-only
+    now, and its ``deadline_seconds`` bounds each window to its short commands
+    plus at most one long command that overruns the budget.
     """
     if operator_config is None:
         return
@@ -1541,6 +1586,69 @@ def _interactive_drain_loop(operator_config: OperatorConfig, stop: threading.Eve
                 # open it is an idle SQLite handle held across the cycle's writes.
                 connection.close()
             stop.wait(INTERACTIVE_POLL_SECONDS)
+
+
+#: How often each bulk-pool thread looks for work. Longer than the interactive
+#: thread's 2s on purpose: the pool is for backlog that takes minutes per item,
+#: so a tighter poll just adds SELECTs without moving the queue faster.
+BULK_POLL_SECONDS = 5
+
+#: How long shutdown waits for in-flight pool commands. Same reasoning as the
+#: interactive thread's join: long enough for a short command to finish, short
+#: enough that Ctrl-C still feels like Ctrl-C. A long verification that overruns
+#: is abandoned in `running` and recovered by the next worker's stuck sweep.
+BULK_POOL_SHUTDOWN_SECONDS = 30
+
+
+def _bulk_drain_loop(
+    operator_config: OperatorConfig, stop: threading.Event, lane_index: int
+) -> None:
+    """Run bulk WorkerCommands continuously, each pool thread in its own lane.
+
+    The pool is what makes a large import with --verify feasible: a 142-report
+    archive at one-thread is days of serial agent time; at N threads it's a
+    fraction of that, and the poll cycle keeps running on the main thread because
+    the pool is separate. Each thread gets its own checkout lane
+    (``bulk-<lane_index>``), so concurrent verifications on the same repo widen
+    to separate git worktrees and don't clobber each other's ``git checkout``.
+
+    ``max_priority=PRIORITY_INTERACTIVE`` is the whole point: a pool thread picks
+    up only bulk work, so it never steals a button press the interactive thread
+    is meant to answer within seconds. Safe alongside the main and interactive
+    drains because the claim is the same atomic ``pending → running`` flip.
+    Never raises: a pool thread dying silently would be worse than the delay.
+    """
+    from django.db import connection
+
+    from franktheunicorn.review.tool_executor import workspace_lane
+    from franktheunicorn.security.queue import PRIORITY_INTERACTIVE
+    from franktheunicorn.worker.commands import process_pending_commands
+
+    try:
+        with workspace_lane(f"bulk-{lane_index}"):
+            while not stop.is_set():
+                try:
+                    processed = process_pending_commands(
+                        operator_config, max_priority=PRIORITY_INTERACTIVE
+                    )
+                    if processed:
+                        logger.info("Bulk pool lane %d: ran %d command(s)", lane_index, processed)
+                except Exception:
+                    logger.exception("Bulk command drain failed; continuing")
+                finally:
+                    # Per-thread connection, and a command can run for minutes. Left
+                    # open it is an idle SQLite handle held across other threads' writes.
+                    connection.close()
+                stop.wait(BULK_POLL_SECONDS)
+    except BaseException:
+        # The inner loop catches Exception; this is for anything that escapes the
+        # with-block (workspace_lane entry, or a BaseException like SystemExit). A
+        # pool thread dying silently drops throughput to N-1 with no log, so log
+        # it loud before letting the thread go.
+        logger.critical(
+            "Bulk pool lane %d died; throughput dropped to %d", lane_index, exc_info=True
+        )
+        raise
 
 
 def _run_cycle(

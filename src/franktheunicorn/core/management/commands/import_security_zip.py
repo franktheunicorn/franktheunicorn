@@ -48,8 +48,20 @@ class Command(BaseCommand):
                 "Queue the deep verifier for every imported report — an agent reads "
                 "the code and says whether the vulnerability is actually there, once "
                 "per active branch. Off by default and more expensive than --triage: "
-                "a full agent run per report per branch. Needs "
-                "security_triage.verifier.enabled."
+                "a full agent run per report per branch. No report cap — the bulk pool "
+                "drains it N-wide. Needs security_triage.verifier.enabled."
+            ),
+        )
+        parser.add_argument(
+            "--verify-exploit",
+            action="store_true",
+            help=(
+                "Queue the exploit verifier for every imported report — an agent "
+                "attempts to reproduce the exploit on the default branch (set up the "
+                "preconditions, run the PoC, observe). Off by default and the most "
+                "expensive: one agent run per report that may run code. No report cap — "
+                "the bulk pool drains it N-wide. Needs "
+                "security_triage.exploit_verify.enabled."
             ),
         )
         parser.add_argument(
@@ -101,6 +113,7 @@ class Command(BaseCommand):
             project=project,
             auto_triage=bool(options.get("triage")),
             auto_verify=bool(options.get("verify")),
+            auto_verify_exploit=bool(options.get("verify_exploit")),
             auto_verify_versions=bool(options.get("verify_versions")),
             auto_find_introduction=bool(options.get("find_introduction")),
             require_security_content=not options.get("no_filter"),
@@ -143,6 +156,10 @@ class Command(BaseCommand):
         if options.get("verify") and result.verify_skipped_reason:
             self.stdout.write(
                 self.style.WARNING(f"  Not verified: {result.verify_skipped_reason}.")
+            )
+        if options.get("verify_exploit") and result.exploit_skipped_reason:
+            self.stdout.write(
+                self.style.WARNING(f"  Not exploit-verified: {result.exploit_skipped_reason}.")
             )
         if options.get("verify_versions") and result.version_map_skipped_reason:
             self.stdout.write(

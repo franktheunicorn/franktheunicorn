@@ -78,6 +78,16 @@ def queue_verification(report: SecurityReport, *, priority: int = PRIORITY_BULK)
     return queue_command("verify_security_report", report=report, priority=priority)
 
 
+def queue_exploit_verification(report: SecurityReport, *, priority: int = PRIORITY_BULK) -> bool:
+    """Queue the exploit verifier: attempt to reproduce the exploit.
+
+    Sibling of :func:`queue_verification`. Same door, same dedup — a double-click
+    is one run, not two agent attempts. Bulk by default (an import ticks the box
+    for the whole archive); interactive when the detail-page button presses it.
+    """
+    return queue_command("verify_exploit", report=report, priority=priority)
+
+
 def queue_version_map(report: SecurityReport, *, priority: int = PRIORITY_BULK) -> bool:
     """Queue the cheap version-mapper: cited files and whether the patch applies.
 

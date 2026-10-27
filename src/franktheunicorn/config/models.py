@@ -1699,6 +1699,62 @@ class SecurityVerifierConfig(BaseModel):
     workspace_subdir: str = "security-verify"
 
 
+class ExploitVerifyConfig(BaseModel):
+    """Config for the exploit verifier: does the reported exploit actually fire?
+
+    A sibling of the deep verifier that answers a different question. The deep
+    verifier reads the code and says whether the vulnerability is *there*. This
+    puts a coding agent in the checkout and asks it to actually *reproduce* the
+    exploit — set up the preconditions the report describes, run the proof of
+    concept, and observe whether the vulnerability fires. One agent run on the
+    default branch, not per-branch: "is this exploitable in the code as it
+    stands" is a single question, and the per-branch version of it is the deep
+    verifier's job.
+
+    Sibling of the sandbox too. The sandbox runs ``parsed_poc`` verbatim as a
+    shell script in a network-less container — cheap, dumb, and exactly what the
+    reporter wrote. This hands the whole report to an agent that can read the
+    code, build the preconditions the report only *describes*, and decide
+    whether the exploit is reachable. Use both: the sandbox is the cheap
+    first cut, this is the expensive second opinion.
+
+    Borrows ``verifier.reviewer`` for the CLI and remote config — one
+    description of how to reach the box the agent runs on, not two. ``model``
+    overrides the reviewer's model; empty means "use the verifier's", so a
+    stronger model for exploitation doesn't force a stronger model for the
+    read-only verifier.
+
+    ``enabled`` defaults True for the same reason ``verifier.enabled`` does:
+    nothing here runs until a button press or an explicit opt-in at import, and
+    a second flag in front of those protected nothing they don't already protect.
+    """
+
+    enabled: bool = True
+    #: Override the reviewer's model. Empty means "use the verifier's model".
+    model: str = ""
+    #: Appended to the agent's argv, like ``verifier.extra_args``.
+    extra_args: list[str] = Field(default_factory=list)
+    #: One agent run, one branch, so the budget is the same as a single verifier
+    #: branch. A real attempt to reproduce can run the code, so leave room.
+    timeout_seconds: int = 1800
+    #: How much of the report to hand the agent. Same default as the verifier.
+    max_report_chars: int = 12_000
+    #: Extra instructions for the exploit-verifying agent, from the operator.
+    #: Appended after the report block, same ordering rule as the verifier's.
+    prompt_addendum: str = ""
+    #: Where the exploit checkout lives. A sibling of the verifier's, so a pool
+    #: thread running both widens each to its own worktree (``lane_subdir``).
+    workspace_subdir: str = "security-exploit"
+    #: Whether to ``git clean -xdff`` (remove ignored files too) before each run.
+    #: Defaults True — unlike the read-only verifier, this agent *runs code*, so
+    #: a stale ``.so`` or generated source left by a prior branch/report can swing
+    #: a reproduced/not-reproduced verdict. The verifier defaults False because it
+    #: reads source and gigabytes of build output per branch switch is not free on a
+    #: Spark-sized tree; here the agent builds and runs, so a clean tree is the
+    #: cheaper mistake to make.
+    fresh_worktree: bool = True
+
+
 class SecurityDuplicateConfig(BaseModel):
     """Config for "have I already got this one?" — see ``security.duplicates``.
 
@@ -1967,6 +2023,7 @@ class SecurityTriageConfig(BaseModel):
     #: attacker wrote. See the class docstring.
     sandbox_enabled: bool = False
     verifier: SecurityVerifierConfig = Field(default_factory=SecurityVerifierConfig)
+    exploit_verify: ExploitVerifyConfig = Field(default_factory=ExploitVerifyConfig)
     duplicates: SecurityDuplicateConfig = Field(default_factory=SecurityDuplicateConfig)
     fix_agent: SecurityFixAgentConfig = Field(default_factory=SecurityFixAgentConfig)
     branch_scan: SecurityBranchScanConfig = Field(default_factory=SecurityBranchScanConfig)
@@ -2131,6 +2188,35 @@ class JudgeConfig(BaseModel):
     max_reask: int = 5
 
 
+class WorkerPoolConfig(BaseModel):
+    """How many bulk commands the worker runs at once.
+
+    The worker used to be single-threaded: one command at a time, drained in the
+    poll cycle's sleep window, so a 142-report verify import was days of serial
+    agent time and parked PR polling the whole while. The pool runs N commands
+    concurrently, each in its own checkout lane (a linked git worktree, via
+    ``workspace_lane``), so concurrent verifications on the same repo don't
+    clobber each other's ``git checkout`` of different branches.
+
+    The main thread keeps running the poll cycle on the default lane; the
+    interactive thread keeps handling button presses on the ``force-run`` lane;
+    the pool handles everything else on ``bulk-0``..``bulk-N`` lanes. The atomic
+    ``pending → running`` claim (``_claim_command``) is already safe across
+    threads, so the pool is additive — set ``concurrency: 1`` to get the old
+    single-threaded behaviour back.
+
+    This is what makes a large import with ``--verify`` feasible: the import
+    queues every report (no 25-report cap), and the pool drains them at N-wide
+    instead of one-at-a-time. The poll cycle keeps running on the main thread, so
+    PR polling is not parked while the backlog drains.
+    """
+
+    #: How many bulk commands run at once. 1 preserves the old single-threaded
+    #: behaviour. 0 is treated as 1 — there is no "no pool" mode; the pool is the
+    #: worker. Each thread holds its own DB connection and checkout lane.
+    concurrency: int = 3
+
+
 class OperatorConfig(BaseModel):
     """Top-level operator config loaded from operator.yaml."""
 
@@ -2172,6 +2258,7 @@ class OperatorConfig(BaseModel):
     perplexity: PerplexityConfig = Field(default_factory=PerplexityConfig)
     fine_tuning: FineTuningConfig = Field(default_factory=FineTuningConfig)
     security_triage: SecurityTriageConfig = Field(default_factory=SecurityTriageConfig)
+    worker_pool: WorkerPoolConfig = Field(default_factory=WorkerPoolConfig)
     zombie_queue: ZombieQueueConfig = Field(default_factory=ZombieQueueConfig)
     merge_intent: MergeIntentConfig = Field(default_factory=MergeIntentConfig)
     # Multiple LLM backends can run in parallel. Each produces findings

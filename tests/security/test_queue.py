@@ -14,6 +14,7 @@ from franktheunicorn.security.queue import (
     PRIORITY_INTERACTIVE,
     cancel_pending_for_reports,
     queue_branch_sweep,
+    queue_exploit_verification,
     queue_fix_landed,
     queue_triage,
     queue_triage_if_enabled,
@@ -326,3 +327,35 @@ class TestFixLandedQueue:
         cmd = WorkerCommand.objects.get(command="check_fix_landed")
         assert cmd.security_report == report
         assert cmd.priority == PRIORITY_INTERACTIVE
+
+
+@pytest.mark.django_db
+class TestExploitVerificationQueue:
+    """The per-report "Attempt to verify exploit" button's door.
+
+    Same door as the deep verifier — a double-click is one agent attempt, not
+    two. Bulk by default (an import ticks the box for the whole archive);
+    interactive when the detail-page button presses it.
+    """
+
+    def test_one_click_is_one_command_at_bulk_priority(self) -> None:
+        report = SecurityReportFactory()
+        assert queue_exploit_verification(report) is True
+        assert queue_exploit_verification(report) is False
+        cmd = WorkerCommand.objects.get(command="verify_exploit")
+        assert cmd.security_report == report
+        assert cmd.priority == PRIORITY_BULK
+
+    def test_the_detail_page_button_uses_interactive_priority(self) -> None:
+        report = SecurityReportFactory()
+        assert queue_exploit_verification(report, priority=PRIORITY_INTERACTIVE) is True
+        cmd = WorkerCommand.objects.get(command="verify_exploit")
+        assert cmd.priority == PRIORITY_INTERACTIVE
+
+    def test_requeues_after_the_previous_run_finished(self) -> None:
+        report = SecurityReportFactory()
+        queue_exploit_verification(report)
+        WorkerCommand.objects.filter(command="verify_exploit").update(status="completed")
+
+        assert queue_exploit_verification(report) is True
+        assert WorkerCommand.objects.filter(command="verify_exploit").count() == 2

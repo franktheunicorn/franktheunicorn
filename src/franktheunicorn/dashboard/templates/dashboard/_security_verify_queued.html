@@ -5,13 +5,24 @@
 <div class="verify-result error-note">{{ blocked }}</div>
 {% elif created %}
 <div class="verify-result queued-note">
+    {% if exploit %}
+    Exploit verification queued. The agent will attempt to reproduce the
+    exploit on the default branch against this report — set up the
+    preconditions, run the PoC, observe. Expect minutes. Reload to see the
+    verdict.
+    {% else %}
     Verification queued. The agent will check
     {% if verifier %}the default branch plus up to {{ verifier.max_branches }} active
     version branch(es){% else %}each active branch{% endif %}
     against this report — expect minutes per branch. Reload to see the verdicts.
+    {% endif %}
 </div>
 {% else %}
 <div class="verify-result queued-note">
+    {% if exploit %}
+    An exploit verification is already running for this report. Reload to see it land.
+    {% else %}
     A verification is already running for this report. Reload to see it land.
+    {% endif %}
 </div>
 {% endif %}

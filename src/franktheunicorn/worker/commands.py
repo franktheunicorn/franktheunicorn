@@ -112,6 +112,7 @@ def process_pending_commands(
     *,
     limit: int | None = None,
     min_priority: int | None = None,
+    max_priority: int | None = None,
     deadline_seconds: float | None = None,
 ) -> int:
     """Run pending WorkerCommands, best first, up to *limit* of them.
@@ -123,6 +124,12 @@ def process_pending_commands(
     *min_priority* skips anything below it. That is what makes the worker's
     interactive thread worth having: it must not pick up a bulk row, because a
     bulk row takes exactly as long as the poll cycle it is trying to jump.
+
+    *max_priority* skips anything at or above it (exclusive upper bound). That is
+    what makes the bulk pool worth having: a pool thread picks up only bulk work
+    (``priority < PRIORITY_INTERACTIVE``) so it never steals a button press the
+    interactive thread is meant to answer within seconds. None (the default)
+    keeps the old behaviour — no upper bound.
 
     *deadline_seconds* stops *claiming new commands* once that much wall time
     has passed since the call started. The command already running when the
@@ -153,6 +160,8 @@ def process_pending_commands(
         pending = WorkerCommand.objects.filter(status="pending")
         if min_priority is not None:
             pending = pending.filter(priority__gte=min_priority)
+        if max_priority is not None:
+            pending = pending.filter(priority__lt=max_priority)
         # Circuit breaker: when no triage backend is alive, leave triage
         # commands pending rather than burning through a backlog of them — each
         # would fail identically (403 key / Ollama down) and bill nothing. Other
@@ -305,18 +314,18 @@ def _claim_command(cmd_id: int) -> WorkerCommand | None:
     """Atomically transition a command from pending → running.
 
     Returns the locked row, or ``None`` if another worker already grabbed it.
+    The conditional UPDATE (``WHERE status='pending'``) is the whole guarantee
+    on SQLite, where ``select_for_update`` is a no-op and the multi-threaded
+    bulk pool can have N threads racing for the same row; on Postgres it is
+    belt-and-suspenders with the row lock. The rowcount tells us who won.
     """
     with transaction.atomic():
-        try:
-            cmd = WorkerCommand.objects.select_for_update().get(pk=cmd_id)
-        except WorkerCommand.DoesNotExist:
+        updated = WorkerCommand.objects.filter(pk=cmd_id, status="pending").update(
+            status="running", started_at=timezone.now()
+        )
+        if updated != 1:
             return None
-        if cmd.status != "pending":
-            return None
-        cmd.status = "running"
-        cmd.started_at = timezone.now()
-        cmd.save(update_fields=["status", "started_at"])
-        return cmd
+        return WorkerCommand.objects.get(pk=cmd_id)
 
 
 def _dispatch(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
@@ -326,6 +335,7 @@ def _dispatch(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
         "run_security_sandbox": _run_security_sandbox,
         "run_security_triage": _run_security_triage,
         "verify_security_report": _verify_security_report,
+        "verify_exploit": _verify_exploit,
         "map_report_versions": _map_report_versions,
         "find_report_introduction": _find_report_introduction,
         "poll_security_rechecks": _poll_security_rechecks,
@@ -551,6 +561,30 @@ def _verify_security_report(cmd: WorkerCommand, operator_config: OperatorConfig)
         # for `enabled: false`, which sends the operator hunting for a bug.
         logger.info(
             "Verification for report #%s did not run: %s", cmd.security_report.pk, run.error
+        )
+
+
+def _verify_exploit(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
+    """Attempt to reproduce one report's exploit: does it actually fire?
+
+    Sibling of the deep verifier that answers a different question. The deep
+    verifier reads the code and says whether the vulnerability is there; this
+    puts a coding agent in the checkout and asks it to set up the preconditions,
+    run the PoC, and observe. One agent run on the default branch, not per-branch.
+    """
+    if cmd.security_report is None:
+        msg = "verify_exploit requires a security_report target"
+        raise ValueError(msg)
+
+    from franktheunicorn.security.exploit_verify import verify_exploit
+
+    run = verify_exploit(cmd.security_report, operator_config)
+    cmd.log = run.summary_line()
+    if run.error:
+        logger.info(
+            "Exploit verification for report #%s did not run: %s",
+            cmd.security_report.pk,
+            run.error,
         )
 
 

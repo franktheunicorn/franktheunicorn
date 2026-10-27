@@ -63,12 +63,6 @@ logger = logging.getLogger(__name__)
 # be told rather than have the box swap itself to death.
 MAX_ENTRIES = 2_000
 
-#: How many reports one import may queue for deep verification. Far below
-#: MAX_ENTRIES on purpose: a verification is (max_branches + 1) agent runs at up to
-#: timeout_seconds each, so the whole-archive case is thousands of hours of agent
-#: time from one checkbox, serialised through a worker that stops polling PRs
-#: meanwhile. A review bound, like the CSV export's row cap — not a memory one.
-MAX_AUTO_VERIFY = 25
 MAX_ENTRY_BYTES = 4 * 1024 * 1024  # 4 MiB of text is a very long report
 MAX_TOTAL_BYTES = 128 * 1024 * 1024
 
@@ -183,6 +177,8 @@ class ZipImportResult:
     queued_triage: int = 0
     #: Deep-verification runs queued by this import (``auto_verify``).
     queued_verifications: int = 0
+    #: Exploit-verification runs queued by this import (``auto_verify_exploit``).
+    queued_exploit_verifications: int = 0
     #: Git-history dating runs queued by this import (``auto_find_introduction``).
     queued_introduction_scans: int = 0
     #: Why none were queued, when the caller asked for them.
@@ -193,6 +189,8 @@ class ZipImportResult:
     #: Why an explicitly requested verification didn't happen. Same reasoning as
     #: ``triage_skipped_reason``: the caller asked, so silence is a wrong answer.
     verify_skipped_reason: str = ""
+    #: Why an explicitly requested exploit verification didn't happen.
+    exploit_skipped_reason: str = ""
     #: Why an explicitly requested version-map didn't happen.
     version_map_skipped_reason: str = ""
     error: str = ""
@@ -251,6 +249,8 @@ class ZipImportResult:
             parts.append(f"{self.queued_triage} queued for triage")
         if self.queued_verifications:
             parts.append(f"{self.queued_verifications} queued for verification")
+        if self.queued_exploit_verifications:
+            parts.append(f"{self.queued_exploit_verifications} queued for exploit verification")
         if self.queued_version_maps:
             parts.append(f"{self.queued_version_maps} queued for version mapping")
         if self.queued_introduction_scans:
@@ -273,6 +273,7 @@ def import_reports_from_zip(
     project: Project | None = None,
     auto_triage: bool = False,
     auto_verify: bool = False,
+    auto_verify_exploit: bool = False,
     auto_verify_versions: bool = False,
     auto_find_introduction: bool = False,
     require_security_content: bool = True,
@@ -319,9 +320,15 @@ def import_reports_from_zip(
 
     ``auto_verify_versions`` queues the cheap version-mapper instead (or as well):
     git ls-tree of cited files, plus ``git apply --check`` of any proposed
-    patch, on every active release branch. No agent, no 25-report cap, no branch
+    patch, on every active release branch. No agent, no report cap, no branch
     count cap (branch_active_within_days still applies).
     That is the box to tick on a 143-report archive.
+
+    ``auto_verify_exploit`` queues the exploit verifier (``security.exploit_verify``)
+    for every report that imported — a coding agent that attempts to reproduce
+    the exploit, not just read the code. Sibling of ``auto_verify`` and more
+    expensive per report (one agent run that may run code), so still opt-in. No
+    report cap: the bulk pool drains it N-wide.
 
     ``max_entries`` lets a caller ask for a tighter bound than ``MAX_ENTRIES``.
     Neither door does any more — the dashboard used to, on the grounds that the
@@ -415,6 +422,8 @@ def import_reports_from_zip(
         # rolled back is a foreign key to nothing, and the failure mode is the
         # worker picking up work for a report the operator never got.
         _queue_verifications(result)
+    if auto_verify_exploit:
+        _queue_exploit_verifications(result)
     if auto_verify_versions:
         _queue_version_maps(result)
     if auto_find_introduction:
@@ -469,36 +478,16 @@ def _queue_verifications(result: ZipImportResult) -> None:
     from franktheunicorn.core.models import SecurityReport
     from franktheunicorn.security.queue import PRIORITY_BULK, queue_verification
 
-    # Counted after the enabled gate and against the reports that would *actually*
-    # be queued. Checking it first meant an operator with verifier.enabled=false
-    # was told "100 reports is over the 25-report limit — thousands of hours of
-    # agent time", split the archive into four, retried, and only then discovered
-    # the setting. Same for an archive whose reports have no project: it would have
-    # queued nothing and was refused for its fan-out.
+    # No report cap. The whole point of the bulk pool (worker_pool.concurrency)
+    # is that a large import with --verify is feasible: every report is queued,
+    # and the pool drains them N-wide instead of one-at-a-time. The old 25-report
+    # cap refused the archive outright — "thousands of hours of agent time from one
+    # checkbox" — which was the wrong answer: the operator asked for it, the pool
+    # is what makes the ask bounded, and a refusal forced splitting the archive
+    # into chunks small enough to fit under a cap that no longer exists.
     verifiable = [
         report for report in SecurityReport.objects.filter(pk__in=ids).select_related("project")
     ]
-    queueable = [report for report in verifiable if report.project_id is not None]
-    if len(queueable) > MAX_AUTO_VERIFY:
-        # Refused rather than truncated. One tick could otherwise enqueue
-        # MAX_ENTRIES=2000 reports x (max_branches+1) agent runs at up to 1800s
-        # each — thousands of hours of paid agent time, serialised through a single
-        # worker that stops polling PRs while it grinds through them. Verifying an
-        # arbitrary 25 of a 200-report archive would be its own kind of wrong, so
-        # the operator is told to narrow it instead.
-        result.verify_skipped_reason = (
-            f"{len(queueable)} reports is over the {MAX_AUTO_VERIFY}-report "
-            "verification limit — that would be thousands of hours of agent time "
-            "from one checkbox. Import without it and verify the ones that matter, "
-            "or import in smaller archives"
-        )
-        logger.warning(
-            "Refusing to auto-verify %d imported report(s); the cap is %d.",
-            len(queueable),
-            MAX_AUTO_VERIFY,
-        )
-        return
-
     unattached = 0
     for report in verifiable:
         if report.project_id is None:
@@ -521,11 +510,81 @@ def _queue_verifications(result: ZipImportResult) -> None:
     )
 
 
+def _queue_exploit_verifications(result: ZipImportResult) -> None:
+    """Queue the exploit verifier for everything that imported.
+
+    Honours ``exploit_verify.enabled`` and the shared reviewer gate, and says so
+    when it declines — same reasoning as :func:`_queue_verifications`: an operator
+    who ticked the box and got silence would conclude the flag was broken. No
+    report cap: the bulk pool drains it N-wide, and refusing the archive the way
+    the old 25-report wall did forced splitting it into chunks that no longer
+    need to exist.
+    """
+    ids = [entry.report_id for entry in result.entries if entry.outcome == "imported"]
+    ids = [report_id for report_id in ids if report_id]
+    if not ids:
+        return
+    try:
+        from franktheunicorn.config.loader import get_operator_config
+
+        operator_config = get_operator_config()
+        verifier = operator_config.security_triage.verifier
+        exploit = operator_config.security_triage.exploit_verify
+    except Exception as exc:
+        logger.warning("Could not load operator config; importing unexploited", exc_info=True)
+        result.exploit_skipped_reason = (
+            f"could not read the operator config ({str(exc) or exc.__class__.__name__})"
+        )
+        return
+    if not exploit.enabled:
+        logger.info("security_triage.exploit_verify.enabled is false; importing unexploited")
+        result.exploit_skipped_reason = (
+            "security_triage.exploit_verify.enabled is false in operator.yaml — it "
+            "defaults true, so either something set it or the config failed to load"
+        )
+        return
+    # Borrows the verifier's reviewer, so the reviewer gate is the same one.
+    from franktheunicorn.security.verifier import resolve_verifier_reviewer
+
+    if resolve_verifier_reviewer(operator_config, verifier) is None:
+        have = ", ".join(rc.name for rc in operator_config.agent_cli_reviewers) or "none"
+        result.exploit_skipped_reason = (
+            f"no agent_cli_reviewers entry named {verifier.reviewer!r} (configured: "
+            f"{have}), so there is no coding-agent CLI to run"
+        )
+        return
+
+    from franktheunicorn.core.models import SecurityReport
+    from franktheunicorn.security.queue import PRIORITY_BULK, queue_exploit_verification
+
+    verifiable = [
+        report for report in SecurityReport.objects.filter(pk__in=ids).select_related("project")
+    ]
+    unattached = 0
+    for report in verifiable:
+        if report.project_id is None:
+            unattached += 1
+            continue
+        if queue_exploit_verification(report, priority=PRIORITY_BULK):
+            result.queued_exploit_verifications += 1
+    if unattached:
+        result.exploit_skipped_reason = (
+            f"{unattached} report(s) have no project, so there is no repo to run the "
+            "exploit against — re-import with a project selected"
+        )
+    logger.info(
+        "Queued %d exploit verification(s) from this import%s",
+        result.queued_exploit_verifications,
+        f" ({unattached} skipped for having no project)" if unattached else "",
+    )
+
+
 def _queue_version_maps(result: ZipImportResult) -> None:
     """Queue cheap version mapping for everything that imported.
 
-    No report cap: this is git ls-tree, not an agent run per branch. The 25-report
-    wall on the deep verifier is exactly why this door exists.
+    No report cap: this is git ls-tree, not an agent run per branch. The deep
+    verifier has no report cap either now — the bulk pool drains it N-wide —
+    but this is the cheap door that still answers the question in minutes.
     """
     from franktheunicorn.security.queue import queue_version_map
 

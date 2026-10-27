@@ -2135,6 +2135,105 @@ class TestSecurityVerifyButton:
 
 
 @pytest.mark.django_db
+class TestSecurityExploitVerifyButton:
+    """The "Attempt to verify exploit" button — a sibling of the deep verifier's.
+
+    Same door, same dedup, same gates (exploit_verify.enabled + the shared
+    reviewer + a project). Queues ``verify_exploit`` at interactive priority so a
+    button press doesn't wait behind the bulk pool.
+    """
+
+    @staticmethod
+    def _config(*, enabled: bool) -> Any:
+        from franktheunicorn.config.models import OperatorConfig
+
+        config = OperatorConfig()
+        config.security_triage.exploit_verify.enabled = enabled
+        return config
+
+    def test_the_button_is_on_the_report_page(self, client: Client) -> None:
+        report = SecurityReportFactory(project=ProjectFactory())
+        body = client.get(f"/security/{report.pk}/").content.decode()
+        assert "verify exploit" in body.lower() or "Attempt to verify exploit" in body
+
+    def test_clicking_queues_a_worker_command(self, client: Client) -> None:
+        from franktheunicorn.core.models import WorkerCommand
+
+        report = SecurityReportFactory(project=ProjectFactory())
+        with patch(
+            "franktheunicorn.config.loader.get_operator_config",
+            return_value=self._config(enabled=True),
+        ):
+            response = client.post(f"/security/{report.pk}/verify-exploit/")
+
+        assert response.status_code == 200
+        assert "queued" in response.content.decode().lower()
+        assert (
+            WorkerCommand.objects.filter(command="verify_exploit", security_report=report).count()
+            == 1
+        )
+
+    def test_a_second_click_does_not_queue_a_second_run(self, client: Client) -> None:
+        from franktheunicorn.core.models import WorkerCommand
+
+        report = SecurityReportFactory(project=ProjectFactory())
+        with patch(
+            "franktheunicorn.config.loader.get_operator_config",
+            return_value=self._config(enabled=True),
+        ):
+            client.post(f"/security/{report.pk}/verify-exploit/")
+            response = client.post(f"/security/{report.pk}/verify-exploit/")
+
+        assert "already running" in response.content.decode()
+        assert WorkerCommand.objects.filter(command="verify_exploit").count() == 1
+
+    def test_the_disabled_gate_names_the_setting(self, client: Client) -> None:
+        from franktheunicorn.core.models import WorkerCommand
+
+        report = SecurityReportFactory(project=ProjectFactory())
+        with patch(
+            "franktheunicorn.config.loader.get_operator_config",
+            return_value=self._config(enabled=False),
+        ):
+            response = client.post(f"/security/{report.pk}/verify-exploit/")
+
+        body = response.content.decode()
+        assert "exploit_verify.enabled" in body
+        assert WorkerCommand.objects.filter(command="verify_exploit").count() == 0
+
+    def test_a_report_with_no_project_says_why_it_cannot_run(self, client: Client) -> None:
+        report = SecurityReportFactory(project=None)
+        with patch(
+            "franktheunicorn.config.loader.get_operator_config",
+            return_value=self._config(enabled=True),
+        ):
+            response = client.post(f"/security/{report.pk}/verify-exploit/")
+
+        assert "no repository" in response.content.decode() or (
+            "isn't attached" in response.content.decode()
+        )
+
+    def test_verify_exploit_is_post_only(self, client: Client) -> None:
+        report = SecurityReportFactory()
+        assert client.get(f"/security/{report.pk}/verify-exploit/").status_code == 405
+
+    def test_the_import_form_offers_exploit_verify_on_import(self, client: Client) -> None:
+        body = client.get("/security/").content.decode()
+        assert 'name="auto_verify_exploit"' in body
+
+    def test_a_prior_verdict_is_shown_on_the_report_page(self, client: Client) -> None:
+        """The button is one-click; the result of the last click has to be visible."""
+        report = SecurityReportFactory(project=ProjectFactory())
+        report.exploit_requested = True
+        report.exploit_verdict = "reproduced"
+        report.exploit_result = "Fired against the RPC port."
+        report.save()
+        body = client.get(f"/security/{report.pk}/").content.decode()
+        assert "reproduced" in body
+        assert "Fired against the RPC port" in body
+
+
+@pytest.mark.django_db
 class TestVerdictCvePreservation:
     """The blanking rule ran after the form's own assignment, so a CVE typed in the
     same submission was deleted when the operator flipped a report off duplicate."""

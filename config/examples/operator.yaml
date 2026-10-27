@@ -75,6 +75,18 @@ auto_post: false
 # How often the worker polls GitHub for new PRs (in seconds)
 poll_interval_seconds: 300
 
+# How many bulk WorkerCommands the worker runs at once. The worker used to be
+# single-threaded: one command at a time, drained in the poll cycle's sleep
+# window, so a 142-report verify import was days of serial agent time and
+# parked PR polling the whole while. The pool runs N commands concurrently,
+# each in its own checkout lane (a linked git worktree), so concurrent
+# verifications on the same repo don't clobber each other's `git checkout` of
+# different branches. The main thread keeps running the poll cycle; the
+# interactive thread keeps handling button presses; the pool handles everything
+# else. Set to 1 to get the old single-threaded behaviour back.
+# worker_pool:
+#   concurrency: 3
+
 # Log level for the worker (CRITICAL/ERROR/WARNING/INFO/DEBUG/NOTSET).
 # Override at the command line with `make worker-debug`, the runner's
 # `--log-level=DEBUG` flag, or the FRANK_LOG_LEVEL env var.
@@ -601,6 +613,28 @@ digest_enabled: false
 #     # NOTE: if you raise timeout_seconds or max_branches much past these,
 #     # raise worker.commands.STUCK_COMMAND_TIMEOUT_SECONDS too, or a long
 #     # legitimate run gets failed as hung.
+#
+#   # The exploit verifier: a sibling of the deep verifier that answers a
+#   # different question. The deep verifier reads the code and says whether
+#   # the vulnerability is *there*; this puts a coding agent in the checkout
+#   # and asks it to actually *reproduce* the exploit — set up the
+#   # preconditions the report describes, run the PoC, observe whether it
+#   # fires. One agent run on the default branch, not per-branch. Sibling of
+#   # the sandbox too (which runs parsed_poc verbatim as a shell script):
+#   # use both — the sandbox is the cheap first cut, this is the expensive
+#   # second opinion. Borrows verifier.reviewer for the CLI/remote config.
+#   # Nothing fires without a button press or --verify-exploit at import.
+#   exploit_verify:
+#     enabled: true            # DEFAULT, for the same reason verifier.enabled is.
+#     # Override the reviewer's model for exploit verification only. Empty
+#     # means "use the verifier's model" — so a stronger model for exploitation
+#     # doesn't force a stronger model for the read-only verifier.
+#     model: ""
+#     extra_args: []
+#     timeout_seconds: 1800    # one agent run; a real attempt can run code
+#     max_report_chars: 12000
+#     prompt_addendum: ""
+#     workspace_subdir: "security-exploit"
 #
 #   # The one-click fix agent and the batch "did recent commits fix these?"
 #   # recheck. Both launch Cursor cloud agents: the fix agent applies the

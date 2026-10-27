@@ -2208,6 +2208,7 @@ def security_report_upload(request: HttpRequest) -> HttpResponse:
     # Off unless ticked, and a sharper knob than triage: this is a full agent run
     # per report per active branch, not two LLM calls.
     auto_verify = request.POST.get("auto_verify") == "on"
+    auto_verify_exploit = request.POST.get("auto_verify_exploit") == "on"
     auto_verify_versions = request.POST.get("auto_verify_versions") == "on"
     auto_find_introduction = request.POST.get("auto_find_introduction") == "on"
 
@@ -2226,6 +2227,7 @@ def security_report_upload(request: HttpRequest) -> HttpResponse:
         project=project,
         auto_triage=auto_triage,
         auto_verify=auto_verify,
+        auto_verify_exploit=auto_verify_exploit,
         auto_verify_versions=auto_verify_versions,
         auto_find_introduction=auto_find_introduction,
         # The filename is the only provenance a browser upload carries, and two
@@ -2267,6 +2269,8 @@ def security_report_upload(request: HttpRequest) -> HttpResponse:
         # doesn't need telling that a thing they declined didn't happen.
         if auto_verify and result.verify_skipped_reason:
             messages.warning(request, f"Not verified: {result.verify_skipped_reason}.")
+        if auto_verify_exploit and result.exploit_skipped_reason:
+            messages.warning(request, f"Not exploit-verified: {result.exploit_skipped_reason}.")
         if auto_verify_versions and result.version_map_skipped_reason:
             messages.warning(request, f"Versions not mapped: {result.version_map_skipped_reason}.")
         if auto_find_introduction and result.introduction_skipped_reason:
@@ -3854,6 +3858,83 @@ def security_report_verify(request: HttpRequest, report_id: int) -> HttpResponse
         request,
         "dashboard/_security_verify_queued.html",
         {"report": report, "created": created, "verifier": verifier},
+    )
+
+
+@require_POST
+def security_report_verify_exploit(request: HttpRequest, report_id: int) -> HttpResponse:
+    """Queue the exploit verifier: attempt to reproduce the exploit (htmx).
+
+    Sibling of :func:`security_report_verify`. That puts an agent in a checkout
+    to read the code and say whether the vulnerability is there; this puts an
+    agent in a checkout and asks it to actually reproduce the exploit — set up
+    the preconditions, run the PoC, observe. One agent run on the default branch,
+    not per-branch. Queued rather than run in-request for the same reason the
+    deep verifier is: minutes of agent time.
+    """
+    report = get_object_or_404(SecurityReport.objects.select_related("project"), pk=report_id)
+
+    from franktheunicorn.config.loader import get_operator_config
+    from franktheunicorn.security.queue import PRIORITY_INTERACTIVE, queue_exploit_verification
+    from franktheunicorn.security.verifier import resolve_verifier_reviewer
+
+    operator_config = get_operator_config()
+    verifier = operator_config.security_triage.verifier
+    exploit = operator_config.security_triage.exploit_verify
+    if not exploit.enabled:
+        return render(
+            request,
+            "dashboard/_security_verify_queued.html",
+            {
+                "report": report,
+                "blocked": (
+                    "Exploit verification has been switched off. It defaults on, so "
+                    "something set security_triage.exploit_verify.enabled: false in "
+                    "operator.yaml — or the file failed to load and took every other "
+                    "setting with it (run `manage.py show_config` to tell those apart)."
+                ),
+            },
+        )
+    # Borrows the verifier's reviewer, so the reviewer gate is the same one and
+    # the answer belongs on the page with the button on it.
+    if resolve_verifier_reviewer(operator_config, verifier) is None:
+        have = ", ".join(rc.name for rc in operator_config.agent_cli_reviewers)
+        return render(
+            request,
+            "dashboard/_security_verify_queued.html",
+            {
+                "report": report,
+                "blocked": (
+                    f"No agent_cli_reviewers entry named '{verifier.reviewer}', so there "
+                    "is no coding-agent CLI to run. "
+                    + (
+                        f"Configured entries: {have}. Point "
+                        "security_triage.verifier.reviewer at one of them."
+                        if have
+                        else "Add one to operator.yaml — it describes the CLI to invoke "
+                        "and, for a remote setup, how to reach the box it runs on."
+                    )
+                ),
+            },
+        )
+    if report.project is None:
+        return render(
+            request,
+            "dashboard/_security_verify_queued.html",
+            {
+                "report": report,
+                "blocked": (
+                    "This report isn't attached to a project, so there's no repository "
+                    "to run the exploit against. Set one and try again."
+                ),
+            },
+        )
+
+    created = queue_exploit_verification(report, priority=PRIORITY_INTERACTIVE)
+    return render(
+        request,
+        "dashboard/_security_verify_queued.html",
+        {"report": report, "created": created, "exploit": exploit},
     )
 
 

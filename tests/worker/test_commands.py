@@ -264,6 +264,56 @@ class TestProcessPendingCommands:
         assert cmd.status == "completed"
         assert mock_triage.call_args.args[1] is None
 
+    def test_verify_exploit_dispatch(self) -> None:
+        """The dashboard queues exploit verification; the worker runs it."""
+        operator_config = MagicMock()
+        project = ProjectFactory(owner="acme", repo="widgets")
+        report = SecurityReportFactory(project=project, title="RCE via RPC", raw_text="...")
+        cmd = WorkerCommand.objects.create(
+            command="verify_exploit",
+            security_report=report,
+        )
+
+        from franktheunicorn.security.exploit_verify import ExploitRun
+
+        fake_run = ExploitRun(
+            verdict="reproduced", branch="master", confidence=0.8, summary="Fired."
+        )
+        with patch(
+            "franktheunicorn.security.exploit_verify.verify_exploit", return_value=fake_run
+        ) as mock_verify:
+            processed = process_pending_commands(operator_config)
+
+        assert processed == 1
+        cmd.refresh_from_db()
+        assert cmd.status == "completed"
+        assert "reproduced" in cmd.log
+        mock_verify.assert_called_once_with(report, operator_config)
+
+    def test_verify_exploit_decline_is_logged_at_info(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A gate that stops configured work logs why, at a level someone sees."""
+        operator_config = MagicMock()
+        report = SecurityReportFactory(title="orphan", raw_text="")
+        cmd = WorkerCommand.objects.create(
+            command="verify_exploit",
+            security_report=report,
+        )
+
+        from franktheunicorn.security.exploit_verify import ExploitRun
+
+        declined = ExploitRun(error="security_triage.exploit_verify.enabled is false")
+        with (
+            patch("franktheunicorn.security.exploit_verify.verify_exploit", return_value=declined),
+            caplog.at_level(logging.INFO, logger="franktheunicorn.worker.commands"),
+        ):
+            process_pending_commands(operator_config)
+
+        cmd.refresh_from_db()
+        assert cmd.status == "completed"
+        assert any("exploit_verify.enabled" in r.getMessage() for r in caplog.records)
+
     def test_unknown_command_marked_failed(self, db_pr: PullRequest) -> None:
         operator_config = MagicMock()
         cmd = WorkerCommand.objects.create(
@@ -536,6 +586,48 @@ class TestInFlightDedup:
             queue_command("run_agents")
         with pytest.raises(ValueError, match="exactly one"):
             queue_command("run_agents", SecurityReportFactory(), pull_request=db_pr)
+
+
+@pytest.mark.django_db
+class TestConcurrentClaim:
+    """The multi-threaded bulk pool can have N threads racing for the same row.
+
+    ``select_for_update`` is a no-op on SQLite (first-class here), so the claim
+    has to be a conditional UPDATE — ``WHERE status='pending'`` — with the
+    rowcount deciding who won. A second claim after the row left ``pending``
+    gets None, which is what makes N pool threads safe: the loser sees the
+    status flip and backs off. (A true two-thread race is hard to test under
+    pytest-django's per-test transaction wrapping — the threads write through
+    their own connections and the outer test transaction's snapshot is what
+    locks — so this pins the property the claim has to hold, not the wiring.)
+    """
+
+    def test_a_second_claim_after_the_first_flipped_to_running_is_none(
+        self, db_pr: PullRequest
+    ) -> None:
+        from franktheunicorn.worker.commands import _claim_command
+
+        cmd = WorkerCommand.objects.create(command="run_dual_tests", pull_request=db_pr)
+        first = _claim_command(cmd.pk)
+        assert first is not None
+        assert first.status == "running"
+
+        # The row is no longer pending, so the conditional UPDATE matches
+        # zero rows — this is the loser's view in the race.
+        assert _claim_command(cmd.pk) is None
+
+    def test_a_second_claim_after_completion_is_none(self, db_pr: PullRequest) -> None:
+        from franktheunicorn.worker.commands import _claim_command
+
+        cmd = WorkerCommand.objects.create(command="run_dual_tests", pull_request=db_pr)
+        assert _claim_command(cmd.pk) is not None
+        WorkerCommand.objects.filter(pk=cmd.pk).update(status="completed")
+        assert _claim_command(cmd.pk) is None
+
+    def test_a_claim_on_a_missing_row_is_none(self) -> None:
+        from franktheunicorn.worker.commands import _claim_command
+
+        assert _claim_command(999_999) is None
 
 
 class TestForgeClientFor:
@@ -853,6 +945,29 @@ class TestInteractiveDrain:
         assert ran == [interactive.pk]
         bulk.refresh_from_db()
         assert bulk.status == "pending"
+
+    def test_max_priority_skips_interactive_rows(self, db_pr: PullRequest) -> None:
+        """The bulk pool's max_priority is an exclusive upper bound: it claims
+        bulk rows but never steals a button press from the interactive thread."""
+        from franktheunicorn.security.queue import PRIORITY_BULK, PRIORITY_INTERACTIVE
+
+        bulk = WorkerCommand.objects.create(
+            command="run_dual_tests", pull_request=db_pr, priority=PRIORITY_BULK
+        )
+        interactive = WorkerCommand.objects.create(
+            command="run_dual_tests",
+            pull_request=PullRequestFactory(project=db_pr.project, number=db_pr.number + 1),
+            priority=PRIORITY_INTERACTIVE,
+        )
+
+        with patch("franktheunicorn.worker.commands._dispatch") as dispatch:
+            processed = process_pending_commands(MagicMock(), max_priority=PRIORITY_INTERACTIVE)
+
+        assert processed == 1
+        ran = [call.args[0].pk for call in dispatch.call_args_list]
+        assert ran == [bulk.pk]
+        interactive.refresh_from_db()
+        assert interactive.status == "pending"
 
     def test_mid_cycle_drain_forwards_its_filters(self, db_pr: PullRequest) -> None:
         """The in-cycle drains pass min_priority (interactive) and the sleep
