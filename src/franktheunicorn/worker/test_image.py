@@ -20,10 +20,11 @@ import hashlib
 import logging
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from franktheunicorn.config.models import TestAutoBuildConfig, TestExecutionConfig
+    from franktheunicorn.worker.test_runner import _DockerClient
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +40,7 @@ def _hash_inputs(*chunks: bytes) -> str:
     return h.hexdigest()[:12]
 
 
-def _image_exists(docker: Any, tag: str) -> bool:
+def _image_exists(docker: _DockerClient, tag: str) -> bool:
     try:
         docker.images.get(tag)
         return True
@@ -74,7 +75,7 @@ def generate_auto_build_dockerfile(
 
 
 def resolve_image(
-    docker: Any,
+    docker: _DockerClient,
     owner: str,
     repo: str,
     tests: TestExecutionConfig,

@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, TypedDict
 
 from franktheunicorn.core.models import TestRun
 from franktheunicorn.worker.test_identifier import identify_test_scope
@@ -22,13 +22,73 @@ from franktheunicorn.worker.test_workspace import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+    from typing import Protocol
+
     from franktheunicorn.config.models import ProjectConfig, TestExecutionConfig
     from franktheunicorn.core.models import PullRequest
+
+    class _DockerContainer(Protocol):
+        def wait(self, *, timeout: int) -> Mapping[str, int]: ...
+        def logs(self, *, stdout: bool, stderr: bool) -> bytes: ...
+        def remove(self, *, force: bool) -> None: ...
+
+    class _DockerContainers(Protocol):
+        def run(
+            self,
+            image: str,
+            *,
+            command: list[str],
+            detach: bool,
+            network_mode: str,
+            nano_cpus: int,
+            mem_limit: str,
+            security_opt: list[str],
+            cap_drop: list[str],
+            read_only: bool,
+            tmpfs: Mapping[str, str],
+            volumes: Mapping[str, Mapping[str, str]],
+            working_dir: str,
+            environment: Mapping[str, str],
+        ) -> _DockerContainer: ...
+
+    class _DockerImages(Protocol):
+        def get(self, name: str) -> object: ...
+        def build(
+            self,
+            path: str,
+            *,
+            dockerfile: str,
+            tag: str,
+            rm: bool,
+            pull: bool,
+        ) -> object: ...
+
+    class _DockerClient(Protocol):
+        def ping(self) -> bool: ...
+        @property
+        def containers(self) -> _DockerContainers: ...
+        @property
+        def images(self) -> _DockerImages: ...
+
+
+class _ResourceTier(TypedDict):
+    cpu_count: int
+    mem_limit: str
+    timeout: int
+
+
+class _ContainerResult(TypedDict):
+    exit_code: int
+    stdout: str
+    stderr: str
+    timed_out: bool
+
 
 logger = logging.getLogger(__name__)
 
 # Resource tiers (§9.4)
-RESOURCE_TIERS: dict[str, dict[str, Any]] = {
+RESOURCE_TIERS: dict[str, _ResourceTier] = {
     "heavy": {"cpu_count": 8, "mem_limit": "16g", "timeout": 45 * 60},
     "standard": {"cpu_count": 4, "mem_limit": "8g", "timeout": 15 * 60},
     "light": {"cpu_count": 2, "mem_limit": "4g", "timeout": 5 * 60},
@@ -55,9 +115,9 @@ class TestRunner:
     """Runs differential tests in Docker containers."""
 
     def __init__(self) -> None:
-        self._docker: Any = None
+        self._docker: _DockerClient | None = None
 
-    def _get_docker(self) -> Any:
+    def _get_docker(self) -> _DockerClient | None:
         """Lazy-load Docker client. Returns None if Docker is unavailable."""
         if self._docker is not None:
             return self._docker
@@ -223,13 +283,13 @@ class TestRunner:
 
     def _run_container(
         self,
-        docker: Any,
+        docker: _DockerClient,
         image: str,
         workspace: Path,
         test_files: list[str],
-        resources: dict[str, Any],
+        resources: _ResourceTier,
         tests: TestExecutionConfig,
-    ) -> dict[str, Any]:
+    ) -> _ContainerResult:
         """Run tests in a Docker container.
 
         Returns a dict with 'exit_code', 'stdout', 'stderr', 'timed_out'.
@@ -301,8 +361,8 @@ class TestRunner:
 
     def _compute_verdict(
         self,
-        pr_result: dict[str, Any],
-        base_result: dict[str, Any],
+        pr_result: _ContainerResult,
+        base_result: _ContainerResult,
     ) -> str:
         """Compute differential verdict (§9.2).
 

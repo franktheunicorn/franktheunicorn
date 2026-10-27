@@ -9,7 +9,7 @@ Both paths return a ``DiscourseSearchResult`` with the same fields.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from bs4 import BeautifulSoup, Tag
 
@@ -23,6 +23,11 @@ from franktheunicorn.data_access.discourse.types import (
     DiscourseSearchResult,
 )
 
+if TYPE_CHECKING:
+    import httpx
+
+    from franktheunicorn.data_access.rate_limiter import GitHubRateLimiter
+
 logger = logging.getLogger(__name__)
 
 
@@ -31,11 +36,12 @@ class DiscourseFetcher(DataFetcher[DiscourseSearchResult]):
 
     def __init__(
         self,
-        *args: Any,
+        client: httpx.Client,
+        rate_limiter: GitHubRateLimiter | None = None,
+        *,
         cache: FileCache | None = None,
-        **kwargs: Any,
     ) -> None:
-        super().__init__(*args, **kwargs)
+        super().__init__(client, rate_limiter)
         # Constructor-injected (no module singleton) so tests and callers can
         # scope the cache; the fetch method is part of the key so cached API
         # data is never replayed relabeled as a scrape result (or vice versa).

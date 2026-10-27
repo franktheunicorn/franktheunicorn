@@ -109,6 +109,21 @@ class LLMBackend(Protocol):
         """Raw, review-agnostic completion. Used by the RLM broker so the
         recursive notebook can call any model with an arbitrary prompt."""
 
+    def metered_call(
+        self,
+        system_prompt: str,
+        user_message: str,
+        *,
+        action_type: str,
+        project_id: int | None = None,
+        pr_id: int | None = None,
+        api_key: str | None = None,
+    ) -> str:
+        """One-off completion with cost accounting. The choke point for every
+        LLM call outside the main ``generate_review`` path — tone guard,
+        sub-checks, CI analysis, security triage. On ``BaseLLMBackend`` since
+        the start; listed here so callers can type against the Protocol."""
+
 
 def _log_backend_error(backend_name: str, exc: BaseException) -> None:
     """Emit an appropriate log message for an LLM API error.

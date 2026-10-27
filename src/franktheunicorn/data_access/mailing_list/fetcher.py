@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import re
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote_plus, urljoin
 
 from bs4 import BeautifulSoup
@@ -26,6 +26,11 @@ from franktheunicorn.data_access.mailing_list.types import (
     MailingListSearchResult,
     MailingListThread,
 )
+
+if TYPE_CHECKING:
+    import httpx
+
+    from franktheunicorn.data_access.rate_limiter import GitHubRateLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -58,12 +63,13 @@ class MailingListFetcher(DataFetcher[MailingListSearchResult]):
 
     def __init__(
         self,
-        *args: Any,
+        client: httpx.Client,
+        rate_limiter: GitHubRateLimiter | None = None,
+        *,
         delay_seconds: float = DEFAULT_DELAY_SECONDS,
         cache: FileCache | None = None,
-        **kwargs: Any,
     ) -> None:
-        super().__init__(*args, **kwargs)
+        super().__init__(client, rate_limiter)
         self._delay_seconds = delay_seconds
         self._cache = cache or FileCache("mailing_list", ttl_seconds=CACHE_TTL_SECONDS)
 

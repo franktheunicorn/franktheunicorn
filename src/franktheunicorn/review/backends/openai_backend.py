@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from franktheunicorn.review.backends.base import BaseLLMBackend
 
 if TYPE_CHECKING:
+    from openai.types.chat import ChatCompletion
+
     from franktheunicorn.config.models import LLMBackendConfig
 
 logger = logging.getLogger(__name__)
@@ -83,7 +85,7 @@ class OpenAIBackend(BaseLLMBackend):
 
         client = openai.OpenAI(**kwargs)  # type: ignore[arg-type]
 
-        def _create() -> Any:
+        def _create() -> ChatCompletion:
             effective_system = (
                 system_prompt if self._supports_json_object else system_prompt + _JSON_ONLY_REMINDER
             )
@@ -102,7 +104,12 @@ class OpenAIBackend(BaseLLMBackend):
                 request_kwargs["extra_body"] = dict(self._config.extra_body)
             if self._supports_json_object:
                 request_kwargs["response_format"] = {"type": "json_object"}
-            return client.chat.completions.create(**request_kwargs)
+            # The ``**request_kwargs`` (dict[str, Any]) splat defeats overload
+            # resolution, so mypy sees the return as Any; the SDK returns
+            # ChatCompletion and the caller reads .choices/.usage off it.
+            # String forward-ref so ChatCompletion stays a TYPE_CHECKING import
+            # (openai is lazy-loaded inside _call_api, not at module import).
+            return cast("ChatCompletion", client.chat.completions.create(**request_kwargs))
 
         # Retry once per known compatibility quirk (token-param name and
         # response_format support). Cap attempts so an unrelated 400 can't loop.

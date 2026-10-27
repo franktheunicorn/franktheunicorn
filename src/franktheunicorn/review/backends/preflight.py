@@ -12,9 +12,13 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING
 
 from franktheunicorn.config.models import LLMBackendConfig
+
+if TYPE_CHECKING:
+    import openai
+    from openai.types.chat import ChatCompletionUserMessageParam
 
 logger = logging.getLogger(__name__)
 
@@ -143,17 +147,21 @@ def _probe_openai(cfg: LLMBackendConfig, api_key: str) -> ProbeResult:
     return ProbeResult(ok=True)
 
 
-def _openai_chat_probe(client: Any, model: str) -> ProbeResult:
+def _openai_chat_probe(client: openai.OpenAI, model: str) -> ProbeResult:
     import openai
 
     token_param = "max_tokens"
+    messages: list[ChatCompletionUserMessageParam] = [{"role": "user", "content": "hi"}]
     for attempt in range(2):
         try:
-            client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": "hi"}],
-                **{token_param: 1},
-            )
+            # Branched, not ``**{token_param: 1}``: a dict[str, int] splat can't
+            # resolve to a single overload param, and the typed client is the win.
+            if token_param == "max_tokens":
+                client.chat.completions.create(model=model, messages=messages, max_tokens=1)
+            else:
+                client.chat.completions.create(
+                    model=model, messages=messages, max_completion_tokens=1
+                )
         except openai.BadRequestError as exc:
             msg = str(exc).lower()
             if attempt == 0 and ("max_tokens" in msg or "max_completion_tokens" in msg):

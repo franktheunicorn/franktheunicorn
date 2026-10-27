@@ -33,6 +33,8 @@ import django
 import httpx
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from franktheunicorn.backends.base import ForgeClient
     from franktheunicorn.config.models import (
         AgentCLIReviewerConfig,
@@ -41,8 +43,19 @@ if TYPE_CHECKING:
         ProjectConfig,
         SnowflakeReviewConfig,
     )
-    from franktheunicorn.core.models import PullRequest
+    from franktheunicorn.core.models import PullRequest, ReviewDraft
     from franktheunicorn.data_access.github.diff_fetcher import DiffFetcher
+    from franktheunicorn.review.agent_cli import AgentCLIFinding
+    from franktheunicorn.review.coderabbit import CodeRabbitFinding
+    from franktheunicorn.review.prior_comments import PriorComment
+    from franktheunicorn.review.snowflake_review import SnowflakeFinding
+
+    #: The finding lists the per-tool ``run_review`` callables return. Three
+    #: independent dataclasses — no shared base — so the union is the honest
+    #: type; ``Any`` hid that the three tools answer in three different shapes.
+    #: ``Sequence`` not ``list`` so a tool returning ``list[CodeRabbitFinding]``
+    #: is assignable despite list invariance.
+    type _ReviewToolFinding = CodeRabbitFinding | AgentCLIFinding | SnowflakeFinding
 
 
 def _raise_keyboard_interrupt(signum: int, frame: FrameType | None) -> None:
@@ -839,7 +852,9 @@ def _check_ssh_configs(operator_config: OperatorConfig) -> frozenset[str]:
 
     failed: set[str] = set()
 
-    tool_remotes: list[tuple[str, Any]] = [
+    tool_remotes: list[
+        tuple[str, CodeRabbitConfig | SnowflakeReviewConfig | AgentCLIReviewerConfig]
+    ] = [
         ("coderabbit", operator_config.coderabbit),
         ("snowflake_review", operator_config.snowflake_review),
     ]
@@ -1171,7 +1186,7 @@ def process_pr(
     force: bool = False,
     log_lines: list[str] | None = None,
     decisions: Counter[str] | None = None,
-) -> list[Any]:
+) -> list[ReviewDraft]:
     """Run the full review pipeline for a single PR.
 
     This is the canonical per-PR processing path shared by the worker poll
@@ -1345,7 +1360,7 @@ def process_pr(
         # commit) that was unbounded duplicate growth, every cycle, forever.
         #
         # force bypasses it: "Force Run Agents" means redo the lot.
-        drafts: list[Any] = []
+        drafts: list[ReviewDraft] = []
         if force or LLM_REVIEW_SOURCE in missing_review_sources(
             pr,
             operator_config,
@@ -2776,8 +2791,8 @@ def _run_review_tool_for_pr(
     project_config: ProjectConfig | None,
     operator_config: OperatorConfig | None,
     diff_http: httpx.Client | None,
-    run_review: Callable[..., list[Any]],
-    create_drafts: Callable[..., list[Any]],
+    run_review: Callable[..., Sequence[_ReviewToolFinding]],
+    create_drafts: Callable[..., list[ReviewDraft]],
     tool_config: object,
 ) -> str:
     """Shared scaffold for all CLI review tool runners. Never raises.
@@ -2902,7 +2917,7 @@ def _run_agent_cli_for_pr(
     project_config: ProjectConfig | None = None,
     operator_config: OperatorConfig | None = None,
     diff_http: httpx.Client | None = None,
-    prior_comments: list[Any] | None = None,
+    prior_comments: list[PriorComment] | None = None,
 ) -> str:
     """Run one agent-CLI reviewer (claude/codex/pi/...) for a PR. Never raises.
 

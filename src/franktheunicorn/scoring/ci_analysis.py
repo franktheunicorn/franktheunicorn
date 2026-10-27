@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from franktheunicorn.backends.base import ForgeClient
     from franktheunicorn.config.models import LLMBackendConfig
     from franktheunicorn.core.models import PullRequest
+    from franktheunicorn.review.backends.base import LLMBackend
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +92,7 @@ def _failing_checks(pr: PullRequest) -> list[CICheck]:
 
 
 def _llm_verdict_for(
-    backend: Any,
+    backend: LLMBackend,
     check: CICheck,
     output_text: str,
     diff: str,

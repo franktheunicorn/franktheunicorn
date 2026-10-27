@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from bs4 import BeautifulSoup
 
@@ -26,6 +26,11 @@ from franktheunicorn.data_access.github.issue_types import (
     GitHubIssueResult,
     IssueComment,
 )
+
+if TYPE_CHECKING:
+    import httpx
+
+    from franktheunicorn.data_access.rate_limiter import GitHubRateLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -44,11 +49,12 @@ class IssueFetcher(DataFetcher[GitHubIssueResult]):
 
     def __init__(
         self,
-        *args: Any,
+        client: httpx.Client,
+        rate_limiter: GitHubRateLimiter | None = None,
+        *,
         cache: FileCache | None = None,
-        **kwargs: Any,
     ) -> None:
-        super().__init__(*args, **kwargs)
+        super().__init__(client, rate_limiter)
         self._cache = cache or FileCache(source_name="github_issues")
 
     def fetch_linked_issues(

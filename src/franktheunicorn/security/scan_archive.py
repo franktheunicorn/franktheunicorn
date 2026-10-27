@@ -56,7 +56,7 @@ import json
 import logging
 import re
 import zipfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -231,7 +231,9 @@ class _Index:
     spent: set[str] = field(default_factory=set)
 
 
-def expand_scan_archive(archive: zipfile.ZipFile, read_entry: Any) -> ScanArchive:
+def expand_scan_archive(
+    archive: zipfile.ZipFile, read_entry: Callable[[zipfile.ZipInfo], bytes | None]
+) -> ScanArchive:
     """Find a findings manifest in *archive* and expand it, one record per finding.
 
     *read_entry* is a callable taking a :class:`zipfile.ZipInfo` and returning
@@ -329,7 +331,9 @@ def expand_scan_archive(archive: zipfile.ZipFile, read_entry: Any) -> ScanArchiv
     return result
 
 
-def _index(archive: zipfile.ZipFile, read_entry: Any) -> _Index:
+def _index(
+    archive: zipfile.ZipFile, read_entry: Callable[[zipfile.ZipInfo], bytes | None]
+) -> _Index:
     """Locate findings manifests, then everything else that refers to them.
 
     Three things come out of the JSON pass: findings manifests, patch sidecars,
@@ -488,7 +492,7 @@ def _alias_bundles(index: _Index) -> None:
 
 def _bundles(
     archive: zipfile.ZipFile,
-    read_entry: Any,
+    read_entry: Callable[[zipfile.ZipInfo], bytes | None],
     sidecars: dict[str, dict[str, Any]],
     known: set[str],
 ) -> dict[str, Bundle]:
@@ -639,7 +643,11 @@ def _finding_id(raw: dict[str, Any]) -> str:
     return ""
 
 
-def _provenance(archive: zipfile.ZipFile, read_entry: Any, result: ScanArchive) -> str:
+def _provenance(
+    archive: zipfile.ZipFile,
+    read_entry: Callable[[zipfile.ZipInfo], bytes | None],
+    result: ScanArchive,
+) -> str:
     """The archive's PROVENANCE document, to de-normalise onto every finding.
 
     It is the same class of thing as ``_CONTEXT_KEYS`` — which repo, which branch,
@@ -897,7 +905,7 @@ class _Anchor:
 
 def _split_rollups(
     archive: zipfile.ZipFile,
-    read_entry: Any,
+    read_entry: Callable[[zipfile.ZipInfo], bytes | None],
     known: set[str],
     index: _Index,
     result: ScanArchive,
@@ -1027,7 +1035,7 @@ _DEPENDS_RE = re.compile(
 
 def _dependencies(
     archive: zipfile.ZipFile,
-    read_entry: Any,
+    read_entry: Callable[[zipfile.ZipInfo], bytes | None],
     known: set[str],
     aliases: dict[str, str],
 ) -> dict[str, list[str]]:
