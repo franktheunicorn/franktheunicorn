@@ -515,6 +515,7 @@
             {% if report.project %} &middot; {{ report.project.full_name }}{% endif %}
             {% if report.reporter_name %} &middot; from {{ report.reporter_name }}{% endif %}
             &middot; {{ report.created_at|timesince }} ago
+            {% if report.eval_in_flight %} &middot; <span class="badge-queued" title="An eval command (triage, verify, exploit, or version scan) is pending or running — results will appear when the worker finishes">Queued for eval</span>{% endif %}
             {% if report.is_expected_behavior %} &middot; <strong style="color: var(--orange);">Expected Behavior</strong>{% endif %}
             {# "Dup of" only when it actually is one. A CVE on this report no #}
             {# longer implies duplicate: the verdict form keeps the field for every #}

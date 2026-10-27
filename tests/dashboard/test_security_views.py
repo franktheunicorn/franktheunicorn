@@ -186,6 +186,89 @@ class TestSecurityReportListRanking:
 
 
 @pytest.mark.django_db
+class TestSecurityReportListQueuedBadge:
+    """A report with an eval command pending or running shows "Queued for eval"
+    in the list, the way a PR with a pending run_agents shows "Queued for Run" —
+    so one waiting on the worker isn't indistinguishable from one nobody's
+    looked at."""
+
+    def test_shows_badge_when_triage_is_pending(self, client: Client, db: Any) -> None:
+        from franktheunicorn.core.models import WorkerCommand
+
+        report = SecurityReportFactory(title="Awaiting triage")
+        WorkerCommand.objects.create(
+            command="run_security_triage", security_report=report, status="pending"
+        )
+
+        body = client.get("/security/").content.decode()
+
+        assert "Queued for eval" in body
+
+    def test_shows_badge_when_a_verify_command_is_running(self, client: Client, db: Any) -> None:
+        from franktheunicorn.core.models import WorkerCommand
+
+        report = SecurityReportFactory(title="Verifying now")
+        cmd = WorkerCommand.objects.create(
+            command="verify_security_report", security_report=report, status="pending"
+        )
+        WorkerCommand.objects.filter(pk=cmd.pk).update(status="running")
+
+        body = client.get("/security/").content.decode()
+
+        assert "Queued for eval" in body
+
+    def test_hides_badge_when_the_only_command_completed(self, client: Client, db: Any) -> None:
+        from franktheunicorn.core.models import WorkerCommand
+
+        report = SecurityReportFactory(title="Already done")
+        cmd = WorkerCommand.objects.create(
+            command="run_security_triage", security_report=report, status="pending"
+        )
+        WorkerCommand.objects.filter(pk=cmd.pk).update(status="completed")
+
+        body = client.get("/security/").content.decode()
+
+        assert "Queued for eval" not in body
+
+    def test_hides_badge_when_no_command_exists(self, client: Client, db: Any) -> None:
+        SecurityReportFactory(title="Never queued")
+
+        body = client.get("/security/").content.decode()
+
+        assert "Queued for eval" not in body
+
+    def test_hides_badge_for_a_non_eval_command_in_flight(self, client: Client, db: Any) -> None:
+        """A sandbox POC run is worker work on this report, but it isn't an eval
+        — so a pending one must not light up the badge. Guards against the
+        command filter widening or the command__in clause being dropped."""
+        from franktheunicorn.core.models import WorkerCommand
+
+        report = SecurityReportFactory(title="Sandbox running")
+        WorkerCommand.objects.create(
+            command="run_security_sandbox", security_report=report, status="pending"
+        )
+
+        body = client.get("/security/").content.decode()
+
+        assert "Queued for eval" not in body
+
+    def test_badge_is_per_report_not_global(self, client: Client, db: Any) -> None:
+        """Two reports on the page, only the one with a queued command shows the
+        badge — proves the batch query tags each row, not the whole list."""
+        from franktheunicorn.core.models import WorkerCommand
+
+        queued = SecurityReportFactory(title="The queued one")
+        SecurityReportFactory(title="The idle one")
+        WorkerCommand.objects.create(
+            command="map_report_versions", security_report=queued, status="pending"
+        )
+
+        body = client.get("/security/").content.decode()
+
+        assert body.count("Queued for eval") == 1
+
+
+@pytest.mark.django_db
 class TestSecurityCveWithoutBranchTab:
     """A CVE id is assigned and nothing is recorded as fixing it — the queue an
     operator holding a CVE number works from."""
@@ -747,6 +830,59 @@ class TestSecurityReportDetail:
         report = SecurityReportFactory(title="No scan data")
         body = client.get(f"/security/{report.pk}/").content.decode()
         assert "Fix Branches" not in body
+
+
+@pytest.mark.django_db
+class TestSecurityReportDetailQueuedBadge:
+    """The detail header shows "Queued for eval" when any eval command is in
+    flight — triage, verify, exploit, or the git-only scans — mirroring the PR
+    detail's "Queued for Run". The triage area below already names triage
+    specifically; this is the whole-pipeline view in the header."""
+
+    def test_shows_badge_when_a_version_map_is_pending(self, client: Client, db: Any) -> None:
+        from franktheunicorn.core.models import WorkerCommand
+
+        report = SecurityReportFactory(title="Mapping versions")
+        WorkerCommand.objects.create(
+            command="map_report_versions", security_report=report, status="pending"
+        )
+
+        body = client.get(f"/security/{report.pk}/").content.decode()
+
+        assert "Queued for eval" in body
+
+    def test_shows_badge_when_an_exploit_verify_is_running(self, client: Client, db: Any) -> None:
+        from franktheunicorn.core.models import WorkerCommand
+
+        report = SecurityReportFactory(title="Verifying exploit")
+        cmd = WorkerCommand.objects.create(
+            command="verify_exploit", security_report=report, status="pending"
+        )
+        WorkerCommand.objects.filter(pk=cmd.pk).update(status="running")
+
+        body = client.get(f"/security/{report.pk}/").content.decode()
+
+        assert "Queued for eval" in body
+
+    def test_hides_badge_when_no_command_is_in_flight(self, client: Client, db: Any) -> None:
+        report = SecurityReportFactory(title="Nothing queued")
+
+        body = client.get(f"/security/{report.pk}/").content.decode()
+
+        assert "Queued for eval" not in body
+
+    def test_hides_badge_when_the_only_command_failed(self, client: Client, db: Any) -> None:
+        from franktheunicorn.core.models import WorkerCommand
+
+        report = SecurityReportFactory(title="Triage failed")
+        cmd = WorkerCommand.objects.create(
+            command="run_security_triage", security_report=report, status="pending"
+        )
+        WorkerCommand.objects.filter(pk=cmd.pk).update(status="failed")
+
+        body = client.get(f"/security/{report.pk}/").content.decode()
+
+        assert "Queued for eval" not in body
 
 
 @pytest.mark.django_db

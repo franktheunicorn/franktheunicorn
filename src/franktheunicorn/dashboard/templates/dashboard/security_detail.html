@@ -17,6 +17,7 @@
     {% if report.claimed_severity != "unknown" and report.claimed_severity != report.assessed_severity %}
     <span class="muted" style="font-size: 0.8rem; margin-left: 0.5rem;">reporter claims {{ report.get_claimed_severity_display|lower }}</span>
     {% endif %}
+    {% if eval_in_flight %}<span class="badge-queued" style="margin-left: 0.5rem;" title="An eval command (triage, verify, exploit, or version scan) is pending or running — results will appear when the worker finishes">Queued for eval</span>{% endif %}
 </div>
 
 <div class="breakdown" style="margin-bottom: 1rem;">

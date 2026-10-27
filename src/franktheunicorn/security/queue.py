@@ -38,6 +38,19 @@ PRIORITY_INTERACTIVE = 100
 #: Queued by ingestion or a bulk import. Nobody is watching; it can wait.
 PRIORITY_BULK = 0
 
+#: The worker commands that make up a report's "eval" — triage, the deep
+#: verifier, the exploit verifier, and the two git-only scans. The dashboard
+#: list/detail show "Queued for eval" off this set the way the PR list shows
+#: "Queued for Run" off ``run_agents``, so a report waiting on the worker is
+#: distinguishable from one nobody's looked at.
+SECURITY_EVAL_COMMANDS: tuple[str, ...] = (
+    "run_security_triage",
+    "verify_security_report",
+    "verify_exploit",
+    "map_report_versions",
+    "find_report_introduction",
+)
+
 
 def in_flight_statuses() -> tuple[str, ...]:
     """The statuses that mean a triage run is already under way.

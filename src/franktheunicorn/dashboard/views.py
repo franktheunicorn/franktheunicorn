@@ -70,7 +70,7 @@ from franktheunicorn.scoring.merge_readiness import (
     refresh_review_and_ci_state,
 )
 from franktheunicorn.security import agent_source
-from franktheunicorn.security.queue import in_flight_statuses
+from franktheunicorn.security.queue import SECURITY_EVAL_COMMANDS, in_flight_statuses
 
 logger = logging.getLogger(__name__)
 
@@ -1802,6 +1802,33 @@ _DEFAULT_SECURITY_SORT = "priority"
 SECURITY_LIST_ROW_CAP = 100
 
 
+def _page_reports_with_eval_state(reports: QuerySet[SecurityReport]) -> list[SecurityReport]:
+    """The page slice of *reports*, each tagged with ``eval_in_flight``.
+
+    One set, not a per-row query, so a 100-row list doesn't become 100 lookups —
+    the same shape as the PR list's ``run_in_flight``. A report with a pending or
+    running triage/verify/exploit/version-map/introduction command shows
+    "Queued for eval" the way a PR with a pending ``run_agents`` shows
+    "Queued for Run", so one waiting on the worker isn't indistinguishable from
+    one nobody's looked at.
+    """
+    page = list(reports[:SECURITY_LIST_ROW_CAP])
+    if not page:
+        return page
+    in_flight_ids = set(
+        WorkerCommand.objects.filter(
+            command__in=SECURITY_EVAL_COMMANDS,
+            status__in=in_flight_statuses(),
+            security_report_id__in=[r.pk for r in page],
+        )
+        .values_list("security_report_id", flat=True)
+        .distinct()
+    )
+    for report in page:
+        report.eval_in_flight = report.pk in in_flight_ids  # type: ignore[attr-defined]
+    return page
+
+
 def security_report_list(request: HttpRequest) -> HttpResponse:
     """List security reports with status tabs, ranked highest-priority first."""
     # Normalised, not passed through. Two things went wrong while this was taken on
@@ -1959,7 +1986,7 @@ def security_report_list(request: HttpRequest) -> HttpResponse:
             "scope_options": scope_options,
             "known_agents": agent_source.known_agents(),
             "reverify_cap": _bulk_verify_cap(),
-            "reports": reports[:SECURITY_LIST_ROW_CAP],
+            "reports": _page_reports_with_eval_state(reports),
             "status_tabs": tabs_with_counts,
             # So the page can say it is showing 100 of N. The tab badge counts the
             # whole filtered set, and on a tab meant to be driven to zero — "CVE, No
@@ -3263,6 +3290,16 @@ def security_report_detail(request: HttpRequest, report_id: int) -> HttpResponse
         .first()
     )
 
+    # Any eval command in flight — triage, the deep verifier, the exploit
+    # verifier, or the two git-only scans — for the header's "Queued for eval"
+    # badge. The triage area below already names triage specifically; this is the
+    # whole-pipeline view, so a queued verify or version map reads the same way.
+    eval_in_flight = WorkerCommand.objects.filter(
+        command__in=SECURITY_EVAL_COMMANDS,
+        status__in=in_flight_statuses(),
+        security_report=report,
+    ).exists()
+
     # branch_order, recorded by the run. Not created_at (every row of a run shares
     # a timestamp, so the database picks), not order_by("branch") (sorts `master`
     # after every `branch-*`), and not a ("main","master","trunk") guess in here —
@@ -3286,6 +3323,7 @@ def security_report_detail(request: HttpRequest, report_id: int) -> HttpResponse
         {
             "report": report,
             "sandbox_enabled": sandbox_enabled,
+            "eval_in_flight": eval_in_flight,
             "verifications": verifications,
             "has_version_map": any(v.agent == VERSION_MAP_AGENT for v in verifications),
             "version_rows": version_rows,
