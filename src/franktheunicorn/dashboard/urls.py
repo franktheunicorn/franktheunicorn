@@ -266,6 +266,11 @@ urlpatterns = [
         views.security_report_verify_exploit,
         name="security_verify_exploit",
     ),
+    path(
+        "security/<int:report_id>/evaluate-patch/",
+        views.security_report_evaluate_patch,
+        name="security_evaluate_patch",
+    ),
     # One-click fix: a Cursor cloud agent applies the scanner's patch, scrubs
     # the wording, and pushes an innocuously-named branch to the fork. The
     # refresh asks the API and the fork where the run got to.

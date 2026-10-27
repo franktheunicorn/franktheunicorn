@@ -1755,6 +1755,62 @@ class ExploitVerifyConfig(BaseModel):
     fresh_worktree: bool = True
 
 
+class PatchEvalConfig(BaseModel):
+    """Config for the patch evaluator: is this proposed patch a good change?
+
+    A third sibling of the deep verifier and the exploit verifier, answering a
+    different question again. The deep verifier says whether the vulnerability is
+    *there*; the exploit verifier says whether the exploit *fires*; this says
+    whether the proposed patch is a good change *setting aside whether it fixes a
+    security hole* — because a report ruled "not a security issue" can still
+    carry a patch worth landing as an ordinary improvement, and the security path
+    (private ticket, no PR) doesn't apply to that.
+
+    Read-only: this agent reviews the patch against the surrounding code, it does
+    not run anything. So ``fresh_worktree`` defaults False (the read-only
+    verifier's choice) rather than True (the exploit verifier's) — no build
+    output to clear, and a clean tree per report is not free on a Spark-sized
+    checkout.
+
+    Also drafts a JIRA-style ticket for the non-security version of the change:
+    title, description, component, priority — with no CVE / vulnerability /
+    exploit language, because the point is to file it through the normal
+    contributor path where a public ticket describing the hole is the bug. This
+    is text generation, not a JIRA API call — ``jira.enabled`` is not required,
+    and the operator pastes the draft into whatever tracker the project uses.
+
+    Borrows ``verifier.reviewer`` like the exploit verifier does — one
+    description of how to reach the agent box, not three.
+
+    ``enabled`` defaults True for the same reason the other two do: nothing here
+    runs until the detail-page button presses it, and a second flag in front of
+    a button press protected nothing the button doesn't already protect.
+    """
+
+    enabled: bool = True
+    #: Override the reviewer's model. Empty means "use the verifier's model".
+    model: str = ""
+    #: Appended to the agent's argv, like ``verifier.extra_args``.
+    extra_args: list[str] = Field(default_factory=list)
+    #: One agent run, one branch, so the budget is the same as a single verifier
+    #: branch. A read-only review is shorter than an exploit attempt, but leave
+    #: room for a real read of the surrounding code.
+    timeout_seconds: int = 1800
+    #: How much of the report to hand the agent. Same default as the verifier.
+    max_report_chars: int = 12_000
+    #: Extra instructions for the patch-evaluating agent, from the operator.
+    #: Appended after the report block, same ordering rule as the verifier's.
+    prompt_addendum: str = ""
+    #: Where the patch-eval checkout lives. A sibling of the verifier's and the
+    #: exploit verifier's, so a pool thread running any of them widens each to
+    #: its own worktree.
+    workspace_subdir: str = "security-patch-eval"
+    #: Whether to ``git clean -xdff`` before each run. Defaults False — this
+    #: agent reads source, it doesn't build or run, so a clean tree per report is
+    #: the cost the read-only verifier already decided not to pay.
+    fresh_worktree: bool = False
+
+
 class SecurityCveMatchConfig(BaseModel):
     """Config for tentatively matching pasted CVE ids to security reports.
 
@@ -2064,6 +2120,7 @@ class SecurityTriageConfig(BaseModel):
     sandbox_enabled: bool = False
     verifier: SecurityVerifierConfig = Field(default_factory=SecurityVerifierConfig)
     exploit_verify: ExploitVerifyConfig = Field(default_factory=ExploitVerifyConfig)
+    patch_eval: PatchEvalConfig = Field(default_factory=PatchEvalConfig)
     cve_match: SecurityCveMatchConfig = Field(default_factory=SecurityCveMatchConfig)
     duplicates: SecurityDuplicateConfig = Field(default_factory=SecurityDuplicateConfig)
     fix_agent: SecurityFixAgentConfig = Field(default_factory=SecurityFixAgentConfig)

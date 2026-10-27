@@ -4033,6 +4033,97 @@ def security_report_verify_exploit(request: HttpRequest, report_id: int) -> Http
 
 
 @require_POST
+def security_report_evaluate_patch(request: HttpRequest, report_id: int) -> HttpResponse:
+    """Queue the patch evaluator: is this proposed patch a good change, security aside (htmx).
+
+    Third sibling of :func:`security_report_verify` and
+    :func:`security_report_verify_exploit`. This puts a read-only coding agent
+    in the checkout on the default branch and asks it whether the patch is a good
+    change setting aside whether it fixes a security hole, and drafts a
+    JIRA-style ticket for the non-security version of it. Queued rather than run
+    in-request for the same reason the siblings are: minutes of agent time.
+    """
+    report = get_object_or_404(SecurityReport.objects.select_related("project"), pk=report_id)
+
+    from franktheunicorn.config.loader import get_operator_config
+    from franktheunicorn.security.queue import PRIORITY_INTERACTIVE, queue_patch_evaluation
+    from franktheunicorn.security.verifier import resolve_verifier_reviewer
+
+    operator_config = get_operator_config()
+    verifier = operator_config.security_triage.verifier
+    patch_eval = operator_config.security_triage.patch_eval
+    if not patch_eval.enabled:
+        return render(
+            request,
+            "dashboard/_security_verify_queued.html",
+            {
+                "report": report,
+                "blocked": (
+                    "Patch evaluation has been switched off. It defaults on, so "
+                    "something set security_triage.patch_eval.enabled: false in "
+                    "operator.yaml — or the file failed to load and took every other "
+                    "setting with it (run `manage.py show_config` to tell those apart)."
+                ),
+            },
+        )
+    # Cheapest-first, matching evaluate_patch's own gate order, so the message
+    # the button names is the one the worker will name too.
+    if not report.proposed_patch:
+        return render(
+            request,
+            "dashboard/_security_verify_queued.html",
+            {
+                "report": report,
+                "blocked": (
+                    "This report has no proposed patch, so there is nothing to "
+                    "evaluate. Scanner archives attach one per finding; a paste "
+                    "report only has one if you pasted a diff."
+                ),
+            },
+        )
+    if report.project is None:
+        return render(
+            request,
+            "dashboard/_security_verify_queued.html",
+            {
+                "report": report,
+                "blocked": (
+                    "This report isn't attached to a project, so there's no repository "
+                    "to review the patch against. Set one and try again."
+                ),
+            },
+        )
+    # Borrows the verifier's reviewer, so the reviewer gate is the same one.
+    if resolve_verifier_reviewer(operator_config, verifier) is None:
+        have = ", ".join(rc.name for rc in operator_config.agent_cli_reviewers)
+        return render(
+            request,
+            "dashboard/_security_verify_queued.html",
+            {
+                "report": report,
+                "blocked": (
+                    f"No agent_cli_reviewers entry named '{verifier.reviewer}', so there "
+                    "is no coding-agent CLI to run. "
+                    + (
+                        f"Configured entries: {have}. Point "
+                        "security_triage.verifier.reviewer at one of them."
+                        if have
+                        else "Add one to operator.yaml — it describes the CLI to invoke "
+                        "and, for a remote setup, how to reach the box it runs on."
+                    )
+                ),
+            },
+        )
+
+    created = queue_patch_evaluation(report, priority=PRIORITY_INTERACTIVE)
+    return render(
+        request,
+        "dashboard/_security_verify_queued.html",
+        {"report": report, "created": created, "patch_eval": patch_eval},
+    )
+
+
+@require_POST
 def security_report_fix(request: HttpRequest, report_id: int) -> HttpResponse:
     """Launch the one-click fix agent (htmx).
 

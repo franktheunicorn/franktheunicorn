@@ -1120,6 +1120,21 @@ class SecurityReport(models.Model):
     exploit_result = models.TextField(blank=True, default="")
     exploit_checked_at = models.DateTimeField(null=True, blank=True)
 
+    # Patch evaluation (optional follow-up). A coding agent reads the proposed
+    # patch and judges it on its merits — is this a good change, setting aside
+    # whether it fixes the security hole — and drafts a JIRA-style ticket for
+    # the non-security version of the change (no CVE/vuln/exploit language, just
+    # a normal improvement). For a report ruled "not a security issue" whose
+    # patch is still a decent cleanup: the security path (private ticket, no
+    # PR) doesn't apply, so the operator needs the patch reviewed and a ticket
+    # they can file the normal way. Driven by the "Evaluate the proposed patch"
+    # button. Sibling of the exploit verifier (one agent run, default branch,
+    # read-only — it reviews, it doesn't run code).
+    patch_eval_requested = models.BooleanField(default=False)
+    patch_eval_verdict = models.CharField(max_length=20, blank=True, default="")
+    patch_eval_result = models.TextField(blank=True, default="")
+    patch_eval_checked_at = models.DateTimeField(null=True, blank=True)
+
     # CVE dedup — against the *public* record.
     cve_matches = models.JSONField(default=list, blank=True)
     matched_cve_id = models.CharField(max_length=50, blank=True, default="")

@@ -314,6 +314,63 @@ class TestProcessPendingCommands:
         assert cmd.status == "completed"
         assert any("exploit_verify.enabled" in r.getMessage() for r in caplog.records)
 
+    def test_evaluate_patch_dispatch(self) -> None:
+        """The dashboard queues patch evaluation; the worker runs it."""
+        operator_config = MagicMock()
+        project = ProjectFactory(owner="acme", repo="widgets")
+        report = SecurityReportFactory(
+            project=project, title="Tighten foo validation", raw_text="...", proposed_patch="..."
+        )
+        cmd = WorkerCommand.objects.create(
+            command="evaluate_patch",
+            security_report=report,
+        )
+
+        from franktheunicorn.security.patch_eval import PatchEvalRun
+
+        fake_run = PatchEvalRun(
+            verdict="good",
+            summary="A clean refactor on its merits.",
+            raw_output="{...}",
+            patch_assessment="correct and minimal",
+            draft_ticket="SPARK-12345: Tighten foo validation",
+            confidence=0.8,
+        )
+        with patch(
+            "franktheunicorn.security.patch_eval.evaluate_patch", return_value=fake_run
+        ) as mock_eval:
+            processed = process_pending_commands(operator_config)
+
+        assert processed == 1
+        cmd.refresh_from_db()
+        assert cmd.status == "completed"
+        assert "good" in cmd.log
+        mock_eval.assert_called_once_with(report, operator_config)
+
+    def test_evaluate_patch_decline_is_logged_at_info(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A gate that stops configured work logs why, at a level someone sees."""
+        operator_config = MagicMock()
+        report = SecurityReportFactory(title="orphan", raw_text="")
+        cmd = WorkerCommand.objects.create(
+            command="evaluate_patch",
+            security_report=report,
+        )
+
+        from franktheunicorn.security.patch_eval import PatchEvalRun
+
+        declined = PatchEvalRun(error="security_triage.patch_eval.enabled is false")
+        with (
+            patch("franktheunicorn.security.patch_eval.evaluate_patch", return_value=declined),
+            caplog.at_level(logging.INFO, logger="franktheunicorn.worker.commands"),
+        ):
+            process_pending_commands(operator_config)
+
+        cmd.refresh_from_db()
+        assert cmd.status == "completed"
+        assert any("patch_eval.enabled" in r.getMessage() for r in caplog.records)
+
     def test_unknown_command_marked_failed(self, db_pr: PullRequest) -> None:
         operator_config = MagicMock()
         cmd = WorkerCommand.objects.create(

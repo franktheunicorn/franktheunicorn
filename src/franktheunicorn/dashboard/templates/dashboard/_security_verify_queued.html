@@ -1,11 +1,16 @@
-{# Answer to the Verify button. Three outcomes, all of them said out loud: the #}
-{# gate declined, the run was queued, or one was already in flight. A button #}
-{# that swaps in nothing is indistinguishable from a broken one. #}
+{# Answer to the Verify / Exploit / Patch-eval buttons. Three outcomes, all #}
+{# said out loud: the gate declined, the run was queued, or one was already in #}
+{# flight. A button that swaps in nothing is indistinguishable from a broken one. #}
 {% if blocked %}
 <div class="verify-result error-note">{{ blocked }}</div>
 {% elif created %}
 <div class="verify-result queued-note">
-    {% if exploit %}
+    {% if patch_eval %}
+    Patch evaluation queued. The agent will read the proposed patch against the
+    default branch and judge it on its merits — is this a good change, security
+    aside — and draft a JIRA-style ticket for the non-security version of it.
+    Expect minutes. Reload to see the verdict and the draft ticket.
+    {% elif exploit %}
     Exploit verification queued. The agent will attempt to reproduce the
     exploit on the default branch against this report — set up the
     preconditions, run the PoC, observe. Expect minutes. Reload to see the
@@ -19,7 +24,9 @@
 </div>
 {% else %}
 <div class="verify-result queued-note">
-    {% if exploit %}
+    {% if patch_eval %}
+    A patch evaluation is already running for this report. Reload to see it land.
+    {% elif exploit %}
     An exploit verification is already running for this report. Reload to see it land.
     {% else %}
     A verification is already running for this report. Reload to see it land.

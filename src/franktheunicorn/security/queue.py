@@ -47,6 +47,7 @@ SECURITY_EVAL_COMMANDS: tuple[str, ...] = (
     "run_security_triage",
     "verify_security_report",
     "verify_exploit",
+    "evaluate_patch",
     "map_report_versions",
     "find_report_introduction",
 )
@@ -99,6 +100,16 @@ def queue_exploit_verification(report: SecurityReport, *, priority: int = PRIORI
     for the whole archive); interactive when the detail-page button presses it.
     """
     return queue_command("verify_exploit", report=report, priority=priority)
+
+
+def queue_patch_evaluation(report: SecurityReport, *, priority: int = PRIORITY_BULK) -> bool:
+    """Queue the patch evaluator: is this proposed patch a good change, security aside?
+
+    Sibling of :func:`queue_exploit_verification`. Same door, same dedup — a
+    double-click is one review, not two. Interactive when the detail-page button
+    presses it; not bulk by default (no import opts into it yet).
+    """
+    return queue_command("evaluate_patch", report=report, priority=priority)
 
 
 def queue_version_map(report: SecurityReport, *, priority: int = PRIORITY_BULK) -> bool:

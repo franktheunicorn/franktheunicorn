@@ -17,6 +17,7 @@ from franktheunicorn.security.queue import (
     queue_cve_match,
     queue_exploit_verification,
     queue_fix_landed,
+    queue_patch_evaluation,
     queue_triage,
     queue_triage_if_enabled,
     queue_triage_on_request,
@@ -360,6 +361,37 @@ class TestExploitVerificationQueue:
 
         assert queue_exploit_verification(report) is True
         assert WorkerCommand.objects.filter(command="verify_exploit").count() == 2
+
+
+@pytest.mark.django_db
+class TestPatchEvaluationQueue:
+    """The per-report "Evaluate the proposed patch" button's door.
+
+    Same door, same dedup, same priority split — bulk by default, interactive
+    when the detail-page button presses it.
+    """
+
+    def test_one_click_is_one_command_at_bulk_priority(self) -> None:
+        report = SecurityReportFactory()
+        assert queue_patch_evaluation(report) is True
+        assert queue_patch_evaluation(report) is False
+        cmd = WorkerCommand.objects.get(command="evaluate_patch")
+        assert cmd.security_report == report
+        assert cmd.priority == PRIORITY_BULK
+
+    def test_the_detail_page_button_uses_interactive_priority(self) -> None:
+        report = SecurityReportFactory()
+        assert queue_patch_evaluation(report, priority=PRIORITY_INTERACTIVE) is True
+        cmd = WorkerCommand.objects.get(command="evaluate_patch")
+        assert cmd.priority == PRIORITY_INTERACTIVE
+
+    def test_requeues_after_the_previous_run_finished(self) -> None:
+        report = SecurityReportFactory()
+        queue_patch_evaluation(report)
+        WorkerCommand.objects.filter(command="evaluate_patch").update(status="completed")
+
+        assert queue_patch_evaluation(report) is True
+        assert WorkerCommand.objects.filter(command="evaluate_patch").count() == 2
 
 
 @pytest.mark.django_db

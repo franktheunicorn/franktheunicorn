@@ -130,6 +130,7 @@ _COMMAND_COST_TIER: dict[str, int] = {
     # Tier 2 — coding agent, real money.
     "verify_security_report": 2,
     "verify_exploit": 2,
+    "evaluate_patch": 2,
     "run_agents": 2,
     "run_dual_tests": 2,
 }
@@ -397,6 +398,7 @@ def _dispatch(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
         "run_security_triage": _run_security_triage,
         "verify_security_report": _verify_security_report,
         "verify_exploit": _verify_exploit,
+        "evaluate_patch": _evaluate_patch,
         "map_report_versions": _map_report_versions,
         "find_report_introduction": _find_report_introduction,
         "poll_security_rechecks": _poll_security_rechecks,
@@ -645,6 +647,31 @@ def _verify_exploit(cmd: WorkerCommand, operator_config: OperatorConfig) -> None
     if run.error:
         logger.info(
             "Exploit verification for report #%s did not run: %s",
+            cmd.security_report.pk,
+            run.error,
+        )
+
+
+def _evaluate_patch(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
+    """Evaluate the proposed patch on its merits, security aside.
+
+    Third sibling of the deep verifier and the exploit verifier. This puts a
+    read-only coding agent in the checkout on the default branch and asks it
+    whether the patch is a good change setting aside whether it fixes a security
+    hole, and drafts a JIRA-style ticket for the non-security version of it.
+    One agent run, one branch.
+    """
+    if cmd.security_report is None:
+        msg = "evaluate_patch requires a security_report target"
+        raise ValueError(msg)
+
+    from franktheunicorn.security.patch_eval import evaluate_patch
+
+    run = evaluate_patch(cmd.security_report, operator_config)
+    cmd.log = run.summary_line()
+    if run.error:
+        logger.info(
+            "Patch evaluation for report #%s did not run: %s",
             cmd.security_report.pk,
             run.error,
         )

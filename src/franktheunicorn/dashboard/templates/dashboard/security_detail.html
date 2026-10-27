@@ -428,6 +428,15 @@
                 🧪 Attempt to verify exploit
             </button>
         </div>
+        <div>
+            <button class="action-btn"
+                    hx-post="{% url 'dashboard:security_evaluate_patch' report.pk %}"
+                    hx-target="#patch-eval-result"
+                    hx-swap="innerHTML"
+                    hx-confirm="Evaluate the proposed patch on its merits? This runs a read-only coding agent over a checkout on the default branch — it judges the patch as a change (good / questionable / bad, security aside) and drafts a JIRA-style ticket for the non-security version. Minutes.">
+                📋 Evaluate the proposed patch
+            </button>
+        </div>
     </div>
     <div id="verify-result"></div>
     <div id="version-map-result"></div>
@@ -457,6 +466,39 @@
             <details>
                 <summary>Agent output</summary>
                 <pre class="verify-evidence">{{ report.exploit_result }}</pre>
+            </details>
+            {% endif %}
+        </div>
+        {% endif %}
+    </div>
+
+    <div id="patch-eval-result">
+        {% if report.patch_eval_requested %}
+        <div class="exploit-summary">
+            <h3>Patch evaluation</h3>
+            <p>
+                <strong>Verdict:</strong>
+                {% if report.patch_eval_verdict == "good" %}
+                <span class="badge badge-success">good</span>
+                {% elif report.patch_eval_verdict == "questionable" %}
+                <span class="badge badge-warning">questionable</span>
+                {% elif report.patch_eval_verdict == "bad" %}
+                <span class="badge badge-danger">bad</span>
+                {% elif report.patch_eval_verdict == "inconclusive" %}
+                <span class="badge badge-warning">inconclusive</span>
+                {% elif report.patch_eval_verdict == "error" %}
+                <span class="badge badge-warning">error</span>
+                {% else %}
+                <span class="badge">{{ report.patch_eval_verdict|default:"(none)" }}</span>
+                {% endif %}
+                {% if report.patch_eval_checked_at %}
+                <span class="muted">at {{ report.patch_eval_checked_at|date:"Y-m-d H:i" }}</span>
+                {% endif %}
+            </p>
+            {% if report.patch_eval_result %}
+            <details>
+                <summary>Agent output &amp; draft ticket</summary>
+                <pre class="verify-evidence">{{ report.patch_eval_result }}</pre>
             </details>
             {% endif %}
         </div>
