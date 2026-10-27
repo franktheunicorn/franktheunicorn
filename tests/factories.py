@@ -259,6 +259,7 @@ class SecurityReportFactory(factory.django.DjangoModelFactory):  # type: ignore[
     expected_behavior_explanation = ""
     poc_assessment = ""
     poc_plausible = None
+    poc_plausible_verdict = ""
     cve_matches = factory.LazyFunction(list)
     matched_cve_id = ""
     operator_notes = ""

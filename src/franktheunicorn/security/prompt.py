@@ -189,7 +189,13 @@ def build_triage_prompt(
         "already-fixed issue.\n\n"
         + TRIAGE_DISPOSITION_RUBRIC
         + "Return a JSON object with exactly these keys:\n"
-        '  "poc_plausible": boolean — does the POC demonstrate a real vulnerability?,\n'
+        '  "poc_plausible": "yes" | "no" | "maybe" — is the reported event a real '
+        'vulnerability? "yes" when the POC demonstrates a real, reachable '
+        'vulnerability that violates the security model; "no" when the premise '
+        "is wrong, the behaviour is documented as expected, or the POC does not "
+        'demonstrate the claimed impact; "maybe" when the input is too '
+        "ambiguous to commit to yes or no (pair that with the UNCERTAIN "
+        "disposition). A boolean true/false is also accepted for back-compat.\n"
         '  "poc_assessment": string — detailed assessment of the POC,\n'
         '  "is_expected_behavior": boolean — is the reported behavior documented/expected '
         "under the project's security model?,\n"

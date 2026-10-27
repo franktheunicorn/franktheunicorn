@@ -816,6 +816,113 @@ class TestTriStateCoercion:
         assert _coerce_bool("yes") is True
 
 
+class TestVerdictCoercion:
+    """The explicit Y/N/M tristate on whether the reported event is real.
+
+    A deliberate "maybe" is its own value here, not the None ``_coerce_tristate``
+    collapses it to — so the list can sort real-first and the badge can show M.
+    """
+
+    def test_affirmative_words_are_yes(self) -> None:
+        from franktheunicorn.security.triage import _coerce_verdict
+
+        for word in (
+            "yes",
+            " Yes ",
+            "true",
+            "TRUE",
+            "plausible",
+            "confirmed",
+            "likely",
+            "real",
+            "1",
+        ):
+            assert _coerce_verdict(word) == "yes", word
+
+    def test_negative_words_are_no(self) -> None:
+        from franktheunicorn.security.triage import _coerce_verdict
+
+        for word in ("no", "false", "not plausible", "implausible", "unlikely", "not real", "0"):
+            assert _coerce_verdict(word) == "no", word
+
+    def test_a_hedge_is_maybe_not_blank(self) -> None:
+        """'maybe'/'unknown'/'unclear' are a deliberate hedge, not "didn't say"."""
+        from franktheunicorn.security.triage import _coerce_verdict
+
+        for word in ("maybe", "uncertain", "unclear", "unknown", "ambiguous", "m", "n/a"):
+            assert _coerce_verdict(word) == "maybe", word
+
+    def test_absent_or_unrecognised_is_blank(self) -> None:
+        from franktheunicorn.security.triage import _coerce_verdict
+
+        assert _coerce_verdict(None) == ""
+        assert _coerce_verdict("") == ""
+        assert _coerce_verdict("who knows") == ""
+
+    def test_a_bool_is_accepted_for_back_compat(self) -> None:
+        """An older backend or prompt that returns a boolean is graded the same
+        way it was: true→yes, false→no."""
+        from franktheunicorn.security.triage import _coerce_verdict
+
+        assert _coerce_verdict(True) == "yes"
+        assert _coerce_verdict(False) == "no"
+
+
+@pytest.mark.django_db
+class TestAnalyzeWritesVerdictTristate:
+    """The analyze step writes the explicit tristate and derives the bool from it,
+    so a deliberate "maybe" is visible and sortable while the bool stays back-compat."""
+
+    def _run(self, verdict_value: object) -> Any:
+        import json
+
+        from tests.factories import SecurityReportFactory
+
+        parse_json = json.dumps({"title": "t", "component": "c", "severity": "high"})
+        analyze_json = json.dumps(
+            {
+                "poc_plausible": verdict_value,
+                "poc_assessment": "assessed",
+                "triage_summary": "summary",
+            }
+        )
+        backend = _MockLLMBackend(responses=[parse_json, analyze_json])
+        report = SecurityReportFactory(raw_text="A vulnerability.", status="new")
+        with (
+            patch("franktheunicorn.security.triage._get_triage_backends", return_value=[backend]),
+            patch("franktheunicorn.security.triage.search_cves", return_value=[]),
+            patch("franktheunicorn.security.triage._check_duplicates"),
+        ):
+            triage_report(report, None, OperatorConfig(github_username="testuser"))
+        report.refresh_from_db()
+        return report
+
+    def test_maybe_is_stored_and_the_bool_stays_none(self) -> None:
+        report = self._run("maybe")
+        assert report.poc_plausible_verdict == "maybe"
+        assert report.poc_plausible is None
+
+    def test_yes_is_stored_and_the_bool_is_true(self) -> None:
+        report = self._run("yes")
+        assert report.poc_plausible_verdict == "yes"
+        assert report.poc_plausible is True
+
+    def test_no_is_stored_and_the_bool_is_false(self) -> None:
+        report = self._run("no")
+        assert report.poc_plausible_verdict == "no"
+        assert report.poc_plausible is False
+
+    def test_a_legacy_boolean_true_is_graded_yes(self) -> None:
+        report = self._run(True)
+        assert report.poc_plausible_verdict == "yes"
+        assert report.poc_plausible is True
+
+    def test_a_legacy_boolean_false_is_graded_no(self) -> None:
+        report = self._run(False)
+        assert report.poc_plausible_verdict == "no"
+        assert report.poc_plausible is False
+
+
 @pytest.mark.django_db
 class TestPartialFailureIsolation:
     """Optional context and unrecognised answers must not destroy a good verdict."""

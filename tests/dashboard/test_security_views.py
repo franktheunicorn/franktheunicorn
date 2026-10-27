@@ -117,6 +117,48 @@ class TestSecurityReportListRanking:
 
         assert content.index(b"Low ranked") < content.index(b"High ranked")
 
+    def test_verdict_sort_ranks_real_first_then_maybe_then_no(self, client: Client) -> None:
+        """The model's Y/N/M on real event is the sort a pasted/emailed backlog
+        needs: yes on top, then maybe, then unassessed, then no — so the operator
+        triaging from the list sees the real ones first without clicking in."""
+        SecurityReportFactory(title="Not real", poc_plausible_verdict="no", priority=90.0)
+        SecurityReportFactory(title="Unassessed", poc_plausible_verdict="", priority=90.0)
+        SecurityReportFactory(title="Maybe real", poc_plausible_verdict="maybe", priority=10.0)
+        SecurityReportFactory(title="Real", poc_plausible_verdict="yes", priority=10.0)
+
+        content = client.get("/security/?sort=verdict").content
+
+        assert content.index(b"Real") < content.index(b"Maybe real")
+        assert content.index(b"Maybe real") < content.index(b"Unassessed")
+        assert content.index(b"Unassessed") < content.index(b"Not real")
+
+    def test_verdict_sort_breaks_ties_with_priority(self, client: Client) -> None:
+        """Inside a verdict tier the scanner's own ranking still wins."""
+        SecurityReportFactory(title="Low prio real", poc_plausible_verdict="yes", priority=10.0)
+        SecurityReportFactory(title="High prio real", poc_plausible_verdict="yes", priority=90.0)
+
+        content = client.get("/security/?sort=verdict").content
+
+        assert content.index(b"High prio real") < content.index(b"Low prio real")
+
+    def test_verdict_sort_link_is_offered(self, client: Client) -> None:
+        SecurityReportFactory(title="Anything")
+
+        content = client.get("/security/").content.decode()
+
+        assert "?sort=verdict" in content
+        assert "Verdict" in content
+
+    def test_the_verdict_badge_is_shown_on_the_row(self, client: Client) -> None:
+        SecurityReportFactory(title="A real one", poc_plausible_verdict="yes")
+
+        content = client.get("/security/").content.decode()
+
+        assert "verdict-yes" in content
+        # The badge's title carries the display label, so the verdict is legible
+        # without depending on the span's inner whitespace.
+        assert "Yes — real" in content
+
     def test_an_unknown_sort_falls_back_rather_than_erroring(self, client: Client) -> None:
         SecurityReportFactory(title="Only one", priority=1.0)
 

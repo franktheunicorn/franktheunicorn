@@ -1084,6 +1084,26 @@ class SecurityReport(models.Model):
     expected_behavior_explanation = models.TextField(blank=True, default="")
     poc_assessment = models.TextField(blank=True, default="")
     poc_plausible = models.BooleanField(null=True, blank=True)
+    #: The model's explicit Y/N/M on whether the reported event is real, written
+    #: by the triage analysis step. ``poc_plausible`` (the bool above) is the
+    #: older projection of this — yes→True, no→False, maybe→None — kept because
+    #: a lot of code reads the bool. This field carries the honest "maybe" the
+    #: bool cannot: a deliberate hedge is distinct from "the model didn't
+    #: say", so the list can sort real-first and the badge can show M.
+    #: Blank when triage hasn't assessed the report.
+    POC_PLAUSIBLE_VERDICT_CHOICES = [
+        ("", "Not assessed"),
+        ("yes", "Yes — real"),
+        ("no", "No — not real"),
+        ("maybe", "Maybe"),
+    ]
+    poc_plausible_verdict = models.CharField(
+        max_length=10,
+        blank=True,
+        default="",
+        choices=POC_PLAUSIBLE_VERDICT_CHOICES,
+        db_index=True,
+    )
 
     # Sandbox execution (optional follow-up)
     sandbox_requested = models.BooleanField(default=False)

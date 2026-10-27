@@ -488,6 +488,12 @@
             {% if report.assessed_severity != "unknown" %}
             <span class="severity-badge sev-{{ report.assessed_severity }}">{{ report.get_assessed_severity_display }}</span>
             {% endif %}
+            {% if report.poc_plausible_verdict %}
+            <span class="severity-badge verdict-{{ report.poc_plausible_verdict }}"
+                  title="Model's Y/N/M on whether the reported event is real: {{ report.get_poc_plausible_verdict_display }}">
+                {% if report.poc_plausible_verdict == 'yes' %}Y{% elif report.poc_plausible_verdict == 'no' %}N{% else %}M{% endif %}
+            </span>
+            {% endif %}
         </div>
         <div class="pr-meta">
             {# What put this report where it is in the list. Shown rather than #}

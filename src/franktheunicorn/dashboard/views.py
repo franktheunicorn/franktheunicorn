@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 from django.contrib import messages
 from django.db import transaction
-from django.db.models import Count, F, Max, Min, Q, QuerySet, Sum
+from django.db.models import Case, Count, F, IntegerField, Max, Min, Q, QuerySet, Sum, Value, When
 from django.db.models.expressions import OrderBy
 from django.http import HttpRequest, HttpResponse, StreamingHttpResponse
 
@@ -1769,11 +1769,32 @@ def _security_tab_q(key: str) -> Q:
 #: and 94, and the page only shows the first 100. "Newest" stays available because
 #: a trickle of emailed reports all rank 0.0 and arrival order is the right one
 #: for an inbox.
+#:
+#: "Verdict" ranks by the model's Y/N/M on whether the reported event is real —
+#: yes first, then maybe, then unassessed, then no — so the operator triaging a
+#: pasted/emailed backlog (where ``priority`` is 0.0 for everything and arrival
+#: order is a poor proxy for "what to look at") gets the real ones on top. The
+#: rank is a CASE because the alphabetical order of yes/maybe/""/no is not the
+#: order anyone wants; ties fall through to ``priority`` then ``created_at`` so
+#: a scanner's own ranking still breaks ties inside a verdict tier.
+_VERDICT_RANK = Case(
+    When(poc_plausible_verdict="yes", then=Value(0)),
+    When(poc_plausible_verdict="maybe", then=Value(1)),
+    When(poc_plausible_verdict="", then=Value(2)),
+    When(poc_plausible_verdict="no", then=Value(3)),
+    default=Value(2),
+    output_field=IntegerField(),
+)
 _SECURITY_SORTS = {
     "priority": ("-priority", "-created_at"),
     "newest": ("-created_at",),
+    "verdict": (_VERDICT_RANK, "-priority", "-created_at"),
 }
-_SECURITY_SORT_LABELS = (("priority", "Priority"), ("newest", "Newest"))
+_SECURITY_SORT_LABELS = (
+    ("priority", "Priority"),
+    ("newest", "Newest"),
+    ("verdict", "Verdict"),
+)
 _DEFAULT_SECURITY_SORT = "priority"
 
 #: Rows the list renders. Ranked first, so the cap keeps the top of the queue —

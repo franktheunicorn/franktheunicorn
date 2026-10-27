@@ -26,7 +26,14 @@
     </div>
     {% endif %}
 
-    {% if report.poc_plausible is not None %}
+    {% if report.poc_plausible_verdict %}
+    <div style="background: {% if report.poc_plausible_verdict == 'yes' %}var(--red-bg){% elif report.poc_plausible_verdict == 'no' %}var(--green-bg){% else %}var(--orange-bg){% endif %}; border-left: 3px solid {% if report.poc_plausible_verdict == 'yes' %}var(--red){% elif report.poc_plausible_verdict == 'no' %}var(--green){% else %}var(--orange){% endif %}; padding: 0.5rem 0.75rem; margin-bottom: 0.5rem;">
+        <strong style="color: {% if report.poc_plausible_verdict == 'yes' %}var(--red){% elif report.poc_plausible_verdict == 'no' %}var(--green){% else %}var(--orange){% endif %};">
+            Reported event: {% if report.poc_plausible_verdict == 'yes' %}Real{% elif report.poc_plausible_verdict == 'no' %}Not real{% else %}Maybe{% endif %}
+        </strong>
+    </div>
+    {% elif report.poc_plausible is not None %}
+    {# Rows triaged before the explicit tristate: fall back to the bool. #}
     <div style="background: {% if report.poc_plausible %}var(--red-bg){% else %}var(--green-bg){% endif %}; border-left: 3px solid {% if report.poc_plausible %}var(--red){% else %}var(--green){% endif %}; padding: 0.5rem 0.75rem; margin-bottom: 0.5rem;">
         <strong style="color: {% if report.poc_plausible %}var(--red){% else %}var(--green){% endif %};">
             POC: {% if report.poc_plausible %}Plausible{% else %}Not Plausible{% endif %}

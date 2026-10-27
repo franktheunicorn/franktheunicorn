@@ -993,8 +993,14 @@ def _mark_backend_down_if_hard(backend: BaseLLMBackend, exc: BaseException) -> N
 
 #: Spellings a model actually uses for yes and no. Anything outside both sets is
 #: not an answer, and guessing which way it leans is how a hedge becomes a verdict.
-_TRUE_WORDS = frozenset({"true", "yes", "y", "1", "plausible", "confirmed", "likely"})
-_FALSE_WORDS = frozenset({"false", "no", "n", "0", "implausible", "not plausible", "unlikely"})
+_TRUE_WORDS = frozenset({"true", "yes", "y", "1", "plausible", "confirmed", "likely", "real"})
+_FALSE_WORDS = frozenset(
+    {"false", "no", "n", "0", "implausible", "not plausible", "unlikely", "not real"}
+)
+#: Spellings that mean the model is hedging — a deliberate "maybe", distinct
+#: from "didn't say". The prompt now asks for "maybe" explicitly; these catch
+#: the older wordings a model reaches for when it won't commit.
+_MAYBE_WORDS = frozenset({"maybe", "uncertain", "unclear", "unknown", "ambiguous", "m", "n/a"})
 
 
 def _coerce_tristate(value: object) -> bool | None:
@@ -1024,6 +1030,33 @@ def _coerce_tristate(value: object) -> bool | None:
             return False
         return None
     return None
+
+
+def _coerce_verdict(value: object) -> str:
+    """Coerce an LLM JSON value to the explicit Y/N/M tristate on real event.
+
+    "yes"/"no"/"maybe"; "" when the model didn't answer. A bool still works
+    (true→yes, false→no) so an older backend or prompt that returns a boolean
+    is graded the same way it was. The maybe set catches a hedge the prompt
+    now invites — a deliberate "I'm not sure" is a first-class value here,
+    not the None ``_coerce_tristate`` returns for it.
+    """
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if value is None:
+        return ""
+    if isinstance(value, int | float):
+        return "yes" if value else "no"
+    if isinstance(value, str):
+        word = value.strip().lower()
+        if word in _TRUE_WORDS:
+            return "yes"
+        if word in _FALSE_WORDS:
+            return "no"
+        if word in _MAYBE_WORDS:
+            return "maybe"
+        return ""
+    return ""
 
 
 def _coerce_bool(value: object) -> bool:
@@ -1218,8 +1251,13 @@ def _analyze_report(
         )
     ):
         # Absent key means "the model didn't assess this", which is what the
-        # field's null=True is for — NOT "not plausible".
-        report.poc_plausible = _coerce_tristate(analysis.get("poc_plausible"))
+        # field's null=True is for — NOT "not plausible". The explicit tristate
+        # is the source of truth now: a deliberate "maybe" is its own value
+        # (not the None "didn't say" collapses to), and the bool is its projection
+        # for the code that already reads ``poc_plausible``.
+        verdict = _coerce_verdict(analysis.get("poc_plausible"))
+        report.poc_plausible_verdict = verdict
+        report.poc_plausible = {"yes": True, "no": False}.get(verdict)
         report.poc_assessment = str(analysis.get("poc_assessment", ""))
         report.is_expected_behavior = _coerce_bool(analysis.get("is_expected_behavior", False))
         report.expected_behavior_explanation = str(
@@ -1262,6 +1300,7 @@ def _analyze_report(
         stored_status = _current_status(report)
         staged_fields: list[str] = [
             "poc_plausible",
+            "poc_plausible_verdict",
             "poc_assessment",
             "is_expected_behavior",
             "expected_behavior_explanation",
