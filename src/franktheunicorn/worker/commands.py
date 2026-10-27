@@ -47,12 +47,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from django.db import transaction
+from django.db.models import Case, IntegerField, Value, When
 from django.utils import timezone
 
 from franktheunicorn.core.models import WorkerCommand
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from django.db.models import QuerySet
 
     from franktheunicorn.backends.base import ForgeClient
     from franktheunicorn.config.models import OperatorConfig, ProjectConfig
@@ -99,6 +102,53 @@ def _forge_client_for(
 #: Bounded, the backlog still drains — across successive drains five seconds
 #: apart — and everything else keeps its turn.
 MAX_COMMANDS_PER_DRAIN = 20
+
+
+#: Cost tier per command, the secondary sort key inside a priority band so a
+#: cheap command doesn't wait behind an expensive one queued earlier. Lower =
+#: claimed first. Tier 0 git-only (minutes, free); tier 1 quick LLM or bounded
+#: container (cheap); tier 2 coding agent per branch (real money). Unknown
+#: defaults to tier 2 — a new command waits unless marked cheap, the safe
+#: surprise. One place this lives, so it can't drift.
+_COMMAND_COST_TIER: dict[str, int] = {
+    # Tier 0 — git-only, no LLM, no agent.
+    "map_report_versions": 0,
+    "find_report_introduction": 0,
+    "match_security_branches": 0,
+    "scan_security_fixed": 0,
+    "check_fix_landed": 0,
+    "check_fixes_landed": 0,
+    "check_cve_fixes_landed": 0,
+    # Tier 1 — quick LLM or bounded container.
+    "run_security_triage": 1,
+    "run_security_sandbox": 1,
+    "analyze_pr_ci": 1,
+    "assess_zombie_pr": 1,
+    "scan_zombie_prs": 1,
+    "poll_security_rechecks": 1,
+    "match_cves_to_reports": 1,
+    # Tier 2 — coding agent, real money.
+    "verify_security_report": 2,
+    "verify_exploit": 2,
+    "run_agents": 2,
+    "run_dual_tests": 2,
+}
+_DEFAULT_COMMAND_TIER = 2
+
+
+def _tier_annotation(queryset: QuerySet[WorkerCommand]) -> QuerySet[WorkerCommand]:
+    """Annotate *queryset* with a ``tier`` for the cost-tier secondary sort."""
+    return queryset.annotate(
+        tier=Case(
+            *(
+                When(command=command, then=Value(tier))
+                for command, tier in _COMMAND_COST_TIER.items()
+            ),
+            default=Value(_DEFAULT_COMMAND_TIER),
+            output_field=IntegerField(),
+        )
+    )
+
 
 #: How long ``poll_security_rechecks`` waits before handing itself back to the
 #: queue. The whole point of the re-queue is that the handler stays short, so
@@ -170,7 +220,18 @@ def process_pending_commands(
         # excludes one command type, so a healthy worker pays nothing for it.
         if not triage_backends_alive(operator_config):
             pending = pending.exclude(command="run_security_triage")
-        cmd_id = pending.order_by("-priority", "created_at").values_list("pk", flat=True).first()
+        # Cost tier is the secondary sort key, after priority and before
+        # creation order: within a band, a cheap git-only scan jumps an
+        # expensive agent verify that was queued earlier, so the version info
+        # lands in minutes instead of after the whole verify backlog. FIFO
+        # still orders commands of the same tier (the common case — most
+        # queues are one command type).
+        cmd_id = (
+            _tier_annotation(pending)
+            .order_by("-priority", "tier", "created_at")
+            .values_list("pk", flat=True)
+            .first()
+        )
         if cmd_id is None:
             break
         cmd = _claim_command(cmd_id)

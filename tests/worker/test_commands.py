@@ -546,6 +546,104 @@ class TestCommandPriority:
 
 
 @pytest.mark.django_db
+class TestCommandCostTier:
+    """Within a priority band, a cheap command jumps an expensive one queued
+    earlier — so a bulk import's git-only version scans (minutes, free) don't
+    sit behind the whole agent-verify backlog (hours, real money). FIFO still
+    orders commands of the same tier."""
+
+    def test_cheap_scan_jumps_expensive_verify_queued_earlier(self) -> None:
+        """The pain case: verify_security_report queued first, map_report_versions
+        queued after. Without the tier key, FIFO runs verify first and the
+        version info waits behind the whole verify backlog."""
+        operator_config = MagicMock()
+        report = SecurityReportFactory()
+        # Same priority (bulk), verify queued first.
+        WorkerCommand.objects.create(
+            command="verify_security_report", security_report=report, priority=0
+        )
+        WorkerCommand.objects.create(
+            command="map_report_versions", security_report=report, priority=0
+        )
+
+        order: list[str] = []
+
+        def record(cmd: WorkerCommand, _opc: Any) -> None:
+            order.append(cmd.command)
+
+        with patch("franktheunicorn.worker.commands._dispatch", side_effect=record):
+            process_pending_commands(operator_config)
+
+        assert order == ["map_report_versions", "verify_security_report"]
+
+    def test_fifo_holds_within_the_same_tier(self) -> None:
+        """Two expensive commands keep creation order — the tier key only
+        separates tiers, it doesn't replace FIFO within one."""
+        operator_config = MagicMock()
+        first = WorkerCommand.objects.create(
+            command="run_dual_tests", pull_request=PullRequestFactory(), priority=0
+        )
+        second = WorkerCommand.objects.create(
+            command="run_agents", pull_request=PullRequestFactory(), priority=0
+        )
+
+        order: list[int] = []
+
+        with patch(
+            "franktheunicorn.worker.commands._dispatch",
+            side_effect=lambda cmd, _opc: order.append(cmd.pk),
+        ):
+            process_pending_commands(operator_config)
+
+        assert order == [first.pk, second.pk]
+
+    def test_priority_still_beats_tier(self) -> None:
+        """An interactive (priority 100) expensive command still beats a bulk
+        (priority 0) cheap one — tier is only the secondary key."""
+        from franktheunicorn.security.queue import PRIORITY_INTERACTIVE
+
+        operator_config = MagicMock()
+        report = SecurityReportFactory()
+        cheap_bulk = WorkerCommand.objects.create(
+            command="map_report_versions", security_report=report, priority=0
+        )
+        clicked = WorkerCommand.objects.create(
+            command="run_agents", pull_request=PullRequestFactory(), priority=PRIORITY_INTERACTIVE
+        )
+
+        order: list[int] = []
+
+        with patch(
+            "franktheunicorn.worker.commands._dispatch",
+            side_effect=lambda cmd, _opc: order.append(cmd.pk),
+        ):
+            process_pending_commands(operator_config)
+
+        assert order[0] == clicked.pk, "the click goes first, tier notwithstanding"
+        assert order[1] == cheap_bulk.pk
+
+    def test_unknown_command_defaults_to_expensive_tier(self) -> None:
+        """A command not in the tier dict waits (tier 2), so a known cheap
+        command queued after it still jumps it."""
+        operator_config = MagicMock()
+        report = SecurityReportFactory()
+        WorkerCommand.objects.create(command="some-new-command", security_report=report, priority=0)
+        WorkerCommand.objects.create(
+            command="map_report_versions", security_report=report, priority=0
+        )
+
+        order: list[str] = []
+
+        def record(cmd: WorkerCommand, _opc: Any) -> None:
+            order.append(cmd.command)
+
+        with patch("franktheunicorn.worker.commands._dispatch", side_effect=record):
+            process_pending_commands(operator_config)
+
+        assert order == ["map_report_versions", "some-new-command"]
+
+
+@pytest.mark.django_db
 class TestInFlightDedup:
     """Force Run Agents is a 30-120s pipeline behind a button that says "reload in
     a few minutes", so an impatient operator used to queue a run per click."""
