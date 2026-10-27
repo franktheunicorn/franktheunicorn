@@ -348,6 +348,7 @@ def _dispatch(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
         "scan_zombie_prs": _scan_zombie_prs,
         "assess_zombie_pr": _assess_zombie_pr,
         "analyze_pr_ci": _analyze_pr_ci,
+        "match_cves_to_reports": _match_cves_to_reports,
     }
     handler = handlers.get(cmd.command)
     if handler is None:
@@ -910,3 +911,33 @@ def _analyze_pr_ci(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
     verdicts = analysis.get("verdicts", {})
     base = analysis.get("base_failing", [])
     cmd.log = f"CI analysis: {len(verdicts)} verdict(s); also failing on base: {base or 'none'}"
+
+
+def _match_cves_to_reports(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
+    """The CVE-match page's Match button: tie pasted CVE ids to backlog reports.
+
+    Targetless (no report/PR target) but scoped to a project via ``kwargs``.
+    Loops every pending TentativeCveMatch for that project, one agent call per
+    CVE. A gate declining is a successful command with a log that says why, not
+    a red "failed" — same as the verifier.
+    """
+    project_id = (cmd.kwargs or {}).get("project_id")
+    if project_id is None:
+        msg = "match_cves_to_reports requires a project_id in kwargs"
+        raise ValueError(msg)
+
+    from franktheunicorn.core.models import Project
+
+    project = Project.objects.filter(pk=project_id).first()
+    if project is None:
+        cmd.log = f"project_id={project_id} no longer exists; nothing to match"
+        return
+
+    from franktheunicorn.security.cve_paste_match import match_pending_for_project
+
+    run = match_pending_for_project(project, operator_config)
+    cmd.log = run.summary()
+    if run.error:
+        logger.info("CVE matching for %s did not run: %s", project.full_name, run.error)
+    elif run.notes:
+        cmd.log += "; " + "; ".join(run.notes)

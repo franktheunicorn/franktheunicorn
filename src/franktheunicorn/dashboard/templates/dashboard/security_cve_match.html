@@ -1,0 +1,106 @@
+{% extends "dashboard/base.html" %}
+{% block title %}CVE Match — franktheunicorn{% endblock %}
+{% block content %}
+<a href="{% url 'dashboard:security_list' %}" class="back-link">&larr; Security Reports</a>
+<h2 style="margin-top: 0.5rem;">CVE Match</h2>
+<p style="font-size: 0.85rem; color: var(--muted); margin-bottom: 1rem;">
+    Paste your currently-assigned-but-not-public CVEs (the id is known, the public
+    record is not). An agent will try to tie each to a report already in the
+    backlog. Matches are <strong>tentative</strong> — confirm or reject them below;
+    a confirm writes the CVE id onto the report.
+    Re-pasting an updated list upserts by CVE id (no duplicates) and re-queues
+    anything still pending or unmatched.
+</p>
+
+<form method="post" action="{% url 'dashboard:security_cve_match' %}"
+      style="padding: 1rem; background: var(--card); border: 1px solid var(--border); border-radius: 4px;">
+    {% csrf_token %}
+    <div class="form-row">
+        <label for="project_id" style="min-width: 6rem; font-size: 0.85rem; font-weight: 600;">Project</label>
+        <select id="project_id" name="project_id" required>
+            <option value="">Pick a project…</option>
+            {% for project in projects %}
+            <option value="{{ project.pk }}">{{ project.full_name }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div style="margin-top: 0.75rem;">
+        <label for="raw_text" style="display: block; font-size: 0.85rem; font-weight: 600; margin-bottom: 0.3rem;">
+            CVEs (one per line; the rest of the line is the description)
+        </label>
+        <textarea id="raw_text" name="raw_text" required rows="10"
+                  style="width: 100%; font-family: monospace; font-size: 0.85rem; padding: 0.5rem; border: 1px solid var(--border); border-radius: 4px; resize: vertical;"
+                  placeholder="CVE-2026-12345: RCE in the foo parser via crafted input
+CVE-2026-12346: DoS through unbounded recursion in bar"></textarea>
+    </div>
+    <div style="margin-top: 0.75rem;">
+        <button class="action-btn post" type="submit" style="font-size: 0.9rem; padding: 0.5rem 1.5rem;"
+                {% if not reviewer_name %}disabled title="No agent_cli_reviewers entry named '{{ reviewer_expected }}' is configured — add one to operator.yaml to enable matching."{% endif %}>
+            Match
+        </button>
+        {% if not reviewer_name %}
+        <span style="font-size: 0.8rem; color: var(--muted); margin-left: 0.5rem;">
+            Matching is disabled until an <code>agent_cli_reviewers</code> entry named
+            <code>{{ reviewer_expected }}</code> is configured.
+        </span>
+        {% endif %}
+    </div>
+</form>
+
+<h3 style="margin-top: 1.5rem;">Tentative matches</h3>
+{% if not matches %}
+<p style="font-size: 0.85rem; color: var(--muted);">No CVEs pasted yet.</p>
+{% else %}
+{% regroup matches by project as by_project %}
+{% for project_group in by_project %}
+<h4 style="margin: 1rem 0 0.4rem; font-size: 0.95rem;">{{ project_group.grouper.full_name }}</h4>
+<div style="border: 1px solid var(--border); border-radius: 4px; overflow: hidden;">
+    {% for match in project_group.list %}
+    <div style="display: flex; gap: 0.6rem; align-items: flex-start; padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border); font-size: 0.85rem;">
+        <div style="flex: 1; min-width: 0;">
+            <code style="font-weight: 600;">{{ match.cve_id }}</code>
+            {% if match.cve_description %}
+            <span style="color: var(--muted);"> — {{ match.cve_description|truncatechars:120 }}</span>
+            {% endif %}
+            <br>
+            {% if match.status == 'tentative' and match.report %}
+                → <a href="{% url 'dashboard:security_detail' report_id=match.report.pk %}">report #{{ match.report.pk }}</a>
+                <em>{{ match.report.title|truncatechars:80 }}</em>
+                <span style="color: var(--muted);">[{{ match.confidence }} confidence]</span>
+                {% if match.reasoning %}<div style="color: var(--muted); font-size: 0.8rem; margin-top: 0.2rem;">{{ match.reasoning|truncatechars:200 }}</div>{% endif %}
+            {% elif match.status == 'confirmed' and match.report %}
+                → <a href="{% url 'dashboard:security_detail' report_id=match.report.pk %}">report #{{ match.report.pk }}</a>
+                <strong style="color: green;">✓ confirmed</strong>
+            {% elif match.status == 'rejected' %}
+                <span style="color: var(--muted);">rejected</span>
+            {% elif match.status == 'no_match' %}
+                <span style="color: var(--muted);">no match found</span>
+                {% if match.reasoning %}<div style="color: var(--muted); font-size: 0.8rem; margin-top: 0.2rem;">{{ match.reasoning|truncatechars:200 }}</div>{% endif %}
+            {% elif match.status == 'pending' %}
+                <span style="color: var(--muted);">pending…</span>
+            {% endif %}
+        </div>
+        <div style="display: flex; gap: 0.3rem; flex-shrink: 0;">
+            {% if match.status == 'tentative' and match.report %}
+            <form method="post" action="{% url 'dashboard:security_cve_match_confirm' match_id=match.pk %}" style="display: inline;">
+                {% csrf_token %}
+                <button class="action-btn post" type="submit" style="font-size: 0.75rem; padding: 0.2rem 0.5rem;">Confirm</button>
+            </form>
+            <form method="post" action="{% url 'dashboard:security_cve_match_reject' match_id=match.pk %}" style="display: inline;">
+                {% csrf_token %}
+                <button class="action-btn" type="submit" style="font-size: 0.75rem; padding: 0.2rem 0.5rem;">Reject</button>
+            </form>
+            {% endif %}
+            {% if match.status != 'pending' %}
+            <form method="post" action="{% url 'dashboard:security_cve_match_rerun' match_id=match.pk %}" style="display: inline;">
+                {% csrf_token %}
+                <button class="action-btn" type="submit" style="font-size: 0.75rem; padding: 0.2rem 0.5rem;" title="Re-run the matcher for this CVE">Re-run</button>
+            </form>
+            {% endif %}
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% endfor %}
+{% endif %}
+{% endblock %}

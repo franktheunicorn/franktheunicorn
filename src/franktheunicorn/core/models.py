@@ -1941,6 +1941,7 @@ class WorkerCommand(models.Model):
         ("check_fixes_landed", "Sweep: check whether known fixes landed upstream"),
         ("scan_zombie_prs", "Sweep: closed-unmerged PRs whose JIRA is still open"),
         ("assess_zombie_pr", "Re-run the zombie assessment on one PR"),
+        ("match_cves_to_reports", "Tentatively match pasted CVE ids to security reports"),
     ]
 
     STATUS_CHOICES = [
@@ -2158,3 +2159,78 @@ class ZombieScanState(models.Model):
 
     def __str__(self) -> str:
         return f"ZombieScanState[{self.project}] frontier=#{self.lowest_number_seen}"
+
+
+class TentativeCveMatch(models.Model):
+    """A CVE id pasted by the operator that an agent tentatively matched to a report.
+
+    The operator pastes their currently-assigned-but-not-public CVEs (the id is
+    known, the public record is not) and an agent tries to tie each to a
+    :class:`SecurityReport` already in the backlog. The link is *tentative* —
+    the operator confirms or rejects it on the report page; a confirm writes
+    the CVE id onto ``SecurityReport.matched_cve_id`` (the field the rest of the
+    dashboard reads as "this report's CVE"), a reject leaves the report alone.
+
+    Upserted by ``(project, cve_id)``: re-pasting tomorrow's updated list does
+    not duplicate a row whose match is still tentative, and only re-queues the
+    ones still pending or unmatched. There is no batch model — the paste is
+    input, the CVE is the unit of work.
+    """
+
+    STATUS_CHOICES = [
+        # Queued; the agent has not run yet.
+        ("pending", "Pending"),
+        # The agent picked a report (``report`` set, ``confidence`` in high/medium/low).
+        ("tentative", "Tentative"),
+        # The agent ran and found no report (``report`` null, ``confidence``="none").
+        ("no_match", "No match"),
+        # The operator confirmed the tentative match; ``report.matched_cve_id`` is set.
+        ("confirmed", "Confirmed"),
+        # The operator rejected the tentative match.
+        ("rejected", "Rejected"),
+    ]
+
+    CONFIDENCE_CHOICES = [
+        ("", "Not attempted"),
+        ("high", "High"),
+        ("medium", "Medium"),
+        ("low", "Low"),
+        ("none", "No match"),
+    ]
+
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="cve_matches")
+    cve_id = models.CharField(max_length=50)
+    # The description as pasted (the line after the CVE id). Re-paste updates it;
+    # the agent reads it as the claim to match against the report bodies.
+    cve_description = models.TextField(blank=True, default="")
+
+    # The agent's pick. null until it runs; null with status="no_match" after.
+    report = models.ForeignKey(
+        SecurityReport,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="tentative_cve_matches",
+    )
+    confidence = models.CharField(max_length=10, choices=CONFIDENCE_CHOICES, blank=True, default="")
+    reasoning = models.TextField(blank=True, default="")
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default="pending")
+    matched_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    objects: models.Manager[TentativeCveMatch] = models.Manager()
+
+    class Meta:
+        # The upsert key: one row per (project, cve_id), so re-pasting is an
+        # update, not a duplicate. Indexed for the per-project worklist.
+        constraints = [
+            models.UniqueConstraint(
+                fields=["project", "cve_id"], name="unique_tentative_cve_match_per_project"
+            ),
+        ]
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"{self.cve_id} → {self.report_id or 'none'} ({self.status})"

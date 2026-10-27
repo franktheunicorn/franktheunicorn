@@ -53,6 +53,7 @@ from franktheunicorn.core.models import (
     SecurityReport,
     SecurityTriageFeedback,
     SecurityTriageGuidance,
+    TentativeCveMatch,
     TestRun,
     WorkerCommand,
     ZombieAssessment,
@@ -5622,3 +5623,174 @@ def pr_by_coords(request: HttpRequest, owner: str, repo: str, pr_number: int) ->
     Useful for deep-linking directly to a PR from external tools or browser bookmarks.
     """
     return _resolve_and_redirect_pr(request, owner, repo, pr_number)
+
+
+# --- CVE match: paste assigned-but-not-public CVEs, agent ties them to reports ---
+
+
+def _cve_match_reviewer_name(operator_config: OperatorConfig) -> str | None:
+    """The agent_cli_reviewers name the matcher would borrow, or None if none configured.
+
+    The page shows the form either way; the Match button explains itself dead
+    when this is None, same pattern as the CVE API panel.
+    """
+    config = operator_config.security_triage.cve_match
+    if not any(rc.name == config.reviewer for rc in operator_config.agent_cli_reviewers):
+        return None
+    return config.reviewer
+
+
+def security_cve_match(request: HttpRequest) -> HttpResponse:
+    """The CVE-match page: paste assigned-but-not-public CVEs, agent matches them.
+
+    GET shows the paste form plus the existing TentativeCveMatch rows (grouped
+    by project). POST parses the paste, upserts the rows, queues the matcher
+    for the selected project, and redirects back with a flash.
+    """
+    from franktheunicorn.config.loader import get_operator_config
+
+    operator_config = get_operator_config()
+    reviewer_name = _cve_match_reviewer_name(operator_config)
+
+    if request.method == "POST":
+        raw_text = request.POST.get("raw_text", "").strip()
+        project_id = request.POST.get("project_id", "").strip()
+
+        if not raw_text:
+            messages.error(request, "Paste at least one CVE id.")
+            return redirect("dashboard:security_cve_match")
+        if not project_id or not project_id.isdigit():
+            messages.error(request, "Pick a project to match the CVEs against.")
+            return redirect("dashboard:security_cve_match")
+
+        project = Project.objects.filter(pk=int(project_id)).first()
+        if project is None:
+            messages.error(request, "That project no longer exists — nothing was saved.")
+            return redirect("dashboard:security_cve_match")
+
+        from franktheunicorn.security.cve_paste_match import parse_pasted_cves, upsert_matches
+
+        pasted = parse_pasted_cves(raw_text)
+        if not pasted:
+            messages.error(
+                request,
+                "No CVE ids found in the paste — expected lines like "
+                "'CVE-2026-12345: short description'.",
+            )
+            return redirect("dashboard:security_cve_match")
+
+        rows = upsert_matches(project, pasted)
+        pending = [r for r in rows if r.status == "pending"]
+
+        if reviewer_name is None:
+            messages.warning(
+                request,
+                f"Saved {len(pasted)} CVE(s) for {project.full_name}, but no "
+                f"agent_cli_reviewers entry named "
+                f"{operator_config.security_triage.cve_match.reviewer!r} is configured, so "
+                "the matcher cannot run. Add one to operator.yaml and press Match again.",
+            )
+        else:
+            from franktheunicorn.security.queue import queue_cve_match
+
+            queued = queue_cve_match(project) if pending else False
+            if not pending:
+                messages.info(
+                    request,
+                    f"All {len(pasted)} CVE(s) for {project.full_name} were already matched or "
+                    "ruled on — nothing to re-run.",
+                )
+            elif queued:
+                messages.success(
+                    request,
+                    f"Queued the matcher for {len(pending)} CVE(s) on {project.full_name}. "
+                    "Results land on this page as the agent runs.",
+                )
+            else:
+                messages.info(
+                    request,
+                    f"A match run is already in flight for {project.full_name}; the "
+                    f"{len(pending)} newly-pending CVE(s) will be picked up by it.",
+                )
+        return redirect("dashboard:security_cve_match")
+
+    # GET: the form plus the existing matches.
+    projects = (
+        Project.objects.filter(enabled=True)
+        .filter(Project.configured_q())
+        .order_by("owner", "repo")
+    )
+    matches = TentativeCveMatch.objects.select_related("project", "report").order_by(
+        "project__owner", "project__repo", "-created_at"
+    )
+    return render(
+        request,
+        "dashboard/security_cve_match.html",
+        {
+            "projects": projects,
+            "matches": matches,
+            "reviewer_name": reviewer_name,
+            "reviewer_expected": operator_config.security_triage.cve_match.reviewer,
+        },
+    )
+
+
+def _cve_match_row_or_404(match_id: int) -> TentativeCveMatch:
+    return get_object_or_404(
+        TentativeCveMatch.objects.select_related("project", "report"), pk=match_id
+    )
+
+
+def security_cve_match_confirm(request: HttpRequest, match_id: int) -> HttpResponse:
+    """Confirm a tentative match: write the CVE id onto the report, mark confirmed."""
+    match = _cve_match_row_or_404(match_id)
+    report = match.report
+    if report is None:
+        messages.error(request, "That match has no report to confirm.")
+        return redirect("dashboard:security_cve_match")
+
+    if request.method == "POST":
+        report.matched_cve_id = match.cve_id
+        report.save(update_fields=["matched_cve_id", "updated_at"])
+        match.status = "confirmed"
+        match.save(update_fields=["status", "updated_at"])
+        where = report.project.full_name if report.project else "no project"
+        messages.success(request, f"Recorded {match.cve_id} on report #{report.pk} ({where}).")
+    return redirect("dashboard:security_cve_match")
+
+
+def security_cve_match_reject(request: HttpRequest, match_id: int) -> HttpResponse:
+    """Reject a tentative match: mark rejected, leave the report alone."""
+    match = _cve_match_row_or_404(match_id)
+    if request.method == "POST":
+        match.status = "rejected"
+        match.save(update_fields=["status", "updated_at"])
+        messages.info(request, f"Rejected the tentative match for {match.cve_id}.")
+    return redirect("dashboard:security_cve_match")
+
+
+def security_cve_match_rerun(request: HttpRequest, match_id: int) -> HttpResponse:
+    """Re-queue matching for one CVE: mark pending and queue the matcher."""
+    match = _cve_match_row_or_404(match_id)
+    if request.method == "POST":
+        from franktheunicorn.config.loader import get_operator_config
+        from franktheunicorn.security.queue import queue_cve_match
+
+        operator_config = get_operator_config()
+        if _cve_match_reviewer_name(operator_config) is None:
+            messages.error(
+                request,
+                f"No agent_cli_reviewers entry named "
+                f"{operator_config.security_triage.cve_match.reviewer!r} is configured.",
+            )
+            return redirect("dashboard:security_cve_match")
+
+        match.status = "pending"
+        match.report = None
+        match.confidence = ""
+        match.reasoning = ""
+        match.matched_at = None
+        match.save()
+        queue_cve_match(match.project)
+        messages.info(request, f"Re-queued matching for {match.cve_id}.")
+    return redirect("dashboard:security_cve_match")

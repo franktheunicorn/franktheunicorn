@@ -14,6 +14,7 @@ from franktheunicorn.security.queue import (
     PRIORITY_INTERACTIVE,
     cancel_pending_for_reports,
     queue_branch_sweep,
+    queue_cve_match,
     queue_exploit_verification,
     queue_fix_landed,
     queue_triage,
@@ -21,7 +22,7 @@ from franktheunicorn.security.queue import (
     queue_triage_on_request,
     queue_version_follow_on,
 )
-from tests.factories import SecurityReportFactory
+from tests.factories import ProjectFactory, SecurityReportFactory
 
 
 def _config(*, enabled: bool = True, auto_triage: bool = True) -> OperatorConfig:
@@ -359,3 +360,35 @@ class TestExploitVerificationQueue:
 
         assert queue_exploit_verification(report) is True
         assert WorkerCommand.objects.filter(command="verify_exploit").count() == 2
+
+
+@pytest.mark.django_db
+class TestQueueCveMatch:
+    """queue_cve_match: one in-flight match per project, scoped by kwargs."""
+
+    def test_queues_at_interactive_priority(self) -> None:
+        project = ProjectFactory()
+        assert queue_cve_match(project) is True
+        cmd = WorkerCommand.objects.get(command="match_cves_to_reports")
+        assert cmd.priority == PRIORITY_INTERACTIVE
+        assert cmd.kwargs == {"project_id": project.pk}
+
+    def test_dedupes_while_one_is_in_flight(self) -> None:
+        project = ProjectFactory()
+        assert queue_cve_match(project) is True
+        # A second press while the first is pending/running is a no-op.
+        assert queue_cve_match(project) is False
+        assert WorkerCommand.objects.filter(command="match_cves_to_reports").count() == 1
+
+    def test_two_projects_queue_independently(self) -> None:
+        a, b = ProjectFactory(), ProjectFactory()
+        assert queue_cve_match(a) is True
+        assert queue_cve_match(b) is True
+        assert WorkerCommand.objects.filter(command="match_cves_to_reports").count() == 2
+
+    def test_requeues_after_the_previous_run_finished(self) -> None:
+        project = ProjectFactory()
+        queue_cve_match(project)
+        WorkerCommand.objects.filter(command="match_cves_to_reports").update(status="completed")
+        assert queue_cve_match(project) is True
+        assert WorkerCommand.objects.filter(command="match_cves_to_reports").count() == 2

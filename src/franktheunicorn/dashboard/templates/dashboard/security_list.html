@@ -37,6 +37,7 @@
     <a href="{% url 'dashboard:security_create' %}" class="action-btn post" style="font-size: 0.85rem; padding: 0.4rem 0.8rem; text-decoration: none;">+ New Report</a>
     <a href="{% url 'dashboard:email_activity' %}" class="action-btn" style="font-size: 0.85rem; padding: 0.4rem 0.8rem; text-decoration: none;" title="Read-only audit of every email the scanner has read">📬 Email Activity</a>
     <a href="{% url 'dashboard:security_guidance' %}" class="action-btn" style="font-size: 0.85rem; padding: 0.4rem 0.8rem; text-decoration: none;" title="Learned guidance distilled from operator agree/disagree feedback">🎓 Learned Guidance</a>
+    <a href="{% url 'dashboard:security_cve_match' %}" class="action-btn" style="font-size: 0.85rem; padding: 0.4rem 0.8rem; text-decoration: none;" title="Paste assigned-but-not-public CVEs and have an agent tentatively match them to reports">🔗 Match CVEs</a>
     {# Bulk re-triage: procedural close → LLM → (for valid-looking) version map + verify. #}
     {# Skips reports the operator already ruled on: notes, a CVE, or a fix branch. Plain form #}
     {# so it works without htmx; htmx gets HX-Redirect back to this page with a flash. #}

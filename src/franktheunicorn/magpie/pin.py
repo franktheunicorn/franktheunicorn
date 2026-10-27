@@ -58,7 +58,9 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 #: The prompt paths a vendored file may be auto-injected into. Kept here so a
 #: typo in the lock is a parse error, not a silently-never-injected entry.
-INJECT_TARGETS: frozenset[str] = frozenset({"review", "security", "verifier", "exploit"})
+INJECT_TARGETS: frozenset[str] = frozenset(
+    {"review", "security", "verifier", "exploit", "cve_match"}
+)
 
 
 class PinnedTool(BaseModel):

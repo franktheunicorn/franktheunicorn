@@ -26,6 +26,7 @@ vendored:
   inject:
   - review
   - security
+  - cve_match
 - source: plugins/magpie-security/skills/issue-triage/classification.md
   dest: magpie-security-triage-classification.md
   sha256: 544c30c46e5ebb72d084a709e0bdebdbdce3bdf13a441c02fef7acbcec4ae9c8

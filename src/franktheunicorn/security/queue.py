@@ -26,7 +26,7 @@ from franktheunicorn.security.agent_source import SCOPE_ALL, scope_covers
 
 if TYPE_CHECKING:
     from franktheunicorn.config.models import OperatorConfig
-    from franktheunicorn.core.models import PullRequest, SecurityReport
+    from franktheunicorn.core.models import Project, PullRequest, SecurityReport
 
 logger = logging.getLogger(__name__)
 
@@ -276,6 +276,30 @@ def queue_zombie_scan(*, priority: int = PRIORITY_BULK) -> bool:
     wait behind that for a button they just pressed.
     """
     return queue_targetless("scan_zombie_prs", priority=priority)
+
+
+def queue_cve_match(project: Project, *, priority: int = PRIORITY_INTERACTIVE) -> bool:
+    """Queue the CVE-to-report matcher for one project unless one is in flight.
+
+    Targetless (no report/PR target) but scoped to a project via kwargs, so the
+    dedup is "a match run already covers this project" — a second paste while
+    the first is running just adds pending rows the running loop picks up, so we
+    decline rather than queue a duplicate. Interactive by default: the operator
+    pasted and is watching.
+    """
+    command = "match_cves_to_reports"
+    in_flight = WorkerCommand.objects.filter(command=command, status__in=_IN_FLIGHT_STATUSES)
+    for kwargs in in_flight.values_list("kwargs", flat=True):
+        if (kwargs or {}).get("project_id") == project.pk:
+            logger.info("%s already in flight for project %s", command, project.full_name)
+            return False
+    WorkerCommand.objects.create(
+        command=command,
+        priority=priority,
+        kwargs={"project_id": project.pk},
+    )
+    logger.info("Queued %s for %s (priority %d)", command, project.full_name, priority)
+    return True
 
 
 def queue_zombie_assessment(pr: PullRequest, *, priority: int = PRIORITY_INTERACTIVE) -> bool:

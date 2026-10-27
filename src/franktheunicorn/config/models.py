@@ -1755,6 +1755,46 @@ class ExploitVerifyConfig(BaseModel):
     fresh_worktree: bool = True
 
 
+class SecurityCveMatchConfig(BaseModel):
+    """Config for tentatively matching pasted CVE ids to security reports.
+
+    The operator pastes their currently-assigned-but-not-public CVEs (the id is
+    known, the public record is not) and an agent tries to tie each to a
+    :class:`~franktheunicorn.core.models.SecurityReport` already in the backlog.
+    The link is tentative until the operator confirms or rejects it on the
+    report page — a confirm writes the CVE id onto ``matched_cve_id``.
+
+    No ``enabled`` flag: nothing runs until the operator pastes and presses
+    Match, which is the consent. The one thing that must be configured is
+    ``reviewer`` — which ``agent_cli_reviewers`` entry to borrow the CLI and
+    remote config from. Defaults to the verifier's reviewer, so an install with
+    the verifier working gets this working too.
+
+    No checkout: the matcher reads report text, not code, so it runs the agent
+    in a scratch cwd rather than a repo. One agent call per CVE.
+    """
+
+    #: Which ``agent_cli_reviewers`` entry to borrow the CLI and remote config from.
+    reviewer: str = "claude"
+    #: Override the reviewer's model. Empty means "whatever the reviewer uses".
+    model: str = ""
+    #: Appended to the agent's argv, like ``verifier.extra_args``.
+    extra_args: list[str] = Field(default_factory=list)
+    #: One agent call per CVE; matching is quicker than a deep verify, but the
+    #: agent still reads a list of reports before it answers.
+    timeout_seconds: int = 600
+    #: How much of each candidate report's body to hand the agent. The matcher
+    #: identifies the hole, not re-investigates it, so a shorter excerpt than the
+    #: verifier's 12k is enough.
+    max_report_chars: int = 1_500
+    #: Cap on how many candidate reports to pass per CVE. A CVE is most likely to
+    #: match a report already ruled valid or still in triage, so those go first;
+    #: the cap is the cost control against a large backlog.
+    max_reports: int = 50
+    #: Extra instructions for the matching agent, from the operator.
+    prompt_addendum: str = ""
+
+
 class SecurityDuplicateConfig(BaseModel):
     """Config for "have I already got this one?" — see ``security.duplicates``.
 
@@ -2024,6 +2064,7 @@ class SecurityTriageConfig(BaseModel):
     sandbox_enabled: bool = False
     verifier: SecurityVerifierConfig = Field(default_factory=SecurityVerifierConfig)
     exploit_verify: ExploitVerifyConfig = Field(default_factory=ExploitVerifyConfig)
+    cve_match: SecurityCveMatchConfig = Field(default_factory=SecurityCveMatchConfig)
     duplicates: SecurityDuplicateConfig = Field(default_factory=SecurityDuplicateConfig)
     fix_agent: SecurityFixAgentConfig = Field(default_factory=SecurityFixAgentConfig)
     branch_scan: SecurityBranchScanConfig = Field(default_factory=SecurityBranchScanConfig)

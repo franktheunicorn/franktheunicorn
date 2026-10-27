@@ -72,6 +72,22 @@ urlpatterns = [
     # Security report triage
     path("security/", views.security_report_list, name="security_list"),
     path("security/new/", views.security_report_create, name="security_create"),
+    path("security/cve-match/", views.security_cve_match, name="security_cve_match"),
+    path(
+        "security/cve-match/<int:match_id>/confirm/",
+        views.security_cve_match_confirm,
+        name="security_cve_match_confirm",
+    ),
+    path(
+        "security/cve-match/<int:match_id>/reject/",
+        views.security_cve_match_reject,
+        name="security_cve_match_reject",
+    ),
+    path(
+        "security/cve-match/<int:match_id>/rerun/",
+        views.security_cve_match_rerun,
+        name="security_cve_match_rerun",
+    ),
     # Bulk re-triage of every eligible report in the queue: procedural close
     # first, then LLM triage, then (for valid-looking ones) version mapping and
     # deep verification. Skips reports the operator already ruled on or that
