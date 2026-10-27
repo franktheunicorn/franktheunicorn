@@ -485,6 +485,54 @@ class TestSecurityFocus:
         assert findings[0].body.startswith("security: crafted footer triggers class load")
 
 
+@pytest.mark.django_db
+class TestMagpieSkillsInjection:
+    """The auto-injected Magpie skill block rides both prompts ahead of the
+    project's own guidance, and is absent entirely when empty (the default —
+    no vendored skills, or the project disabled them)."""
+
+    def test_general_prompt_carries_the_block_when_provided(self) -> None:
+        prompt = build_review_prompt(
+            AgentCLIReviewerConfig(name="pi"),
+            "diff --git a/x b/x\n+pass\n",
+            magpie_skills="## Borrowed Magpie skill text\n\nAI signals rule.",
+        )
+        assert "Borrowed Magpie skill text" in prompt
+        # Ahead of the diff so the rubric grounds the review before the code.
+        assert prompt.index("AI signals rule.") < prompt.index("diff --git")
+
+    def test_security_prompt_carries_the_block_when_provided(self) -> None:
+        prompt = build_review_prompt(
+            AgentCLIReviewerConfig(name="cursor-agent-security", review_focus="security"),
+            "DIFF",
+            security_model="Submitted jobs run arbitrary code by design.",
+            magpie_skills="## Borrowed Magpie skill text\n\nVALID vs INVALID rubric.",
+        )
+        assert "Borrowed Magpie skill text" in prompt
+        assert "VALID vs INVALID rubric." in prompt
+
+    def test_empty_block_leaves_no_stray_section(self) -> None:
+        prompt = build_review_prompt(AgentCLIReviewerConfig(name="pi"), "DIFF", magpie_skills="")
+        assert "Borrowed Magpie skill text" not in prompt
+
+    def test_whitespace_only_block_is_treated_as_empty(self) -> None:
+        prompt = build_review_prompt(
+            AgentCLIReviewerConfig(name="pi"), "DIFF", magpie_skills="  \n  "
+        )
+        assert "Borrowed Magpie skill text" not in prompt
+
+    def test_the_block_rides_ahead_of_project_review_guidance(self) -> None:
+        """The project's stance overrides the borrowed rubric, so the rubric
+        goes first and the guidance after — not the other way around."""
+        prompt = build_review_prompt(
+            AgentCLIReviewerConfig(name="pi"),
+            "DIFF",
+            review_guidance="UNIQUE-PROJECT-GUIDANCE-MARKER.",
+            magpie_skills="## Borrowed Magpie skill text\n\nborrowed rule.",
+        )
+        assert prompt.index("borrowed rule.") < prompt.index("UNIQUE-PROJECT-GUIDANCE-MARKER.")
+
+
 # ---------------------------------------------------------------------------
 # Draft creation + cross-agent dedup
 # ---------------------------------------------------------------------------

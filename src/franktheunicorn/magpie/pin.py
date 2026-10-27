@@ -56,6 +56,10 @@ PROVENANCE_END = "END MAGPIE PROVENANCE -->"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
+#: The prompt paths a vendored file may be auto-injected into. Kept here so a
+#: typo in the lock is a parse error, not a silently-never-injected entry.
+INJECT_TARGETS: frozenset[str] = frozenset({"review", "security", "verifier", "exploit"})
+
 
 class PinnedTool(BaseModel):
     """One Magpie Python tool frank runs, pinned by subdirectory.
@@ -97,6 +101,11 @@ class VendoredFile(BaseModel):
     ``sha256`` is over the upstream bytes at the pinned commit, which equals the
     vendored file's body after the provenance header. Empty until the first
     ``--sync`` fills it in.
+
+    ``inject`` names the agent prompts this file is auto-injected into as
+    Magpie skill text (see :func:`franktheunicorn.magpie.skills.skills_block`).
+    Empty means the file is vendored for other uses (a tool reads it) but does
+    not ride a prompt. The allowed values are :data:`INJECT_TARGETS`.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -108,6 +117,10 @@ class VendoredFile(BaseModel):
     sha256: str = ""
     #: What frank uses it for, in one line.
     purpose: str = ""
+    #: Which agent prompts this skill text rides: subset of ``INJECT_TARGETS``.
+    #: Tuple, not list, so a frozen pin stays frozen (a list field stays
+    #: mutable in place on a frozen model).
+    inject: tuple[str, ...] = Field(default_factory=tuple)
 
     @field_validator("source", "dest")
     @classmethod
@@ -126,6 +139,22 @@ class VendoredFile(BaseModel):
             msg = f"sha256 must be 64 hex characters, got {v!r}"
             raise ValueError(msg)
         return v
+
+    @field_validator("inject")
+    @classmethod
+    def _inject_targets(cls, v: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+        out: list[str] = []
+        for item in v:
+            name = item.strip()
+            if name not in INJECT_TARGETS:
+                msg = (
+                    f"inject entry {name!r} is not one of {sorted(INJECT_TARGETS)}; "
+                    "fix the lock entry"
+                )
+                raise ValueError(msg)
+            if name not in out:
+                out.append(name)
+        return tuple(out)
 
 
 class MagpiePin(BaseModel):

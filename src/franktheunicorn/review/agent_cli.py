@@ -68,7 +68,7 @@ Skip formatting, naming, and import order.
 {reviewing_guidance}
 
 {untrusted_rule}
-{review_guidance_section}{review_areas_section}{prior_comments_section}For EACH issue, emit a block in EXACTLY this format, separated by lines of
+{magpie_skills_section}{review_guidance_section}{review_areas_section}{prior_comments_section}For EACH issue, emit a block in EXACTLY this format, separated by lines of
 five or more equals signs:
 
 <file_path>:<line_number> - [<Severity>] <Short title>
@@ -123,7 +123,7 @@ finding. Behavior the security model declares trusted is not a finding.
 {untrusted_rule}
 
 {security_model_section}
-{review_guidance_section}{review_areas_section}{prior_comments_section}For EACH security issue, emit a block in EXACTLY this format, separated by
+{magpie_skills_section}{review_guidance_section}{review_areas_section}{prior_comments_section}For EACH security issue, emit a block in EXACTLY this format, separated by
 lines of five or more equals signs:
 
 <file_path>:<line_number> - [<Severity>] security: <Short title>
@@ -190,6 +190,7 @@ def build_review_prompt(
     review_areas_of_interest: list[str] | None = None,
     prior_comments: str = "",
     nonce: str = "",
+    magpie_skills: str = "",
 ) -> str:
     """Pick and fill the prompt template for the reviewer's ``review_focus``.
 
@@ -205,6 +206,13 @@ def build_review_prompt(
     ``review_areas_of_interest`` is the per-project watch list — short
     descriptors of areas to flag for extra consideration when touched — and
     also reaches both templates.
+
+    ``magpie_skills`` is the auto-injected Magpie skill text for this
+    reviewer's focus (resolved by the caller from the project's
+    ``magpie_skills_enabled`` flag via :func:`magpie.skills.skills_block`).
+    Empty by default — a project with no vendored skills, or one that disabled
+    them, gets the same prompt it always did. It rides ahead of the project's
+    own guidance so the project's stance can override the borrowed rubric.
     """
     guidance = (review_guidance or "").strip()
     guidance_section = (
@@ -212,6 +220,7 @@ def build_review_prompt(
         if guidance
         else ""
     )
+    magpie_section = f"\n{magpie_skills}" if magpie_skills.strip() else ""
     areas = [a.strip() for a in (review_areas_of_interest or []) if a.strip()]
     areas_section = (
         "\nAreas of interest — flag for extra consideration when the PR touches these:\n"
@@ -234,6 +243,7 @@ def build_review_prompt(
             comment_voice=COMMENT_VOICE,
             untrusted_rule=UNTRUSTED_CONTENT_RULE,
             security_model_section=section,
+            magpie_skills_section=magpie_section,
             review_guidance_section=guidance_section,
             review_areas_section=areas_section,
             prior_comments_section=prior_comments_section,
@@ -243,6 +253,7 @@ def build_review_prompt(
     return _PROMPT_TEMPLATE.format(
         reviewing_guidance=REVIEWING_GUIDANCE,
         untrusted_rule=UNTRUSTED_CONTENT_RULE,
+        magpie_skills_section=magpie_section,
         review_guidance_section=guidance_section,
         review_areas_section=areas_section,
         prior_comments_section=prior_comments_section,
@@ -293,6 +304,7 @@ def run_agent_cli_review(
     review_guidance: str = "",
     review_areas_of_interest: list[str] | None = None,
     prior_comments: str = "",
+    magpie_skills: str = "",
 ) -> list[AgentCLIFinding]:
     """
     Run the agent CLI against the diff between ``base_commit`` and HEAD.
@@ -365,6 +377,7 @@ def run_agent_cli_review(
         review_guidance,
         review_areas_of_interest,
         prior_comments,
+        magpie_skills=magpie_skills,
     )
 
     cmd = list(config.cli_argv) + config.build_invocation(prompt)

@@ -2912,6 +2912,10 @@ def _run_agent_cli_for_pr(
     """
     from functools import partial
 
+    # Magpie skill text rides the agent prompt as text (the confinement guard
+    # moves the checkout's .claude aside, so skills can't reach the agent as
+    # files). Gated by the project's magpie_skills_enabled flag.
+    from franktheunicorn.magpie.skills import skills_block
     from franktheunicorn.review.agent_cli import (
         create_drafts_from_agent_cli,
         run_agent_cli_review,
@@ -2922,12 +2926,17 @@ def _run_agent_cli_for_pr(
     # guidance the prompt says is authoritative.
     from franktheunicorn.review.prior_comments import format_prior_comments
 
+    magpie_enabled = project_config.magpie_skills_enabled if project_config else True
     review_kwargs: dict[str, Any] = {
         "review_guidance": project_config.review_guidance if project_config else "",
         "review_areas_of_interest": (
             list(project_config.review_areas_of_interest) if project_config else []
         ),
         "prior_comments": format_prior_comments(prior_comments or []),
+        "magpie_skills": skills_block(
+            inject_into="security" if reviewer.review_focus == "security" else "review",
+            enabled=magpie_enabled,
+        ),
     }
     if reviewer.review_focus == "security":
         # Resolved here rather than in run_agent_cli_review because the

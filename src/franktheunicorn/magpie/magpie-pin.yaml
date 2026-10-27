@@ -6,8 +6,32 @@
 # vendored/. Hand edits to `commit` without a --sync leave vendored/ stale, and
 # `manage.py magpie_sync --check` (run in CI) will say so.
 url: https://github.com/apache/magpie.git
-commit: 27268f28a253978137e0cfa17bc19ef6e8897c28
+commit: 5dd9a1540a563e6027deb68d830d45b415268a0c
 tag: ''
-commit_date: '2026-10-23'
+commit_date: '2026-10-27'
 tools: []
-vendored: []
+vendored:
+- source: plugins/magpie-pr-management/skills/code-review/criteria/ai-generated-code-signals.md
+  dest: magpie-ai-generated-code-signals.md
+  sha256: bf56324a0463c9671cfe686969442c8f35eaa8109a7bee51961b3832c2358dcb
+  purpose: AI-generated-code signals — when to flag a missing disclosure (general
+    review)
+  inject:
+  - review
+- source: plugins/magpie-pr-management/skills/code-review/criteria/security-model.md
+  dest: magpie-security-model.md
+  sha256: 47d27b1b23dbdf134cc52109492f026f43b7bca748bb467a45e8db64400a0d5b
+  purpose: Security-model calibration — distinguish a real crossing from documented-as-trusted
+    behavior
+  inject:
+  - review
+  - security
+- source: plugins/magpie-security/skills/issue-triage/classification.md
+  dest: magpie-security-triage-classification.md
+  sha256: 544c30c46e5ebb72d084a709e0bdebdbdce3bdf13a441c02fef7acbcec4ae9c8
+  purpose: Security-issue-triage classification — VALID / DEFENSE-IN-DEPTH / INFO-ONLY
+    / INVALID / PROBABLE-DUP / FIX-ALREADY-PUBLIC
+  inject:
+  - security
+  - verifier
+  - exploit

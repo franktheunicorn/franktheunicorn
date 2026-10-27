@@ -2633,6 +2633,14 @@ class ProjectConfig(BaseModel):
     # ``review_guidance`` prose: guidance is the voice, areas are the watch
     # list. Empty by default.
     review_areas_of_interest: list[str] = Field(default_factory=list)
+    #: Whether Magpie skill text is auto-injected into this project's agent
+    #: prompts (review, security review, deep verifier, exploit verifier).
+    #: The confinement guard moves the checkout's ``.claude`` aside every run,
+    #: so skills reach the agents as prompt text, not installed files. Default
+    #: on: a project with no vendored skills gets the same prompt it always did
+    #: (the block is empty when nothing matches), so this only ever *adds*
+    #: rubric. Set false to opt a project out entirely.
+    magpie_skills_enabled: bool = True
     scoring_weights: dict[str, float] = Field(default_factory=dict)
     custom_scoring_expressions: list[str] = Field(default_factory=list)
     custom_scoring_max_boost: int = 30

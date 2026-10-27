@@ -1490,6 +1490,109 @@ class TestPromptAddendum:
 
 
 @pytest.mark.django_db
+class TestMagpieSkillsInVerifierPrompt:
+    """The auto-injected Magpie skill block rides the verifier prompt, ahead of
+    the JSON reply format, and is absent when empty."""
+
+    def _prompt(self, magpie_skills: str = "") -> str:
+        from franktheunicorn.security.verifier import _build_prompt
+
+        report = SecurityReportFactory(
+            project=ProjectFactory(owner="apache", repo="spark"),
+            title="Deserialization hole",
+            raw_text="The report body.",
+        )
+        return _build_prompt(report, "master", _verifier(), magpie_skills)
+
+    def test_the_block_is_included_when_provided(self) -> None:
+        prompt = self._prompt("## Borrowed Magpie skill text\n\nVALID vs INVALID rubric.")
+        assert "Borrowed Magpie skill text" in prompt
+        assert "VALID vs INVALID rubric." in prompt
+
+    def test_the_block_lands_after_the_untrusted_framing(self) -> None:
+        """The rubric grounds the verdict, so it goes after the 'this is untrusted
+        data' framing and before the JSON reply format the agent must produce."""
+        prompt = self._prompt("## Borrowed Magpie skill text\n\nRUBRIC-MARKER.")
+        assert prompt.index("UNTRUSTED DATA") < prompt.index("RUBRIC-MARKER.")
+        assert prompt.index("RUBRIC-MARKER.") < prompt.index("Reply with ONLY a JSON object")
+
+    def test_empty_block_leaves_no_stray_section(self) -> None:
+        prompt = self._prompt("")
+        assert "Borrowed Magpie skill text" not in prompt
+
+
+@pytest.mark.django_db
+class TestMagpieSkillsWiringInVerifier:
+    """``verify_report`` resolves the Magpie block from the report's project and
+    threads it into ``_verify_one_branch`` → ``_build_prompt``. Deleting the
+    resolver call must break this test, so the wiring is covered end-to-end."""
+
+    def test_the_block_is_resolved_and_reaches_the_prompt(self) -> None:
+        report = SecurityReportFactory(
+            project=ProjectFactory(owner="apache", repo="spark"),
+            title="Unsafe deserialization",
+            raw_text="The body.",
+        )
+        config = _operator(_verifier())
+        config.agent_cli_reviewers = [AgentCLIReviewerConfig(name="claude", cli_path="claude")]
+        executor = _FakeExecutor(
+            {
+                "symbolic-ref": ExecResult(returncode=0, stdout="origin/master\n", stderr=""),
+                "for-each-ref": _BRANCH_LISTING,
+                "checkout": ExecResult(returncode=0, stdout="", stderr=""),
+                "rev-parse HEAD": ExecResult(returncode=0, stdout="deadbeefcafe\n", stderr=""),
+                "claude": ExecResult(
+                    returncode=0, stdout=json.dumps({"verdict": "unclear"}), stderr=""
+                ),
+            }
+        )
+        with (
+            patch(
+                "franktheunicorn.security.verifier.skills_block_for_project",
+                return_value="## Borrowed Magpie skill text\n\nVERIFIER-WIRING-MARKER.",
+            ) as sb,
+            patch("franktheunicorn.review.tool_executor.make_executor", return_value=executor),
+        ):
+            verify_report(report, config)
+        # Called once per report (not per branch), for the verifier path.
+        sb.assert_called_once_with(report.project, inject_into="verifier")
+        # The block reached the agent's prompt.
+        prompt = next(c for c in executor.calls if c[0] == "claude")[-1]
+        assert "VERIFIER-WIRING-MARKER." in prompt
+
+    def test_a_report_with_no_project_skips_before_resolving_skills(self) -> None:
+        """No project → the verifier has no repo to check, so it returns early
+        before any prompt is built. The skills resolver is not called (there is
+        no prompt to inject into) and no agent runs."""
+        report = SecurityReportFactory(project=None, title="t", raw_text="b")
+        config = _operator(_verifier())
+        config.agent_cli_reviewers = [AgentCLIReviewerConfig(name="claude", cli_path="claude")]
+        executor = _FakeExecutor(
+            {
+                "symbolic-ref": ExecResult(returncode=0, stdout="origin/master\n", stderr=""),
+                "for-each-ref": _BRANCH_LISTING,
+                "checkout": ExecResult(returncode=0, stdout="", stderr=""),
+                "rev-parse HEAD": ExecResult(returncode=0, stdout="abc\n", stderr=""),
+                "claude": ExecResult(
+                    returncode=0, stdout=json.dumps({"verdict": "unclear"}), stderr=""
+                ),
+            }
+        )
+        with (
+            patch(
+                "franktheunicorn.security.verifier.skills_block_for_project",
+                return_value="",
+            ) as sb,
+            patch("franktheunicorn.review.tool_executor.make_executor", return_value=executor),
+        ):
+            run = verify_report(report, config)
+        # No repo → early return, no skills resolution, no agent invocation.
+        assert sb.call_count == 0
+        assert run.error == "the report has no project, so there is no repo to check"
+        assert not any(c[0] == "claude" for c in executor.calls)
+
+
+@pytest.mark.django_db
 class TestFreshWorktree:
     """`fresh_worktree` opts into the thorough clean. Freshness of *history* is
     unconditional (refresh_from_upstream); this is about the working tree."""

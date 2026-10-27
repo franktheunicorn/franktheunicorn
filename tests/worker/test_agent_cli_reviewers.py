@@ -379,6 +379,88 @@ class TestSecurityFocusWiring:
         assert run_review.call_args.kwargs["security_model"] == ""
 
 
+@pytest.mark.django_db
+class TestMagpieSkillsWiring:
+    """The runner resolves the Magpie skill block from the project's
+    ``magpie_skills_enabled`` flag and the reviewer's focus, and passes it as
+    ``magpie_skills`` — the one kwarg ``run_agent_cli_review`` threads into the
+    prompt. A project that disables it passes an empty block."""
+
+    @staticmethod
+    def _security_reviewer() -> AgentCLIReviewerConfig:
+        return _ssh_reviewer(
+            name="cursor-agent-security", cli_path="cursor-agent", review_focus="security"
+        )
+
+    def _run(
+        self,
+        db_pr: PullRequest,
+        reviewer: AgentCLIReviewerConfig,
+        project_config: ProjectConfig | None,
+    ) -> MagicMock:
+        db_pr.head_sha = "a" * 40
+        db_pr.save()
+        run_review = MagicMock(return_value=[])
+        with (
+            patch.object(RemoteSSHExecutor, "prepare_repo", return_value="/remote/spark"),
+            patch(
+                "franktheunicorn.worker.runner._resolve_remote_base_ref",
+                return_value="origin/master",
+            ),
+            patch.object(
+                RemoteSSHExecutor,
+                "run",
+                return_value=ExecResult(returncode=0, stdout="b" * 40, stderr=""),
+            ),
+            patch("franktheunicorn.review.agent_cli.run_agent_cli_review", run_review),
+        ):
+            _run_agent_cli_for_pr(
+                db_pr,
+                reviewer,
+                repo_path=None,
+                clone_url="https://example.com/a/b.git",
+                project_config=project_config,
+            )
+        return run_review
+
+    def test_a_general_reviewer_gets_the_review_block(self, db_pr: PullRequest) -> None:
+        run_review = self._run(db_pr, _ssh_reviewer(), ProjectConfig(owner="apache", repo="spark"))
+        # The shipped lock vendors a file injected into "review", so the block
+        # is non-empty when the project has not disabled it.
+        assert run_review.call_args.kwargs["magpie_skills"].strip()
+
+    def test_a_security_reviewer_gets_the_security_block(self, db_pr: PullRequest) -> None:
+        run_review = self._run(
+            db_pr, self._security_reviewer(), ProjectConfig(owner="apache", repo="spark")
+        )
+        block = run_review.call_args.kwargs["magpie_skills"]
+        assert block.strip()
+        # The security-triage classification rubric rides the security path.
+        assert "VALID" in block
+
+    def test_a_project_that_disables_it_gets_an_empty_block(self, db_pr: PullRequest) -> None:
+        run_review = self._run(
+            db_pr,
+            _ssh_reviewer(),
+            ProjectConfig(owner="apache", repo="spark", magpie_skills_enabled=False),
+        )
+        assert run_review.call_args.kwargs["magpie_skills"] == ""
+
+    def test_a_configured_project_gets_the_block(self, db_pr: PullRequest) -> None:
+        run_review = self._run(
+            db_pr,
+            _ssh_reviewer(),
+            ProjectConfig(owner="apache", repo="spark"),
+        )
+        assert run_review.call_args.kwargs["magpie_skills"].strip()
+
+    def test_a_project_with_no_config_file_still_gets_the_block(self, db_pr: PullRequest) -> None:
+        """The runner's ``project_config=None`` branch (a PR whose project has no
+        config file) defaults to enabled, so the block still rides the prompt."""
+        run_review = self._run(db_pr, _ssh_reviewer(), project_config=None)
+        assert run_review.call_args.kwargs["magpie_skills"].strip()
+
+
 class TestStartupProbe:
     """An ssh reviewer is enabled optimistically, so startup is the only place
     the remote binary gets checked at all."""

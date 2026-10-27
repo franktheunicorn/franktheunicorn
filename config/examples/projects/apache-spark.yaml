@@ -186,6 +186,15 @@ review_areas_of_interest:
   # around type promotion, UDF support, and read/write round-tripping.
   - "vector type — VECTOR type changes (parquet/orc/arrow round-trip, type promotion, UDF support) flag for extra consideration"
 
+# Auto-inject Magpie skill text into this project's agent prompts (review,
+# security review, deep verifier, exploit verifier). The confinement guard
+# moves the checkout's .claude aside every run, so skills reach the agents as
+# prompt text, not installed files. Default on; the block is empty when
+# nothing is vendored for a focus, so this only ever adds rubric. Set false to
+# opt this project out entirely (e.g. a project whose review guidance already
+# restates the same rules and would rather not pay the prompt tokens twice).
+magpie_skills_enabled: true
+
 # Threat model / trust boundaries, fed into security-report triage. This is
 # what lets triage tell "we run arbitrary code by design" reports apart from
 # real findings, instead of flagging (or dismissing) everything the same way.
