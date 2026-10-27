@@ -2868,6 +2868,7 @@ class ProjectConfig(BaseModel):
             "malicious-prompt",
             "parity",
             "pr-description",
+            "red-team",
             "security",
             "security-context",
             "security-disclosure",

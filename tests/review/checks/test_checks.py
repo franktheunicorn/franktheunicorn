@@ -32,6 +32,10 @@ class TestRegistry:
         registry = _get_registry()
         assert "security-context" in registry
 
+    def test_red_team_registered(self) -> None:
+        registry = _get_registry()
+        assert "red-team" in registry
+
     def test_registry_values_are_base_check_subclasses(self) -> None:
         registry = _get_registry()
         for cls in registry.values():

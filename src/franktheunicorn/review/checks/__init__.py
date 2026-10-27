@@ -69,6 +69,7 @@ def _get_registry() -> dict[str, type[BaseCheck]]:
     from franktheunicorn.review.checks.malicious_prompt import MaliciousPromptCheck
     from franktheunicorn.review.checks.parity import ParityCheck
     from franktheunicorn.review.checks.pr_description import PRDescriptionCheck
+    from franktheunicorn.review.checks.red_team import RedTeamCheck
     from franktheunicorn.review.checks.security import SecurityCheck
     from franktheunicorn.review.checks.security_context import SecurityContextCheck
     from franktheunicorn.review.checks.security_disclosure import SecurityDisclosureCheck
@@ -90,6 +91,7 @@ def _get_registry() -> dict[str, type[BaseCheck]]:
         "malicious-prompt": MaliciousPromptCheck,
         "parity": ParityCheck,
         "pr-description": PRDescriptionCheck,
+        "red-team": RedTeamCheck,
         "security": SecurityCheck,
         "security-context": SecurityContextCheck,
         "security-disclosure": SecurityDisclosureCheck,
