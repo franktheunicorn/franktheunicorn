@@ -134,9 +134,10 @@ class TestListScope:
 
         body = client.get("/security/?agent=xbow").content.decode()
 
-        # The eleven existing bulk buttons, Confirm / Re-verify, and the two forms
-        # on each archive row (none here) all post it.
-        assert body.count('<input type="hidden" name="agent" value="xbow">') == 12
+        # The eleven existing bulk buttons, Confirm / Re-verify, the project
+        # filter form (preserves the scope when narrowing to one repo), and the
+        # two forms on each archive row (none here) all post it.
+        assert body.count('<input type="hidden" name="agent" value="xbow">') == 13
         assert "Acting on: reports from agent xbow." in body
 
     def test_no_source_row_until_some_report_has_an_agent(self, client: Client) -> None:

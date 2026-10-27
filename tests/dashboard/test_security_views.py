@@ -97,6 +97,162 @@ class TestSecurityReportList:
 
 
 @pytest.mark.django_db
+class TestSecurityReportListProjectFilter:
+    """A read filter for one repo: narrows the rows, the tab counts and the
+    export, and travels with every link that keeps the view. The bulk buttons
+    act on the agent scope, not this — their confirm text says so."""
+
+    def _backlog(self) -> dict[str, SecurityReport]:
+        spark = ProjectFactory(owner="apache", repo="spark")
+        snow = ProjectFactory(owner="apache", repo="snowflake")
+        return {
+            "spark_a": SecurityReportFactory(title="Spark finding A", project=spark),
+            "spark_b": SecurityReportFactory(title="Spark finding B", project=spark),
+            "snow_a": SecurityReportFactory(title="Snowflake finding", project=snow),
+            "none_a": SecurityReportFactory(title="No-project finding", project=None),
+        }
+
+    def test_one_project_narrows_the_rows(self, client: Client) -> None:
+        self._backlog()
+
+        body = client.get("/security/?project=apache/spark").content.decode()
+
+        assert "Spark finding A" in body
+        assert "Spark finding B" in body
+        assert "Snowflake finding" not in body
+        assert "No-project finding" not in body
+
+    def test_the_tab_counts_respect_the_filter(self, client: Client) -> None:
+        self._backlog()
+
+        response = client.get("/security/?project=apache/spark")
+
+        counts = {tab["key"]: tab["count"] for tab in response.context["status_tabs"]}
+        # Two Spark reports on the "all" tab; the Snowflake and no-project rows
+        # are outside the filter and must not be in the badge.
+        assert counts["all"] == 2
+
+    def test_every_link_that_keeps_the_view_carries_the_filter(self, client: Client) -> None:
+        self._backlog()
+
+        body = client.get("/security/?project=apache/spark&status=new").content.decode()
+
+        # Export, tabs and sort links: none of them may drop the filter on a click.
+        assert "/security/export.csv?sort=priority&amp;status=new&amp;project=apache/spark" in body
+        assert "?sort=priority&amp;status=valid&amp;project=apache/spark" in body
+        assert "?sort=newest&amp;status=new&amp;project=apache/spark" in body
+
+    def test_the_scope_chips_keep_the_filter(self, client: Client) -> None:
+        spark = ProjectFactory(owner="apache", repo="spark")
+        SecurityReportFactory(title="Spark finding", project=spark)
+        SecurityReportFactory(source_agent="xbow", title="xbow Spark finding", project=spark)
+
+        response = client.get("/security/?project=apache/spark")
+
+        queries = {option["key"]: option["query"] for option in response.context["scope_options"]}
+        assert "project=apache/spark" in queries["xbow"]
+
+    def test_the_export_holds_only_the_projects_reports(self, client: Client) -> None:
+        self._backlog()
+
+        response = client.get("/security/export.csv?project=apache/spark")
+        body = b"".join(response.streaming_content).decode()
+
+        assert "Spark finding A" in body
+        assert "Spark finding B" in body
+        assert "Snowflake finding" not in body
+
+    def test_the_export_filename_names_the_project(self, client: Client) -> None:
+        from franktheunicorn.security.sheet_sync import export_filename
+
+        # The slash becomes a dash: a / in a download filename is a path
+        # separator browsers sanitize away, so the saved file wouldn't match.
+        assert "apache-spark" in export_filename(project="apache/spark")
+        assert "apache/spark" not in export_filename(project="apache/spark")
+        assert "apache-spark" not in export_filename()
+
+    def test_a_slug_that_does_not_parse_is_ignored_not_widened(self, client: Client) -> None:
+        self._backlog()
+
+        # No slash — not a slug. The page shows everything rather than 400ing,
+        # because the dropdown only offers real slugs and a junk value is a stale
+        # bookmark, not operator input.
+        body = client.get("/security/?project=not-a-slug").content.decode()
+
+        assert "Snowflake finding" in body
+        assert "No-project finding" in body
+
+    def test_the_export_refuses_a_bad_slug_rather_than_widening(self, client: Client) -> None:
+        self._backlog()
+
+        response = client.get("/security/export.csv?project=not-a-slug")
+
+        assert response.status_code == 400
+        assert b"Unknown project filter" in response.content
+
+    def test_the_cve_lookup_is_global_and_ignores_the_filter(self, client: Client) -> None:
+        backlog = self._backlog()
+
+        report = backlog["snow_a"]
+        report.matched_cve_id = "CVE-2026-99999"
+        report.save(update_fields=["matched_cve_id"])
+
+        # Filtered to Spark, but the CVE box answers "do we have this anywhere".
+        response = client.get("/security/?project=apache/spark&cve=CVE-2026-99999")
+
+        assert response.status_code == 302
+        assert response.url == f"/security/{report.pk}/"
+
+    def test_the_filter_form_preserves_sort_status_and_agent(self, client: Client) -> None:
+        spark = ProjectFactory(owner="apache", repo="spark")
+        SecurityReportFactory(title="Spark finding", project=spark)
+        SecurityReportFactory(source_agent="xbow", title="xbow Spark finding", project=spark)
+
+        body = client.get(
+            "/security/?project=apache/spark&status=new&sort=newest&agent=xbow"
+        ).content.decode()
+
+        # The project filter form carries sort, status and agent so picking a
+        # different project doesn't drop the rest of the view.
+        assert '<input type="hidden" name="sort" value="newest">' in body
+        assert '<input type="hidden" name="status" value="new">' in body
+        assert '<input type="hidden" name="agent" value="xbow">' in body
+        assert '<option value="apache/spark" selected>apache/spark</option>' in body
+
+    def test_the_bulk_buttons_do_not_carry_the_project_filter(self, client: Client) -> None:
+        # The project filter is a read filter: the bulk buttons act on the agent
+        # scope, not the project. The bulk buttons carry the agent scope as a
+        # hidden input; a regression that scoped them to the project filter
+        # would add a hidden project input alongside it. Assert none exists.
+        spark = ProjectFactory(owner="apache", repo="spark")
+        SecurityReportFactory(title="Spark finding", project=spark)
+
+        body = client.get("/security/?project=apache/spark").content.decode()
+
+        assert '<input type="hidden" name="project"' not in body
+
+    def test_the_note_renders_and_names_the_project_when_set(self, client: Client) -> None:
+        # On an install with no agent-labelled reports the scope note is absent
+        # — so without this the operator would filter to a project and press a
+        # bulk button with no visible statement that it widens.
+        spark = ProjectFactory(owner="apache", repo="spark")
+        SecurityReportFactory(title="Spark finding", project=spark)
+
+        body = client.get("/security/?project=apache/spark").content.decode()
+
+        assert "source-scope-note" in body
+        assert "apache/spark" in body
+        assert "not the project filter" in body
+
+    def test_the_note_is_absent_without_a_filter(self, client: Client) -> None:
+        SecurityReportFactory(source_agent="")
+
+        body = client.get("/security/").content.decode()
+
+        assert "source-scope-note" not in body
+
+
+@pytest.mark.django_db
 class TestSecurityReportListRanking:
     """A 129-finding archive is unusable in arrival order, and the page shows 100."""
 

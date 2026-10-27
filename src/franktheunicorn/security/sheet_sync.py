@@ -462,7 +462,9 @@ class _RowBuffer:
         return joined
 
 
-def export_filename(*, full: bool = False, status: str = "", agent: str = "") -> str:
+def export_filename(
+    *, full: bool = False, status: str = "", agent: str = "", project: str = ""
+) -> str:
     """A filename that says what the sheet is, dated, for a Downloads folder.
 
     The status filter is in there because without it two differently-scoped
@@ -477,12 +479,17 @@ def export_filename(*, full: bool = False, status: str = "", agent: str = "") ->
     *agent* is an agent scope for the same reason — a sheet of one agent's
     findings and a sheet of everything must not share a name — and is just as
     safe to interpolate: :func:`agent_source.parse_scope` folds it to
-    ``[a-z0-9._-]``. ``all`` is no scope and adds nothing.
+    ``[a-z0-9._-]``. ``all`` is no scope and adds nothing. *project* is the
+    ``owner/repo`` slug for the same reason again; the slash is swapped for a
+    dash because a ``/`` in a download filename is a path separator browsers
+    sanitize away, so the saved file would not match the name the test asserts.
     """
     stamp = timezone.now().date().isoformat()
     scope = f"-{status}" if status else ""
     if agent and agent != agent_source.SCOPE_ALL:
         scope += f"-agent-{agent}"
+    if project:
+        scope += f"-{project.replace('/', '-')}"
     suffix = "-full" if full else ""
     return f"security-review{scope}-{stamp}{suffix}.csv"
 

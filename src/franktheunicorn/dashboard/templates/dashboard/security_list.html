@@ -13,8 +13,11 @@
 {# hover text is how each source's reports were ruled — "how often is this agent #}
 {# right?" is the first question to ask of another agent's output. #}
 {# Hidden until some report has an agent: on an install that has never labelled #}
-{# one, "All 40 · Not from an agent 40" is two chips saying nothing. #}
-{% if scope_options|length > 2 or agent_scope != "all" %}
+{# one, "All 40 · Not from an agent 40" is two chips saying nothing. Also shown #}
+{# when a project filter is set, so the note below can say the bulk buttons #}
+{# ignore it — without that, filtering to one repo and pressing Re-run Triage #}
+{# silently widens to every project. #}
+{% if scope_options|length > 2 or agent_scope != "all" or active_project %}
 <nav class="source-scope" aria-label="Filter by source">
     <span>Source:</span>
     {% for option in scope_options %}
@@ -27,9 +30,10 @@
     {% endfor %}
 </nav>
 <p class="source-scope-note">
-    Rows, tab counts, Export and the bulk buttons below act on
-    <strong>{{ agent_scope_label }}</strong>.
-    {% if agent_scope != "all" %}<a href="{% url 'dashboard:security_list' %}?sort={{ active_sort }}{% if active_status != 'all' %}&amp;status={{ active_status|urlencode }}{% endif %}">Show every source</a>{% endif %}
+    Rows, tab counts and Export act on
+    <strong>{{ agent_scope_label }}</strong>{% if active_project %}, narrowed to <strong>{{ active_project }}</strong>{% endif %}.
+    The bulk buttons below act on <strong>{{ agent_scope_label }}</strong> only — not the project filter.
+    {% if agent_scope != "all" %}<a href="{% url 'dashboard:security_list' %}?sort={{ active_sort }}{% if active_status != 'all' %}&amp;status={{ active_status|urlencode }}{% endif %}{{ project_query }}">Show every source</a>{% endif %}
 </p>
 {% endif %}
 
@@ -372,11 +376,11 @@
     {# showing, so the cap keeps the rows the operator is actually looking at. #}
     <div class="sheet-sync-row">
         <a class="action-btn"
-           href="{% url 'dashboard:security_export_csv' %}?sort={{ active_sort }}{% if active_status != 'all' %}&amp;status={{ active_status|urlencode }}{% endif %}{{ agent_query }}">
+           href="{% url 'dashboard:security_export_csv' %}?sort={{ active_sort }}{% if active_status != 'all' %}&amp;status={{ active_status|urlencode }}{% endif %}{{ agent_query }}{{ project_query }}">
             ⬇ Export CSV{% if active_status != 'all' %} ({{ active_status }}){% endif %}{% if agent_scope != 'all' %} — {{ agent_scope_label }}{% endif %}
         </a>
         <a class="action-btn sheet-sync-full"
-           href="{% url 'dashboard:security_export_csv' %}?full=1&amp;sort={{ active_sort }}{% if active_status != 'all' %}&amp;status={{ active_status|urlencode }}{% endif %}{{ agent_query }}"
+           href="{% url 'dashboard:security_export_csv' %}?full=1&amp;sort={{ active_sort }}{% if active_status != 'all' %}&amp;status={{ active_status|urlencode }}{% endif %}{{ agent_query }}{{ project_query }}"
            title="Also include the raw report text and any proposed patch — bigger, and a good deal more sensitive to leave in a shared Drive">
             ⬇ Export CSV (full text)
         </a>
@@ -439,13 +443,39 @@
     {% if cve_filter %}
     <span class="muted">— showing reports whose assigned CVE or NVD matches name
         <code>{{ cve_filter }}</code>.</span>
-    <a href="{% url 'dashboard:security_list' %}?sort={{ active_sort }}">clear</a>
+    <a href="{% url 'dashboard:security_list' %}?sort={{ active_sort }}{{ project_query }}">clear</a>
     {% endif %}
 </form>
 
+{# Project filter: narrow the list, the tab counts and the export to one repo. #}
+{# A read filter only — the bulk buttons below act on the agent scope, not this, #}
+{# and their confirm text says so. Preserves sort, status and agent on submit. #}
+{# Hidden during a CVE lookup: that box is global by design, so the dropdown #}
+{# would show "apache/spark selected" over a list of every source's matches. #}
+{% if not cve_filter %}
+<form method="get" action="{% url 'dashboard:security_list' %}" class="security-sort"
+      style="display: flex; gap: 0.4rem; align-items: center; margin-bottom: 0.5rem;">
+    <label for="filter-project">Project:</label>
+    <select id="filter-project" name="project"
+            style="font-size: 0.85rem; padding: 0.25rem 0.5rem; border: 1px solid var(--border); border-radius: 4px;"
+            onchange="this.form.submit()">
+        <option value="">All Projects</option>
+        {% for project in projects %}
+        {% with proj_full=project.owner|add:"/"|add:project.repo %}
+        <option value="{{ proj_full }}" {% if active_project == proj_full %}selected{% endif %}>{{ proj_full }}</option>
+        {% endwith %}
+        {% endfor %}
+    </select>
+    <input type="hidden" name="sort" value="{{ active_sort }}">
+    {% if active_status != 'all' %}<input type="hidden" name="status" value="{{ active_status }}">{% endif %}
+    {% if agent_scope != 'all' %}<input type="hidden" name="agent" value="{{ agent_scope }}">{% endif %}
+    <noscript><button type="submit" class="action-btn" style="font-size: 0.85rem; padding: 0.3rem 0.7rem;">Go</button></noscript>
+</form>
+{% endif %}
+
 <div class="tab-bar">
     {% for tab in status_tabs %}
-    <a href="{% url 'dashboard:security_list' %}?sort={{ active_sort }}{% if tab.key != 'all' %}&amp;status={{ tab.key|urlencode }}{% endif %}{{ agent_query }}"
+    <a href="{% url 'dashboard:security_list' %}?sort={{ active_sort }}{% if tab.key != 'all' %}&amp;status={{ tab.key|urlencode }}{% endif %}{{ agent_query }}{{ project_query }}"
        {% if active_status == tab.key and not cve_filter %}class="active"{% endif %}>
         {{ tab.label }}
         <span class="tab-count">{{ tab.count }}</span>
@@ -460,7 +490,7 @@
     Sort:
     {% for key, label in sort_options %}
     {% if key == active_sort %}<strong>{{ label }}</strong>{% else %}<a
-        href="{% url 'dashboard:security_list' %}?sort={{ key }}{% if active_status != 'all' %}&amp;status={{ active_status|urlencode }}{% endif %}{{ agent_query }}">{{ label }}</a>{% endif %}
+        href="{% url 'dashboard:security_list' %}?sort={{ key }}{% if active_status != 'all' %}&amp;status={{ active_status|urlencode }}{% endif %}{{ agent_query }}{{ project_query }}">{{ label }}</a>{% endif %}
     {% if not forloop.last %}&middot;{% endif %}
     {% endfor %}
 </p>

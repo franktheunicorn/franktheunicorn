@@ -1867,6 +1867,14 @@ def security_report_list(request: HttpRequest) -> HttpResponse:
         )
         agent_scope = agent_source.SCOPE_ALL
 
+    # Which project the page shows, as an ``owner/repo`` slug. Unlike the agent
+    # scope this is a read filter only — the bulk buttons below act on the
+    # agent scope, not this, and their confirm text says so. A slug that doesn't
+    # parse (no slash, empty) is ignored rather than warned: the dropdown only
+    # offers real slugs, so a junk value is a stale bookmark, not operator input.
+    parsed_project = _parse_project_slug(request.GET.get("project", ""))
+    active_project = request.GET.get("project", "") if parsed_project is not None else ""
+
     # The CVE lookup box. One exact assigned-CVE hit goes straight to the
     # report — "brings up the local entry" is the point of the box — while
     # several (duplicates) or only NVD-match hits get the filtered list, which
@@ -1896,6 +1904,10 @@ def security_report_list(request: HttpRequest) -> HttpResponse:
         .filter(scoped)
         .order_by(*_SECURITY_SORTS[sort])
     )
+    # The CVE lookup is global on purpose ("do we have this anywhere"), so it
+    # ignores the project filter the same way it ignores the agent scope.
+    if parsed_project is not None and not cve_filter:
+        reports = reports.filter(project__owner=parsed_project[0], project__repo=parsed_project[1])
     if cve_filter:
         exact = reports.filter(matched_cve_id=cve_filter)
         if exact.count() == 1:
@@ -1921,8 +1933,13 @@ def security_report_list(request: HttpRequest) -> HttpResponse:
         reports = reports.filter(_security_tab_q(status_filter))
 
     # Counted inside the scope: a tab badge that counts every source above a list
-    # of one agent's rows is a count the rows can't account for.
+    # of one agent's rows is a count the rows can't account for. The project
+    # filter applies here too, or the badges count rows the list can't show.
     all_reports = SecurityReport.objects.filter(scoped)
+    if parsed_project is not None and not cve_filter:
+        all_reports = all_reports.filter(
+            project__owner=parsed_project[0], project__repo=parsed_project[1]
+        )
     tabs_with_counts: list[dict[str, str | int]] = []
     for tab in SECURITY_STATUS_TABS:
         count = all_reports.filter(_security_tab_q(tab["key"])).count()
@@ -1944,6 +1961,12 @@ def security_report_list(request: HttpRequest) -> HttpResponse:
     agent_query = (
         "" if agent_scope == agent_source.SCOPE_ALL else "&" + urlencode({"agent": agent_scope})
     )
+    # Same idea for the project filter: travels with tabs, sort, export and the
+    # scope chips. Not urlencoded: the slug is ``owner/repo`` from the dropdown
+    # (URL-safe chars), the slash is meaningful, and request.GET already decoded
+    # any incoming ``%2F`` — so the raw value round-trips. The PR list filter does
+    # the same.
+    project_query = "" if not active_project else f"&project={active_project}"
     status_query = "" if status_filter == "all" else "&" + urlencode({"status": status_filter})
     scope_options = [
         {
@@ -1951,7 +1974,7 @@ def security_report_list(request: HttpRequest) -> HttpResponse:
             "label": option.label,
             "count": option.count,
             "breakdown": option.breakdown,
-            "query": f"?sort={sort}{status_query}"
+            "query": f"?sort={sort}{status_query}{project_query}"
             + (
                 ""
                 if option.key == agent_source.SCOPE_ALL
@@ -1972,7 +1995,7 @@ def security_report_list(request: HttpRequest) -> HttpResponse:
                 else agent_scope,
                 "count": 0,
                 "breakdown": "",
-                "query": f"?sort={sort}{status_query}{agent_query}",
+                "query": f"?sort={sort}{status_query}{project_query}{agent_query}",
             }
         )
 
@@ -2001,6 +2024,8 @@ def security_report_list(request: HttpRequest) -> HttpResponse:
             "sort_options": _SECURITY_SORT_LABELS,
             "archives": _imported_archives(),
             "cve_api_pmcs": _cve_token_card_context(),
+            "active_project": active_project,
+            "project_query": project_query,
             # Configured projects, plus any project that actually has a report.
             # The reports themselves are deliberately *not* allow-list filtered —
             # hiding a security report because its YAML was removed loses sight of
@@ -2995,12 +3020,20 @@ def security_report_export_csv(request: HttpRequest) -> HttpResponseBase:
     if agent is None:
         return HttpResponse("Unknown agent filter.", status=400)
 
+    # The list page's project filter, same reasoning again: a sheet of one
+    # project's reports and a sheet of the whole backlog must not share a name,
+    # and a junk slug is a hand-edited URL, not operator input.
+    parsed_project = _parse_project_slug(request.GET.get("project", ""))
+    if request.GET.get("project", "") and parsed_project is None:
+        return HttpResponse("Unknown project filter.", status=400)
+    project = f"{parsed_project[0]}/{parsed_project[1]}" if parsed_project is not None else ""
+
     sort = request.GET.get("sort", DEFAULT_EXPORT_SORT)
     if sort not in EXPORT_SORTS:
         sort = DEFAULT_EXPORT_SORT
     full = request.GET.get("full") == "1"
     reports = reports_for_export(
-        status=status, limit=MAX_SECURITY_CSV_EXPORT_ROWS, sort=sort, agent=agent
+        status=status, limit=MAX_SECURITY_CSV_EXPORT_ROWS, sort=sort, agent=agent, project=project
     )
 
     # .iterator() so a big backlog isn't fully materialised to serve a stream.
@@ -3008,7 +3041,7 @@ def security_report_export_csv(request: HttpRequest) -> HttpResponseBase:
         stream_reports_csv(reports.iterator(chunk_size=200), full=full),
         content_type="text/csv; charset=utf-8",
     )
-    filename = export_filename(full=full, status=status, agent=agent)
+    filename = export_filename(full=full, status=status, agent=agent, project=project)
     response["Content-Disposition"] = f'attachment; filename="{filename}"'
     # This file is unfixed vulnerability reports, and with full=1 it's a working
     # description of how to exploit them. Without no-store it's heuristically
@@ -3017,9 +3050,10 @@ def security_report_export_csv(request: HttpRequest) -> HttpResponseBase:
     # download was deleted.
     response["Cache-Control"] = "no-store"
     logger.info(
-        "Security CSV export: status=%s agent=%s sort=%s full=%s (cap %d rows)",
+        "Security CSV export: status=%s agent=%s project=%s sort=%s full=%s (cap %d rows)",
         status or "all",
         agent,
+        project or "all",
         sort,
         full,
         MAX_SECURITY_CSV_EXPORT_ROWS,
