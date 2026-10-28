@@ -40,7 +40,7 @@ Usage: ./scripts/run_local_all.sh [up|down|status|logs] [options]
 
 Commands:
   up                 Start web, wait for health, then start worker (default)
-  down               Stop web and worker, removing stale pid files
+  down               Stop web and worker (plus any frank systemd units), removing stale pid files
   status             Show process state and attach instructions
   logs [web|worker]  Tail logs; defaults to both
 
@@ -379,6 +379,70 @@ stop_service() {
     fi
 }
 
+# Systemd units frank might be installed as. The project ships none and most
+# local runs use `make up` (no systemd at all), so this is best-effort: if
+# systemctl is missing, or no matching unit is installed, we say nothing and
+# move on. Override the probed list with
+#   FRANK_SYSTEMD_UNITS="a.service b.service"
+# or disable the integration entirely with FRANK_SYSTEMD=0.
+systemd_unit_candidates() {
+    if [ -n "${FRANK_SYSTEMD_UNITS:-}" ]; then
+        # shellcheck disable=SC2086
+        printf '%s\n' ${FRANK_SYSTEMD_UNITS}
+        return 0
+    fi
+    local base suffix
+    for base in "${APP_NAME}" "frank"; do
+        for suffix in "" "-web" "-worker"; do
+            printf '%s%s.service\n' "${base}" "${suffix}"
+        done
+    done
+}
+
+# Stop one frank unit in a given systemd scope ("system" or "user") if it is
+# both loaded and active. Returns 0 when it acted (or tried to), 1 otherwise.
+stop_systemd_unit() {
+    local scope="$1" unit="$2"
+    local sc=()
+    [ "${scope}" = "user" ] && sc=(--user)
+
+    # LoadState guards against stopping on a typo'd candidate: a not-found unit
+    # reads "not-found", and a scope with no running manager (e.g. --user over
+    # SSH without lingering) errors out and leaves this empty.
+    local load_state
+    load_state="$(systemctl "${sc[@]}" show -p LoadState --value "${unit}" 2>/dev/null || true)"
+    [ "${load_state}" = "loaded" ] || return 1
+
+    systemctl "${sc[@]}" is-active --quiet "${unit}" 2>/dev/null || return 1
+
+    if systemctl "${sc[@]}" stop "${unit}" 2>/dev/null; then
+        info "systemd: stopped ${unit} (${scope})"
+        return 0
+    fi
+    # A system unit usually needs privileges; try sudo non-interactively.
+    if [ "${scope}" = "system" ] && command -v sudo >/dev/null 2>&1 \
+        && sudo -n systemctl stop "${unit}" 2>/dev/null; then
+        info "systemd: stopped ${unit} (system, via sudo)"
+        return 0
+    fi
+    warn "systemd: ${unit} (${scope}) is active but could not be stopped"
+    return 0
+}
+
+# Stop any frank systemd units that happen to be installed. Silent in the
+# common case where systemd isn't used for frank at all.
+stop_systemd_services() {
+    [ "${FRANK_SYSTEMD:-1}" = "0" ] && return 0
+    command -v systemctl >/dev/null 2>&1 || return 0
+
+    local unit
+    while IFS= read -r unit; do
+        [ -n "${unit}" ] || continue
+        stop_systemd_unit system "${unit}" || true
+        stop_systemd_unit user "${unit}" || true
+    done < <(systemd_unit_candidates)
+}
+
 wait_for_pid_exit() {
     local pid="$1" timeout="$2" elapsed=0
     while kill -0 "${pid}" 2>/dev/null; do
@@ -536,6 +600,7 @@ cmd_down() {
         stop_service "${service}"
     done
     rm -f "${BACKEND_FILE}" "${WEB_URL_FILE}"
+    stop_systemd_services
 }
 
 cmd_status() {
