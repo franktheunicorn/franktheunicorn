@@ -2793,6 +2793,44 @@ class TestExecutionConfig(BaseModel):
         return self
 
 
+class CalibrationConfig(BaseModel):
+    """Post-check severity calibration — combat LLM "everything is critical" inflation.
+
+    Mantis's ``/mantis-calibrate`` scores each finding numerically and
+    surfaces the most critical rather than spewing thousands of "criticals".
+    franktheunicorn's findings are categorical with no cap, so a check that
+    flags eight "critical" findings surfaces all eight. This scores each
+    finding 1-10 from severity, confidence, and evidence, then caps to the
+    top-N per check — applied as a post-check filter before draft creation.
+
+    On by default. Turn off to pass every finding through (the operator
+    wants to see all of them, e.g. a high-stakes PR).
+    """
+
+    enabled: bool = True
+    #: Drop findings below this score (1-10). 3 keeps mediums and above,
+    #: drops low/informational and low-confidence nits.
+    min_score: float = 3.0
+    #: Cap findings per check to this many (highest score first). 0 = no cap.
+    max_findings: int = 5
+
+    @field_validator("min_score")
+    @classmethod
+    def min_score_valid(cls, v: float) -> float:
+        if not 1.0 <= v <= 10.0:
+            msg = f"calibration.min_score must be 1-10, got {v}"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("max_findings")
+    @classmethod
+    def max_findings_valid(cls, v: int) -> int:
+        if v < 0:
+            msg = f"calibration.max_findings must be >= 0, got {v}"
+            raise ValueError(msg)
+        return v
+
+
 class ProjectConfig(BaseModel):
     """Per-project config loaded from a YAML file in the projects directory."""
 
@@ -2988,6 +3026,11 @@ class ProjectConfig(BaseModel):
     # getent command uses $X" -> "command uses $X"). Turn it off per project to
     # post the review model's own wording unmodified.
     tone_guard_enabled: bool = True
+
+    # Post-check severity calibration: score findings 1-10 and cap to the
+    # top-N per check. Combats LLM "everything is critical" inflation (Mantis's
+    # /mantis-calibrate). On by default; see CalibrationConfig.
+    calibration: CalibrationConfig = Field(default_factory=CalibrationConfig)
 
     # v1.75 rejection predictor — opt-in. When enabled, drafts are scored
     # with the per-project sklearn model (training it automatically once

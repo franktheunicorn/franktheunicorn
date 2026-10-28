@@ -23,6 +23,7 @@ from franktheunicorn.review.backends.base import (
     ReviewFinding,
     parse_llm_response,
 )
+from franktheunicorn.review.calibration import calibrate_findings
 from franktheunicorn.review.drafter import build_pr_context, create_drafts_from_findings
 from franktheunicorn.review.tone_guard import apply_tone_guard_batch
 
@@ -192,6 +193,12 @@ def run_enabled_checks(
 
         # Recorded even at zero findings, or a clean check reads as "not run".
         record_agent_run(pr, source, status="ok", findings=len(findings))
+        if not findings:
+            continue
+
+        # Post-check severity calibration: score 1-10, cap to top-N. Combats
+        # LLM "everything is critical" inflation (Mantis's /mantis-calibrate).
+        findings = calibrate_findings(findings, project_config.calibration)
         if not findings:
             continue
 
