@@ -1881,6 +1881,42 @@ class SecurityTriageGuidance(models.Model):
         return f"SecurityTriageGuidance(project={self.project_id}): {self.guidance_text[:60]}"
 
 
+class SecurityReviewGuidance(models.Model):
+    """Review guidance distilled from the commits that introduced past CVEs.
+
+    One active row per project (plus an optional global row with
+    ``project=None``), the review-guidance sibling of
+    :class:`SecurityTriageGuidance`. Where triage guidance is distilled from
+    operator agree/disagree feedback, review guidance is distilled from the
+    diffs of commits that introduced real CVEs — "what should a code reviewer
+    have looked for to catch this class of issue at review time?" The
+    ``guidance_text`` is injected into the introduced-CVE scan prompt via
+    ``security.review_guidance.resolve_review_guidance`` so the scan that
+    looks for new CVEs is guided by what past CVE-introducing commits looked
+    like.
+    """
+
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.CASCADE,
+        related_name="review_guidance",
+        null=True,
+        blank=True,
+    )
+    guidance_text = models.TextField(blank=True, default="")
+    source_report_count = models.IntegerField(default=0)
+    source_commit_count = models.IntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+
+    def __str__(self) -> str:
+        return f"SecurityReviewGuidance(project={self.project_id}): {self.guidance_text[:60]}"
+
+
 class EmailScanRecord(models.Model):
     """Audit record of a single email the security inbox poller examined.
 

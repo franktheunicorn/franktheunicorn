@@ -36,6 +36,7 @@ from franktheunicorn.security.introduced_scan_prompt import (
 from franktheunicorn.security.introduced_scan_prompt import (
     TEMPLATE as _PROMPT_TEMPLATE,
 )
+from franktheunicorn.security.review_guidance import resolve_review_guidance
 from franktheunicorn.security.verifier import (
     _checkout,
     _default_branch,
@@ -248,6 +249,10 @@ def scan_project_for_introduced_cves(
 
     accepted, rejected = _prior_context(project)
     security_model = project_config.security_model or "(none set)"
+    review_guidance = (
+        resolve_review_guidance(project)
+        or "(none yet — build it with manage.py build_review_guidance)"
+    )
     magpie_skills = skills_block_for_project(project, inject_into="security")
     prompt = _build_prompt(
         project=project.full_name,
@@ -256,6 +261,7 @@ def scan_project_for_introduced_cves(
         accepted_context=accepted,
         rejected_context=rejected,
         security_model=security_model,
+        review_guidance=review_guidance,
         diff=diff,
         magpie_skills=magpie_skills,
         addendum=config.prompt_addendum,
@@ -445,6 +451,7 @@ def _build_prompt(
     accepted_context: str,
     rejected_context: str,
     security_model: str,
+    review_guidance: str,
     diff: str,
     magpie_skills: str,
     addendum: str,
@@ -459,6 +466,7 @@ def _build_prompt(
         accepted_context=accepted_context,
         rejected_context=rejected_context,
         security_model=security_model,
+        review_guidance=review_guidance,
         diff=diff,
         magpie_skills=magpie_skills,
         addendum=addendum_block,

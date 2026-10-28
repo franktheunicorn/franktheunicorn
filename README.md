@@ -192,6 +192,66 @@ letting you manually run tests on any PR after you have reviewed the code.
 
 See [docs/test-runner.md](docs/test-runner.md) for the full reference.
 
+## Security Review
+
+franktheunicorn has a security pipeline that runs alongside the PR review
+path: a security report backlog (paste, email inbox, scanner archive import),
+triage, exploit verification, and a scheduled scan that walks a project's
+recent changes for newly introduced CVEs.
+
+### Introduced-CVE scan
+
+An optional per-project check-in (`introduced_scan.enabled`, default off)
+that runs a coding agent on a cadence — daily, weekly, or monthly — to
+review the project's recent changes for newly introduced vulnerabilities,
+given the project's previously accepted and rejected CVE reports as
+context. Daily diffs the last N days; weekly/monthly diffs against the
+last final release tag. Each finding is filed as a security report in a
+separate **Introduced Scan** triage queue, and exploit verification is
+queued on each (the agent launches its own checkout and tries to prove the
+hole is real). Hard-capped at 8 hours and 20 findings per run.
+
+```yaml
+# config/active/projects/apache-spark.yaml
+introduced_scan:
+  enabled: true
+  cadence: daily          # daily | weekly | monthly
+  lookback_days: 2        # daily only; weekly/monthly diff from the last release
+  timeout_seconds: 28800  # 8h
+  max_findings: 20
+  auto_verify: true       # queue exploit verification on each finding
+```
+
+Run it on demand, or let the worker scheduler queue it when the cadence is
+due:
+
+```bash
+python manage.py scan_introduced_cves --project apache/spark            # run now
+python manage.py scan_introduced_cves --project apache/spark --queue   # hand to the worker
+```
+
+### Review guidance from past CVEs
+
+The scan above is only as good as the guidance it carries. The review-guidance
+builder distills guidance from the commits that *introduced* past CVEs —
+"what should a code reviewer have looked for to catch this class of issue at
+review time?" It walks the project's valid reports that have a dated
+introducing commit, shows each commit's diff, asks an LLM what a reviewer
+should have caught, then distills the per-commit notes into a single guidance
+addendum. That addendum is injected into the introduced-CVE scan's prompt,
+so the scan that looks for new CVEs is guided by what past CVE-introducing
+commits looked like.
+
+```bash
+python manage.py build_review_guidance --project apache/spark            # build + store
+python manage.py build_review_guidance --project apache/spark --dry-run  # print, don't store
+python manage.py build_review_guidance --project apache/spark --max-commits 50
+```
+
+The stored guidance (one active row per project) is read automatically by
+the introduced-CVE scan — no wiring needed. Re-run the command to refresh it
+as new CVEs are filed and dated.
+
 ## Documentation
 
 - **[Install Guide](docs/install.md)** — full setup, project configuration, and workspace setup
