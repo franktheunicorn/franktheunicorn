@@ -70,7 +70,7 @@ migrate: venv ## Run database migrations
 up: ## Start web + worker locally without Docker (port 7742, falls back to 4242)
 	./scripts/run_local_all.sh up
 
-down: ## Stop local web + worker started by make up
+down: ## Stop local web + worker started by make up (and any frank systemd units)
 	./scripts/run_local_all.sh down
 
 up-status: ## Show local web + worker status
