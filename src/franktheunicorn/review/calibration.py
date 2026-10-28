@@ -88,18 +88,17 @@ def calibrate_findings(
 
 def _score(finding: ReviewFinding) -> float:
     """Numerical risk score 1-10 from severity, confidence, and evidence."""
-    base = _SEVERITY_SCORE.get((finding.severity or "").lower().strip(), 5.0)
+    base = _SEVERITY_SCORE.get(finding.severity.lower().strip(), 5.0)
     # Confidence scales the base: a high-confidence finding keeps its score,
     # a low-confidence one drops toward half. (In the prompt path confidence is
     # a function of severity, so this term is near-constant there; it varies
     # for hand-built sub-check findings.)
     score = base * (0.5 + 0.5 * finding.confidence)
-    body = (finding.body or "").lower()
+    body = finding.body.lower()
     if any(kw in body for kw in _EVIDENCE_KEYWORDS):
         score += 1.0
-    title = (finding.title or "").lower()
-    if any(w in title for w in _VAGUE_WORDS):
+    if any(w in finding.title.lower() for w in _VAGUE_WORDS):
         score -= 2.0
-    if len(finding.body or "") < 50:
+    if len(finding.body) < 50:
         score -= 1.0
     return max(1.0, min(10.0, round(score, 1)))

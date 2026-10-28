@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from franktheunicorn.config.models import CalibrationConfig, ProjectConfig
 from franktheunicorn.review.backends.base import ReviewFinding
@@ -28,9 +29,7 @@ def _finding(
 
 
 def _cfg(**overrides: object) -> CalibrationConfig:
-    base: dict[str, object] = {}
-    base.update(overrides)
-    return CalibrationConfig(**base)  # type: ignore[arg-type]
+    return CalibrationConfig.model_validate(overrides)
 
 
 class TestScore:
@@ -113,13 +112,9 @@ class TestWiring:
         assert pc.calibration.max_findings == 5
 
     def test_config_validates_min_score(self) -> None:
-        from pydantic import ValidationError
-
         with pytest.raises(ValidationError):
             _cfg(min_score=0.5)
 
     def test_config_validates_max_findings(self) -> None:
-        from pydantic import ValidationError
-
         with pytest.raises(ValidationError):
             _cfg(max_findings=-1)
