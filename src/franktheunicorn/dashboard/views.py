@@ -75,6 +75,13 @@ from franktheunicorn.security.queue import SECURITY_EVAL_COMMANDS, in_flight_sta
 
 logger = logging.getLogger(__name__)
 
+#: The "Security Findings" tab key. Not a ``PullRequest.queue`` value —
+#: like ``ALMOST_READY_QUEUE`` it cuts across the routing queues, filtering
+#: open PRs that have at least one security-category line finding (the
+#: ``security`` / ``security-context`` LLM checks). A PR can be in the
+#: ``review`` queue AND have security findings, so it shows under both tabs.
+SECURITY_FINDINGS_QUEUE = "security-findings"
+
 # Queue definitions for the tab bar. "almost-ready" is not a PullRequest.queue
 # value: it cuts across the moderation queues (a new contributor's PR can be
 # almost ready) and is filtered on merge_readiness_verdict instead.
@@ -82,6 +89,11 @@ QUEUE_TABS: list[dict[str, str]] = [
     {"key": "review", "label": "Review"},
     {"key": ALMOST_READY_QUEUE, "label": "Almost Ready to Merge"},
     {"key": "intending-to-merge", "label": "Intending to Merge"},
+    {
+        "key": SECURITY_FINDINGS_QUEUE,
+        "label": "Security Findings",
+        "icon": "dashboard/img/shield.svg",
+    },
     {"key": "your-prs", "label": "Your PRs"},
     {"key": "mentioned", "label": "Mentioned"},
     {"key": "ai-generated", "label": "AI-Generated"},
@@ -161,6 +173,15 @@ def _queue_members_q(queue: str, readiness_off: Q | None = None) -> Q:
         if readiness_off is not None:
             q &= ~readiness_off
         return q
+    if queue == SECURITY_FINDINGS_QUEUE:
+        # Open PRs with at least one security-category line finding (the
+        # ``security`` / ``security-context`` LLM checks). A subquery, not a
+        # JOIN, so a PR with several security findings is not duplicated.
+        security_pr_ids = ReviewDraft.objects.filter(
+            ReviewDraft.line_finding_q(),
+            category__in=("security", "security-context"),
+        ).values_list("pull_request_id", flat=True)
+        return Q(state="open", pk__in=security_pr_ids)
     # A PR can be in several queues at once; match membership, not just the
     # primary queue, so e.g. a mentioned new-contributor PR shows under both
     # tabs. PullRequest.queue_filter is SQLite-safe (no JSON-array contains).
@@ -256,6 +277,19 @@ def index(request: HttpRequest) -> HttpResponse:
             .annotate(c=Count("id"))
             .values_list("pull_request_id", "c")
         )
+        # Security-category finding counts — the badge on each row says how
+        # many security concerns to look at. Computed on every tab (like
+        # findings_count) so a security flag is visible without switching.
+        security_counts: dict[int, int] = dict(
+            ReviewDraft.objects.filter(
+                ReviewDraft.line_finding_q(),
+                category__in=("security", "security-context"),
+                pull_request_id__in=pr_ids,
+            )
+            .values("pull_request_id")
+            .annotate(c=Count("id"))
+            .values_list("pull_request_id", "c")
+        )
         # Fetch the latest completed test run verdict per PR.
         # Order by created_at DESC and pick the first per PR (SQLite-compatible).
         latest_verdicts: dict[int, str] = {}
@@ -294,6 +328,7 @@ def index(request: HttpRequest) -> HttpResponse:
             pr.latest_test_verdict = latest_verdicts.get(pr.pk)  # type: ignore[attr-defined]
             pr.zombie = zombies.get(pr.pk)  # type: ignore[attr-defined]
             pr.run_in_flight = pr.pk in run_in_flight_pr_ids  # type: ignore[attr-defined]
+            pr.security_findings_count = security_counts.get(pr.pk, 0)  # type: ignore[attr-defined]
 
     # The almost-ready tab carries its own per-PR panel (verdict, reasons,
     # buttons) and a header of what the queue has learned from past verdicts.
@@ -364,6 +399,7 @@ def index(request: HttpRequest) -> HttpResponse:
             "available_projects": available_projects,
             "learned_rules": learned_rules,
             "almost_ready_queue": ALMOST_READY_QUEUE,
+            "security_findings_queue": SECURITY_FINDINGS_QUEUE,
         },
     )
 

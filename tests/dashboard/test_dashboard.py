@@ -459,6 +459,221 @@ class TestQueueTabs:
 
 
 @pytest.mark.django_db
+class TestSecurityFindingsTab:
+    def test_tab_appears_in_tab_bar(self, client: Client) -> None:
+        response = client.get("/")
+        assert b"Security Findings" in response.content
+
+    def test_queue_security_findings_filters_to_security_category(
+        self, client: Client, db_project: Project
+    ) -> None:
+        sec_pr = PullRequestFactory(
+            project=db_project, number=601, github_id=6001, title="Sec PR here"
+        )
+        plain_pr = PullRequestFactory(
+            project=db_project, number=602, github_id=6002, title="Plain PR here"
+        )
+        ReviewDraftFactory(
+            pull_request=sec_pr,
+            category="security",
+            line_number=10,
+            comment_body="Possible injection.",
+        )
+        ReviewDraftFactory(
+            pull_request=plain_pr,
+            category="correctness",
+            line_number=20,
+            comment_body="Off-by-one.",
+        )
+        response = client.get("/?queue=security-findings")
+        assert response.status_code == 200
+        assert b"Sec PR here" in response.content
+        assert b"Plain PR here" not in response.content
+
+    def test_security_context_category_also_counts(
+        self, client: Client, db_project: Project
+    ) -> None:
+        sec_pr = PullRequestFactory(
+            project=db_project, number=603, github_id=6003, title="Context PR here"
+        )
+        ReviewDraftFactory(
+            pull_request=sec_pr,
+            category="security-context",
+            line_number=5,
+            comment_body="Sensitive data in logs.",
+        )
+        response = client.get("/?queue=security-findings")
+        assert b"Context PR here" in response.content
+
+    def test_excludes_prs_with_only_auto_suppressed_security_findings(
+        self, client: Client, db_project: Project
+    ) -> None:
+        pr = PullRequestFactory(
+            project=db_project, number=604, github_id=6004, title="Suppressed PR here"
+        )
+        ReviewDraftFactory(
+            pull_request=pr,
+            category="security",
+            line_number=10,
+            is_auto_suppressed=True,
+            comment_body="Suppressed security finding.",
+        )
+        response = client.get("/?queue=security-findings")
+        assert b"Suppressed PR here" not in response.content
+
+    def test_excludes_prs_with_only_rejected_security_findings(
+        self, client: Client, db_project: Project
+    ) -> None:
+        pr = PullRequestFactory(
+            project=db_project, number=605, github_id=6005, title="Rejected PR here"
+        )
+        ReviewDraftFactory(
+            pull_request=pr,
+            category="security",
+            line_number=10,
+            status="rejected",
+            comment_body="Rejected security finding.",
+        )
+        response = client.get("/?queue=security-findings")
+        assert b"Rejected PR here" not in response.content
+
+    def test_excludes_prs_with_only_non_line_security_drafts(
+        self, client: Client, db_project: Project
+    ) -> None:
+        pr = PullRequestFactory(
+            project=db_project, number=606, github_id=6006, title="Summary PR here"
+        )
+        ReviewDraftFactory(
+            pull_request=pr,
+            category="security",
+            line_number=None,
+            comment_body="PR-level summary, not a line finding.",
+        )
+        response = client.get("/?queue=security-findings")
+        assert b"Summary PR here" not in response.content
+
+    def test_excludes_closed_prs_with_security_findings(
+        self, client: Client, db_project: Project
+    ) -> None:
+        pr = PullRequestFactory(
+            project=db_project,
+            number=607,
+            github_id=6007,
+            title="Closed sec PR here",
+            state="closed",
+        )
+        ReviewDraftFactory(pull_request=pr, category="security", line_number=10, comment_body="X.")
+        response = client.get("/?queue=security-findings")
+        assert b"Closed sec PR here" not in response.content
+
+    def test_security_badge_renders_on_list(self, client: Client, db_project: Project) -> None:
+        pr = PullRequestFactory(
+            project=db_project, number=608, github_id=6008, title="Badge PR here"
+        )
+        ReviewDraftFactory(pull_request=pr, category="security", line_number=10, comment_body="X.")
+        response = client.get("/?queue=security-findings")
+        assert b'class="security-badge"' in response.content
+
+    def test_security_badge_shows_count(self, client: Client, db_project: Project) -> None:
+        pr = PullRequestFactory(
+            project=db_project, number=609, github_id=6009, title="Count PR here"
+        )
+        ReviewDraftFactory(pull_request=pr, category="security", line_number=10, comment_body="X.")
+        ReviewDraftFactory(pull_request=pr, category="security", line_number=20, comment_body="Y.")
+        response = client.get("/?queue=security-findings")
+        assert b"2 security findings" in response.content
+
+    def test_no_security_findings_shows_empty_state(
+        self, client: Client, db_project: Project
+    ) -> None:
+        PullRequestFactory(project=db_project, number=610, github_id=6010, title="Clean PR here")
+        response = client.get("/?queue=security-findings")
+        assert response.status_code == 200
+        # No PR rows; the empty state renders.
+        assert b"Clean PR here" not in response.content
+
+    def test_tab_count_in_tab_bar_reflects_security_prs(
+        self, client: Client, db_project: Project
+    ) -> None:
+        # Two PRs with security findings, one without.
+        for num in (621, 622):
+            pr = PullRequestFactory(
+                project=db_project, number=num, github_id=6000 + num, title=f"Sec {num}"
+            )
+            ReviewDraftFactory(
+                pull_request=pr, category="security", line_number=10, comment_body="X."
+            )
+        PullRequestFactory(project=db_project, number=623, github_id=6023, title="Plain PR")
+        response = client.get("/")
+        assert response.status_code == 200
+        # The Security Findings tab count badge should show 2.
+        content = response.content
+        idx = content.find(b"queue=security-findings")
+        assert idx != -1
+        snippet = content[idx : idx + 200]
+        assert b">2<" in snippet
+
+    def test_tab_count_respects_project_filter(self, client: Client, db_project: Project) -> None:
+        other_project = ProjectFactory(owner="other", repo="other")
+        # Security PR in the OTHER project.
+        other_pr = PullRequestFactory(
+            project=other_project, number=611, github_id=6011, title="Other proj sec PR"
+        )
+        ReviewDraftFactory(
+            pull_request=other_pr, category="security", line_number=10, comment_body="X."
+        )
+        # Security PR in the SELECTED project.
+        own_pr = PullRequestFactory(
+            project=db_project, number=612, github_id=6012, title="Own proj sec PR"
+        )
+        ReviewDraftFactory(
+            pull_request=own_pr, category="security", line_number=10, comment_body="X."
+        )
+        # Filter to the selected project; only the own-project PR should appear.
+        response = client.get(
+            f"/?queue=security-findings&project={db_project.owner}/{db_project.repo}"
+        )
+        assert response.status_code == 200
+        assert b"Own proj sec PR" in response.content
+        assert b"Other proj sec PR" not in response.content
+
+    def test_security_pr_also_shows_on_review_tab(
+        self, client: Client, db_project: Project
+    ) -> None:
+        # A PR with both a security finding and a correctness finding should
+        # appear on both the Review and Security Findings tabs.
+        pr = PullRequestFactory(
+            project=db_project,
+            number=631,
+            github_id=6031,
+            title="Dual finding PR",
+            queue="review",
+        )
+        ReviewDraftFactory(pull_request=pr, category="security", line_number=10, comment_body="sec")
+        ReviewDraftFactory(
+            pull_request=pr, category="correctness", line_number=20, comment_body="bug"
+        )
+        review_resp = client.get("/?queue=review")
+        assert b"Dual finding PR" in review_resp.content
+        sec_resp = client.get("/?queue=security-findings")
+        assert b"Dual finding PR" in sec_resp.content
+
+    def test_security_badge_shows_on_review_tab(self, client: Client, db_project: Project) -> None:
+        # The security badge should be visible on the Review tab too, not
+        # only on the Security Findings tab.
+        pr = PullRequestFactory(
+            project=db_project,
+            number=641,
+            github_id=6041,
+            title="Review tab sec PR",
+            queue="review",
+        )
+        ReviewDraftFactory(pull_request=pr, category="security", line_number=10, comment_body="X.")
+        response = client.get("/?queue=review")
+        assert b'class="security-badge"' in response.content
+
+
+@pytest.mark.django_db
 class TestFindingActions:
     def test_approve_draft(self, client: Client, review_draft: ReviewDraft) -> None:
         response = client.post(f"/draft/{review_draft.pk}/approve/")

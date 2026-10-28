@@ -55,6 +55,12 @@
 </div>
 {% endif %}
 
+{% if active_queue == security_findings_queue %}
+<div class="mc-intro">
+    <p class="muted">PRs the review pipeline flagged for possible security issues — the <code>security</code> and <code>security-context</code> LLM checks found something worth a look. Open a PR to triage.</p>
+</div>
+{% endif %}
+
 {% if active_queue == "zombie" %}
 {% comment %} The hunt is a worker sweep, so the toolbar shows where each project's
    scan got to — the only feedback a bounded, resumable scan has. {% endcomment %}
@@ -111,6 +117,7 @@
             {% if pr.mergeable == False %}· <span class="badge-conflict" title="PR has merge conflicts — needs rebase">Needs Rebase</span>{% endif %}
             {% if pr.run_in_flight %}· <span class="badge-queued" title="A run_agents command is pending or running — findings will appear when the worker finishes">Queued for Run</span>{% endif %}
             {% if pr.findings_count %}· <span class="findings-badge" title="Draft line-level concerns">{{ pr.findings_count }} finding{{ pr.findings_count|pluralize }}</span>{% endif %}
+            {% if pr.security_findings_count %}· <span class="security-badge" title="{{ pr.security_findings_count }} security-category finding{{ pr.security_findings_count|pluralize }} — open the PR to triage">{{ pr.security_findings_count }} security finding{{ pr.security_findings_count|pluralize }}</span>{% endif %}
             {% if pr.latest_test_verdict %}·
                 {% if pr.latest_test_verdict == "good" %}
                 <span class="verdict-badge verdict-good" title="New tests fail without this PR's changes — the tests validate the change">Tests: GOOD</span>

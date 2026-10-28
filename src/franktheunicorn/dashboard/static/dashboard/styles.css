@@ -124,6 +124,7 @@ nav a:hover, nav a.active { color: var(--accent); font-weight: 600; }
 .score-badge.low { background: var(--orange-bg); color: var(--orange); }
 .score-badge.mid { background: var(--blue-bg); color: var(--blue); }
 .findings-badge { display: inline-block; background: var(--yellow-bg); color: var(--orange); padding: 0.05rem 0.35rem; border-radius: 3px; font-weight: 600; font-size: 0.75rem; }
+.security-badge { display: inline-block; background: var(--red-bg); color: var(--red); padding: 0.05rem 0.35rem; border-radius: 3px; font-weight: 600; font-size: 0.75rem; }
 .badge-conflict { display: inline-block; background: var(--red-bg); color: var(--red); padding: 0.05rem 0.35rem; border-radius: 3px; font-weight: 600; font-size: 0.75rem; }
 .badge-mentioned { display: inline-block; background: var(--blue-bg); color: var(--blue); padding: 0.05rem 0.35rem; border-radius: 3px; font-weight: 600; font-size: 0.75rem; }
 
