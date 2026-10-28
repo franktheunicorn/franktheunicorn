@@ -32,6 +32,7 @@
     --yellow: #fdd835;
     --yellow-bg: #fffde7;
     --purple: #6e40c9;
+    --purple-bg: rgba(110, 64, 201, 0.12);
     --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     --font-mono: ui-monospace, "Cascadia Code", "Fira Code", monospace;
     --radius: 6px;
@@ -58,6 +59,7 @@
         --yellow: #fde047;
         --yellow-bg: #713f12;
         --purple: #c4b5fd;
+        --purple-bg: rgba(196, 181, 253, 0.15);
         --code-bg: rgba(255, 255, 255, 0.10);
     }
 }
@@ -665,6 +667,29 @@ thead th { border-bottom: 2px solid var(--border); }
     padding: 0 0.35rem;
     border-radius: 3px;
     white-space: nowrap;
+}
+
+/* How a security report arrived — a badge so the agent-discovered sources
+   (introduced scan, variant scan) read as distinct from the incoming ones
+   (paste, email, zip) at a glance, the way the agent badge marks whose
+   output it is. The scan sources get the purple treatment (proactive,
+   agent-driven); the incoming sources stay muted (a person or a scanner
+   archive sent them). Named ``report-source-badge`` to not collide with the
+   PR-review ``.source-badge`` (CodeRabbit / agent) defined above. */
+.report-source-badge {
+    display: inline-block;
+    background: var(--code-bg);
+    color: var(--muted);
+    padding: 0 0.35rem;
+    border-radius: 3px;
+    font-size: 0.78rem;
+    white-space: nowrap;
+}
+.report-source-badge.src-introduced-scan,
+.report-source-badge.src-variant-scan {
+    background: var(--purple-bg);
+    color: var(--purple);
+    font-weight: 600;
 }
 .zip-archives input[type="text"] { width: 9rem; font-size: 0.8rem; }
 .agent-relabel { display: inline-flex; gap: 0.3rem; align-items: center; margin-left: 0.4rem; }

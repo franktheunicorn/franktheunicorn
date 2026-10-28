@@ -549,7 +549,7 @@
             </span>
             {% if report.priority_reason %}<span class="muted">{{ report.priority_reason }}</span> &middot; {% endif %}
             {% endif %}
-            {{ report.get_source_display }}
+            <span class="report-source-badge src-{{ report.source }}">{{ report.get_source_display }}</span>
             {# Whose output it is, beside how it arrived: another agent's finding #}
             {# must never read as a person's report at a glance. #}
             {% if report.source_agent %} &middot; <span class="agent-badge" title="Produced by an automated agent, not a person">🤖 {{ report.source_agent }}</span>{% endif %}

@@ -51,6 +51,7 @@ if TYPE_CHECKING:
         IntroducedScanConfig,
         OperatorConfig,
         ProjectConfig,
+        SecurityDuplicateConfig,
     )
     from franktheunicorn.core.models import IntroducedBug, Project
     from franktheunicorn.review.tool_executor import ToolExecutor
@@ -95,6 +96,12 @@ class IntroducedScanResult:
     bug_count: int = 0
     #: How many of those were queued for exploit verification.
     verified_count: int = 0
+    #: How many were linked to an existing report in the project (cross-source
+    #: dedup: a paste, email or zip report of the same hole the scan just found).
+    linked_count: int = 0
+    #: How many agent findings were not filed (no title, or a re-scan of a
+    #: finding the scan already filed — the self-dedup skip).
+    skipped_count: int = 0
     raw_output: str = ""
 
     def summary(self) -> str:
@@ -102,9 +109,12 @@ class IntroducedScanResult:
         if self.error:
             return f"introduced scan: did not run — {self.error}"
         bugs = f", {self.bug_count} bug(s) filed" if self.bug_count else ""
+        links = f", {self.linked_count} linked" if self.linked_count else ""
+        skipped = f", {self.skipped_count} skipped" if self.skipped_count else ""
         return (
             f"introduced scan ({self.cadence}, {self.commit_range}): "
-            f"{self.finding_count} finding(s) filed, {self.verified_count} queued for verify{bugs}"
+            f"{self.finding_count} finding(s) filed, {self.verified_count} queued for verify"
+            f"{links}{skipped}{bugs}"
         )
 
 
@@ -351,13 +361,19 @@ def scan_project_for_introduced_cves(
 
     from franktheunicorn.security.queue import queue_exploit_verification
 
+    dup_config = operator_config.security_triage.duplicates
     filed = 0
     verified = 0
+    linked = 0
+    skipped = 0
     for finding in result.findings[: config.max_findings]:
-        report = _file_finding(finding, project, run_row)
+        report = _file_finding(finding, project, run_row, dup_config)
         if report is None:
+            skipped += 1
             continue
         filed += 1
+        if report.duplicate_of_id is not None:
+            linked += 1
         if config.auto_verify and queue_exploit_verification(report):
             verified += 1
             logger.info(
@@ -367,6 +383,8 @@ def scan_project_for_introduced_cves(
             )
     result.finding_count = filed
     result.verified_count = verified
+    result.linked_count = linked
+    result.skipped_count = skipped
 
     bugs_filed = 0
     if config.detect_bugs:
@@ -566,16 +584,37 @@ def _file_finding(
     finding: dict[str, Any],
     project: Project,
     run_row: IntroducedScanRun,
+    dup_config: SecurityDuplicateConfig | None = None,
 ) -> SecurityReport | None:
     """File one finding as a SecurityReport with source="introduced-scan".
 
-    Returns the report, or None when the finding had no title (a finding with no
-    title is not a finding the operator can triage). Dedup is left to the
-    operator — a re-scan over the same range will file again, and the operator
-    dismisses the dup the way they dismiss any other.
+    Returns the report, or None when the finding had no title or is a re-scan of
+    a finding the scan already filed (same title + source + project, and the prior
+    one is still open). After filing, links the report to an existing one in the
+    project when the duplicate heuristic scores them above threshold — so a paste,
+    email or zip report of the same hole the scan just found is surfaced as a
+    candidate link rather than filed as a second row the operator triages twice.
+    The link is a pointer to any earlier report (triaged or not — surfacing "same
+    hole, already ruled on" is as useful as "same hole, untriaged"), never a
+    verdict (``status="duplicate"`` stays the operator's); see ``security.duplicates``.
     """
     title = str(finding.get("title", "")).strip()
     if not title:
+        return None
+    # Self-dedup: a prior introduced-scan report with the same title that is still
+    # open means the last run already filed this one — skip, don't re-file. A
+    # prior report the operator dismissed (invalid / expected-behavior / closed)
+    # does NOT block: the scan window moved, and the same title in a new range
+    # may be a genuinely new introduction worth re-surfacing.
+    if (
+        SecurityReport.objects.filter(project=project, source="introduced-scan", title=title[:500])
+        .exclude(status__in=SecurityReport.NO_FIX_OWED_STATUSES)
+        .exists()
+    ):
+        logger.info(
+            "Introduced scan skipping a re-scan of an existing open scan finding: %s",
+            title,
+        )
         return None
     severity = str(finding.get("severity", "")).strip().lower() or "unknown"
     component = str(finding.get("component", "")).strip()
@@ -605,6 +644,25 @@ def _file_finding(
         parsed_component=component,
         raw_text=body,
     )
+    # Cross-source dedup: link to an existing report in the project when the
+    # heuristic scores them above threshold. Heuristic only (no LLM call) — the
+    # scan already ran an agent to find the CVE; this is a cheap local match
+    # against rows already in the database. Respects the operator's duplicates
+    # config (off → no link). Never sets status="duplicate" — a pointer, not a
+    # verdict.
+    if dup_config is not None and dup_config.enabled:
+        from franktheunicorn.security.duplicates import detect_for_report
+
+        detection = detect_for_report(report, dup_config)
+        if detection.match is not None and report.duplicate_of_id is not None:
+            logger.info(
+                "Introduced-scan report #%s looks like a duplicate of #%s "
+                "(score %.2f: %s) — linked, not merged.",
+                report.pk,
+                detection.match.report_id,
+                detection.match.score,
+                detection.match.reason,
+            )
     return report
 
 

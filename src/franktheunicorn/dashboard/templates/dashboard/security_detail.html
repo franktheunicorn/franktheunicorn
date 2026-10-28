@@ -22,7 +22,7 @@
 
 <div class="breakdown" style="margin-bottom: 1rem;">
     <dl>
-        <dt>Source:</dt><dd>{{ report.get_source_display }}</dd>
+        <dt>Source:</dt><dd><span class="report-source-badge src-{{ report.source }}">{{ report.get_source_display }}</span></dd>
         {# Which archive, and which finding within it — the ids the archive's own #}
         {# other files refer to, so the operator can go back to the bundle. #}
         {% if report.source_archive %}<dt>Archive:</dt><dd>{{ report.source_archive }}</dd>{% endif %}

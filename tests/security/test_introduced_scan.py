@@ -299,6 +299,118 @@ class TestFileFinding:
         assert _file_finding({"severity": "high"}, project, run_row) is None
         assert not SecurityReport.objects.filter(source="introduced-scan").exists()
 
+    def test_self_dedup_skips_a_re_scan_of_the_same_title(self) -> None:
+        project = ProjectFactory()
+        run_row = IntroducedScanRun.objects.create(project=project, cadence="daily")
+        finding = {"title": "Negative foo bypasses validation", "severity": "high"}
+        assert _file_finding(finding, project, run_row) is not None
+        # A re-scan over the same range files the same title again — skip it.
+        assert _file_finding(finding, project, run_row) is None
+        assert SecurityReport.objects.filter(source="introduced-scan").count() == 1
+
+    def test_self_dedup_does_not_skip_a_dismissed_prior_finding(self) -> None:
+        project = ProjectFactory()
+        run_row = IntroducedScanRun.objects.create(project=project, cadence="daily")
+        # A prior scan finding the operator already dismissed — the scan
+        # window moved, so a re-scan over a new range can re-file it.
+        SecurityReportFactory(
+            project=project,
+            source="introduced-scan",
+            status="invalid",
+            title="Negative foo bypasses validation",
+        )
+        finding = {"title": "Negative foo bypasses validation", "severity": "high"}
+        assert _file_finding(finding, project, run_row) is not None
+        assert SecurityReport.objects.filter(source="introduced-scan").count() == 2
+
+    def test_links_to_an_existing_report_of_the_same_hole(self) -> None:
+        from franktheunicorn.config.models import SecurityDuplicateConfig
+
+        project = ProjectFactory()
+        run_row = IntroducedScanRun.objects.create(project=project, cadence="daily")
+        # An untriaged paste report of the same hole, filed before the scan.
+        SecurityReportFactory(
+            project=project,
+            source="paste",
+            status="new",
+            title="Negative foo bypasses validation",
+            raw_text="Negative foo is not rejected and reaches the planner in sql/foo.py",
+            parsed_component="SQL",
+        )
+        finding = {
+            "title": "Negative foo bypasses validation",
+            "severity": "high",
+            "component": "SQL",
+            "suspected_paths": ["sql/foo.py"],
+            "description": "Negative foo is not rejected and reaches the planner.",
+        }
+        report = _file_finding(finding, project, run_row, SecurityDuplicateConfig())
+        assert report is not None
+        report.refresh_from_db()
+        assert report.duplicate_of_id is not None
+        assert report.duplicate_of.title == "Negative foo bypasses validation"
+
+    def test_links_to_an_already_valid_report(self) -> None:
+        from franktheunicorn.config.models import SecurityDuplicateConfig
+
+        project = ProjectFactory()
+        run_row = IntroducedScanRun.objects.create(project=project, cadence="daily")
+        # A confirmed-real report the operator already triaged — linking to it
+        # tells the operator "the scan found something you already confirmed."
+        SecurityReportFactory(
+            project=project,
+            source="paste",
+            status="valid",
+            title="Negative foo bypasses validation",
+            raw_text="Negative foo is not rejected and reaches the planner in sql/foo.py",
+            parsed_component="SQL",
+        )
+        finding = {
+            "title": "Negative foo bypasses validation",
+            "severity": "high",
+            "component": "SQL",
+            "suspected_paths": ["sql/foo.py"],
+        }
+        report = _file_finding(finding, project, run_row, SecurityDuplicateConfig())
+        assert report is not None
+        report.refresh_from_db()
+        assert report.duplicate_of_id is not None
+
+    def test_dedup_disabled_does_not_link(self) -> None:
+        from franktheunicorn.config.models import SecurityDuplicateConfig
+
+        project = ProjectFactory()
+        run_row = IntroducedScanRun.objects.create(project=project, cadence="daily")
+        SecurityReportFactory(
+            project=project,
+            source="paste",
+            status="new",
+            title="Negative foo bypasses validation",
+            raw_text="Negative foo is not rejected and reaches the planner in sql/foo.py",
+        )
+        finding = {"title": "Negative foo bypasses validation", "severity": "high"}
+        report = _file_finding(finding, project, run_row, SecurityDuplicateConfig(enabled=False))
+        assert report is not None
+        report.refresh_from_db()
+        assert report.duplicate_of_id is None
+
+    def test_summary_includes_linked_and_skipped_counts(self) -> None:
+        from franktheunicorn.security.introduced_scan import IntroducedScanResult
+
+        result = IntroducedScanResult(
+            cadence="daily",
+            commit_range="last 2 days",
+            finding_count=2,
+            verified_count=1,
+            linked_count=1,
+            skipped_count=1,
+        )
+        summary = result.summary()
+        assert "2 finding(s) filed" in summary
+        assert "1 queued" in summary
+        assert "1 linked" in summary
+        assert "1 skipped" in summary
+
 
 @pytest.mark.django_db
 class TestPriorContext:
