@@ -814,6 +814,60 @@ class TestEdgeBranches:
             scan_project_for_introduced_cves(project, _operator())
         assert captured.get("addendum") == "Look hard at deserialization."
 
+    def test_cve_class_catalog_reaches_the_agent_prompt(self) -> None:
+        from franktheunicorn.config.models import ProjectConfig
+
+        project = ProjectFactory(owner="apache", repo="spark")
+        scan = _scan()
+        pc = ProjectConfig(
+            owner="apache", repo="spark", introduced_scan=scan, cve_class_catalog="spark"
+        )
+        executor = _executor_with(json.dumps({"findings": []}))
+        captured: dict[str, Any] = {}
+
+        def _capture_prompt(*_args: Any, **kwargs: Any) -> str:
+            captured.update(kwargs)
+            return "prompt"
+
+        with (
+            patch("franktheunicorn.config.loader.get_project_config", return_value=pc),
+            patch("franktheunicorn.review.tool_executor.make_executor", return_value=executor),
+            patch(
+                "franktheunicorn.security.introduced_scan._build_prompt",
+                side_effect=_capture_prompt,
+            ),
+            patch("franktheunicorn.security.queue.queue_exploit_verification", return_value=True),
+        ):
+            scan_project_for_introduced_cves(project, _operator())
+        catalog = captured.get("cve_class_catalog", "")
+        assert "Command injection" in catalog
+        assert "CVE-2022-33891" in catalog
+
+    def test_cve_class_catalog_empty_when_not_configured(self) -> None:
+        from franktheunicorn.config.models import ProjectConfig
+
+        project = ProjectFactory(owner="apache", repo="spark")
+        scan = _scan()
+        pc = ProjectConfig(owner="apache", repo="spark", introduced_scan=scan)
+        executor = _executor_with(json.dumps({"findings": []}))
+        captured: dict[str, Any] = {}
+
+        def _capture_prompt(*_args: Any, **kwargs: Any) -> str:
+            captured.update(kwargs)
+            return "prompt"
+
+        with (
+            patch("franktheunicorn.config.loader.get_project_config", return_value=pc),
+            patch("franktheunicorn.review.tool_executor.make_executor", return_value=executor),
+            patch(
+                "franktheunicorn.security.introduced_scan._build_prompt",
+                side_effect=_capture_prompt,
+            ),
+            patch("franktheunicorn.security.queue.queue_exploit_verification", return_value=True),
+        ):
+            scan_project_for_introduced_cves(project, _operator())
+        assert captured.get("cve_class_catalog", "") == ""
+
 
 def test_parse_findings_skips_malformed_json() -> None:
     """A blob that isn't valid JSON is skipped, not fatal — the next candidate wins."""

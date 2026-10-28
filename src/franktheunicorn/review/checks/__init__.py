@@ -61,6 +61,7 @@ def _get_registry() -> dict[str, type[BaseCheck]]:
     from franktheunicorn.review.checks.config_docs import ConfigDocsCheck
     from franktheunicorn.review.checks.correctness import CorrectnessCheck
     from franktheunicorn.review.checks.coverage import CoverageCheck
+    from franktheunicorn.review.checks.cve_class import CVEClassCheck
     from franktheunicorn.review.checks.design import DesignCheck
     from franktheunicorn.review.checks.doc_accuracy import DocAccuracyCheck
     from franktheunicorn.review.checks.edge_case import EdgeCaseCheck
@@ -83,6 +84,7 @@ def _get_registry() -> dict[str, type[BaseCheck]]:
         "concurrency": ConcurrencyCheck,
         "correctness": CorrectnessCheck,
         "coverage": CoverageCheck,
+        "cve-class": CVEClassCheck,
         "design": DesignCheck,
         "doc-accuracy": DocAccuracyCheck,
         "edge-case": EdgeCaseCheck,
@@ -254,6 +256,11 @@ def _instantiate_check(
         from franktheunicorn.review.checks.security_disclosure import SecurityDisclosureCheck
 
         return SecurityDisclosureCheck(governance=project_config.governance)
+    if check_name == "cve-class":
+        from franktheunicorn.review.checks.cve_class import CVEClassCheck
+        from franktheunicorn.security.cve_class_catalog import resolve_cve_class_catalog
+
+        return CVEClassCheck(catalog=resolve_cve_class_catalog(project_config))
     return check_cls()
 
 

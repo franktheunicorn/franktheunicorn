@@ -260,9 +260,21 @@ def scan_project_for_introduced_cves(
         or "(none yet — build it with manage.py build_review_guidance)"
     )
     magpie_skills = skills_block_for_project(project, inject_into="security")
-    from franktheunicorn.security.introduced_scan_prompt import BUG_SECTION, BUG_SECTION_OFF
+    from franktheunicorn.security.cve_class_catalog import resolve_cve_class_catalog
+    from franktheunicorn.security.introduced_scan_prompt import (
+        BUG_SECTION,
+        BUG_SECTION_OFF,
+        CVE_CLASS_SECTION,
+        CVE_CLASS_SECTION_OFF,
+    )
 
     bug_section = BUG_SECTION if config.detect_bugs else BUG_SECTION_OFF
+    cve_catalog = resolve_cve_class_catalog(project_config)
+    cve_class_section = (
+        CVE_CLASS_SECTION.format(cve_class_catalog=cve_catalog)
+        if cve_catalog
+        else CVE_CLASS_SECTION_OFF
+    )
     prompt = _build_prompt(
         project=project.full_name,
         branch=branch,
@@ -275,6 +287,7 @@ def scan_project_for_introduced_cves(
         magpie_skills=magpie_skills,
         addendum=config.prompt_addendum,
         bug_section=bug_section,
+        cve_class_catalog=cve_class_section,
     )
 
     started = time.monotonic()
@@ -475,6 +488,7 @@ def _build_prompt(
     magpie_skills: str,
     addendum: str,
     bug_section: str = "",
+    cve_class_catalog: str = "",
 ) -> str:
     addendum_block = ""
     if addendum:
@@ -491,6 +505,7 @@ def _build_prompt(
         magpie_skills=magpie_skills,
         addendum=addendum_block,
         bug_section=bug_section,
+        cve_class_catalog=cve_class_catalog,
     )
 
 

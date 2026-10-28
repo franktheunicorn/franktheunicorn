@@ -2810,6 +2810,12 @@ class ProjectConfig(BaseModel):
     # flagging them as findings. Empty by default (triage falls back to
     # README/SECURITY.md context only).
     security_model: str = ""
+    # Curated CVE-class catalog for the cve-class review check: "spark" for
+    # the built-in Apache Spark catalog (grouped from published advisories),
+    # a repo-relative or absolute file path for a custom catalog, or empty
+    # (the check runs with no classes listed — a misconfiguration the
+    # operator should fix). See security/cve_class_catalog.py.
+    cve_class_catalog: str = ""
     # Repo-relative path to a threat-model document to load as the security
     # model when ``security_model`` above is not set inline. Empty means
     # auto-discover a conventional threat-model file (e.g.
@@ -3035,6 +3041,7 @@ class ProjectConfig(BaseModel):
             "concurrency",
             "correctness",
             "coverage",
+            "cve-class",
             "design",
             "doc-accuracy",
             "edge-case",
