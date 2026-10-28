@@ -62,6 +62,11 @@ logger = logging.getLogger(__name__)
 #: agent gets the most recent part and a note that it was truncated.
 _MAX_DIFF_CHARS = 200_000
 
+#: Linux caps a single argv string at 128 KB (MAX_ARG_STRLEN). A Spark
+#: introduced-scan prompt (diff + CVE context + guidance) blows past that, so
+#: prompts over this size go to the agent via stdin instead of ``-p <prompt>``.
+_MAX_ARG_PROMPT_CHARS = 100_000
+
 #: How much of each prior CVE report's text to include as context.
 _MAX_CONTEXT_CHARS = 4_000
 
@@ -576,8 +581,26 @@ def _run_model_attempt(
     attempt = _ModelAttempt(model=model)
     try:
         started = time.monotonic()
-        argv = [*reviewer.cli_argv, *_invocation(reviewer, config, model, prompt)]
-        run_result = executor.run(guard_agent_argv(argv), cwd=cwd, timeout=config.timeout_seconds)
+        invocation = _invocation(reviewer, config, model, prompt)
+        # A prompt over the argv limit goes via stdin: build_invocation puts
+        # the prompt last, so strip it and hand the text to executor.run.
+        if len(prompt) > _MAX_ARG_PROMPT_CHARS:
+            argv = [*reviewer.cli_argv, *invocation[:-1]]
+            stdin = prompt
+            logger.info(
+                "Introduced scan for %s: prompt is %d chars; delivering via stdin",
+                project_name,
+                len(prompt),
+            )
+        else:
+            argv = [*reviewer.cli_argv, *invocation]
+            stdin = None
+        run_result = executor.run(
+            guard_agent_argv(argv, stdin=stdin is not None),
+            cwd=cwd,
+            timeout=config.timeout_seconds,
+            stdin=stdin,
+        )
         attempt.duration_seconds = time.monotonic() - started
         for note in guard_notes(run_result.stderr if run_result is not None else ""):
             logger.warning("Introduced scan for %s: %s", project_name, note)

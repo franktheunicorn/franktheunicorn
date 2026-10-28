@@ -2377,6 +2377,17 @@ class TestAgentConfigGuard:
         assert unwrap_guarded(argv) is argv
         assert unwrap_guarded(["sh", "-c", "true"]) == ["sh", "-c", "true"]
 
+    def test_guard_stdin_flag_passes_stdin_to_backgrounded_agent(self) -> None:
+        # bash redirects a backgrounded process's stdin to /dev/null; the
+        # stdin=True flag adds 0<&0 so a prompt delivered via stdin reaches
+        # the agent. Without it, the script has no explicit redirect.
+        from franktheunicorn.review.tool_executor import _guard_script
+
+        no_stdin = _guard_script()
+        with_stdin = _guard_script(stdin=True)
+        assert "0<&0" not in no_stdin
+        assert "0<&0" in with_stdin
+
     @patch("franktheunicorn.review.tool_executor.subprocess.run")
     def test_it_survives_stdin_delivery_to_a_remote(self, mock_run: Any, tmp_path: Path) -> None:
         from franktheunicorn.review.tool_executor import guard_agent_argv

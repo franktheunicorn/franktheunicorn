@@ -396,7 +396,7 @@ for f in @ENTRIES@; do
     restore; exit @REFUSED@
   fi
 done
-"$@" &
+"$@" @STDIN_REDIRECT@&
 p=$!
 wait "$p"
 rc=$?
@@ -405,19 +405,24 @@ exit "$rc"
 """
 
 
-def _guard_script() -> str:
+def _guard_script(stdin: bool = False) -> str:
     entries = " ".join(shlex.quote(e) for e in AGENT_CONFIG_ENTRIES)
     script = _GUARD_SCRIPT
     for placeholder, value in (
         ("@ENTRIES@", entries),
         ("@REFUSED@", str(GUARD_REFUSED_EXIT)),
         ("@STASH@", GUARD_STASH),
+        # bash redirects a backgrounded process's stdin to /dev/null by
+        # default; ``0<&0`` undoes that so a prompt delivered via stdin reaches
+        # the agent. Empty for the argv path (the agent's stdin stays /dev/null,
+        # the original behavior — no CLI here reads a prompt from stdin).
+        ("@STDIN_REDIRECT@", "0<&0 " if stdin else ""),
     ):
         script = script.replace(placeholder, value)
     return script.strip() + "\n"
 
 
-def guard_agent_argv(argv: list[str]) -> list[str]:
+def guard_agent_argv(argv: list[str], stdin: bool = False) -> list[str]:
     """*argv* wrapped so ``AGENT_CONFIG_ENTRIES`` are absent while it runs.
 
     One ``sh -c`` call that moves the entries into the checkout's git dir, runs
@@ -438,10 +443,13 @@ def guard_agent_argv(argv: list[str]) -> list[str]:
     One argv, no stdin, so it goes through ``RemoteSSHExecutor`` in either
     delivery shape and needs only a POSIX ``sh``, ``mv`` and ``git`` on the
     agent host, which the executor already assumes. The agent's stdin is
-    ``/dev/null``: none of these CLIs is given a prompt on stdin, and on the
-    remote the shell's stdin is the delivery stream.
+    ``/dev/null`` by default (bash redirects a backgrounded process's stdin
+    there); ``stdin=True`` adds ``0<&0`` so a prompt delivered via stdin
+    reaches the agent — used by the introduced-CVE scan, whose prompt
+    (diff + CVE context) blows past the 128 KB per-argument argv limit. On
+    the remote the shell's stdin is the delivery stream.
     """
-    return ["sh", "-c", _guard_script(), _GUARD_NAME, *argv]
+    return ["sh", "-c", _guard_script(stdin=stdin), _GUARD_NAME, *argv]
 
 
 def unwrap_guarded(argv: list[str]) -> list[str]:

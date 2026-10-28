@@ -82,6 +82,7 @@ class _FakeExecutor:
         self.cwd = cwd
         self.model_responses = model_responses or {}
         self.calls: list[list[str]] = []
+        self.stdins: list[str | None] = []
         self.guarded: list[bool] = []
         self.subdir = ""
 
@@ -96,6 +97,7 @@ class _FakeExecutor:
         self.guarded.append(unwrapped is not cmd)
         cmd = unwrapped
         self.calls.append(cmd)
+        self.stdins.append(stdin)
         # An agent call with a --model flag: prefer a model-specific response.
         if cmd and cmd[0] != "git" and self.model_responses:
             model = _model_from_argv(cmd)
@@ -756,6 +758,26 @@ class TestModelGauntlet:
     def test_negative_max_timeline_seconds_is_rejected(self) -> None:
         with pytest.raises(ValidationError):
             IntroducedScanConfig(enabled=True, max_timeline_seconds=-1)
+
+    def test_large_prompt_goes_via_stdin_not_argv(self) -> None:
+        # A prompt over the per-arg limit (100K) is delivered via stdin, not
+        # as a -p argument — Linux caps a single argv string at 128K.
+        agent_json = json.dumps({"findings": [{"title": "X", "severity": "low"}]})
+        big_diff = "--- a/f\n+++ b/f\n@@ -1 +1 @@\n" + "x\n" * 60_000  # ~600K
+        result, executor, _project, _q = self._run_scan(agent_json, diff=big_diff)
+        assert result.error == ""
+        assert result.finding_count == 1
+        agent_calls = [c for c in executor.calls if c[0] == "claude"]
+        assert len(agent_calls) == 1
+        # The prompt is NOT in argv — it went via stdin.
+        assert all(len(arg) < 100_000 for arg in agent_calls[0])
+        agent_stdins = [
+            s
+            for c, s in zip(executor.calls, executor.stdins, strict=False)
+            if c[0] == "claude" and s is not None
+        ]
+        assert len(agent_stdins) == 1
+        assert len(agent_stdins[0]) > 100_000
 
 
 @pytest.mark.django_db
