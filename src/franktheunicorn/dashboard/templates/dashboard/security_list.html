@@ -199,6 +199,20 @@
             ⑃ Check CVE Fixes Landed
         </button>
     </form>
+    {# The last step after the checks: read the recheck/fix-landed verdicts #}
+    {# and move matching reports to the closed archive. No git, no agent — #}
+    {# it closes what the buttons above already found. Run those first; #}
+    {# with no verdicts on the queue this presses to "nothing to close". #}
+    <form method="post" action="{% url 'dashboard:security_close_addressed' %}" style="display: inline;">
+        {% csrf_token %}
+        <input type="hidden" name="agent" value="{{ agent_scope }}">
+        <button type="submit" class="action-btn post"
+                style="font-size: 0.85rem; padding: 0.4rem 0.8rem;"
+                hx-post="{% url 'dashboard:security_close_addressed' %}"
+                hx-confirm="Close every report the checks ruled fixed? Reads the likely-fixed and fix-landed verdicts from the buttons above and moves matching reports to the Closed tab. No git, no agent — it closes what those already found, so run them first. Reports ruled invalid or duplicate keep their verdict. Acting on: {{ agent_scope_label }}.">
+            ✓ Close Addressed
+        </button>
+    </form>
 </div>
 
 {% include "dashboard/_security_cve_token_card.html" %}

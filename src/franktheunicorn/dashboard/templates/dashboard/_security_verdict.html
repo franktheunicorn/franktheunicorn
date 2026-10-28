@@ -23,6 +23,7 @@
                 <option value="expected-behavior" {% if report.status == "expected-behavior" %}selected{% endif %}>Expected Behavior</option>
                 <option value="defense-in-depth" {% if report.status == "defense-in-depth" %}selected{% endif %}>Defense in Depth (fix welcome, no CVE)</option>
                 <option value="info-only" {% if report.status == "info-only" %}selected{% endif %}>Info Only (explain, no change)</option>
+                <option value="closed" {% if report.status == "closed" %}selected{% endif %}>Closed (fix landed, moved to archive)</option>
             </select>
         </div>
 

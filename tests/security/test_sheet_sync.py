@@ -954,6 +954,18 @@ class TestSelection:
 
         assert [report.title for report in selected] == ["scan finding"]
 
+    def test_export_honours_the_closed_tab(self) -> None:
+        """The closed archive exports the same way the other cross-cutting tabs
+        do — the operator looking at the archive can sheet-sync just that."""
+        from franktheunicorn.security.sheet_sync import reports_for_export
+
+        SecurityReportFactory(status="closed", title="done report")
+        SecurityReportFactory(status="valid", title="still open")
+
+        selected = reports_for_export(status=SecurityReport.CLOSED_FILTER)
+
+        assert [report.title for report in selected] == ["done report"]
+
     def test_export_honours_the_newest_sort(self) -> None:
         """A trickle of emailed reports all rank 0.0, so arrival order is the right
         one for an inbox — and an export that silently re-ranks means the row cap

@@ -1730,7 +1730,11 @@ def merge_candidate_refresh(request: HttpRequest, pr_id: int) -> HttpResponse:
 
 SECURITY_STATUS_TABS: list[dict[str, str]] = [
     {"key": "all", "label": "All"},
-    *[{"key": k, "label": v} for k, v in SecurityReport.STATUS_CHOICES],
+    *[
+        {"key": k, "label": v}
+        for k, v in SecurityReport.STATUS_CHOICES
+        if k != SecurityReport.CLOSED_FILTER
+    ],
     # Last, after the status tabs, because they cut across them rather than being
     # one more status. CVE, No Branch is the thing an operator with a CVE id in
     # hand needs: the holes public-by-assignment and still unfixed. Valid, No CVE
@@ -1740,6 +1744,9 @@ SECURITY_STATUS_TABS: list[dict[str, str]] = [
     {"key": SecurityReport.CVE_NO_BRANCH_FILTER, "label": "CVE, No Branch"},
     {"key": SecurityReport.VALID_NO_CVE_FILTER, "label": "Valid, No CVE"},
     {"key": SecurityReport.INTRODUCED_SCAN_FILTER, "label": "Introduced Scan"},
+    # The archive: reports the close-addressed workflow ruled done. Last because
+    # it is not a worklist — nothing to do here but confirm the fix held.
+    {"key": SecurityReport.CLOSED_FILTER, "label": "Closed"},
 ]
 
 
@@ -1762,6 +1769,8 @@ def _security_tab_q(key: str) -> Q:
         return SecurityReport.valid_without_cve_q()
     if key == SecurityReport.INTRODUCED_SCAN_FILTER:
         return SecurityReport.introduced_scan_q()
+    if key == SecurityReport.CLOSED_FILTER:
+        return SecurityReport.closed_q()
     # Unknown keys included: a garbage ?status= has always returned an empty list
     # rather than 400ing, and the tab bar still renders to click out of.
     return Q(status=key)
@@ -4274,6 +4283,61 @@ def security_scan_fixed(request: HttpRequest) -> HttpResponse:
         messages.info(
             request, "An already-fixed sweep covering these reports is already queued or running."
         )
+    return _back_to_security_list(request)
+
+
+@require_POST
+def security_close_addressed(request: HttpRequest) -> HttpResponse:
+    """Move reports the checks ruled fixed into the closed archive.
+
+    The last step after the checks: "Check Fixed (git)" reverse-applies each
+    patch and writes ``recheck_status="likely-fixed"``, "Check Fixes Landed"
+    walks ancestry and writes ``fix_landed_status="merged"``/``"released"``.
+    This button reads those verdicts and closes the reports that have them —
+    a single SQL pass, no git, no agent, so it runs in-request like the other
+    bulk DB-only buttons.
+
+    Only reports that still owe a fix can close: ``new``, ``triaging``,
+    ``valid`` and ``defense-in-depth``. Reports already ruled no-fix
+    (``invalid``, ``expected-behavior``, ``duplicate``, ``info-only``) keep
+    that verdict — "closed" means was real and is done, not "was never real".
+    Pending worker commands are cancelled first so a queued triage or verify
+    doesn't burn an agent run on a report that just left the queue.
+    """
+    scope = _bulk_scope(request)
+    if scope is None:
+        return _back_to_security_list(request)
+
+    addressed = (
+        SecurityReport.objects.exclude(status__in=SecurityReport.NO_FIX_OWED_STATUSES)
+        .filter(agent_source.scope_q(scope))
+        .filter(Q(recheck_status="likely-fixed") | Q(fix_landed_status__in=("merged", "released")))
+    )
+    report_ids = list(addressed.values_list("pk", flat=True))
+    total = len(report_ids)
+    if not total:
+        messages.info(
+            request,
+            f"No open report{agent_source.scope_suffix(scope)} has a fix-landed or "
+            "likely-fixed verdict yet. Run “Check Fixed (git)” or “Check Fixes Landed” "
+            "first — this button closes what those checks already found.",
+        )
+        return _back_to_security_list(request)
+
+    from franktheunicorn.security.queue import cancel_pending_for_reports
+
+    with transaction.atomic():
+        cancelled = cancel_pending_for_reports(report_ids)
+        addressed.update(status="closed")
+    note = f" (cancelled {cancelled} queued job(s))" if cancelled else ""
+    messages.success(
+        request,
+        f"Closed {total} report(s) the checks ruled fixed{note}. They are now on the "
+        "Closed tab — re-open one from its detail page if a check was wrong.",
+    )
+    logger.info(
+        "Closed %d addressed security report(s); cancelled %d pending command(s)", total, cancelled
+    )
     return _back_to_security_list(request)
 
 

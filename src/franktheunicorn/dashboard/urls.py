@@ -150,6 +150,14 @@ urlpatterns = [
         views.security_scan_fixed,
         name="security_scan_fixed",
     ),
+    # Close reports the checks ruled fixed: reads the recheck/fix-landed
+    # verdicts and moves matching reports to the closed archive. In-request,
+    # like the other bulk DB-only buttons.
+    path(
+        "security/close-addressed/",
+        views.security_close_addressed,
+        name="security_close_addressed",
+    ),
     # Did the recorded fix land upstream? The per-report button queues a git
     # ancestry check; the two list-page buttons are the git sweep over every
     # project and the cloud-agent fallback for what git couldn't settle.

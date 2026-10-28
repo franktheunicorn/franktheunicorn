@@ -830,6 +830,11 @@ class SecurityReport(models.Model):
         # info-only owes an explanation and nothing else.
         ("defense-in-depth", "Defense in Depth"),
         ("info-only", "Info Only"),
+        # A report the operator (or the close-addressed workflow) has ruled
+        # addressed — the fix landed or the recheck said "likely-fixed". Not
+        # "invalid" (that was never a real issue): "closed" was real and is
+        # done. Separate tab so the active backlog and the archive don't mix.
+        ("closed", "Closed"),
     ]
 
     #: The machine's triage class, staged like ``auto_triage_status`` and never a
@@ -890,6 +895,13 @@ class SecurityReport(models.Model):
     #: reads as ``?status=introduced-scan`` and the export honours it the same way.
     INTRODUCED_SCAN_FILTER = "introduced-scan"
 
+    #: The cross-cutting filter for closed reports: the archive tab, separate
+    #: from the active backlog. A report is closed when the fix landed or the
+    #: recheck said "likely-fixed" — the close-addressed workflow moves it
+    #: here. The key is the status value, so the tab's ``?status=`` URL reads
+    #: as ``?status=closed``.
+    CLOSED_FILTER = "closed"
+
     #: Statuses that owe no fix, so no branch is the answer rather than a gap.
     #: ``duplicate`` is here because that is what ``matched_cve_id`` was built for —
     #: without it the queue on a real backlog is almost entirely "dup of CVE-X", and
@@ -898,7 +910,7 @@ class SecurityReport(models.Model):
     #: A tuple for a stable order in the emitted parameters and in anything that
     #: prints them; the SQL text is identical either way, since ``IN`` values are
     #: bound parameters rather than inlined.
-    NO_FIX_OWED_STATUSES = ("invalid", "expected-behavior", "duplicate", "info-only")
+    NO_FIX_OWED_STATUSES = ("invalid", "expected-behavior", "duplicate", "info-only", "closed")
 
     @classmethod
     def list_filters(cls) -> set[str]:
@@ -913,6 +925,7 @@ class SecurityReport(models.Model):
             cls.CVE_NO_BRANCH_FILTER,
             cls.VALID_NO_CVE_FILTER,
             cls.INTRODUCED_SCAN_FILTER,
+            cls.CLOSED_FILTER,
         }
 
     @staticmethod
@@ -1040,6 +1053,17 @@ class SecurityReport(models.Model):
         rules on them the way they rule on any pasted report.
         """
         return Q(source="introduced-scan")
+
+    @staticmethod
+    def closed_q() -> Q:
+        """Match reports moved to the closed archive.
+
+        A closed report was real and is done — the fix landed or the recheck
+        said "likely-fixed" — so it sits in its own tab, away from the active
+        backlog. Distinct from "invalid" (never a real issue): "closed" was
+        real and has been addressed.
+        """
+        return Q(status="closed")
 
     project = models.ForeignKey(
         Project,

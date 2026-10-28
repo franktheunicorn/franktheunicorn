@@ -870,6 +870,122 @@ class TestSecurityArchiveDrop:
 
 
 @pytest.mark.django_db
+class TestSecurityCloseAddressed:
+    """The last step after the checks: close reports the checks ruled fixed."""
+
+    def test_closes_reports_with_likely_fixed_recheck(self, client: Client) -> None:
+        fixed = SecurityReportFactory(status="valid", recheck_status="likely-fixed")
+        open_one = SecurityReportFactory(status="valid", recheck_status="")
+
+        response = client.post("/security/close-addressed/", follow=True)
+
+        assert response.status_code == 200
+        fixed.refresh_from_db()
+        open_one.refresh_from_db()
+        assert fixed.status == "closed"
+        assert open_one.status == "valid"
+        assert "Closed 1 report(s)" in response.content.decode()
+
+    def test_closes_reports_with_merged_fix_landed(self, client: Client) -> None:
+        merged = SecurityReportFactory(status="valid", fix_landed_status="merged")
+        released = SecurityReportFactory(status="new", fix_landed_status="released")
+
+        client.post("/security/close-addressed/")
+
+        merged.refresh_from_db()
+        released.refresh_from_db()
+        assert merged.status == "closed"
+        assert released.status == "closed"
+
+    def test_leaves_no_fix_owed_statuses_alone(self, client: Client) -> None:
+        """invalid/duplicate/etc. are already terminal verdicts, not 'was real,
+        now fixed' — closing them would overwrite the operator's ruling."""
+        invalid = SecurityReportFactory(status="invalid", recheck_status="likely-fixed")
+        duplicate = SecurityReportFactory(status="duplicate", fix_landed_status="merged")
+
+        client.post("/security/close-addressed/")
+
+        invalid.refresh_from_db()
+        duplicate.refresh_from_db()
+        assert invalid.status == "invalid"
+        assert duplicate.status == "duplicate"
+
+    def test_closes_defense_in_depth(self, client: Client) -> None:
+        """Defense-in-depth owed an ordinary fix; if that landed, it closes."""
+        did = SecurityReportFactory(status="defense-in-depth", fix_landed_status="merged")
+
+        client.post("/security/close-addressed/")
+
+        did.refresh_from_db()
+        assert did.status == "closed"
+
+    def test_no_evidence_says_so(self, client: Client) -> None:
+        SecurityReportFactory(status="valid", recheck_status="", fix_landed_status="")
+
+        response = client.post("/security/close-addressed/", follow=True)
+
+        assert (
+            "No open report has a fix-landed or likely-fixed verdict" in response.content.decode()
+        )
+        assert SecurityReport.objects.filter(status="closed").count() == 0
+
+    def test_cancels_pending_jobs_for_closed_reports(self, client: Client) -> None:
+        from franktheunicorn.core.models import WorkerCommand
+
+        fixed = SecurityReportFactory(status="valid", recheck_status="likely-fixed")
+        WorkerCommand.objects.create(command="run_security_triage", security_report=fixed)
+        WorkerCommand.objects.create(command="verify_security_report", security_report=fixed)
+
+        response = client.post("/security/close-addressed/", follow=True)
+
+        assert "cancelled 2 queued job(s)" in response.content.decode()
+        assert WorkerCommand.objects.count() == 0
+
+    def test_get_is_refused(self, client: Client) -> None:
+        SecurityReportFactory(status="valid", recheck_status="likely-fixed")
+
+        response = client.get("/security/close-addressed/")
+
+        assert response.status_code == 405
+        assert SecurityReport.objects.filter(status="closed").count() == 0
+
+    def test_htmx_gets_full_navigation(self, client: Client) -> None:
+        SecurityReportFactory(status="valid", recheck_status="likely-fixed")
+
+        response = client.post("/security/close-addressed/", headers={"hx-request": "true"})
+
+        assert response.status_code == 204
+        assert response["HX-Redirect"] == "/security/"
+
+    def test_closed_tab_shows_closed_reports(self, client: Client) -> None:
+        SecurityReportFactory(title="Done report", status="closed")
+        SecurityReportFactory(title="Open report", status="valid")
+
+        response = client.get("/security/?status=closed")
+
+        assert response.status_code == 200
+        assert b"Done report" in response.content
+        assert b"Open report" not in response.content
+
+    def test_closed_tab_count_appears(self, client: Client) -> None:
+        SecurityReportFactory(status="closed")
+        SecurityReportFactory(status="closed")
+
+        content = client.get("/security/").content.decode()
+
+        assert "Closed" in content
+
+    def test_bad_agent_scope_refuses(self, client: Client) -> None:
+        SecurityReportFactory(status="valid", recheck_status="likely-fixed")
+
+        response = client.post("/security/close-addressed/", {"agent": "&&&"}, follow=True)
+
+        messages = [str(m) for m in response.context["messages"]]
+        assert any("isn't an agent scope" in m for m in messages)
+        assert SecurityReport.objects.filter(status="closed").count() == 0
+
+
+@pytest.mark.django_db
 class TestSecurityReportCreate:
     def test_create_form_renders(self, client: Client) -> None:
         response = client.get("/security/new/")
