@@ -164,6 +164,41 @@ class TestSecurityDefaults:
         assert triage.sandbox_enabled is False
         assert triage.email.enabled is False
 
+    def test_introduced_scan_is_off_out_of_the_box(self) -> None:
+        """The scheduled introduced-CVE scan runs a coding agent on a cadence, so it
+        spends money on its own — opt-in per project, not on by default."""
+        from franktheunicorn.config.models import ProjectConfig
+
+        scan = ProjectConfig(owner="apache", repo="spark").introduced_scan
+        assert scan.enabled is False
+        assert scan.cadence == "daily"
+        assert scan.timeout_seconds == 28800
+        assert scan.max_findings == 20
+        assert scan.auto_verify is True
+
+    def test_cadence_is_normalised_to_lowercase(self) -> None:
+        """A YAML author who writes ``DAILY`` gets the same cadence as ``daily`` —
+        the validator normalises before it checks, so case is not a footgun."""
+        from franktheunicorn.config.models import IntroducedScanConfig, ProjectConfig
+
+        scan = ProjectConfig(
+            owner="apache",
+            repo="spark",
+            introduced_scan=IntroducedScanConfig(enabled=True, cadence="WEEKLY"),
+        ).introduced_scan
+        assert scan.cadence == "weekly"
+
+    @pytest.mark.parametrize("cadence", ["hourly", "yearly", ""])
+    def test_a_bad_cadence_is_rejected(self, cadence: str) -> None:
+        from franktheunicorn.config.models import IntroducedScanConfig, ProjectConfig
+
+        with pytest.raises(ValueError):
+            ProjectConfig(
+                owner="apache",
+                repo="spark",
+                introduced_scan=IntroducedScanConfig(enabled=True, cadence=cadence),
+            )
+
 
 class TestNonMappingConfig:
     """Valid YAML of the wrong shape. `OperatorConfig(**data)` raises TypeError for a

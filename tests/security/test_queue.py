@@ -17,6 +17,7 @@ from franktheunicorn.security.queue import (
     queue_cve_match,
     queue_exploit_verification,
     queue_fix_landed,
+    queue_introduced_scan,
     queue_patch_evaluation,
     queue_triage,
     queue_triage_if_enabled,
@@ -392,6 +393,45 @@ class TestPatchEvaluationQueue:
 
         assert queue_patch_evaluation(report) is True
         assert WorkerCommand.objects.filter(command="evaluate_patch").count() == 2
+
+
+@pytest.mark.django_db
+class TestIntroducedScanQueue:
+    """The scheduled introduced-CVE scan's queue door.
+
+    Per-project like the CVE matcher, deduped by project so a scheduler tick
+    behind a slow run doesn't queue a second. Bulk by default — a scheduled
+    check-in nobody is watching shouldn't jump the interactive lane.
+    """
+
+    def test_one_click_is_one_command_at_bulk_priority(self) -> None:
+        project = ProjectFactory()
+        assert queue_introduced_scan(project) is True
+        assert queue_introduced_scan(project) is False
+        cmd = WorkerCommand.objects.get(command="scan_introduced_cves")
+        assert (cmd.kwargs or {}).get("project_id") == project.pk
+        assert cmd.priority == PRIORITY_BULK
+
+    def test_a_second_click_for_the_same_project_is_a_no_op(self) -> None:
+        project = ProjectFactory()
+        queue_introduced_scan(project)
+        assert queue_introduced_scan(project) is False
+        assert WorkerCommand.objects.filter(command="scan_introduced_cves").count() == 1
+
+    def test_a_second_project_queues_separately(self) -> None:
+        """The dedup is per project, not global — two projects can scan at once."""
+        a = ProjectFactory()
+        b = ProjectFactory()
+        assert queue_introduced_scan(a) is True
+        assert queue_introduced_scan(b) is True
+        assert WorkerCommand.objects.filter(command="scan_introduced_cves").count() == 2
+
+    def test_requeues_after_the_previous_run_finished(self) -> None:
+        project = ProjectFactory()
+        queue_introduced_scan(project)
+        WorkerCommand.objects.filter(command="scan_introduced_cves").update(status="completed")
+        assert queue_introduced_scan(project) is True
+        assert WorkerCommand.objects.filter(command="scan_introduced_cves").count() == 2
 
 
 @pytest.mark.django_db

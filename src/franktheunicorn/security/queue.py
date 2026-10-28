@@ -326,6 +326,29 @@ def queue_cve_match(project: Project, *, priority: int = PRIORITY_INTERACTIVE) -
     return True
 
 
+def queue_introduced_scan(project: Project, *, priority: int = PRIORITY_BULK) -> bool:
+    """Queue the introduced-CVE scan for one project unless one is in flight.
+
+    Targetless (no report/PR target) but scoped to a project via kwargs, like
+    :func:`queue_cve_match`. Bulk by default: this is a scheduled check-in,
+    nobody is watching, and it's minutes-to-hours of agent time — it goes
+    behind the interactive lane so a button press doesn't wait behind it.
+    """
+    command = "scan_introduced_cves"
+    in_flight = WorkerCommand.objects.filter(command=command, status__in=_IN_FLIGHT_STATUSES)
+    for kwargs in in_flight.values_list("kwargs", flat=True):
+        if (kwargs or {}).get("project_id") == project.pk:
+            logger.info("%s already in flight for project %s", command, project.full_name)
+            return False
+    WorkerCommand.objects.create(
+        command=command,
+        priority=priority,
+        kwargs={"project_id": project.pk},
+    )
+    logger.info("Queued %s for %s (priority %d)", command, project.full_name, priority)
+    return True
+
+
 def queue_zombie_assessment(pr: PullRequest, *, priority: int = PRIORITY_INTERACTIVE) -> bool:
     """Queue the per-PR zombie re-assessment. Interactive: it is a button on the
     detail page with somebody watching, and one LLM call."""

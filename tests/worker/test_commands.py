@@ -371,6 +371,71 @@ class TestProcessPendingCommands:
         assert cmd.status == "completed"
         assert any("patch_eval.enabled" in r.getMessage() for r in caplog.records)
 
+    def test_scan_introduced_cves_dispatch(self) -> None:
+        """The scheduler queues a per-project introduced-CVE scan; the worker runs it."""
+        operator_config = MagicMock()
+        project = ProjectFactory(owner="apache", repo="spark")
+        cmd = WorkerCommand.objects.create(
+            command="scan_introduced_cves",
+            kwargs={"project_id": project.pk},
+        )
+
+        from franktheunicorn.security.introduced_scan import IntroducedScanResult
+
+        fake = IntroducedScanResult(
+            cadence="daily",
+            commit_range="last 2 day(s)",
+            branch="master",
+            commit="deadbeefcafe",
+            agent="claude-code",
+            duration_seconds=1.0,
+            findings=[],
+            finding_count=0,
+            verified_count=0,
+            raw_output="",
+        )
+        with patch(
+            "franktheunicorn.security.introduced_scan.scan_project_for_introduced_cves",
+            return_value=fake,
+        ) as mock_scan:
+            processed = process_pending_commands(operator_config)
+
+        assert processed == 1
+        cmd.refresh_from_db()
+        assert cmd.status == "completed"
+        assert "0 finding" in cmd.log
+        mock_scan.assert_called_once()
+        called_project = mock_scan.call_args.args[0]
+        assert called_project.pk == project.pk
+        assert mock_scan.call_args.args[1] is operator_config
+
+    def test_scan_introduced_cves_decline_is_logged_at_info(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A declined scan (disabled, bad reviewer, etc.) is a successful command with a reason."""
+        operator_config = MagicMock()
+        project = ProjectFactory(owner="apache", repo="spark")
+        cmd = WorkerCommand.objects.create(
+            command="scan_introduced_cves",
+            kwargs={"project_id": project.pk},
+        )
+
+        from franktheunicorn.security.introduced_scan import IntroducedScanResult
+
+        declined = IntroducedScanResult(error="introduced_scan.enabled is false")
+        with (
+            patch(
+                "franktheunicorn.security.introduced_scan.scan_project_for_introduced_cves",
+                return_value=declined,
+            ),
+            caplog.at_level(logging.INFO, logger="franktheunicorn.worker.commands"),
+        ):
+            process_pending_commands(operator_config)
+
+        cmd.refresh_from_db()
+        assert cmd.status == "completed"
+        assert any("introduced_scan.enabled" in r.getMessage() for r in caplog.records)
+
     def test_unknown_command_marked_failed(self, db_pr: PullRequest) -> None:
         operator_config = MagicMock()
         cmd = WorkerCommand.objects.create(

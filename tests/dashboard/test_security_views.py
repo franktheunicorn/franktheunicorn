@@ -689,6 +689,58 @@ class TestSecurityValidNoCveTab:
 
 
 @pytest.mark.django_db
+class TestSecurityIntroducedScanTab:
+    """The worklist for findings the scheduled introduced-CVE scan filed.
+
+    A separate queue from the operator-pasted / inbox / archive reports — these
+    are the ones the agent found on its own by diffing recent changes.
+    """
+
+    def test_the_tab_lists_a_scan_finding(self, client: Client) -> None:
+        SecurityReportFactory(title="Off-by-one in foo", source="introduced-scan")
+
+        content = client.get("/security/?status=introduced-scan").content.decode()
+
+        assert "Off-by-one in foo" in content
+
+    def test_a_non_scan_report_is_not_listed(self, client: Client) -> None:
+        SecurityReportFactory(title="Pasted report", source="paste")
+
+        content = client.get("/security/?status=introduced-scan").content.decode()
+
+        assert "Pasted report" not in content
+
+    def test_the_tab_count_matches_what_the_tab_lists(self, client: Client) -> None:
+        SecurityReportFactory(title="Scan one", source="introduced-scan")
+        SecurityReportFactory(title="Scan two", source="introduced-scan")
+        SecurityReportFactory(title="Pasted", source="paste")
+
+        response = client.get("/security/?status=introduced-scan")
+
+        tabs = {tab["key"]: tab["count"] for tab in response.context["status_tabs"]}
+        assert tabs["introduced-scan"] == 2
+        titles = [report.title for report in response.context["reports"]]
+        assert sorted(titles) == ["Scan one", "Scan two"]
+
+    def test_the_tab_renders_in_the_tab_bar(self, client: Client) -> None:
+        SecurityReportFactory(source="introduced-scan")
+
+        content = client.get("/security/").content.decode()
+
+        assert "Introduced Scan" in content
+
+    def test_the_export_honours_the_tab(self, client: Client) -> None:
+        SecurityReportFactory(title="export me", source="introduced-scan")
+        SecurityReportFactory(title="pasted", source="paste")
+
+        response = client.get("/security/export.csv?status=introduced-scan")
+        body = b"".join(response.streaming_content).decode()
+
+        assert "export me" in body
+        assert "pasted" not in body
+
+
+@pytest.mark.django_db
 class TestSecurityArchiveDrop:
     """The undo for a bad import."""
 

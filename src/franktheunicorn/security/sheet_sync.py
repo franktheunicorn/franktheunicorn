@@ -1253,6 +1253,12 @@ def reports_for_export(
         # to push for CVE assignment, and the one a reviewer asks "is this worth
         # a CVE?" of — so it exports too.
         reports = reports.filter(SecurityReport.valid_without_cve_q())
+    elif status == SecurityReport.INTRODUCED_SCAN_FILTER:
+        # The scheduled introduced-CVE scan's worklist — findings the agent filed
+        # by diffing recent changes. A separate queue from the operator-pasted
+        # / inbox / archive reports, exported for the same "what I'm looking at"
+        # contract as the other cross-cutting tabs.
+        reports = reports.filter(SecurityReport.introduced_scan_q())
     elif status:
         reports = reports.filter(status=status)
     if project:

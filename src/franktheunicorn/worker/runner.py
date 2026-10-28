@@ -1888,6 +1888,11 @@ def _run_cycle(
     if operator_config is not None:
         _poll_security_emails(operator_config)
 
+    # Scheduled introduced-CVE scan: queue any project whose cadence is due.
+    # Cheap (one SELECT per project, no agent work here) so it's fine in-cycle.
+    if operator_config is not None:
+        _schedule_introduced_scans(operator_config)
+
     if operator_username:
         _scan_operator_prs(clients, operator_username, operator_config, project_configs)
 
@@ -3315,6 +3320,43 @@ def _poll_security_emails(operator_config: OperatorConfig) -> None:
         _last_security_email_poll = now
     except Exception:
         logger.exception("Error polling security emails")
+
+
+def _schedule_introduced_scans(operator_config: OperatorConfig) -> None:
+    """Queue the introduced-CVE scan for each project whose cadence is due.
+
+    One SELECT per project to read its last :class:`IntroducedScanRun` against
+    the configured cadence — cheap, no agent work here. The scan itself is the
+    expensive part and goes through the worker queue at bulk priority, so a due
+    project doesn't block the cycle. A project with the feature off, or one
+    whose cadence hasn't elapsed, is skipped silently.
+    """
+    from django.conf import settings
+
+    from franktheunicorn.config.loader import load_project_configs
+    from franktheunicorn.core.models import Project
+    from franktheunicorn.security.introduced_scan import is_due
+    from franktheunicorn.security.queue import queue_introduced_scan
+
+    try:
+        for pc in load_project_configs(getattr(settings, "FRANK_PROJECTS_DIR", "")):
+            if not pc.enabled or not pc.introduced_scan.enabled:
+                continue
+            project, _created = Project.objects.get_or_create(
+                owner=pc.owner,
+                repo=pc.repo,
+                defaults={"review_context": pc.review_context or ""},
+            )
+            if not project.enabled:
+                continue
+            if is_due(project, pc.introduced_scan) and queue_introduced_scan(project):
+                logger.info(
+                    "Queued introduced-CVE scan for %s (cadence %s, due)",
+                    project.full_name,
+                    pc.introduced_scan.cadence,
+                )
+    except Exception:
+        logger.exception("Error scheduling introduced-CVE scans")
 
 
 def _fetch_dependency_changelogs_for_cycle(

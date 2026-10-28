@@ -131,6 +131,7 @@ _COMMAND_COST_TIER: dict[str, int] = {
     "verify_security_report": 2,
     "verify_exploit": 2,
     "evaluate_patch": 2,
+    "scan_introduced_cves": 2,
     "run_agents": 2,
     "run_dual_tests": 2,
 }
@@ -412,6 +413,7 @@ def _dispatch(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
         "assess_zombie_pr": _assess_zombie_pr,
         "analyze_pr_ci": _analyze_pr_ci,
         "match_cves_to_reports": _match_cves_to_reports,
+        "scan_introduced_cves": _scan_introduced_cves,
     }
     handler = handlers.get(cmd.command)
     if handler is None:
@@ -1029,3 +1031,35 @@ def _match_cves_to_reports(cmd: WorkerCommand, operator_config: OperatorConfig) 
         logger.info("CVE matching for %s did not run: %s", project.full_name, run.error)
     elif run.notes:
         cmd.log += "; " + "; ".join(run.notes)
+
+
+def _scan_introduced_cves(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
+    """The scheduled introduced-CVE scan: did recent changes introduce a new CVE?
+
+    Targetless (no report/PR target) but scoped to a project via ``kwargs``,
+    like ``_match_cves_to_reports``. Walks the project's recent changes (last
+    ``lookback_days`` on daily, diff from the last final release tag on
+    weekly/monthly), asks a coding agent whether any introduce a new CVE given
+    the project's prior accepted/rejected CVE reports as context, files each
+    finding as a SecurityReport with source="introduced-scan", and queues
+    exploit verification on each. A gate declining is a successful command with
+    a log that says why, not a red "failed" — same as the verifier.
+    """
+    project_id = (cmd.kwargs or {}).get("project_id")
+    if project_id is None:
+        msg = "scan_introduced_cves requires a project_id in kwargs"
+        raise ValueError(msg)
+
+    from franktheunicorn.core.models import Project
+
+    project = Project.objects.filter(pk=project_id).first()
+    if project is None:
+        cmd.log = f"project_id={project_id} no longer exists; nothing to scan"
+        return
+
+    from franktheunicorn.security.introduced_scan import scan_project_for_introduced_cves
+
+    result = scan_project_for_introduced_cves(project, operator_config)
+    cmd.log = result.summary()
+    if result.error:
+        logger.info("Introduced scan for %s did not run: %s", project.full_name, result.error)

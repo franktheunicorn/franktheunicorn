@@ -1811,6 +1811,66 @@ class PatchEvalConfig(BaseModel):
     fresh_worktree: bool = False
 
 
+class IntroducedScanConfig(BaseModel):
+    """Per-project config for the introduced-CVE scan (a scheduled check-in).
+
+    On a cadence (daily / weekly / monthly), walks the project's recent changes
+    and asks a coding agent whether any of them introduce a new CVE — given the
+    context of the project's previously accepted and previously rejected CVE
+    reports, so it doesn't re-report what the operator already ruled on. Each
+    finding lands as a :class:`~franktheunicorn.core.models.SecurityReport` with
+    ``source="introduced-scan"`` (a separate queue for triaging), and the scan
+    then queues exploit verification on each — the agent that "launches its own
+    instance of the project and tries to verify the vuln is really exploitable".
+
+    Per-project, not operator-level: each project opts in with its own cadence,
+    and the lookback / release-base differs per project. Defaults off: this is
+    real money on a cadence, so it needs an explicit opt-in, the way the
+    one-click fix and the deep verifier do.
+
+    Daily looks at the last ``lookback_days`` (default 2) of commits on the
+    default branch. Weekly and monthly look at the diff from the last final
+    release tag to HEAD — "what shipped since the last cut" is the question at
+    that cadence, and a two-day window misses a week's worth. The release-tag
+    rule is the project's own (``release_tag_prefix`` / ``release_tag_pattern``).
+
+    Borrows ``verifier.reviewer`` like the exploit verifier — one description of
+    how to reach the agent box, not a fourth one. ``model`` overrides the
+    reviewer's model; empty means "use the verifier's".
+    """
+
+    #: Off by default: a scheduled agent run on a cadence is real money, and the
+    #: operator's consent is opting a project in. Nothing runs until this is true
+    #: AND the cadence is due, so setting it true alone doesn't fire anything
+    #: immediately — the next due check does.
+    enabled: bool = False
+    #: daily / weekly / monthly. Daily looks at the last ``lookback_days``;
+    #: weekly and monthly look at the diff from the last final release tag.
+    cadence: str = "daily"
+    #: Commits to consider on the daily cadence. Ignored on weekly/monthly.
+    lookback_days: int = 2
+    #: Hard cap on the agent run. 8h by default — a real diff review is long.
+    timeout_seconds: int = 28800
+    #: Override the reviewer's model. Empty means "use the verifier's model".
+    model: str = ""
+    #: Appended to the agent's argv, like ``verifier.extra_args``.
+    extra_args: list[str] = Field(default_factory=list)
+    #: Cap on findings filed per run. Each becomes a report + an exploit-verify
+    #: queue, so this bounds the money and the queue depth of one run.
+    max_findings: int = 20
+    #: Queue ``verify_exploit`` on each finding (the "launch its own instance and
+    #: verify it's really exploitable" step). On by default — that verification
+    #: is the point of the scan. Turn off to file findings for triage without
+    #: spending the exploit-verify budget.
+    auto_verify: bool = True
+    #: Extra instructions for the scanning agent, from the operator.
+    prompt_addendum: str = ""
+    #: Where the scan checkout lives. A sibling of the verifier's and the exploit
+    #: verifier's, so a pool thread running any of them widens each to its own
+    #: worktree.
+    workspace_subdir: str = "security-introduced-scan"
+
+
 class SecurityCveMatchConfig(BaseModel):
     """Config for tentatively matching pasted CVE ids to security reports.
 
@@ -2817,6 +2877,9 @@ class ProjectConfig(BaseModel):
     community_sources: list[CommunitySourceConfig] = Field(default_factory=list)
     downstream: list[DownstreamConfig] = Field(default_factory=list)
     posting: PostingConfig = Field(default_factory=PostingConfig)
+    # Scheduled introduced-CVE scan (a per-project daily/weekly/monthly check-in).
+    # Off by default; opting a project in sets the cadence. See IntroducedScanConfig.
+    introduced_scan: IntroducedScanConfig = Field(default_factory=IntroducedScanConfig)
 
     # Copy-pasta detection
     copypasta_enabled: bool = False
@@ -2994,6 +3057,26 @@ class ProjectConfig(BaseModel):
     def copypasta_max_repo_occurrences_valid(cls, v: int) -> int:
         if v < 0:
             msg = "copypasta_max_repo_occurrences must be >= 0 (0 disables the check)"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("introduced_scan")
+    @classmethod
+    def introduced_scan_valid(cls, v: IntroducedScanConfig) -> IntroducedScanConfig:
+        # A cadence the scheduler doesn't recognise would never fire and look
+        # like a silent bug, so normalise and reject at load, not at run time.
+        v.cadence = v.cadence.strip().lower()
+        if v.cadence not in {"daily", "weekly", "monthly"}:
+            msg = f"introduced_scan.cadence must be one of daily/weekly/monthly, got {v.cadence!r}"
+            raise ValueError(msg)
+        if v.lookback_days < 1:
+            msg = "introduced_scan.lookback_days must be >= 1"
+            raise ValueError(msg)
+        if v.max_findings < 1:
+            msg = "introduced_scan.max_findings must be >= 1"
+            raise ValueError(msg)
+        if v.timeout_seconds < 60:
+            msg = "introduced_scan.timeout_seconds must be >= 60"
             raise ValueError(msg)
         return v
 

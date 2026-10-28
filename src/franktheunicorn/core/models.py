@@ -849,6 +849,11 @@ class SecurityReport(models.Model):
         ("paste", "Pasted"),
         ("email", "Email"),
         ("zip", "Zip import"),
+        # Findings filed by the scheduled introduced-CVE scan (a per-project
+        # daily/weekly/monthly check-in that walks recent changes for new CVEs).
+        # A separate queue for triaging: the scan files these, the operator
+        # rules on them the way they rule on pasted reports.
+        ("introduced-scan", "Introduced-CVE scan"),
     ]
     RELAY_KIND_CHOICES = [
         ("asf-security", "ASF Security Team"),
@@ -879,6 +884,12 @@ class SecurityReport(models.Model):
     #: the same thing by it, or the Export button 400s on a tab the page offered.
     VALID_NO_CVE_FILTER = "valid-no-cve"
 
+    #: The cross-cutting filter for findings filed by the scheduled introduced-CVE
+    #: scan: a separate queue for triaging, the way "CVE, No Branch" is a separate
+    #: worklist. The key is the source value itself, so the tab's ``?status=`` URL
+    #: reads as ``?status=introduced-scan`` and the export honours it the same way.
+    INTRODUCED_SCAN_FILTER = "introduced-scan"
+
     #: Statuses that owe no fix, so no branch is the answer rather than a gap.
     #: ``duplicate`` is here because that is what ``matched_cve_id`` was built for —
     #: without it the queue on a real backlog is almost entirely "dup of CVE-X", and
@@ -901,6 +912,7 @@ class SecurityReport(models.Model):
         return {key for key, _ in cls.STATUS_CHOICES} | {
             cls.CVE_NO_BRANCH_FILTER,
             cls.VALID_NO_CVE_FILTER,
+            cls.INTRODUCED_SCAN_FILTER,
         }
 
     @staticmethod
@@ -1015,6 +1027,19 @@ class SecurityReport(models.Model):
         negating; the ``status="valid"`` half is the selective one anyway.
         """
         return Q(status="valid") & Q(matched_cve_id="")
+
+    @staticmethod
+    def introduced_scan_q() -> Q:
+        """Match findings filed by the scheduled introduced-CVE scan.
+
+        A separate queue for triaging: the scan walks recent changes for newly
+        introduced CVEs and files each as a report with
+        ``source="introduced-scan"``. This tab is the worklist for those, the way
+        "CVE, No Branch" is the worklist for confirmed-but-unfixed. The filter is on
+        ``source`` (not ``status``) because these start ``new`` and the operator
+        rules on them the way they rule on any pasted report.
+        """
+        return Q(source="introduced-scan")
 
     project = models.ForeignKey(
         Project,
@@ -2194,6 +2219,51 @@ class ZombieScanState(models.Model):
 
     def __str__(self) -> str:
         return f"ZombieScanState[{self.project}] frontier=#{self.lowest_number_seen}"
+
+
+class IntroducedScanRun(models.Model):
+    """One run of the scheduled introduced-CVE scan for one project.
+
+    The scan walks a project's recent changes (last ``lookback_days`` on daily,
+    diff from the last final release tag on weekly/monthly) and asks a coding
+    agent whether any introduce a new CVE, given the project's previously
+    accepted and rejected CVE reports as context. Findings land as
+    :class:`SecurityReport` rows with ``source="introduced-scan"``.
+
+    One row per run, for scheduling and audit: the scheduler decides a project
+    is due by comparing ``now`` to the most recent row's ``started_at`` against
+    the configured cadence. A row is created at the *start* of a run (with
+    ``finished_at`` null) so a crash leaves a visible "started, never finished"
+    row rather than looking like the run never happened — the same honesty rule
+    as the zombie queue's ``ZombieAssessment``.
+    """
+
+    project = models.ForeignKey(
+        Project, on_delete=models.CASCADE, related_name="introduced_scan_runs"
+    )
+    started_at = models.DateTimeField(default=timezone.now)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    #: daily / weekly / monthly — the cadence this run was fired under, so a
+    #: later config change doesn't make the history unreadable.
+    cadence = models.CharField(max_length=10, default="daily")
+    #: The commit range examined: "last 2 days" or "v3.5.0..master".
+    commit_range = models.CharField(max_length=200, blank=True, default="")
+    #: How many findings the run filed (each a SecurityReport). 0 is a clean run,
+    #: not a non-run — the run started and finished and found nothing.
+    finding_count = models.IntegerField(default=0)
+    #: How many of those were queued for exploit verification.
+    verified_count = models.IntegerField(default=0)
+    log = models.TextField(blank=True, default="")
+    #: Why the run did not happen, if it didn't. Empty is the good case.
+    error = models.TextField(blank=True, default="")
+
+    objects: models.Manager[IntroducedScanRun] = models.Manager()
+
+    def __str__(self) -> str:
+        return (
+            f"IntroducedScanRun[{self.project}] {self.cadence} "
+            f"{self.started_at:%Y-%m-%d %H:%M} findings={self.finding_count}"
+        )
 
 
 class TentativeCveMatch(models.Model):

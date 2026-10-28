@@ -942,6 +942,18 @@ class TestSelection:
 
         assert [report.title for report in selected] == ["needs a cve"]
 
+    def test_export_honours_the_introduced_scan_tab(self) -> None:
+        """The introduced-CVE scan's worklist exports the same way the other
+        cross-cutting tabs do — "what I'm looking at" is one click to a sheet."""
+        from franktheunicorn.security.sheet_sync import reports_for_export
+
+        SecurityReportFactory(source="introduced-scan", title="scan finding")
+        SecurityReportFactory(source="paste", title="pasted report")
+
+        selected = reports_for_export(status=SecurityReport.INTRODUCED_SCAN_FILTER)
+
+        assert [report.title for report in selected] == ["scan finding"]
+
     def test_export_honours_the_newest_sort(self) -> None:
         """A trickle of emailed reports all rank 0.0, so arrival order is the right
         one for an inbox — and an export that silently re-ranks means the row cap

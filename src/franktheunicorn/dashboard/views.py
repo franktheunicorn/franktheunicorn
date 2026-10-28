@@ -1734,9 +1734,11 @@ SECURITY_STATUS_TABS: list[dict[str, str]] = [
     # one more status. CVE, No Branch is the thing an operator with a CVE id in
     # hand needs: the holes public-by-assignment and still unfixed. Valid, No CVE
     # is the one before that: confirmed real, not yet CVE'd — the queue to push
-    # for assignment.
+    # for assignment. Introduced Scan is the worklist for findings the scheduled
+    # introduced-CVE scan filed — a separate queue for triaging.
     {"key": SecurityReport.CVE_NO_BRANCH_FILTER, "label": "CVE, No Branch"},
     {"key": SecurityReport.VALID_NO_CVE_FILTER, "label": "Valid, No CVE"},
+    {"key": SecurityReport.INTRODUCED_SCAN_FILTER, "label": "Introduced Scan"},
 ]
 
 
@@ -1757,6 +1759,8 @@ def _security_tab_q(key: str) -> Q:
         return SecurityReport.cve_without_branch_q()
     if key == SecurityReport.VALID_NO_CVE_FILTER:
         return SecurityReport.valid_without_cve_q()
+    if key == SecurityReport.INTRODUCED_SCAN_FILTER:
+        return SecurityReport.introduced_scan_q()
     # Unknown keys included: a garbage ?status= has always returned an empty list
     # rather than 400ing, and the tab bar still renders to click out of.
     return Q(status=key)
