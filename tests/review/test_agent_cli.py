@@ -637,6 +637,49 @@ class TestCreateDraftsFromAgentCLI:
         assert len(b) == 1
         assert db_pr.review_drafts.count() == 2
 
+    def test_security_prefix_title_categorized(self, db_pr: PullRequest) -> None:
+        # A security-focused agent emits `security:` in the title per the
+        # security prompt template; the draft should land in category=security.
+        finding = self._finding(title="security: Possible injection in query parser")
+        drafts = create_drafts_from_agent_cli(db_pr, [finding], source="cursor-agent")
+        assert len(drafts) == 1
+        assert drafts[0].category == "security"
+
+    def test_backport_keyword_in_title_categorized(self, db_pr: PullRequest) -> None:
+        # The grok agent often writes "Is this meant for master only, or does
+        # it need a backport" — "backport" in the title should route it there.
+        finding = self._finding(title="Is this meant for master only, or does it need a backport?")
+        drafts = create_drafts_from_agent_cli(db_pr, [finding], source="cursor-agent-grok")
+        assert len(drafts) == 1
+        assert drafts[0].category == "backport"
+
+    def test_correctness_prefix_title_categorized(self, db_pr: PullRequest) -> None:
+        finding = self._finding(title="correctness: off-by-one in the loop bound")
+        drafts = create_drafts_from_agent_cli(db_pr, [finding], source="codex")
+        assert len(drafts) == 1
+        assert drafts[0].category == "correctness"
+
+    def test_no_category_keyword_falls_to_other(self, db_pr: PullRequest) -> None:
+        finding = self._finding(title="This variable name is a bit vague")
+        drafts = create_drafts_from_agent_cli(db_pr, [finding], source="cursor-agent")
+        assert len(drafts) == 1
+        assert drafts[0].category == "other"
+
+    def test_category_prefix_does_not_leak_into_comment(self, db_pr: PullRequest) -> None:
+        # The title (with its `security:` prefix) is prepended to the body by
+        # the parser; _strip_title_echo must drop that echo so the prefix does
+        # not appear in the posted GitHub comment.
+        finding = self._finding(
+            title="security: Possible injection in query parser",
+            body="security: Possible injection in query parser\n\nThe input is not sanitized.",
+        )
+        drafts = create_drafts_from_agent_cli(db_pr, [finding], source="cursor-agent")
+        assert len(drafts) == 1
+        assert drafts[0].category == "security"
+        # The posted comment is the body after title-echo stripping — no prefix.
+        assert "security:" not in drafts[0].comment_body
+        assert "The input is not sanitized." in drafts[0].comment_body
+
 
 # ---------------------------------------------------------------------------
 # Auto-enablement resolution ("use if installed")

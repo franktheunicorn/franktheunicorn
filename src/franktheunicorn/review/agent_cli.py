@@ -71,7 +71,7 @@ Skip formatting, naming, and import order.
 {magpie_skills_section}{review_guidance_section}{review_areas_section}{prior_comments_section}For EACH issue, emit a block in EXACTLY this format, separated by lines of
 five or more equals signs:
 
-<file_path>:<line_number> - [<Severity>] <Short title>
+<file_path>:<line_number> - [<Severity>] <Category>: <Short title>
 
 <the GitHub comment: 1-2 sentences in the voice above. This text is what
 gets posted. The direction goes here. Do not write a paragraph.>
@@ -83,6 +83,10 @@ when you have the exact replacement text for those lines, which is rare.
 =============
 
 Severity must be one of: Critical, High, Medium, Low, Nit.
+Category must be one of: correctness, security, backport, test-coverage,
+style, naming, architectural, issue-link, other. Pick the best fit;
+when in doubt use "other". The category prefixes the title so the finding
+can be routed (a security concern lands in the Security Findings queue).
 File paths must be relative to the repository root, exactly as they appear
 in the diff. Line numbers must refer to the new file.
 
@@ -614,11 +618,13 @@ def create_drafts_from_agent_cli(
         # against the stripped body already on disk.
         from franktheunicorn.review.drafter import (
             _coerce_severity,
+            _derive_category,
             _strip_nit_prefix_if_severe,
             _strip_title_echo,
         )
 
         coerced_severity = _coerce_severity(finding.severity, finding.title)
+        category = _derive_category(finding.title)
         stripped_body = _strip_nit_prefix_if_severe(
             _strip_title_echo(finding.title, finding.body), coerced_severity
         )
@@ -684,6 +690,7 @@ def create_drafts_from_agent_cli(
             suggestion=finding.suggestion,
             confidence=confidence,
             severity=coerced_severity,
+            category=category,
             status="pending",
             sources=[source],
             backend_used=source,

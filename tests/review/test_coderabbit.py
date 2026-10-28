@@ -219,6 +219,34 @@ class TestCreateDraftsFromCodeRabbit:
         drafts = create_drafts_from_coderabbit(db_pr, [])
         assert drafts == []
 
+    def test_security_prefix_title_categorized(self, db_pr: PullRequest) -> None:
+        findings = [
+            CodeRabbitFinding(
+                "a.py", 1, "high", "security: SQL injection", "security: SQL injection\n\nDetails."
+            ),
+        ]
+        drafts = create_drafts_from_coderabbit(db_pr, findings)
+        assert len(drafts) == 1
+        assert drafts[0].category == "security"
+
+    def test_backport_keyword_in_title_categorized(self, db_pr: PullRequest) -> None:
+        findings = [
+            CodeRabbitFinding(
+                "a.py", 1, "nit", "Needs a backport?", "Needs a backport?\n\nDetails."
+            ),
+        ]
+        drafts = create_drafts_from_coderabbit(db_pr, findings)
+        assert len(drafts) == 1
+        assert drafts[0].category == "backport"
+
+    def test_no_category_keyword_falls_to_other(self, db_pr: PullRequest) -> None:
+        findings = [
+            CodeRabbitFinding("a.py", 1, "nit", "Vague name", "Vague name\n\nDetails."),
+        ]
+        drafts = create_drafts_from_coderabbit(db_pr, findings)
+        assert len(drafts) == 1
+        assert drafts[0].category == "other"
+
 
 # ---------------------------------------------------------------------------
 # Worker integration test

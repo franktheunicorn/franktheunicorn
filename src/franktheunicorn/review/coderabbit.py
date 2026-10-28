@@ -243,7 +243,7 @@ def create_drafts_from_coderabbit(
 
         confidence = _SEVERITY_CONFIDENCE.get(finding.severity, 0.5)
 
-        from franktheunicorn.review.drafter import _coerce_severity
+        from franktheunicorn.review.drafter import _coerce_severity, _derive_category
 
         draft = ReviewDraft.objects.create(
             pull_request=pr,
@@ -253,6 +253,7 @@ def create_drafts_from_coderabbit(
             suggestion=finding.suggestion,
             confidence=confidence,
             severity=_coerce_severity(finding.severity, finding.title),
+            category=_derive_category(finding.title),
             status="pending",
             sources=["coderabbit"],
             backend_used="coderabbit",
