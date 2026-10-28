@@ -349,6 +349,28 @@ def queue_introduced_scan(project: Project, *, priority: int = PRIORITY_BULK) ->
     return True
 
 
+def queue_variant_scan(project: Project, *, priority: int = PRIORITY_BULK) -> bool:
+    """Queue the variant-analysis scan for one project unless one is in flight.
+
+    Same shape as :func:`queue_introduced_scan`: targetless, scoped to a project
+    via kwargs, bulk by default. One agent run per confirmed past CVE, so it's
+    longer than the introduced scan — it goes behind the interactive lane.
+    """
+    command = "scan_security_variants"
+    in_flight = WorkerCommand.objects.filter(command=command, status__in=_IN_FLIGHT_STATUSES)
+    for kwargs in in_flight.values_list("kwargs", flat=True):
+        if (kwargs or {}).get("project_id") == project.pk:
+            logger.info("%s already in flight for project %s", command, project.full_name)
+            return False
+    WorkerCommand.objects.create(
+        command=command,
+        priority=priority,
+        kwargs={"project_id": project.pk},
+    )
+    logger.info("Queued %s for %s (priority %d)", command, project.full_name, priority)
+    return True
+
+
 def queue_zombie_assessment(pr: PullRequest, *, priority: int = PRIORITY_INTERACTIVE) -> bool:
     """Queue the per-PR zombie re-assessment. Interactive: it is a button on the
     detail page with somebody watching, and one LLM call."""

@@ -1259,6 +1259,10 @@ def reports_for_export(
         # / inbox / archive reports, exported for the same "what I'm looking at"
         # contract as the other cross-cutting tabs.
         reports = reports.filter(SecurityReport.introduced_scan_q())
+    elif status == SecurityReport.VARIANT_SCAN_FILTER:
+        # The variant-analysis scan's worklist — one agent per confirmed past
+        # CVE looking for the same bug pattern elsewhere. Same export contract.
+        reports = reports.filter(SecurityReport.variant_scan_q())
     elif status:
         reports = reports.filter(status=status)
     if project:

@@ -132,6 +132,7 @@ _COMMAND_COST_TIER: dict[str, int] = {
     "verify_exploit": 2,
     "evaluate_patch": 2,
     "scan_introduced_cves": 2,
+    "scan_security_variants": 2,
     "run_agents": 2,
     "run_dual_tests": 2,
 }
@@ -414,6 +415,7 @@ def _dispatch(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
         "analyze_pr_ci": _analyze_pr_ci,
         "match_cves_to_reports": _match_cves_to_reports,
         "scan_introduced_cves": _scan_introduced_cves,
+        "scan_security_variants": _scan_security_variants,
     }
     handler = handlers.get(cmd.command)
     if handler is None:
@@ -1063,3 +1065,29 @@ def _scan_introduced_cves(cmd: WorkerCommand, operator_config: OperatorConfig) -
     cmd.log = result.summary()
     if result.error:
         logger.info("Introduced scan for %s did not run: %s", project.full_name, result.error)
+
+
+def _scan_security_variants(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
+    """The variant-analysis scan: find siblings of a known CVE elsewhere.
+
+    Targetless, scoped to a project via kwargs, like _scan_introduced_cves.
+    A gate declining is a successful command with a log that says why.
+    """
+    project_id = (cmd.kwargs or {}).get("project_id")
+    if project_id is None:
+        msg = "scan_security_variants requires a project_id in kwargs"
+        raise ValueError(msg)
+
+    from franktheunicorn.core.models import Project
+
+    project = Project.objects.filter(pk=project_id).first()
+    if project is None:
+        cmd.log = f"project_id={project_id} no longer exists; nothing to scan"
+        return
+
+    from franktheunicorn.security.variant_scan import scan_project_for_variants
+
+    result = scan_project_for_variants(project, operator_config)
+    cmd.log = result.summary()
+    if result.error:
+        logger.info("Variant scan for %s did not run: %s", project.full_name, result.error)

@@ -1881,6 +1881,47 @@ class IntroducedScanConfig(BaseModel):
     workspace_subdir: str = "security-introduced-scan"
 
 
+class VariantScanConfig(BaseModel):
+    """Per-project config for the variant-analysis scan.
+
+    On a cadence, one coding agent per confirmed past CVE (a valid
+    :class:`~franktheunicorn.core.models.SecurityReport` with a dated
+    ``introduced_commit``) hunts for the same bug pattern elsewhere. Each
+    candidate lands as a SecurityReport with ``source="variant-scan"`` and is
+    queued for verification (the second-pass false-positive gauntlet).
+
+    Off by default — a scheduled agent run per CVE is real money. Borrows
+    ``verifier.reviewer`` for the agent box.
+    """
+
+    #: Off by default: one agent run per confirmed CVE on a cadence is real money.
+    enabled: bool = False
+    #: daily / weekly / monthly. Weekly is the natural cadence — a variant hunt
+    #: over the whole codebase doesn't change day to day.
+    cadence: str = "weekly"
+    #: Hard cap on the agent run per CVE. 4h — a whole-codebase variant hunt.
+    timeout_seconds: int = 14400
+    #: Override the reviewer's model. Empty means "use the verifier's model".
+    model: str = ""
+    #: Appended to the agent's argv, like ``verifier.extra_args``.
+    extra_args: list[str] = Field(default_factory=list)
+    #: Cap on variants filed per CVE per run. Each becomes a report + a verify
+    #: queue, so this bounds the money and the queue depth of one run.
+    max_variants_per_cve: int = 5
+    #: Cap on how many past CVEs to variant-hunt in one run (the oldest-first
+    #: slice of the valid-with-introduced-commit set).
+    max_cves_per_run: int = 10
+    #: Queue ``verify_security_report`` on each finding (the second-pass
+    #: false-positive gauntlet). On by default — verification is the point.
+    auto_verify: bool = True
+    #: Extra instructions for the scanning agent, from the operator.
+    prompt_addendum: str = ""
+    #: Where the scan checkout lives. A sibling of the verifier's and the
+    #: introduced scan's, so a pool thread running any of them widens each to
+    #: its own worktree.
+    workspace_subdir: str = "security-variant-scan"
+
+
 class SecurityCveMatchConfig(BaseModel):
     """Config for tentatively matching pasted CVE ids to security reports.
 
@@ -2891,6 +2932,10 @@ class ProjectConfig(BaseModel):
     # Off by default; opting a project in sets the cadence. See IntroducedScanConfig.
     introduced_scan: IntroducedScanConfig = Field(default_factory=IntroducedScanConfig)
 
+    # Variant-analysis scan: one agent per confirmed past CVE looking for the
+    # same bug pattern elsewhere. Off by default; see VariantScanConfig.
+    variant_scan: VariantScanConfig = Field(default_factory=VariantScanConfig)
+
     # Copy-pasta detection
     copypasta_enabled: bool = False
     copypasta_min_lines: int = 4
@@ -3087,6 +3132,24 @@ class ProjectConfig(BaseModel):
             raise ValueError(msg)
         if v.timeout_seconds < 60:
             msg = "introduced_scan.timeout_seconds must be >= 60"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("variant_scan")
+    @classmethod
+    def variant_scan_valid(cls, v: VariantScanConfig) -> VariantScanConfig:
+        v.cadence = v.cadence.strip().lower()
+        if v.cadence not in {"daily", "weekly", "monthly"}:
+            msg = f"variant_scan.cadence must be one of daily/weekly/monthly, got {v.cadence!r}"
+            raise ValueError(msg)
+        if v.max_variants_per_cve < 1:
+            msg = "variant_scan.max_variants_per_cve must be >= 1"
+            raise ValueError(msg)
+        if v.max_cves_per_run < 1:
+            msg = "variant_scan.max_cves_per_run must be >= 1"
+            raise ValueError(msg)
+        if v.timeout_seconds < 60:
+            msg = "variant_scan.timeout_seconds must be >= 60"
             raise ValueError(msg)
         return v
 

@@ -1744,6 +1744,7 @@ SECURITY_STATUS_TABS: list[dict[str, str]] = [
     {"key": SecurityReport.CVE_NO_BRANCH_FILTER, "label": "CVE, No Branch"},
     {"key": SecurityReport.VALID_NO_CVE_FILTER, "label": "Valid, No CVE"},
     {"key": SecurityReport.INTRODUCED_SCAN_FILTER, "label": "Introduced Scan"},
+    {"key": SecurityReport.VARIANT_SCAN_FILTER, "label": "Variant Scan"},
     # The archive: reports the close-addressed workflow ruled done. Last because
     # it is not a worklist — nothing to do here but confirm the fix held.
     {"key": SecurityReport.CLOSED_FILTER, "label": "Closed"},
@@ -1769,6 +1770,8 @@ def _security_tab_q(key: str) -> Q:
         return SecurityReport.valid_without_cve_q()
     if key == SecurityReport.INTRODUCED_SCAN_FILTER:
         return SecurityReport.introduced_scan_q()
+    if key == SecurityReport.VARIANT_SCAN_FILTER:
+        return SecurityReport.variant_scan_q()
     if key == SecurityReport.CLOSED_FILTER:
         return SecurityReport.closed_q()
     # Unknown keys included: a garbage ?status= has always returned an empty list

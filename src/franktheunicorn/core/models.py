@@ -859,6 +859,9 @@ class SecurityReport(models.Model):
         # A separate queue for triaging: the scan files these, the operator
         # rules on them the way they rule on pasted reports.
         ("introduced-scan", "Introduced-CVE scan"),
+        # Findings filed by the variant-analysis scan: one agent per confirmed
+        # past CVE, looking for the same bug pattern elsewhere.
+        ("variant-scan", "Variant scan"),
     ]
     RELAY_KIND_CHOICES = [
         ("asf-security", "ASF Security Team"),
@@ -895,6 +898,11 @@ class SecurityReport(models.Model):
     #: reads as ``?status=introduced-scan`` and the export honours it the same way.
     INTRODUCED_SCAN_FILTER = "introduced-scan"
 
+    #: The cross-cutting filter for findings filed by the variant-analysis scan:
+    #: one agent per confirmed past CVE looking for the same bug pattern elsewhere.
+    #: Same shape as the introduced-scan filter — the key is the source value.
+    VARIANT_SCAN_FILTER = "variant-scan"
+
     #: The cross-cutting filter for closed reports: the archive tab, separate
     #: from the active backlog. A report is closed when the fix landed or the
     #: recheck said "likely-fixed" — the close-addressed workflow moves it
@@ -925,6 +933,7 @@ class SecurityReport(models.Model):
             cls.CVE_NO_BRANCH_FILTER,
             cls.VALID_NO_CVE_FILTER,
             cls.INTRODUCED_SCAN_FILTER,
+            cls.VARIANT_SCAN_FILTER,
             cls.CLOSED_FILTER,
         }
 
@@ -1053,6 +1062,11 @@ class SecurityReport(models.Model):
         rules on them the way they rule on any pasted report.
         """
         return Q(source="introduced-scan")
+
+    @staticmethod
+    def variant_scan_q() -> Q:
+        """Match findings filed by the variant-analysis scan (source, not status)."""
+        return Q(source="variant-scan")
 
     @staticmethod
     def closed_q() -> Q:
@@ -2325,6 +2339,41 @@ class IntroducedScanRun(models.Model):
         return (
             f"IntroducedScanRun[{self.project}] {self.cadence} "
             f"{self.started_at:%Y-%m-%d %H:%M} findings={self.finding_count}"
+        )
+
+
+class VariantScanRun(models.Model):
+    """One run of the variant-analysis scan for one project (scheduling + audit).
+
+    Same shape as :class:`IntroducedScanRun`: the scheduler decides a project is
+    due by comparing ``now`` to the most recent row's ``started_at`` against the
+    configured cadence. A row is created at the *start* so a crash leaves a
+    visible "started, never finished" row, and on declines that depend on data
+    (no candidates, no reviewer) so the cadence clock starts even then.
+    """
+
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="variant_scan_runs")
+    started_at = models.DateTimeField(default=timezone.now)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    #: daily / weekly / monthly — the cadence this run was fired under.
+    cadence = models.CharField(max_length=10, default="weekly")
+    #: How many past CVEs the run examined.
+    cves_examined = models.IntegerField(default=0)
+    #: How many variant findings the run filed (each a SecurityReport).
+    finding_count = models.IntegerField(default=0)
+    #: How many of those were queued for verification (the second-pass gauntlet).
+    verified_count = models.IntegerField(default=0)
+    log = models.TextField(blank=True, default="")
+    #: Why the run did not happen, if it didn't. Empty is the good case.
+    error = models.TextField(blank=True, default="")
+
+    objects: models.Manager[VariantScanRun] = models.Manager()
+
+    def __str__(self) -> str:
+        return (
+            f"VariantScanRun[{self.project}] {self.cadence} "
+            f"{self.started_at:%Y-%m-%d %H:%M} cves={self.cves_examined} "
+            f"findings={self.finding_count}"
         )
 
 

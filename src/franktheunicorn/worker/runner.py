@@ -1893,6 +1893,10 @@ def _run_cycle(
     if operator_config is not None:
         _schedule_introduced_scans(operator_config)
 
+    # Scheduled variant-analysis scan: queue any project whose cadence is due.
+    if operator_config is not None:
+        _schedule_variant_scans(operator_config)
+
     if operator_username:
         _scan_operator_prs(clients, operator_username, operator_config, project_configs)
 
@@ -3357,6 +3361,41 @@ def _schedule_introduced_scans(operator_config: OperatorConfig) -> None:
                 )
     except Exception:
         logger.exception("Error scheduling introduced-CVE scans")
+
+
+def _schedule_variant_scans(operator_config: OperatorConfig) -> None:
+    """Queue the variant-analysis scan for each project whose cadence is due.
+
+    Same shape as :func:`_schedule_introduced_scans`: one SELECT per project,
+    bulk priority. A project with the feature off or whose cadence hasn't
+    elapsed is skipped silently.
+    """
+    from django.conf import settings
+
+    from franktheunicorn.config.loader import load_project_configs
+    from franktheunicorn.core.models import Project
+    from franktheunicorn.security.queue import queue_variant_scan
+    from franktheunicorn.security.variant_scan import is_due
+
+    try:
+        for pc in load_project_configs(getattr(settings, "FRANK_PROJECTS_DIR", "")):
+            if not pc.enabled or not pc.variant_scan.enabled:
+                continue
+            project, _created = Project.objects.get_or_create(
+                owner=pc.owner,
+                repo=pc.repo,
+                defaults={"review_context": pc.review_context or ""},
+            )
+            if not project.enabled:
+                continue
+            if is_due(project, pc.variant_scan) and queue_variant_scan(project):
+                logger.info(
+                    "Queued variant-analysis scan for %s (cadence %s, due)",
+                    project.full_name,
+                    pc.variant_scan.cadence,
+                )
+    except Exception:
+        logger.exception("Error scheduling variant-analysis scans")
 
 
 def _fetch_dependency_changelogs_for_cycle(
