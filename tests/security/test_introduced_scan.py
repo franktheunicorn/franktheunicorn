@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 import pytest
 from django.utils import timezone
+from pydantic import ValidationError
 
 from franktheunicorn.config.models import (
     AgentCLIReviewerConfig,
@@ -63,11 +64,23 @@ def _operator(
 
 
 class _FakeExecutor:
-    """Scripted executor: maps an argv prefix to a result."""
+    """Scripted executor: maps an argv prefix to a result.
 
-    def __init__(self, responses: dict[str, Any], cwd: str = "/w/spark") -> None:
+    For agent calls, ``model_responses`` maps a model name (the ``--model``
+    flag's value) to a result, so the multi-model gauntlet can script a
+    different outcome per model. When a model isn't in the map, the default
+    ``"claude"`` response is used (the original single-model behavior).
+    """
+
+    def __init__(
+        self,
+        responses: dict[str, Any],
+        cwd: str = "/w/spark",
+        model_responses: dict[str, Any] | None = None,
+    ) -> None:
         self.responses = responses
         self.cwd = cwd
+        self.model_responses = model_responses or {}
         self.calls: list[list[str]] = []
         self.guarded: list[bool] = []
         self.subdir = ""
@@ -83,11 +96,24 @@ class _FakeExecutor:
         self.guarded.append(unwrapped is not cmd)
         cmd = unwrapped
         self.calls.append(cmd)
+        # An agent call with a --model flag: prefer a model-specific response.
+        if cmd and cmd[0] != "git" and self.model_responses:
+            model = _model_from_argv(cmd)
+            if model and model in self.model_responses:
+                return self.model_responses[model]
         shape = " ".join(cmd[:4]) if cmd and cmd[0] == "git" else (cmd[0] if cmd else "")
         for key, response in self.responses.items():
             if key in shape:
                 return response
         return ExecResult(returncode=0, stdout="", stderr="")
+
+
+def _model_from_argv(cmd: list[str]) -> str:
+    """The value of the ``--model`` flag in *cmd*, or ""."""
+    for i, arg in enumerate(cmd):
+        if arg == "--model" and i + 1 < len(cmd):
+            return cmd[i + 1]
+    return ""
 
 
 def _executor_with(
@@ -98,6 +124,7 @@ def _executor_with(
     tags: str = "v3.5.0\nv3.5.0-RC1\nv3.4.0\n",
     diff: str = "--- a/f\n+++ b/f\n@@ -1 +1 @@\n-return x;\n+return Math.max(x, 0);\n",
     cwd: str = "/w/spark",
+    model_responses: dict[str, Any] | None = None,
 ) -> _FakeExecutor:
     return _FakeExecutor(
         {
@@ -112,6 +139,7 @@ def _executor_with(
             "claude": ExecResult(returncode=agent_returncode, stdout=agent_output, stderr=""),
         },
         cwd=cwd,
+        model_responses=model_responses,
     )
 
 
@@ -438,42 +466,44 @@ class TestPriorContext:
         assert rejected == "(none)"
 
 
+def _run_scan(
+    agent_output: str,
+    *,
+    scan: IntroducedScanConfig | None = None,
+    agent_returncode: int = 0,
+    daily_commits: str = "aaa111\n",
+    tags: str = "v3.5.0\n",
+    diff: str = "--- a/f\n+++ b/f\n",
+    model_responses: dict[str, Any] | None = None,
+) -> tuple[Any, _FakeExecutor, Any, Any]:
+    from franktheunicorn.config.models import ProjectConfig
+
+    project = ProjectFactory(owner="apache", repo="spark")
+    scan = scan or _scan()
+    pc = ProjectConfig(owner="apache", repo="spark", introduced_scan=scan)
+    config = _operator()
+    executor = _executor_with(
+        agent_output,
+        agent_returncode=agent_returncode,
+        daily_commits=daily_commits,
+        tags=tags,
+        diff=diff,
+        model_responses=model_responses,
+    )
+    with (
+        patch("franktheunicorn.config.loader.get_project_config", return_value=pc),
+        patch("franktheunicorn.review.tool_executor.make_executor", return_value=executor),
+        patch("franktheunicorn.security.queue.queue_exploit_verification", return_value=True) as q,
+    ):
+        result = scan_project_for_introduced_cves(project, config)
+    return result, executor, project, q
+
+
 @pytest.mark.django_db
 class TestAgentRun:
     """The happy path: findings are filed and exploit verification is queued."""
 
-    def _run_scan(
-        self,
-        agent_output: str,
-        *,
-        scan: IntroducedScanConfig | None = None,
-        agent_returncode: int = 0,
-        daily_commits: str = "aaa111\n",
-        tags: str = "v3.5.0\n",
-        diff: str = "--- a/f\n+++ b/f\n",
-    ) -> tuple[Any, _FakeExecutor, Any, Any]:
-        from franktheunicorn.config.models import ProjectConfig
-
-        project = ProjectFactory(owner="apache", repo="spark")
-        scan = scan or _scan()
-        pc = ProjectConfig(owner="apache", repo="spark", introduced_scan=scan)
-        config = _operator()
-        executor = _executor_with(
-            agent_output,
-            agent_returncode=agent_returncode,
-            daily_commits=daily_commits,
-            tags=tags,
-            diff=diff,
-        )
-        with (
-            patch("franktheunicorn.config.loader.get_project_config", return_value=pc),
-            patch("franktheunicorn.review.tool_executor.make_executor", return_value=executor),
-            patch(
-                "franktheunicorn.security.queue.queue_exploit_verification", return_value=True
-            ) as q,
-        ):
-            result = scan_project_for_introduced_cves(project, config)
-        return result, executor, project, q
+    _run_scan = staticmethod(_run_scan)
 
     def test_daily_run_files_findings_and_queues_verify(self) -> None:
         agent_json = json.dumps(
@@ -619,6 +649,113 @@ class TestAgentRun:
         )
         assert "1 finding(s) filed" in result.summary()
         assert "1 queued for verify" in result.summary()
+
+
+@pytest.mark.django_db
+class TestModelGauntlet:
+    """The multi-model gauntlet: try each model in order until one parses."""
+
+    _run_scan = staticmethod(_run_scan)
+
+    def test_falls_back_to_the_second_model_when_the_first_fails(self) -> None:
+        agent_json = json.dumps({"findings": [{"title": "X", "severity": "low"}]})
+        result, executor, _project, _q = self._run_scan(
+            agent_json,
+            scan=_scan(models=["strong-model", "fast-model"]),
+            model_responses={
+                "strong-model": ExecResult(returncode=1, stdout="oops", stderr="boom"),
+                "fast-model": ExecResult(returncode=0, stdout=agent_json, stderr=""),
+            },
+        )
+        assert result.error == ""
+        assert result.finding_count == 1
+        assert "fast-model" in result.agent
+        # The strong model was tried first and failed; the fast model was tried second.
+        agent_calls = [c for c in executor.calls if c[0] == "claude"]
+        assert len(agent_calls) == 2
+
+    def test_first_model_success_does_not_try_the_second(self) -> None:
+        agent_json = json.dumps({"findings": [{"title": "X", "severity": "low"}]})
+        result, executor, _project, _q = self._run_scan(
+            agent_json,
+            scan=_scan(models=["strong-model", "fast-model"]),
+            model_responses={
+                "strong-model": ExecResult(returncode=0, stdout=agent_json, stderr=""),
+            },
+        )
+        assert result.error == ""
+        assert result.finding_count == 1
+        assert "strong-model" in result.agent
+        agent_calls = [c for c in executor.calls if c[0] == "claude"]
+        assert len(agent_calls) == 1
+
+    def test_no_json_on_the_last_model_is_a_clean_run(self) -> None:
+        # Both models produce no JSON — the last one is accepted as a clean run,
+        # the original single-model behavior (not an error).
+        result, _executor, _project, _q = self._run_scan(
+            "I looked, nothing to report.",
+            scan=_scan(models=["strong-model", "fast-model"]),
+        )
+        assert result.error == ""
+        assert result.finding_count == 0
+
+    def test_max_timeline_stops_before_the_second_model(self) -> None:
+        agent_json = json.dumps({"findings": [{"title": "X", "severity": "low"}]})
+        executor = _executor_with(
+            agent_json,
+            model_responses={
+                "strong-model": ExecResult(returncode=1, stdout="oops", stderr="boom"),
+                "fast-model": ExecResult(returncode=0, stdout=agent_json, stderr=""),
+            },
+        )
+
+        # The fake executor is instant, so drive time off the executor's own
+        # agent-call count: 0.0 until the first model runs, then 100.0. The
+        # timeline (1s) trips on the second iteration's check, before the
+        # fast model is tried. Keying on agent calls (not a raw monotonic
+        # call count) keeps this robust to extra timing calls inside the
+        # attempt path.
+        def _monotonic() -> float:
+            agent_calls = sum(1 for c in executor.calls if c[0] == "claude")
+            return 100.0 if agent_calls >= 1 else 0.0
+
+        from franktheunicorn.config.models import ProjectConfig
+
+        project = ProjectFactory(owner="apache", repo="spark")
+        scan = _scan(models=["strong-model", "fast-model"], max_timeline_seconds=1)
+        pc = ProjectConfig(owner="apache", repo="spark", introduced_scan=scan)
+        config = _operator()
+        with (
+            patch("franktheunicorn.config.loader.get_project_config", return_value=pc),
+            patch("franktheunicorn.review.tool_executor.make_executor", return_value=executor),
+            patch(
+                "franktheunicorn.security.introduced_scan.time.monotonic",
+                side_effect=_monotonic,
+            ),
+            patch("franktheunicorn.security.queue.queue_exploit_verification", return_value=True),
+        ):
+            result = scan_project_for_introduced_cves(project, config)
+        # The strong model failed; the timeline (1s) was exceeded before the
+        # fast model could be tried.
+        assert "max timeline" in result.error
+        assert result.finding_count == 0
+        agent_calls = [c for c in executor.calls if c[0] == "claude"]
+        assert len(agent_calls) == 1
+
+    def test_empty_models_uses_the_single_model_field(self) -> None:
+        # Backward compat: empty models list falls back to the single model field.
+        agent_json = json.dumps({"findings": [{"title": "X", "severity": "low"}]})
+        result, _executor, _project, _q = self._run_scan(
+            agent_json,
+            scan=_scan(model="my-model"),
+        )
+        assert result.error == ""
+        assert result.finding_count == 1
+        assert "my-model" in result.agent
+
+    def test_negative_max_timeline_seconds_is_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            IntroducedScanConfig(enabled=True, max_timeline_seconds=-1)
 
 
 @pytest.mark.django_db
@@ -1011,7 +1148,7 @@ class TestBugDetection:
                 ],
             }
         )
-        result, _executor, project, _q = TestAgentRun._run_scan(self, agent_json)
+        result, _executor, project, _q = _run_scan(agent_json)
         assert result.error == ""
         assert result.bug_count == 1
         from franktheunicorn.core.models import IntroducedBug
@@ -1031,7 +1168,7 @@ class TestBugDetection:
     def test_detect_bugs_off_skips_bug_filing(self) -> None:
         agent_json = json.dumps({"findings": [], "bugs": [{"title": "bug", "category": "logic"}]})
         scan = _scan(detect_bugs=False)
-        result, _executor, project, _q = TestAgentRun._run_scan(self, agent_json, scan=scan)
+        result, _executor, project, _q = _run_scan(agent_json, scan=scan)
         assert result.error == ""
         assert result.bug_count == 0
         from franktheunicorn.core.models import IntroducedBug
@@ -1042,12 +1179,12 @@ class TestBugDetection:
         bugs = [{"title": f"bug {i}", "category": "correctness"} for i in range(5)]
         agent_json = json.dumps({"findings": [], "bugs": bugs})
         scan = _scan(max_bugs=2)
-        result, _executor, _project, _q = TestAgentRun._run_scan(self, agent_json, scan=scan)
+        result, _executor, _project, _q = _run_scan(agent_json, scan=scan)
         assert result.bug_count == 2
 
     def test_bug_with_no_title_is_skipped(self) -> None:
         agent_json = json.dumps({"findings": [], "bugs": [{"title": "", "category": "logic"}]})
-        result, _executor, _project, _q = TestAgentRun._run_scan(self, agent_json)
+        result, _executor, _project, _q = _run_scan(agent_json)
         assert result.bug_count == 0
 
     def test_both_findings_and_bugs_filed(self) -> None:
@@ -1059,7 +1196,7 @@ class TestBugDetection:
                 ],
             }
         )
-        result, _executor, project, _q = TestAgentRun._run_scan(self, agent_json)
+        result, _executor, project, _q = _run_scan(agent_json)
         assert result.error == ""
         assert result.finding_count == 1
         assert result.bug_count == 1
@@ -1070,10 +1207,10 @@ class TestBugDetection:
 
     def test_summary_includes_bug_count(self) -> None:
         agent_json = json.dumps({"findings": [], "bugs": [{"title": "bug", "category": "logic"}]})
-        result, _executor, _project, _q = TestAgentRun._run_scan(self, agent_json)
+        result, _executor, _project, _q = _run_scan(agent_json)
         assert "1 bug(s) filed" in result.summary()
 
     def test_no_bugs_in_summary_when_zero(self) -> None:
         agent_json = json.dumps({"findings": [], "bugs": []})
-        result, _executor, _project, _q = TestAgentRun._run_scan(self, agent_json)
+        result, _executor, _project, _q = _run_scan(agent_json)
         assert "bug" not in result.summary()

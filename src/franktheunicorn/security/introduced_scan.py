@@ -300,64 +300,64 @@ def scan_project_for_introduced_cves(
         cve_class_catalog=cve_class_section,
     )
 
-    started = time.monotonic()
-    result.agent = (
-        f"{reviewer.name}/{config.model or verifier.model or reviewer.model or 'default'}"
-    )
-    argv = [*reviewer.cli_argv, *_invocation(reviewer, config, verifier.model, prompt)]
-    from franktheunicorn.review.tool_executor import (
-        agent_stderr,
-        auth_failure_advice,
-        guard_agent_argv,
-        guard_notes,
-        guard_refusal,
-        looks_like_auth_failure,
-        looks_like_workspace_trust_refusal,
-        workspace_trust_advice,
-    )
-
-    run_result = executor.run(guard_agent_argv(argv), cwd=cwd, timeout=config.timeout_seconds)
-    result.duration_seconds = time.monotonic() - started
-    for note in guard_notes(run_result.stderr if run_result is not None else ""):
-        logger.warning("Introduced scan for %s: %s", project.full_name, note)
-    if run_result is not None and (
-        refused := guard_refusal(run_result.returncode, run_result.stderr)
-    ):
-        result.error = f"the {reviewer.name} CLI did not run: {refused}"
-        return _finish(result)
-    if run_result is None:
-        result.error = (
-            f"the {reviewer.name} CLI produced no result within {config.timeout_seconds}s"
-        )
-        return _finish(result)
-    if not run_result.ok:
-        stderr = agent_stderr(run_result.stderr)
-        detail = (stderr or run_result.stdout).strip()[:500]
-        summary = f"the {reviewer.name} CLI exited {run_result.returncode}: {detail}"
-        if looks_like_auth_failure(stderr):
-            summary = (
-                f"{summary}\n\n"
-                f"{auth_failure_advice(reviewer.name, reviewer.cli_argv[0], remote=reviewer.remote.mode == 'ssh')}"
+    # The model gauntlet: try each model in order until one parses, or the
+    # timeline runs out. Empty ``models`` means one attempt with ``model`` (or
+    # the verifier's / reviewer's), the original behavior.
+    models_to_try = config.models or [config.model or verifier.model or reviewer.model or "default"]
+    timeline_started = time.monotonic()
+    last_attempt: _ModelAttempt | None = None
+    for model_name in models_to_try:
+        # Record the model up front so a failed/timeline run still shows which
+        # model was attempted (the original code set agent before the run).
+        result.agent = f"{reviewer.name}/{model_name}"
+        if (
+            config.max_timeline_seconds > 0
+            and time.monotonic() - timeline_started >= config.max_timeline_seconds
+        ):
+            result.error = (
+                f"max timeline ({config.max_timeline_seconds}s) exceeded before trying {model_name}"
             )
-        if looks_like_workspace_trust_refusal(stderr, run_result.stdout):
-            summary = f"{summary}\n\n{workspace_trust_advice(reviewer.name)}"
-        result.error = summary
-        result.raw_output = run_result.stdout[:20_000]
+            break
+        attempt = _run_model_attempt(
+            executor, cwd, reviewer, config, prompt, model_name, project.full_name
+        )
+        result.duration_seconds += attempt.duration_seconds
+        last_attempt = attempt
+        if not attempt.error and attempt.parsed:
+            break  # success — use this attempt's findings
+        if attempt.error:
+            logger.warning(
+                "Introduced scan for %s: model %s failed (%s); trying next",
+                project.full_name,
+                model_name,
+                attempt.error,
+            )
+        else:
+            # No JSON but the agent ran — soft failure. Try the next model;
+            # if this is the last one the post-loop block accepts it as clean.
+            logger.info(
+                "Introduced scan for %s: model %s produced no JSON; trying next",
+                project.full_name,
+                model_name,
+            )
+
+    if last_attempt is None:
+        # Timeline exceeded before the first model ran.
+        return _finish(result)
+    if result.error:
+        # Timeline broke the loop — result.error already carries the timeline
+        # reason; don't overwrite it with the last attempted model's error.
+        return _finish(result)
+    if last_attempt.error:
+        # Every model failed with a real error — the last one's error wins.
+        result.error = last_attempt.error
+        result.raw_output = last_attempt.raw_output
         return _finish(result)
 
-    parsed = _parse_findings(run_result.stdout)
-    if parsed is None:
-        logger.warning(
-            "No JSON findings in the %s output for %s; keeping the raw text.",
-            reviewer.name,
-            project.full_name,
-        )
-        result.findings = []
-        result.bugs = []
-        result.raw_output = run_result.stdout[:20_000]
-    else:
-        result.findings = parsed.get("findings", []) if isinstance(parsed, dict) else []
-        result.bugs = parsed.get("bugs", []) if isinstance(parsed, dict) else []
+    # A parsed attempt, or the last model's no-JSON (accepted as a clean run).
+    result.findings = last_attempt.findings
+    result.bugs = last_attempt.bugs
+    result.raw_output = last_attempt.raw_output
 
     from franktheunicorn.security.queue import queue_exploit_verification
 
@@ -527,20 +527,119 @@ def _build_prompt(
     )
 
 
+@dataclass
+class _ModelAttempt:
+    """The outcome of one model attempt in the multi-model gauntlet.
+
+    ``error`` non-empty means the agent did not run (timeout, refusal, non-zero
+    exit) — the gauntlet should try the next model. ``parsed`` is False when the
+    agent ran but produced no JSON — a soft failure that tries the next model,
+    unless this is the last one (then the caller accepts it as a clean run, the
+    original single-model behavior).
+    """
+
+    error: str = ""
+    parsed: bool = False
+    findings: list[dict[str, Any]] = field(default_factory=list)
+    bugs: list[dict[str, Any]] = field(default_factory=list)
+    raw_output: str = ""
+    duration_seconds: float = 0.0
+    model: str = ""
+
+
+def _run_model_attempt(
+    executor: ToolExecutor,
+    cwd: str,
+    reviewer: AgentCLIReviewerConfig,
+    config: IntroducedScanConfig,
+    prompt: str,
+    model: str,
+    project_name: str,
+) -> _ModelAttempt:
+    """Run the agent with one model. Returns the parsed findings or an error.
+
+    Never raises — every failure path carries a reason. The caller loops over
+    models and stops at the first one that parses (or accepts the last one's
+    no-JSON as a clean run).
+    """
+    from franktheunicorn.review.tool_executor import (
+        agent_stderr,
+        auth_failure_advice,
+        guard_agent_argv,
+        guard_notes,
+        guard_refusal,
+        looks_like_auth_failure,
+        looks_like_workspace_trust_refusal,
+        workspace_trust_advice,
+    )
+
+    attempt = _ModelAttempt(model=model)
+    try:
+        started = time.monotonic()
+        argv = [*reviewer.cli_argv, *_invocation(reviewer, config, model, prompt)]
+        run_result = executor.run(guard_agent_argv(argv), cwd=cwd, timeout=config.timeout_seconds)
+        attempt.duration_seconds = time.monotonic() - started
+        for note in guard_notes(run_result.stderr if run_result is not None else ""):
+            logger.warning("Introduced scan for %s: %s", project_name, note)
+        if run_result is not None and (
+            refused := guard_refusal(run_result.returncode, run_result.stderr)
+        ):
+            attempt.error = f"the {reviewer.name} CLI did not run: {refused}"
+            return attempt
+        if run_result is None:
+            attempt.error = (
+                f"the {reviewer.name} CLI produced no result within {config.timeout_seconds}s"
+            )
+            return attempt
+        if not run_result.ok:
+            stderr = agent_stderr(run_result.stderr)
+            detail = (stderr or run_result.stdout).strip()[:500]
+            summary = f"the {reviewer.name} CLI exited {run_result.returncode}: {detail}"
+            if looks_like_auth_failure(stderr):
+                summary = (
+                    f"{summary}\n\n"
+                    f"{auth_failure_advice(reviewer.name, reviewer.cli_argv[0], remote=reviewer.remote.mode == 'ssh')}"
+                )
+            if looks_like_workspace_trust_refusal(stderr, run_result.stdout):
+                summary = f"{summary}\n\n{workspace_trust_advice(reviewer.name)}"
+            attempt.error = summary
+            attempt.raw_output = run_result.stdout[:20_000]
+            return attempt
+
+        parsed = _parse_findings(run_result.stdout)
+        attempt.raw_output = run_result.stdout[:20_000]
+        if parsed is None:
+            logger.warning(
+                "No JSON findings in the %s output for %s; keeping the raw text.",
+                reviewer.name,
+                project_name,
+            )
+            return attempt  # parsed=False, error="" — soft failure
+        attempt.parsed = True
+        attempt.findings = parsed.get("findings", []) if isinstance(parsed, dict) else []
+        attempt.bugs = parsed.get("bugs", []) if isinstance(parsed, dict) else []
+        return attempt
+    except Exception as exc:
+        logger.exception("Introduced scan for %s: model %s crashed", project_name, model)
+        attempt.error = f"model {model} crashed: {exc}"
+        return attempt
+
+
 def _invocation(
     reviewer: AgentCLIReviewerConfig,
     config: IntroducedScanConfig,
-    verifier_model: str,
+    model: str,
     prompt: str,
 ) -> list[str]:
-    """The reviewer's argv shape, with the scan config's model and flags.
+    """The reviewer's argv shape, with the given model and the scan's flags.
 
-    Mirrors the siblings: the model falls back to the verifier's, so
-    ``introduced_scan.model`` empty + ``verifier.model`` set uses the verifier's.
+    The model is passed in (not read from ``config``) so the multi-model
+    gauntlet can call this once per model. ``extra_args`` still come from the
+    scan config — they are shared across attempts.
     """
     borrowed = reviewer.model_copy(
         update={
-            "model": config.model or verifier_model or reviewer.model,
+            "model": model,
             "extra_args": [*reviewer.extra_args, *config.extra_args],
         }
     )

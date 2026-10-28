@@ -1849,10 +1849,25 @@ class IntroducedScanConfig(BaseModel):
     cadence: str = "daily"
     #: Commits to consider on the daily cadence. Ignored on weekly/monthly.
     lookback_days: int = 2
-    #: Hard cap on the agent run. 8h by default — a real diff review is long.
+    #: Hard cap on a single agent run. 8h by default — a real diff review is long.
     timeout_seconds: int = 28800
     #: Override the reviewer's model. Empty means "use the verifier's model".
+    #: Ignored when ``models`` is non-empty (the list drives the attempts).
     model: str = ""
+    #: Models to try, in order, until one produces findings or the timeline
+    #: runs out. Empty means "use ``model``" (one attempt, the original
+    #: behavior). When set, each model gets ``timeout_seconds`` per attempt
+    #: and the whole gauntlet is capped by ``max_timeline_seconds``. A
+    #: stronger model first and a faster one as fallback is the shape: the
+    #: strong one catches what the fast one misses, and the fast one is cheap
+    #: insurance when the strong one refuses or times out.
+    models: list[str] = Field(default_factory=list)
+    #: Wall-clock budget for all model attempts. 0 means no overall cap (each
+    #: model gets ``timeout_seconds`` and the gauntlet runs until one succeeds
+    #: or all are tried). When set, the scan stops trying more models once this
+    #: many seconds have elapsed since the first attempt started — a soft cap
+    #: checked between attempts, not a hard kill mid-run.
+    max_timeline_seconds: int = Field(default=0, ge=0)
     #: Appended to the agent's argv, like ``verifier.extra_args``.
     extra_args: list[str] = Field(default_factory=list)
     #: Cap on findings filed per run. Each becomes a report + an exploit-verify
