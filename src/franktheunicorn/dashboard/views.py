@@ -44,6 +44,7 @@ from franktheunicorn.core.models import (
     CostRecord,
     DependencyChange,
     EmailScanRecord,
+    IntroducedBug,
     MergeReadinessFeedback,
     OperatorAction,
     Project,
@@ -5982,3 +5983,93 @@ def security_cve_match_rerun(request: HttpRequest, match_id: int) -> HttpRespons
         queue_cve_match(match.project)
         messages.info(request, f"Re-queued matching for {match.cve_id}.")
     return redirect("dashboard:security_cve_match")
+
+
+# ---------------------------------------------------------------------------
+# Bug Review — non-security bugs found by the introduced-CVE scan, with
+# proposed patches. A separate queue so correctness/performance/logic bugs
+# don't drown the security triage backlog.
+# ---------------------------------------------------------------------------
+
+_BUG_SORTS: dict[str, list[str]] = {
+    "newest": ["-created_at"],
+    "severity": ["-severity_rank", "-created_at"],
+}
+_DEFAULT_BUG_SORT = "newest"
+#: Severity → numeric rank for ordering (major first). Mirrors the security
+#: report sort's severity rank.
+_BUG_SEVERITY_RANK = {"major": 0, "important": 1, "minor": 2}
+
+
+def _bug_severity_rank(severity: str) -> int:
+    return _BUG_SEVERITY_RANK.get(severity.lower(), 3)
+
+
+def bug_review_list(request: HttpRequest) -> HttpResponse:
+    """List non-security bugs found by the introduced-CVE scan, with status tabs."""
+    status_filter = request.GET.get("status", "all")
+    if status_filter != "all" and status_filter not in IntroducedBug.list_filters():
+        status_filter = "all"
+    sort = request.GET.get("sort", _DEFAULT_BUG_SORT)
+    if sort not in _BUG_SORTS:
+        sort = _DEFAULT_BUG_SORT
+
+    parsed_project = _parse_project_slug(request.GET.get("project", ""))
+    bugs = IntroducedBug.objects.select_related("project", "scan_run")
+    if parsed_project is not None:
+        bugs = bugs.filter(project__owner=parsed_project[0], project__repo=parsed_project[1])
+
+    # Tab counts — one per status plus the cross-cutting "bug-review" (new) filter.
+    tab_qs: dict[str, QuerySet[IntroducedBug]] = {}
+    for key, _label in IntroducedBug.STATUS_CHOICES:
+        tab_qs[key] = bugs.filter(status=key)
+    tab_qs[IntroducedBug.BUG_REVIEW_FILTER] = bugs.filter(IntroducedBug.bug_review_q())
+    tab_counts = {key: qs.count() for key, qs in tab_qs.items()}
+    tab_counts["all"] = bugs.count()
+
+    if status_filter == IntroducedBug.BUG_REVIEW_FILTER:
+        bugs = bugs.filter(IntroducedBug.bug_review_q())
+    elif status_filter != "all":
+        bugs = bugs.filter(status=status_filter)
+
+    bugs = bugs.order_by(*_BUG_SORTS[sort])
+    active_project = request.GET.get("project", "") if parsed_project is not None else ""
+    context = {
+        "bugs": list(bugs[:200]),
+        "tab_counts": tab_counts,
+        "active_status": status_filter,
+        "active_sort": sort,
+        "active_project": active_project,
+        "project_query": f"&project={active_project}" if active_project else "",
+    }
+    return render(request, "dashboard/bug_review_list.html", context)
+
+
+def bug_review_detail(request: HttpRequest, bug_id: int) -> HttpResponse:
+    """Detail view for a single non-security bug and its proposed patch."""
+    bug = get_object_or_404(IntroducedBug.objects.select_related("project", "scan_run"), pk=bug_id)
+    return render(request, "dashboard/bug_review_detail.html", {"bug": bug})
+
+
+@require_POST
+def bug_review_dismiss(request: HttpRequest, bug_id: int) -> HttpResponse:
+    """Dismiss a bug — the operator ruled it not a real defect."""
+    bug = get_object_or_404(IntroducedBug, pk=bug_id)
+    bug.status = IntroducedBug.STATUS_DISMISSED
+    bug.save()
+    logger.info("Bug #%s dismissed", bug_id)
+    if request.headers.get("HX-Request"):
+        return HttpResponse(bug.status)
+    return redirect("dashboard:bug_review_detail", bug_id=bug_id)
+
+
+@require_POST
+def bug_review_fix(request: HttpRequest, bug_id: int) -> HttpResponse:
+    """Mark a bug as fixed — the operator applied the proposed patch (or their own)."""
+    bug = get_object_or_404(IntroducedBug, pk=bug_id)
+    bug.status = IntroducedBug.STATUS_FIXED
+    bug.save()
+    logger.info("Bug #%s marked fixed", bug_id)
+    if request.headers.get("HX-Request"):
+        return HttpResponse(bug.status)
+    return redirect("dashboard:bug_review_detail", bug_id=bug_id)

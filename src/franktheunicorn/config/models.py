@@ -1863,6 +1863,16 @@ class IntroducedScanConfig(BaseModel):
     #: is the point of the scan. Turn off to file findings for triage without
     #: spending the exploit-verify budget.
     auto_verify: bool = True
+    #: Also classify non-security bugs (correctness, logic, performance, API
+    #: misuse, resource leaks) and propose a patch for each. The agent is already
+    #: reviewing the diff, so asking it to also note non-security bugs and draft
+    #: a fix is marginal extra output, not a second call. On by default — the
+    #: operator asked for it, and the cost is the same agent run producing more
+    #: JSON. Bugs land in a separate "Bug Review" queue so they don't drown the
+    #: security backlog.
+    detect_bugs: bool = True
+    #: Cap on non-security bugs filed per run (same shape as ``max_findings``).
+    max_bugs: int = 20
     #: Extra instructions for the scanning agent, from the operator.
     prompt_addendum: str = ""
     #: Where the scan checkout lives. A sibling of the verifier's and the exploit

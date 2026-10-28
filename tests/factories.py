@@ -23,6 +23,7 @@ from franktheunicorn.core.models import (
     CVEAPIToken,
     DependencyChange,
     EmailScanRecord,
+    IntroducedBug,
     LLMBackendFallback,
     MergeReadinessFeedback,
     OperatorAction,
@@ -471,3 +472,22 @@ class CannedLLMBackend(StubBackend):
         del api_key
         self.calls.append(user_message)
         return self._response
+
+
+class IntroducedBugFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
+    """Factory for IntroducedBug model instances."""
+
+    class Meta:
+        model = IntroducedBug
+
+    project = factory.SubFactory(ProjectFactory)
+    title = factory.Sequence(lambda n: f"Bug #{n}")
+    category = "correctness"
+    severity = "important"
+    file_path = "src/main/loop.py"
+    line_start = 42
+    line_end = 45
+    description = factory.Faker("paragraph")
+    proposed_patch = "- for i in range(n):\n+ for i in range(n + 1):"
+    status = "new"
+    commit = "deadbeefcafe"

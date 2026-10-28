@@ -322,4 +322,11 @@ urlpatterns = [
         views.security_cve_advisory_push,
         name="security_cve_advisory_push",
     ),
+    # Bug Review — non-security bugs found by the introduced-CVE scan,
+    # with proposed patches. A separate queue so they don't drown the
+    # security triage backlog.
+    path("bugs/", views.bug_review_list, name="bug_review_list"),
+    path("bugs/<int:bug_id>/", views.bug_review_detail, name="bug_review_detail"),
+    path("bugs/<int:bug_id>/dismiss/", views.bug_review_dismiss, name="bug_review_dismiss"),
+    path("bugs/<int:bug_id>/fix/", views.bug_review_fix, name="bug_review_fix"),
 ]

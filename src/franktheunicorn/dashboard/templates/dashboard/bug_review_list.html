@@ -1,0 +1,66 @@
+{% extends "dashboard/base.html" %}
+{% block title %}Bug Review — franktheunicorn{% endblock %}
+{% block content %}
+<h2>Bug Review</h2>
+<p style="font-size: 0.85rem; color: var(--muted); margin-bottom: 1rem;">
+    Non-security bugs found by the introduced-CVE scan, with proposed patches.
+    Separate from the security triage queue so correctness and logic bugs don't drown it.
+</p>
+
+<nav class="tabs" aria-label="Filter by status">
+    <a href="{% url 'dashboard:bug_review_list' %}?sort={{ active_sort }}"
+       {% if active_status == 'all' %}class="active" aria-current="true"{% endif %}>
+        All <span class="tab-count">{{ tab_counts.all }}</span>
+    </a>
+    <a href="{% url 'dashboard:bug_review_list' %}?status=bug-review&sort={{ active_sort }}"
+       {% if active_status == 'bug-review' %}class="active" aria-current="true"{% endif %}>
+        New <span class="tab-count">{{ tab_counts.bug_review }}</span>
+    </a>
+    <a href="{% url 'dashboard:bug_review_list' %}?status=fixed&sort={{ active_sort }}"
+       {% if active_status == 'fixed' %}class="active" aria-current="true"{% endif %}>
+        Fixed <span class="tab-count">{{ tab_counts.fixed }}</span>
+    </a>
+    <a href="{% url 'dashboard:bug_review_list' %}?status=dismissed&sort={{ active_sort }}"
+       {% if active_status == 'dismissed' %}class="active" aria-current="true"{% endif %}>
+        Dismissed <span class="tab-count">{{ tab_counts.dismissed }}</span>
+    </a>
+</nav>
+
+{% if active_project %}
+<p style="font-size: 0.85rem; margin-bottom: 0.5rem;">
+    Filtered to <strong>{{ active_project }}</strong>.
+    <a href="{% url 'dashboard:bug_review_list' %}?sort={{ active_sort }}{% if active_status != 'all' %}&status={{ active_status|urlencode }}{% endif %}">Show all projects</a>
+</p>
+{% endif %}
+
+{% if bugs %}
+<table class="data-table">
+    <thead>
+        <tr>
+            <th>Title</th>
+            <th>Project</th>
+            <th>Category</th>
+            <th>Severity</th>
+            <th>File</th>
+            <th>Status</th>
+            <th>Found</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for bug in bugs %}
+        <tr>
+            <td><a href="{% url 'dashboard:bug_review_detail' bug.id %}">{{ bug.title }}</a></td>
+            <td><a href="{% url 'dashboard:bug_review_list' %}?project={{ bug.project.owner }}/{{ bug.project.repo }}">{{ bug.project.owner }}/{{ bug.project.repo }}</a></td>
+            <td>{{ bug.category }}</td>
+            <td>{{ bug.severity }}</td>
+            <td title="{{ bug.file_path }}">{{ bug.file_path|truncatechars:40 }}</td>
+            <td>{{ bug.status }}</td>
+            <td>{{ bug.created_at|date:"Y-m-d H:i" }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p>No bugs on this tab.</p>
+{% endif %}
+{% endblock %}

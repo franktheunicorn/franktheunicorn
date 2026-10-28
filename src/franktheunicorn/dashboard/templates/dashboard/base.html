@@ -25,6 +25,7 @@
             <a href="{% url 'dashboard:index' %}" {% if request.resolver_match.url_name == 'index' %}class="active"{% endif %}>Inbox</a>
             <a href="{% url 'dashboard:anti_patterns' %}" {% if request.resolver_match.url_name == 'anti_patterns' %}class="active"{% endif %}>Anti-Patterns</a>
             <a href="{% url 'dashboard:security_list' %}" {% if request.resolver_match.url_name|slice:":8" == 'security' %}class="active"{% endif %}>Security</a>
+            <a href="{% url 'dashboard:bug_review_list' %}" {% if request.resolver_match.url_name|slice:":9" == 'bug_review' %}class="active"{% endif %}>Bugs</a>
             <a href="{% url 'dashboard:stats' %}" {% if request.resolver_match.url_name == 'stats' %}class="active"{% endif %}>Stats</a>
             {% if workspaces and workspaces|length > 1 %}
             <form class="workspace-select" method="post" action="{% url 'dashboard:set_workspace' %}">

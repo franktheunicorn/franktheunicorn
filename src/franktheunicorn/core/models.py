@@ -2287,6 +2287,8 @@ class IntroducedScanRun(models.Model):
     #: How many findings the run filed (each a SecurityReport). 0 is a clean run,
     #: not a non-run — the run started and finished and found nothing.
     finding_count = models.IntegerField(default=0)
+    #: How many non-security bugs the run filed (each an IntroducedBug).
+    bug_count = models.IntegerField(default=0)
     #: How many of those were queued for exploit verification.
     verified_count = models.IntegerField(default=0)
     log = models.TextField(blank=True, default="")
@@ -2300,6 +2302,84 @@ class IntroducedScanRun(models.Model):
             f"IntroducedScanRun[{self.project}] {self.cadence} "
             f"{self.started_at:%Y-%m-%d %H:%M} findings={self.finding_count}"
         )
+
+
+class IntroducedBug(models.Model):
+    """A non-security bug found by the introduced-CVE scan, with a proposed patch.
+
+    The scan's agent reviews the diff for newly introduced vulnerabilities AND
+    non-security bugs — correctness, logic, performance, API misuse, resource
+    leaks. Security findings land as :class:`SecurityReport` rows (the existing
+    path); non-security bugs land here, in a separate "Bug Review" queue, so
+    the operator can triage them without them drowning the security backlog.
+
+    Each bug carries a ``proposed_patch`` the agent drafted alongside the
+    finding — the operator reviews the patch and decides whether to apply it,
+    the way they decide whether a security report is a real CVE. The status
+    cycle mirrors ``SecurityReport``: ``new`` → ``fixed`` / ``dismissed``, with
+    ``reviewed`` for "looked at, not acting on it right now".
+    """
+
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="introduced_bugs")
+    #: The scan run that filed this bug. Nullable for rows created outside a
+    #: scan (a manual import, a future CLI path).
+    scan_run = models.ForeignKey(
+        IntroducedScanRun,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="bugs",
+    )
+    #: The commit that introduced the bug (the scan range's HEAD or the
+    #: specific hunk the agent cited).
+    commit = models.CharField(max_length=40, blank=True, default="")
+    file_path = models.CharField(max_length=500, blank=True, default="")
+    line_start = models.IntegerField(null=True, blank=True)
+    line_end = models.IntegerField(null=True, blank=True)
+    #: correctness / performance / api-misuse / logic / resource-leak / other
+    category = models.CharField(max_length=30, default="other")
+    #: major / important / minor
+    severity = models.CharField(max_length=20, default="minor")
+    title = models.CharField(max_length=500)
+    description = models.TextField(blank=True, default="")
+    #: The draft fix the agent proposed — a code block or unified diff.
+    proposed_patch = models.TextField(blank=True, default="")
+    #: new / reviewed / fixed / dismissed
+    status = models.CharField(max_length=20, default="new")
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    objects: models.Manager[IntroducedBug] = models.Manager()
+
+    # Status values the operator can set.
+    STATUS_NEW = "new"
+    STATUS_REVIEWED = "reviewed"
+    STATUS_FIXED = "fixed"
+    STATUS_DISMISSED = "dismissed"
+    STATUS_CHOICES = (
+        (STATUS_NEW, "New"),
+        (STATUS_REVIEWED, "Reviewed"),
+        (STATUS_FIXED, "Fixed"),
+        (STATUS_DISMISSED, "Dismissed"),
+    )
+
+    #: The cross-cutting filter for the "Bug Review" queue tab: bugs the
+    #: operator hasn't triaged yet. The key is the status value, so the tab's
+    #: ``?status=`` URL reads as ``?status=bug-review``.
+    BUG_REVIEW_FILTER = "bug-review"
+
+    @classmethod
+    def list_filters(cls) -> set[str]:
+        """Every legal value of the bug list page's ``?status=`` parameter."""
+        return {key for key, _ in cls.STATUS_CHOICES} | {cls.BUG_REVIEW_FILTER}
+
+    @staticmethod
+    def bug_review_q() -> Q:
+        """The worklist: bugs still awaiting the operator's first look."""
+        return Q(status="new")
+
+    def __str__(self) -> str:
+        return f"IntroducedBug[{self.project}] {self.title[:60]} ({self.status})"
 
 
 class TentativeCveMatch(models.Model):

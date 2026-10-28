@@ -52,7 +52,7 @@ if TYPE_CHECKING:
         OperatorConfig,
         ProjectConfig,
     )
-    from franktheunicorn.core.models import Project
+    from franktheunicorn.core.models import IntroducedBug, Project
     from franktheunicorn.review.tool_executor import ToolExecutor
 
 logger = logging.getLogger(__name__)
@@ -85,10 +85,14 @@ class IntroducedScanResult:
     commit: str = ""
     agent: str = ""
     duration_seconds: float = 0.0
-    #: Parsed findings the agent reported.
+    #: Parsed security findings the agent reported.
     findings: list[dict[str, Any]] = field(default_factory=list)
+    #: Parsed non-security bugs the agent reported.
+    bugs: list[dict[str, Any]] = field(default_factory=list)
     #: How many findings were filed as SecurityReport rows.
     finding_count: int = 0
+    #: How many non-security bugs were filed as IntroducedBug rows.
+    bug_count: int = 0
     #: How many of those were queued for exploit verification.
     verified_count: int = 0
     raw_output: str = ""
@@ -97,9 +101,10 @@ class IntroducedScanResult:
         """One line for the worker log and ``IntroducedScanRun.log``."""
         if self.error:
             return f"introduced scan: did not run — {self.error}"
+        bugs = f", {self.bug_count} bug(s) filed" if self.bug_count else ""
         return (
             f"introduced scan ({self.cadence}, {self.commit_range}): "
-            f"{self.finding_count} finding(s) filed, {self.verified_count} queued for verify"
+            f"{self.finding_count} finding(s) filed, {self.verified_count} queued for verify{bugs}"
         )
 
 
@@ -183,6 +188,7 @@ def scan_project_for_introduced_cves(
         run_row.cadence = res.cadence
         run_row.commit_range = res.commit_range
         run_row.finding_count = res.finding_count
+        run_row.bug_count = res.bug_count
         run_row.verified_count = res.verified_count
         run_row.log = res.summary()
         run_row.error = res.error
@@ -254,6 +260,9 @@ def scan_project_for_introduced_cves(
         or "(none yet — build it with manage.py build_review_guidance)"
     )
     magpie_skills = skills_block_for_project(project, inject_into="security")
+    from franktheunicorn.security.introduced_scan_prompt import BUG_SECTION, BUG_SECTION_OFF
+
+    bug_section = BUG_SECTION if config.detect_bugs else BUG_SECTION_OFF
     prompt = _build_prompt(
         project=project.full_name,
         branch=branch,
@@ -265,6 +274,7 @@ def scan_project_for_introduced_cves(
         diff=diff,
         magpie_skills=magpie_skills,
         addendum=config.prompt_addendum,
+        bug_section=bug_section,
     )
 
     started = time.monotonic()
@@ -320,9 +330,11 @@ def scan_project_for_introduced_cves(
             project.full_name,
         )
         result.findings = []
+        result.bugs = []
         result.raw_output = run_result.stdout[:20_000]
     else:
-        result.findings = parsed
+        result.findings = parsed.get("findings", []) if isinstance(parsed, dict) else []
+        result.bugs = parsed.get("bugs", []) if isinstance(parsed, dict) else []
 
     from franktheunicorn.security.queue import queue_exploit_verification
 
@@ -342,6 +354,13 @@ def scan_project_for_introduced_cves(
             )
     result.finding_count = filed
     result.verified_count = verified
+
+    bugs_filed = 0
+    if config.detect_bugs:
+        for bug in result.bugs[: config.max_bugs]:
+            if _file_bug(bug, project, run_row, result.commit) is not None:
+                bugs_filed += 1
+    result.bug_count = bugs_filed
     logger.info("Introduced scan for %s: %s", project.full_name, result.summary())
     return _finish(result)
 
@@ -455,6 +474,7 @@ def _build_prompt(
     diff: str,
     magpie_skills: str,
     addendum: str,
+    bug_section: str = "",
 ) -> str:
     addendum_block = ""
     if addendum:
@@ -470,6 +490,7 @@ def _build_prompt(
         diff=diff,
         magpie_skills=magpie_skills,
         addendum=addendum_block,
+        bug_section=bug_section,
     )
 
 
@@ -493,12 +514,13 @@ def _invocation(
     return borrowed.build_invocation(prompt)
 
 
-def _parse_findings(output: str) -> list[dict[str, Any]] | None:
+def _parse_findings(output: str) -> dict[str, Any] | None:
     """The JSON object the agent was asked for, or None when no JSON is found.
 
-    Lenient like the siblings' parsers: a model told to emit only JSON will still
-    wrap it in prose. None rather than an empty list so an unparseable answer
-    is distinguishable from a clean "no findings" run.
+    Returns the full parsed dict (with ``findings`` and ``bugs`` keys) so the
+    caller can pull both lists. Lenient like the siblings' parsers: a model
+    told to emit only JSON will still wrap it in prose. None rather than an
+    empty dict so an unparseable answer is distinguishable from a clean run.
     """
     import json
 
@@ -510,9 +532,18 @@ def _parse_findings(output: str) -> list[dict[str, Any]] | None:
         except (json.JSONDecodeError, ValueError):
             continue
         if isinstance(candidate, dict) and "findings" in candidate:
-            findings = candidate["findings"]
+            # Filter non-dict entries from both lists, the way the old parser did.
+            findings = candidate.get("findings", [])
             if isinstance(findings, list):
-                return [f for f in findings if isinstance(f, dict)]
+                candidate["findings"] = [f for f in findings if isinstance(f, dict)]
+            else:
+                candidate["findings"] = []
+            bugs = candidate.get("bugs", [])
+            if isinstance(bugs, list):
+                candidate["bugs"] = [b for b in bugs if isinstance(b, dict)]
+            else:
+                candidate["bugs"] = []
+            return candidate
     return None
 
 
@@ -560,3 +591,43 @@ def _file_finding(
         raw_text=body,
     )
     return report
+
+
+def _file_bug(
+    bug: dict[str, Any],
+    project: Project,
+    run_row: IntroducedScanRun,
+    commit: str,
+) -> IntroducedBug | None:
+    """File one non-security bug as an IntroducedBug with a proposed patch.
+
+    Returns the bug, or None when the bug had no title. Dedup is left to the
+    operator — a re-scan over the same range will file again.
+    """
+    from franktheunicorn.core.models import IntroducedBug
+
+    title = str(bug.get("title", "")).strip()
+    if not title:
+        return None
+    category = str(bug.get("category", "")).strip().lower() or "other"
+    severity = str(bug.get("severity", "")).strip().lower() or "minor"
+    file_path = str(bug.get("file_path", "")).strip()[:500]
+    line_start = bug.get("line_start")
+    line_end = bug.get("line_end")
+    description = str(bug.get("description", "")).strip()
+    proposed_patch = str(bug.get("proposed_patch", "")).strip()
+    row = IntroducedBug.objects.create(
+        project=project,
+        scan_run=run_row,
+        commit=commit[:40],
+        file_path=file_path,
+        line_start=int(line_start) if isinstance(line_start, (int, float)) else None,
+        line_end=int(line_end) if isinstance(line_end, (int, float)) else None,
+        category=category[:30],
+        severity=severity[:20],
+        title=title[:500],
+        description=description,
+        proposed_patch=proposed_patch,
+        status="new",
+    )
+    return row

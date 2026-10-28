@@ -1,0 +1,51 @@
+{% extends "dashboard/base.html" %}
+{% block title %}{{ bug.title }} — Bug Review{% endblock %}
+{% block content %}
+<h2>{{ bug.title }}</h2>
+<p style="font-size: 0.85rem; color: var(--muted); margin-bottom: 1rem;">
+    <a href="{% url 'dashboard:bug_review_list' %}?project={{ bug.project.owner }}/{{ bug.project.repo }}">{{ bug.project.owner }}/{{ bug.project.repo }}</a>
+    · {{ bug.category }} · {{ bug.severity }} · {{ bug.status }}
+</p>
+
+{% if bug.scan_run %}
+<p style="font-size: 0.85rem; color: var(--muted); margin-bottom: 1rem;">
+    Found by the introduced-CVE scan ({{ bug.scan_run.cadence }}, {{ bug.scan_run.commit_range }}).
+</p>
+{% endif %}
+
+{% if bug.file_path %}
+<p><strong>File:</strong> <code>{{ bug.file_path }}</code>
+{% if bug.line_start %} (L{{ bug.line_start }}{% if bug.line_end and bug.line_end != bug.line_start %}–{{ bug.line_end }}{% endif %}){% endif %}
+</p>
+{% endif %}
+
+{% if bug.commit %}
+<p><strong>Commit:</strong> <code>{{ bug.commit }}</code></p>
+{% endif %}
+
+{% if bug.description %}
+<h3>Description</h3>
+<p>{{ bug.description|linebreaksbr }}</p>
+{% endif %}
+
+{% if bug.proposed_patch %}
+<h3>Proposed Patch</h3>
+<pre class="code-block">{{ bug.proposed_patch }}</pre>
+{% endif %}
+
+<div class="actions" style="margin-top: 1.5rem;">
+    {% if bug.status != 'fixed' %}
+    <form method="post" action="{% url 'dashboard:bug_review_fix' bug.id %}" style="display: inline;">
+        {% csrf_token %}
+        <button type="submit" class="action-btn">Mark Fixed</button>
+    </form>
+    {% endif %}
+    {% if bug.status != 'dismissed' %}
+    <form method="post" action="{% url 'dashboard:bug_review_dismiss' bug.id %}" style="display: inline;">
+        {% csrf_token %}
+        <button type="submit" class="action-btn" style="background: var(--muted);">Dismiss</button>
+    </form>
+    {% endif %}
+    <a href="{% url 'dashboard:bug_review_list' %}" class="action-btn" style="background: var(--muted);">Back</a>
+</div>
+{% endblock %}

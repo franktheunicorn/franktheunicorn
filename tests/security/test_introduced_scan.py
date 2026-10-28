@@ -234,10 +234,14 @@ class TestIsDue:
 class TestParseFindings:
     def test_happy_list(self) -> None:
         out = json.dumps({"findings": [{"title": "X", "severity": "high"}]})
-        assert _parse_findings(out) == [{"title": "X", "severity": "high"}]
+        parsed = _parse_findings(out)
+        assert isinstance(parsed, dict)
+        assert parsed["findings"] == [{"title": "X", "severity": "high"}]
 
     def test_empty_list_is_a_clean_run(self) -> None:
-        assert _parse_findings(json.dumps({"findings": []})) == []
+        parsed = _parse_findings(json.dumps({"findings": []}))
+        assert isinstance(parsed, dict)
+        assert parsed["findings"] == []
 
     def test_no_json_is_none(self) -> None:
         assert _parse_findings("I had a look, nothing to report.") is None
@@ -247,11 +251,18 @@ class TestParseFindings:
 
     def test_non_dict_entries_are_dropped(self) -> None:
         out = json.dumps({"findings": [{"title": "X"}, "not a dict", None]})
-        assert _parse_findings(out) == [{"title": "X"}]
+        parsed = _parse_findings(out)
+        assert parsed["findings"] == [{"title": "X"}]
 
     def test_json_wrapped_in_prose_is_taken(self) -> None:
         wrapped = 'Here:\n{"findings": [{"title": "Y"}]}\nDone.'
-        assert _parse_findings(wrapped) == [{"title": "Y"}]
+        parsed = _parse_findings(wrapped)
+        assert parsed["findings"] == [{"title": "Y"}]
+
+    def test_bugs_key_is_preserved(self) -> None:
+        out = json.dumps({"findings": [], "bugs": [{"title": "B"}]})
+        parsed = _parse_findings(out)
+        assert parsed["bugs"] == [{"title": "B"}]
 
 
 @pytest.mark.django_db
@@ -807,4 +818,96 @@ class TestEdgeBranches:
 def test_parse_findings_skips_malformed_json() -> None:
     """A blob that isn't valid JSON is skipped, not fatal — the next candidate wins."""
     out = 'Here you go:\n```json\n{not valid}\n```\n```json\n{"findings": []}\n```'
-    assert _parse_findings(out) == []
+    parsed = _parse_findings(out)
+    assert isinstance(parsed, dict)
+    assert parsed.get("findings") == []
+
+
+@pytest.mark.django_db
+class TestBugDetection:
+    """The scan also classifies non-security bugs and proposes patches."""
+
+    def test_bugs_are_filed_as_introduced_bugs(self) -> None:
+        agent_json = json.dumps(
+            {
+                "findings": [],
+                "bugs": [
+                    {
+                        "title": "Off-by-one in loop bound",
+                        "category": "correctness",
+                        "severity": "important",
+                        "file_path": "src/main/loop.py",
+                        "line_start": 42,
+                        "line_end": 45,
+                        "description": "The loop runs one iteration too few.",
+                        "proposed_patch": "- for i in range(n):\n+ for i in range(n + 1):",
+                    }
+                ],
+            }
+        )
+        result, _executor, project, _q = TestAgentRun._run_scan(self, agent_json)
+        assert result.error == ""
+        assert result.bug_count == 1
+        from franktheunicorn.core.models import IntroducedBug
+
+        bug = IntroducedBug.objects.get(project=project)
+        assert bug.title == "Off-by-one in loop bound"
+        assert bug.category == "correctness"
+        assert bug.severity == "important"
+        assert bug.file_path == "src/main/loop.py"
+        assert bug.line_start == 42
+        assert bug.line_end == 45
+        assert "loop runs one iteration too few" in bug.description
+        assert "range(n + 1)" in bug.proposed_patch
+        assert bug.status == "new"
+        assert bug.scan_run is not None
+
+    def test_detect_bugs_off_skips_bug_filing(self) -> None:
+        agent_json = json.dumps({"findings": [], "bugs": [{"title": "bug", "category": "logic"}]})
+        scan = _scan(detect_bugs=False)
+        result, _executor, project, _q = TestAgentRun._run_scan(self, agent_json, scan=scan)
+        assert result.error == ""
+        assert result.bug_count == 0
+        from franktheunicorn.core.models import IntroducedBug
+
+        assert not IntroducedBug.objects.filter(project=project).exists()
+
+    def test_max_bugs_caps_filing(self) -> None:
+        bugs = [{"title": f"bug {i}", "category": "correctness"} for i in range(5)]
+        agent_json = json.dumps({"findings": [], "bugs": bugs})
+        scan = _scan(max_bugs=2)
+        result, _executor, _project, _q = TestAgentRun._run_scan(self, agent_json, scan=scan)
+        assert result.bug_count == 2
+
+    def test_bug_with_no_title_is_skipped(self) -> None:
+        agent_json = json.dumps({"findings": [], "bugs": [{"title": "", "category": "logic"}]})
+        result, _executor, _project, _q = TestAgentRun._run_scan(self, agent_json)
+        assert result.bug_count == 0
+
+    def test_both_findings_and_bugs_filed(self) -> None:
+        agent_json = json.dumps(
+            {
+                "findings": [{"title": "RCE via eval", "severity": "critical", "description": "d"}],
+                "bugs": [
+                    {"title": "Missing null check", "category": "correctness", "severity": "minor"}
+                ],
+            }
+        )
+        result, _executor, project, _q = TestAgentRun._run_scan(self, agent_json)
+        assert result.error == ""
+        assert result.finding_count == 1
+        assert result.bug_count == 1
+        from franktheunicorn.core.models import IntroducedBug
+
+        assert SecurityReport.objects.filter(project=project, source="introduced-scan").count() == 1
+        assert IntroducedBug.objects.filter(project=project).count() == 1
+
+    def test_summary_includes_bug_count(self) -> None:
+        agent_json = json.dumps({"findings": [], "bugs": [{"title": "bug", "category": "logic"}]})
+        result, _executor, _project, _q = TestAgentRun._run_scan(self, agent_json)
+        assert "1 bug(s) filed" in result.summary()
+
+    def test_no_bugs_in_summary_when_zero(self) -> None:
+        agent_json = json.dumps({"findings": [], "bugs": []})
+        result, _executor, _project, _q = TestAgentRun._run_scan(self, agent_json)
+        assert "bug" not in result.summary()

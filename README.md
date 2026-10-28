@@ -252,6 +252,29 @@ The stored guidance (one active row per project) is read automatically by
 the introduced-CVE scan — no wiring needed. Re-run the command to refresh it
 as new CVEs are filed and dated.
 
+### Non-security bug detection
+
+The introduced-CVE scan also classifies non-security bugs — correctness,
+logic, performance, API misuse, resource leaks — that the same diff introduces,
+and proposes a patch for each. The agent is already reviewing the diff, so
+asking it to also note non-security bugs and draft a fix is marginal extra
+output, not a second call. Bugs land in a separate **Bug Review** queue
+(`/bugs/` on the dashboard) so they don't drown the security triage backlog.
+Each bug carries the file, line range, category, severity, description, and
+a proposed patch the operator can review and apply or dismiss.
+
+```yaml
+# config/active/projects/apache-spark.yaml
+introduced_scan:
+  enabled: true
+  cadence: daily
+  detect_bugs: true   # on by default — the agent run is the same, the bugs are extra JSON
+  max_bugs: 20         # cap on non-security bugs filed per run
+```
+
+Turn `detect_bugs` off to file security findings only. The Bug Review queue
+is at `http://localhost:7742/bugs/` — tabs for New, Fixed, Dismissed, and All.
+
 ## Documentation
 
 - **[Install Guide](docs/install.md)** — full setup, project configuration, and workspace setup
