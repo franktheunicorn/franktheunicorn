@@ -219,6 +219,13 @@ class PullRequest(models.Model):
     # until the author pushes again — the dismissal is about this code, not
     # the PR forever. The reason goes to MergeReadinessFeedback for learning.
     merge_readiness_dismissed_sha = models.CharField(max_length=64, blank=True, default="")
+    # The cheap "is this close to mergeable?" pass (review/mergeability.py) that
+    # gates the full review under auto_review_policy: triage. Verdict is
+    # "likely-mergeable" / "needs-work" / "unclear", for mergeability_sha only;
+    # detail carries summary, suggestion, touches_area and which backend answered.
+    mergeability_verdict = models.CharField(max_length=20, blank=True, default="")
+    mergeability_sha = models.CharField(max_length=64, blank=True, default="")
+    mergeability_detail = models.JSONField(default=dict, blank=True)
     # "Ask the author to rebase" bookkeeping: the head it was asked on, when,
     # and which checks were failing. When the head moves, the poller looks at
     # those checks again — green now is a confirmed flake, still red is a real

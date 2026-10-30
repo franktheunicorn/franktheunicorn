@@ -37,11 +37,16 @@ from franktheunicorn.config.models import (
     RemoteExecutionConfig,
 )
 from franktheunicorn.core.models import PullRequest
-from franktheunicorn.review.agent_cli import AgentCLIRunError, run_agent_cli_review
+from franktheunicorn.review.agent_cli import (
+    AgentCLIRunError,
+    AgentCLIUsageLimitError,
+    run_agent_cli_review,
+)
 from franktheunicorn.review.tool_executor import ExecResult, RemoteSSHExecutor
 from franktheunicorn.worker.runner import (
     _check_agent_cli_reviewers,
     _run_agent_cli_for_pr,
+    expected_review_sources,
     resolve_agent_cli_reviewers,
 )
 
@@ -818,6 +823,38 @@ class TestReviewerOutcomeLines:
         db_pr.refresh_from_db()
         assert db_pr.agent_runs["claude"]["status"] == "merge-conflict"
 
+    def test_out_of_usage_is_not_recorded_as_a_turn(self, db_pr: PullRequest) -> None:
+        """A recorded failure is never retried; this one should be once usage is back."""
+        from franktheunicorn.worker.runner import _REMOTE
+
+        with (
+            patch(
+                "franktheunicorn.worker.runner._resolve_cwd_for_tool",
+                return_value=("/remote/spark", "origin/master", _REMOTE),
+            ),
+            patch(
+                "franktheunicorn.review.agent_cli.run_agent_cli_review",
+                side_effect=AgentCLIUsageLimitError("claude is out of usage"),
+            ),
+        ):
+            outcome = _run_agent_cli_for_pr(
+                db_pr,
+                _ssh_reviewer(),
+                repo_path=None,
+                clone_url="https://example.com/a/b.git",
+                project_config=ProjectConfig(owner="apache", repo="spark"),
+            )
+
+        assert outcome.startswith("paused")
+        db_pr.refresh_from_db()
+        assert "claude" not in (db_pr.agent_runs or {})
+
+    def test_a_paused_reviewer_is_not_owed(self) -> None:
+        oc = OperatorConfig(agent_cli_reviewers=[_ssh_reviewer()])
+        assert "claude" in expected_review_sources(oc)
+        with patch("franktheunicorn.review.agent_cli.usage_paused", return_value=True):
+            assert "claude" not in expected_review_sources(oc)
+
     def test_a_general_reviewer_gets_project_guidance(self, db_pr: PullRequest) -> None:
         """The security branch used to be the only one that saw review_guidance."""
         from franktheunicorn.worker.runner import _REMOTE
@@ -954,3 +991,99 @@ class TestReadOnlyStartupLine:
             _check_agent_cli_reviewers(oc)
         warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
         assert any("without read-only flags" in r.getMessage() for r in warnings)
+
+
+@pytest.mark.django_db
+class TestUsageLimitFallback:
+    """While cursor is out of usage its turn goes to a fallback, once per PR."""
+
+    def _oc(self) -> OperatorConfig:
+        oc = OperatorConfig(
+            agent_cli_reviewers=[
+                AgentCLIReviewerConfig(name="cursor-agent", fallback=["coco", "codex-lmao"]),
+                AgentCLIReviewerConfig(
+                    name="cursor-agent-grok", cli_path="cursor-agent", fallback=["coco"]
+                ),
+                AgentCLIReviewerConfig(name="coco", cli_path="cortex", enabled=False),
+                AgentCLIReviewerConfig(name="codex-lmao", cli_path="codex", enabled=False),
+            ]
+        )
+        return oc
+
+    def _turns(
+        self, db_pr: PullRequest, paused: set[str], status: str = "ok"
+    ) -> tuple[list[str], list[str]]:
+        from franktheunicorn.worker.runner import _take_agent_cli_turn, record_agent_run
+
+        oc = self._oc()
+        ran_names: list[str] = []
+        ran: dict[str, str] = {}
+        outcomes = []
+
+        def _run(rc: AgentCLIReviewerConfig) -> str:
+            ran_names.append(rc.name)
+            record_agent_run(db_pr, rc.name, status=status)
+            return status
+
+        with patch(
+            "franktheunicorn.review.agent_cli.usage_paused",
+            side_effect=lambda rc: rc.cli_path in paused,
+        ):
+            for reviewer in oc.agent_cli_reviewers[:2]:
+                outcomes.append(
+                    _take_agent_cli_turn(
+                        db_pr,
+                        reviewer,
+                        oc,
+                        force=False,
+                        run=_run,
+                        ran=ran,
+                        log=lambda _m: None,
+                    )
+                )
+        return ran_names, outcomes
+
+    def test_one_fallback_run_covers_every_paused_reviewer(self, db_pr: PullRequest) -> None:
+        ran, outcomes = self._turns(db_pr, {"cursor-agent"})
+        assert ran == ["coco"]
+        assert all(o.startswith("paused; coco took its turn") for o in outcomes)
+        db_pr.refresh_from_db()
+        assert db_pr.agent_runs["cursor-agent"]["status"] == "fallback:coco"
+        assert db_pr.agent_runs["cursor-agent-grok"]["status"] == "fallback:coco"
+
+    def test_a_failed_fallback_does_not_cover(self, db_pr: PullRequest) -> None:
+        ran, _ = self._turns(db_pr, {"cursor-agent"}, status="no-checkout")
+        assert ran == ["coco", "codex-lmao"]
+        db_pr.refresh_from_db()
+        assert "cursor-agent" not in db_pr.agent_runs
+
+    def test_a_fallback_that_reviewed_this_head_is_not_rerun(self, db_pr: PullRequest) -> None:
+        from franktheunicorn.worker.runner import record_agent_run
+
+        record_agent_run(db_pr, "coco", status="ok")
+        ran, outcomes = self._turns(db_pr, {"cursor-agent"})
+        assert ran == []
+        assert outcomes[0].startswith("paused; coco took its turn")
+
+    def test_the_next_fallback_when_the_first_is_paused_too(self, db_pr: PullRequest) -> None:
+        ran, outcomes = self._turns(db_pr, {"cursor-agent", "cortex"})
+        assert ran == ["codex-lmao"]
+        assert outcomes[1].startswith("paused: its CLI hit a usage limit")
+
+    def test_owed_while_a_fallback_is_free(self) -> None:
+        oc = self._oc()
+        oc._resolved_agent_cli_reviewers = oc.agent_cli_reviewers[:2]
+        with patch(
+            "franktheunicorn.review.agent_cli.usage_paused",
+            side_effect=lambda rc: rc.cli_path in {"cursor-agent", "cortex"},
+        ):
+            sources = expected_review_sources(oc)
+        assert "cursor-agent" in sources
+        assert "cursor-agent-grok" not in sources
+
+    def test_an_uninstalled_auto_fallback_is_not_a_fallback(self) -> None:
+        from franktheunicorn.worker.runner import _fallbacks
+
+        primary = AgentCLIReviewerConfig(name="cursor-agent", fallback=["ghost"])
+        oc = OperatorConfig(agent_cli_reviewers=[primary, AgentCLIReviewerConfig(name="ghost")])
+        assert _fallbacks(primary, oc) == []

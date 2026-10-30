@@ -697,6 +697,15 @@ def _check_agent_cli_reviewers(operator_config: OperatorConfig) -> None:
         logger.info("Agent CLI reviewers: (none configured)")
         return
 
+    names = {rc.name for rc in operator_config.agent_cli_reviewers}
+    for rc in operator_config.agent_cli_reviewers:
+        if unknown := [n for n in rc.fallback if n not in names]:
+            logger.warning("Agent CLI %r: fallback names no reviewer: %s", rc.name, unknown)
+    if unknown := [
+        n for n in operator_config.mergeability_triage.backends if n != "llm" and n not in names
+    ]:
+        logger.warning("mergeability_triage.backends names no reviewer: %s", unknown)
+
     for rc in operator_config.agent_cli_reviewers:
         where = "ssh" if rc.remote.mode == "ssh" else "local"
         if rc.name not in resolved_names:
@@ -746,7 +755,7 @@ def _check_agent_cli_reviewers(operator_config: OperatorConfig) -> None:
 
 #: Binaries frank ships read-only flags for; an entry for one of them with empty
 #: ``readonly_args`` has had them overridden away, which the startup check names.
-_READONLY_SEEDED_BINARIES = frozenset({"claude", "codex", "cursor-agent", "pi"})
+_READONLY_SEEDED_BINARIES = frozenset({"claude", "codex", "cortex", "cursor-agent", "pi"})
 
 #: Echoed through the remote command path to prove a command actually ran there.
 _REMOTE_PROBE_SENTINEL = "frank-remote-ok"
@@ -1018,12 +1027,79 @@ def expected_review_sources(operator_config: OperatorConfig | None) -> set[str]:
     sources = {LLM_REVIEW_SOURCE}
     if operator_config is None:
         return sources
-    sources |= {rc.name for rc in resolve_agent_cli_reviewers(operator_config)}
+    from franktheunicorn.review.agent_cli import usage_paused
+
+    # A paused reviewer with no free fallback isn't owed a turn yet; leaving it out
+    # keeps the backfill from re-preparing every PR each cycle just to skip it.
+    sources |= {
+        rc.name
+        for rc in resolve_agent_cli_reviewers(operator_config)
+        if not all(usage_paused(c) for c in [rc, *_fallbacks(rc, operator_config)])
+    }
     if operator_config.coderabbit.enabled:
         sources.add("coderabbit")
     if operator_config.snowflake_review.enabled:
         sources.add("snowflake")
     return sources
+
+
+def _fallbacks(
+    reviewer: AgentCLIReviewerConfig, operator_config: OperatorConfig
+) -> list[AgentCLIReviewerConfig]:
+    by_name = {rc.name: rc for rc in operator_config.agent_cli_reviewers}
+    return [
+        rc
+        for rc in (by_name[n] for n in reviewer.fallback if n in by_name)
+        # enabled: auto means "if installed", for a fallback as for anything else.
+        if rc.enabled != "auto" or rc.remote.mode == "ssh" or _agent_cli_available_locally(rc)
+    ]
+
+
+def _take_agent_cli_turn(
+    pr: PullRequest,
+    reviewer: AgentCLIReviewerConfig,
+    operator_config: OperatorConfig | None,
+    *,
+    force: bool,
+    run: Callable[[AgentCLIReviewerConfig], str],
+    ran: dict[str, str],
+    log: Callable[[str], None],
+) -> str:
+    """Run *reviewer*, or while it's usage-paused its first free fallback.
+
+    *ran* is this PR's runs so far: three paused cursor entries naming coco cost one
+    coco run, and the rest are recorded as covered by it so they aren't owed again.
+    """
+    from franktheunicorn.review.agent_cli import usage_paused
+
+    if reviewer.name in ran:
+        return f"already ran on this PR ({ran[reviewer.name]})"
+    if force or not usage_paused(reviewer):
+        log(f"Running {reviewer.name} agent CLI review...")
+        ran[reviewer.name] = run(reviewer)
+        if not usage_paused(reviewer):
+            return ran[reviewer.name]
+    for fallback in _fallbacks(reviewer, operator_config) if operator_config else []:
+        if usage_paused(fallback):
+            continue
+        # A fallback that already reviewed this head isn't run again: drafts would double.
+        if fallback.name not in ran and not _reviewed_this_head(pr, fallback.name):
+            log(f"{reviewer.name} is paused on a usage limit; running {fallback.name}...")
+            ran[fallback.name] = run(fallback)
+        if not _reviewed_this_head(pr, fallback.name):
+            continue
+        record_agent_run(pr, reviewer.name, status=f"fallback:{fallback.name}")
+        return f"paused; {fallback.name} took its turn ({ran.get(fallback.name, 'earlier')})"
+    return "paused: its CLI hit a usage limit and no fallback reviewed it"
+
+
+def _reviewed_this_head(pr: PullRequest, source: str) -> bool:
+    info = (pr.agent_runs or {}).get(source)
+    return (
+        isinstance(info, dict)
+        and info.get("status") == "ok"
+        and _run_matches_head(info, pr.head_sha or "", re_review=True)
+    )
 
 
 def record_agent_run(pr: PullRequest, source: str, *, status: str, findings: int = 0) -> None:
@@ -1163,6 +1239,19 @@ def review_skip_reason(
             f"Set auto_review_policy: all (or mentioned_or_authored) to change that.",
         )
     operator_username = operator_config.github_username if operator_config else ""
+    if policy == "triage":
+        from franktheunicorn.review.mergeability import current_triage, interest_reason
+
+        triage = current_triage(pr)
+        if (
+            triage is not None
+            and not triage.wants_full_review
+            and not interest_reason(pr, pc, operator_username)
+        ):
+            return ReviewSkip(
+                "triage-not-mergeable",
+                f"Mergeability triage ({triage.source}) said {triage.verdict}: {triage.summary}",
+            )
     if policy == "mentioned_or_authored" and not _should_auto_review(pr, operator_username):
         return ReviewSkip(
             "not-involved",
@@ -1170,6 +1259,12 @@ def review_skip_reason(
             f"is not the author, a requested reviewer, an assignee, or @-mentioned. "
             f"Set auto_review_policy: all to review every PR.",
         )
+    from franktheunicorn.core.models import PullRequest as PullRequestModel
+
+    # Last, so only a PR about to be reviewed pays the query. The row, not *pr*: a
+    # mid-cycle reap may have closed it since *pr* was read.
+    if pr.pk and not PullRequestModel.objects.filter(pk=pr.pk, state="open").exists():
+        return ReviewSkip("closed", "It was closed or merged upstream.")
     # policy == "all" falls through to the full pipeline.
     return None
 
@@ -1252,6 +1347,75 @@ def process_pr(
             decisions["ran"] += 1
         _log(f"Starting agent run for PR #{pr.number}: {pr.title}")
 
+        # Fetch the PR's real unified diff for the LLM pipeline. Without it,
+        # draft_review falls back to a filename-only placeholder and the
+        # backends never see the actual changes. Failure degrades gracefully
+        # to that placeholder.
+        #
+        # Prefer the project's own ForgeClient: it targets the *configured*
+        # forge (GitHub, GHE, GitLab, Gitea) with the right auth, so we get a
+        # real diff on every forge and never accidentally read a same-named
+        # public-GitHub repo. Only when no client is supplied (direct/legacy
+        # callers) do we fall back to the public-GitHub dual-path DiffFetcher.
+        pr_diff = ""
+        try:
+            if forge_client is not None:
+                _log("Fetching PR diff via forge client...")
+                pr_diff = forge_client.get_pull_request_diff(pc.owner, pc.repo, pr.number)
+            else:
+                from franktheunicorn.data_access.github.diff_fetcher import DiffFetcher
+
+                _log("Fetching PR diff...")
+                pr_diff = DiffFetcher(client=diff_http).fetch(pc.owner, pc.repo, pr.number).raw_diff
+        except Exception:
+            logger.debug(
+                "Diff fetch failed for PR #%d; using changed-files placeholder.",
+                pr.number,
+                exc_info=True,
+            )
+
+        effective_config = operator_config
+        if disabled_backends and operator_config is not None:
+            active = [
+                bc
+                for i, bc in enumerate(operator_config.llm_backends)
+                if i not in disabled_backends
+            ]
+            effective_config = operator_config.model_copy(update={"llm_backends": active})
+
+        # Before the external context: a PR the triage turns away needs only the diff.
+        if getattr(pc, "auto_review_policy", "") == "triage" and effective_config is not None:
+            from franktheunicorn.review.mergeability import (
+                current_triage,
+                interest_reason,
+                record_triage,
+                run_triage,
+            )
+
+            triage = current_triage(pr)
+            # No diff, no triage: an empty-diff "unclear" would stick to this head.
+            if triage is None and pr_diff:
+                triage = run_triage(pr, pc, effective_config, pr_diff)
+                if triage is not None:
+                    record_triage(pr, triage)
+                    line = (
+                        f"Mergeability triage ({triage.source}): {triage.verdict}: {triage.summary}"
+                    )
+                    # INFO only for the ones that go on: the rest are most PRs, every push.
+                    if triage.wants_full_review:
+                        _log(line)
+                    else:
+                        logger.debug("PR #%d: %s", pr.number, line)
+            why = interest_reason(pr, pc, effective_config.github_username)
+            if not force and not why and (triage is None or not triage.wants_full_review):
+                if decisions is not None:
+                    decisions["ran"] -= 1
+                    decisions[
+                        "triage-unavailable" if triage is None else "triage-not-mergeable"
+                    ] += 1
+                logger.debug("PR #%d: no full review; triage %s", pr.number, triage)
+                return []
+
         community_ctx = ""
         jira_ctx = ""
         sentry_ctx = ""
@@ -1308,42 +1472,6 @@ def process_pr(
 
         health_ctx = _build_repo_health_context(pr)
 
-        effective_config = operator_config
-        if disabled_backends and operator_config is not None:
-            active = [
-                bc
-                for i, bc in enumerate(operator_config.llm_backends)
-                if i not in disabled_backends
-            ]
-            effective_config = operator_config.model_copy(update={"llm_backends": active})
-
-        # Fetch the PR's real unified diff for the LLM pipeline. Without it,
-        # draft_review falls back to a filename-only placeholder and the
-        # backends never see the actual changes. Failure degrades gracefully
-        # to that placeholder.
-        #
-        # Prefer the project's own ForgeClient: it targets the *configured*
-        # forge (GitHub, GHE, GitLab, Gitea) with the right auth, so we get a
-        # real diff on every forge and never accidentally read a same-named
-        # public-GitHub repo. Only when no client is supplied (direct/legacy
-        # callers) do we fall back to the public-GitHub dual-path DiffFetcher.
-        pr_diff = ""
-        try:
-            if forge_client is not None:
-                _log("Fetching PR diff via forge client...")
-                pr_diff = forge_client.get_pull_request_diff(pc.owner, pc.repo, pr.number)
-            else:
-                from franktheunicorn.data_access.github.diff_fetcher import DiffFetcher
-
-                _log("Fetching PR diff...")
-                pr_diff = DiffFetcher(client=diff_http).fetch(pc.owner, pc.repo, pr.number).raw_diff
-        except Exception:
-            logger.debug(
-                "Diff fetch failed for PR #%d; using changed-files placeholder.",
-                pr.number,
-                exc_info=True,
-            )
-
         from franktheunicorn.review.prior_comments import fetch_prior_comments
 
         prior_comments = fetch_prior_comments(forge_client, pc.owner, pc.repo, pr.number)
@@ -1361,11 +1489,12 @@ def process_pr(
         #
         # force bypasses it: "Force Run Agents" means redo the lot.
         drafts: list[ReviewDraft] = []
-        if force or LLM_REVIEW_SOURCE in missing_review_sources(
+        owed = missing_review_sources(
             pr,
             operator_config,
             review_activity_days=getattr(pc, "review_activity_days", 30),
-        ):
+        )
+        if force or LLM_REVIEW_SOURCE in owed:
             _log("Running LLM review pipeline...")
             drafts = draft_review(
                 pr,
@@ -1392,7 +1521,7 @@ def process_pr(
 
         clone_url = _clone_url_for_project(pc, operator_config)
 
-        if cr_config is not None:
+        if cr_config is not None and (force or "coderabbit" in owed):
             _log("Running CodeRabbit...")
             outcome = _run_coderabbit_for_pr(
                 pr,
@@ -1408,11 +1537,11 @@ def process_pr(
             # silence read exactly like a clean run when the reviewer had in
             # fact been skipped for want of a checkout.
             _log(f"CodeRabbit: {outcome}")
-        for reviewer in agent_cli_reviewers:
-            _log(f"Running {reviewer.name} agent CLI review...")
-            outcome = _run_agent_cli_for_pr(
+
+        def _run_reviewer(rc: AgentCLIReviewerConfig) -> str:
+            return _run_agent_cli_for_pr(
                 pr,
-                reviewer,
+                rc,
                 repo_path,
                 clone_url,
                 project_config=pc,
@@ -1420,8 +1549,24 @@ def process_pr(
                 diff_http=diff_http,
                 prior_comments=prior_comments,
             )
+
+        ran: dict[str, str] = {}
+        for reviewer in agent_cli_reviewers:
+            # Only what's owed, like the LLM gate above: a paused reviewer coming
+            # back must not re-run every other reviewer on the PR. force probes it.
+            if not force and reviewer.name not in owed:
+                continue
+            outcome = _take_agent_cli_turn(
+                pr,
+                reviewer,
+                operator_config,
+                force=force,
+                run=_run_reviewer,
+                ran=ran,
+                log=_log,
+            )
             _log(f"{reviewer.name}: {outcome}")
-        if snowflake_config is not None:
+        if snowflake_config is not None and (force or "snowflake" in owed):
             _log("Running Snowflake review...")
             outcome = _run_snowflake_for_pr(
                 pr,
@@ -1666,6 +1811,41 @@ def _bulk_drain_loop(
         raise
 
 
+#: How often a long cycle re-lists open PRs to drop the ones closed meanwhile.
+_CLOSED_REAP_INTERVAL_SECONDS = 600.0
+_last_closed_reap = float("-inf")
+_closed_reap_lock = threading.Lock()
+
+
+def _reap_closed_prs_if_due(
+    clients: Mapping[str, object] | None, project_configs: Sequence[object]
+) -> None:
+    """Close rows for PRs that left the open listing, at most every 10 minutes.
+
+    poll_project reaps once per project at the top of the cycle, and a cycle that
+    reviews hundreds of PRs runs for hours: everything merged meanwhile stayed on
+    the dashboard, and got reviewed. Costs one listing per project (8 calls for Spark).
+    """
+    global _last_closed_reap
+    from franktheunicorn.backends.poller import reap_closed_pull_requests
+    from franktheunicorn.config.models import ProjectConfig
+
+    with _closed_reap_lock:
+        if not clients or time.monotonic() - _last_closed_reap < _CLOSED_REAP_INTERVAL_SECONDS:
+            return
+        _last_closed_reap = time.monotonic()
+    for pc in project_configs:
+        if not isinstance(pc, ProjectConfig) or not pc.enabled or pc.forge not in clients:
+            continue
+        try:
+            closed = reap_closed_pull_requests(pc, clients[pc.forge])  # type: ignore[arg-type]
+        except Exception:
+            logger.debug("Mid-cycle closed-PR reap failed for %s", pc.full_name, exc_info=True)
+            continue
+        if closed:
+            logger.info("%s: %d PR(s) closed upstream mid-cycle, dropped", pc.full_name, closed)
+
+
 def _run_cycle(
     clients: Mapping[str, object],
     project_configs: Sequence[object],
@@ -1689,6 +1869,10 @@ def _run_cycle(
     from franktheunicorn.review.copypasta import check_copypasta
     from franktheunicorn.security.queue import PRIORITY_INTERACTIVE
     from franktheunicorn.worker.test_runner import TestRunner
+
+    global _last_closed_reap
+    # poll_project reaps every project below; the mid-cycle reap starts counting here.
+    _last_closed_reap = time.monotonic()
 
     # Shared HTTP client for diff fetching (copypasta + dependency changelogs).
     # NOTE: DiffFetcher is currently GitHub-specific (talks to api.github.com).
@@ -1815,6 +1999,7 @@ def _run_cycle(
                     getattr(pr, "interest_score", 0.0),
                 )
 
+                _reap_closed_prs_if_due(clients, project_configs)
                 process_pr(
                     pr,
                     pc,
@@ -1973,6 +2158,10 @@ _SKIP_ADVICE = {
     "wip": "Every candidate is in the wip queue (draft, or a WIP title).",
     "policy-none": "auto_review_policy is 'none' in the project YAML; set it to 'all' "
     "or 'mentioned_or_authored' to auto-review.",
+    "triage-not-mergeable": "auto_review_policy is 'triage' and the mergeability triage "
+    "called none of them close; that is the policy working. Use 'all' to review every PR.",
+    "triage-unavailable": "No mergeability triage answered (no diff, or every "
+    "mergeability_triage.backends entry failed); those PRs are retried next cycle.",
     "not-involved": "auto_review_policy is 'mentioned_or_authored' and none of these PRs "
     "involve you; set auto_review_policy: all in the project YAML to review every PR.",
 }
@@ -2193,6 +2382,7 @@ def _backfill_unreviewed_prs(
         # each would be ~900 a cycle on Spark — breaking the same "per-PR detail
         # stays at DEBUG" rule this work added to CLAUDE.md.
         considered += 1
+        _reap_closed_prs_if_due(clients, project_configs)
         if review_skip_reason(pr, pc, operator_config, force=False) is not None:
             continue
 
@@ -2815,7 +3005,7 @@ def _run_review_tool_for_pr(
     returned outcome the per-reviewer result lived only in the worker log —
     so there a skipped reviewer read exactly like a clean one.
     """
-    from franktheunicorn.review.agent_cli import AgentCLIRunError
+    from franktheunicorn.review.agent_cli import AgentCLIRunError, AgentCLIUsageLimitError
     from franktheunicorn.review.tool_executor import make_executor
 
     mode = getattr(remote_config, "mode", "local")
@@ -2875,6 +3065,10 @@ def _run_review_tool_for_pr(
         # two states the rescan has to tell apart.
         record_agent_run(pr, source, status="ok", findings=len(findings))
         return f"{len(findings)} finding(s) → {len(drafts)} draft(s)"
+    except AgentCLIUsageLimitError as exc:
+        # Not recorded: a run recorded as failed is never retried, and this one
+        # should be once the usage comes back.
+        return f"paused — {exc}"
     except AgentCLIRunError as exc:
         # Already logged with the detail where it happened; no traceback needed.
         record_agent_run(pr, source, status="failed")

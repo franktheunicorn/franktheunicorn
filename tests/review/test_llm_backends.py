@@ -225,6 +225,38 @@ class TestAffirmationFilter:
             assert not _is_affirmation_body(body), body
 
 
+class TestNoCommentBody:
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "Semantically equivalent; it drops an allocation. Nothing here earns a comment."
+            "\n\nReview completed",
+            "No issues found",
+            "The provided input contains no comments to rewrite.",
+            "The assertions match the rendered text. Nothing new substantive to raise.",
+        ],
+    )
+    def test_dropped(self, body: str) -> None:
+        from franktheunicorn.review.backends.base import is_no_comment_body
+
+        assert is_no_comment_body(body)
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "Nothing here fails if `X` goes back to RuntimeException.",
+            "No issues here, but could you add a test?",
+            "Worth a comment so the next reader doesn't 'fix' it.",
+            "The null check on line 5 is inverted, so empty input crashes. Otherwise, no other issues.",
+            "Use a with block here. Nothing else to flag.",
+        ],
+    )
+    def test_kept(self, body: str) -> None:
+        from franktheunicorn.review.backends.base import is_no_comment_body
+
+        assert not is_no_comment_body(body)
+
+
 class TestCoerceProse:
     """A weaker model sometimes double-encodes the body as a JSON object;
     the parser should salvage the human sentence."""

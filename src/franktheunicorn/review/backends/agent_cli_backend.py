@@ -254,6 +254,10 @@ class AgentCLIBackend(BaseLLMBackend):
                 borrowed.cli_argv[0],
             )
             return ""
+        from franktheunicorn.review.agent_cli import note_usage_limit
+
+        if note_usage_limit(reviewer, result):
+            return ""
         if not result.ok:
             advice = (
                 " " + workspace_trust_advice(reviewer.name)

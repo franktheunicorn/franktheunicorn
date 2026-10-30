@@ -31,12 +31,14 @@ from franktheunicorn.review.antipattern import (
     check_against_anti_patterns,
     record_anti_pattern_matches,
 )
+from franktheunicorn.review.backends.base import is_no_comment_body
 from franktheunicorn.review.coderabbit import parse_prompt_only_output
 from franktheunicorn.review.dedup import is_duplicate_finding
 from franktheunicorn.review.prior_comments import seen_keys_from_drafts
 from franktheunicorn.review.prompt import COMMENT_VOICE, REVIEWING_GUIDANCE
 from franktheunicorn.review.tool_executor import (
     DEFAULT_TIMEOUT_SECONDS,
+    ExecResult,
     LocalExecutor,
     ToolExecutor,
 )
@@ -270,6 +272,70 @@ class AgentCLIRunError(RuntimeError):
     """The CLI didn't produce a review. Distinct from a clean one, which is ``[]``."""
 
 
+class AgentCLIUsageLimitError(AgentCLIRunError):
+    """The account behind the CLI is out of usage, so every reviewer on it is."""
+
+
+#: cursor-agent exits 1 with "ActionRequiredError: You've reached your monthly
+#: usage limit ..." on stderr, once per reviewer per PR, forever.
+_USAGE_LIMIT_MARKERS = ("usage limit", "spend limit")
+
+#: A monthly limit won't lift in minutes; this buys one cheap failed probe an hour.
+USAGE_LIMIT_PAUSE_SECONDS = 3600.0
+
+#: Keyed by command, not reviewer name: cursor-agent, -grok and -k3-max share one account.
+_usage_paused_until: dict[str, float] = {}
+
+
+def _usage_key(config: AgentCLIReviewerConfig) -> str:
+    """The command, plus the box when it runs over ssh: another box, maybe another login."""
+    r = config.remote
+    where = f"{' '.join(r.ssh_command)} {r.user}@{r.host}:{r.port}: " if r.mode == "ssh" else ""
+    return where + " ".join(config.cli_argv)
+
+
+def note_usage_limit(config: AgentCLIReviewerConfig, result: ExecResult) -> bool:
+    """Pause *config*'s command if *result* is it running out of usage.
+
+    Only a run with no review counts: a review may quote "usage limit", but claude
+    puts its limit notice on stdout, so stdout's head counts when it holds no finding.
+    """
+    from franktheunicorn.review.tool_executor import agent_stderr
+
+    stdout = (result.stdout or "").strip()
+    if result.ok and stdout:
+        return False
+    if any(b.file_path for b in parse_prompt_only_output(stdout)):
+        stdout = ""
+    text = f"{agent_stderr(result.stderr)} {stdout[:300]}"
+    if not any(m in text.lower() for m in _USAGE_LIMIT_MARKERS):
+        return False
+    key = _usage_key(config)
+    _usage_paused_until[key] = time.monotonic() + USAGE_LIMIT_PAUSE_SECONDS
+    logger.warning(
+        "%s is out of usage; pausing every reviewer on `%s` for %d min: %s",
+        config.name,
+        key,
+        USAGE_LIMIT_PAUSE_SECONDS // 60,
+        text.strip()[:300],
+    )
+    return True
+
+
+def usage_paused(config: AgentCLIReviewerConfig) -> bool:
+    """Whether *config*'s CLI is paused for a usage limit. Expiry un-pauses it."""
+    key = _usage_key(config)
+    deadline = _usage_paused_until.get(key)
+    if deadline is None:
+        return False
+    if time.monotonic() < deadline:
+        return True
+    # pop, not del: the pool lanes and the interactive drain can both see it expire.
+    _usage_paused_until.pop(key, None)
+    logger.info("%s usage-limit pause expired; the next review probes it.", key)
+    return False
+
+
 #: Exit-0 output that is the CLI refusing, not reviewing. cursor-agent exits 0
 #: on both an unknown --model and an untrusted workspace.
 _REFUSAL_MARKERS = ("cannot use this model",)
@@ -469,6 +535,8 @@ def run_agent_cli_review(
                 config.name,
             )
         raise AgentCLIRunError(f"{cmd[0]} returned nothing after {elapsed:.0f}s")
+    if note_usage_limit(config, result):
+        raise AgentCLIUsageLimitError(f"{cmd[0]} is out of usage")
     if not result.ok:
         from franktheunicorn.review.tool_executor import (
             looks_like_workspace_trust_refusal,
@@ -495,6 +563,9 @@ def run_agent_cli_review(
         raise AgentCLIRunError(f"{cmd[0]} exited with code {result.returncode}")
 
     blocks = parse_prompt_only_output(result.stdout)
+    if _ends_with_sentinel(result.stdout):
+        # The model said it is done; file-less text around that is its narration.
+        blocks = [b for b in blocks if b.file_path]
     # The parser makes a file-less "finding" out of any text, refusals included.
     if not any(b.file_path for b in blocks) and not _ends_with_sentinel(result.stdout):
         from franktheunicorn.review.tool_executor import (
@@ -585,6 +656,11 @@ def create_drafts_from_agent_cli(
     seen_comments: set[str] = seen_keys_from_drafts(d.comment_body for d in filed)
 
     for finding in findings:
+        if is_no_comment_body(finding.body):
+            logger.info(
+                "Dropped %s finding %r: it says nothing earns a comment", source, finding.title
+            )
+            continue
         # Decided here, applied after the two gates below: the rewrite replaces
         # the body both of them key on. An anti-pattern written to kill this
         # finding does not match "+1 @bob", and the dedup compares the short +1

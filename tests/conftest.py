@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,16 @@ def _db_projects_count_as_configured(
         "franktheunicorn.config.loader.configured_owner_repos",
         _from_db,
     )
+
+
+@pytest.fixture(autouse=True)
+def _no_usage_pauses() -> Iterator[None]:
+    """A usage-limit pause is process-wide; one test's must not skip another's reviewer."""
+    from franktheunicorn.review import agent_cli
+
+    agent_cli._usage_paused_until.clear()
+    yield
+    agent_cli._usage_paused_until.clear()
 
 
 @pytest.fixture

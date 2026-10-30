@@ -895,6 +895,17 @@ def _close_missing_pull_requests(
     return int(stale.update(state="closed", updated_at=timezone.now()))
 
 
+def reap_closed_pull_requests(project_config: ProjectConfig, client: ForgeClient) -> int:
+    """Re-list *project_config*'s open PRs and close the rows that vanished."""
+    project = Project.objects.filter(
+        owner=project_config.owner, repo=project_config.repo, enabled=True
+    ).first()
+    if project is None:
+        return 0
+    raw_prs = client.list_pull_requests(project_config.owner, project_config.repo)
+    return _close_missing_pull_requests(project, raw_prs, client)
+
+
 def _should_analyze_ci(pr_obj: PullRequest, project_config: ProjectConfig) -> bool:
     """Whether to run CI-failure analysis on this PR.
 

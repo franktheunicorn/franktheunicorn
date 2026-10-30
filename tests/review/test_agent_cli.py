@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -19,11 +20,14 @@ from franktheunicorn.config.models import (
 )
 from franktheunicorn.core.models import Project, PullRequest
 from franktheunicorn.review.agent_cli import (
+    USAGE_LIMIT_PAUSE_SECONDS,
     AgentCLIFinding,
     AgentCLIRunError,
+    AgentCLIUsageLimitError,
     build_review_prompt,
     create_drafts_from_agent_cli,
     run_agent_cli_review,
+    usage_paused,
 )
 from franktheunicorn.review.tool_executor import ExecResult, unwrap_guarded
 from franktheunicorn.worker.runner import resolve_agent_cli_reviewers
@@ -760,8 +764,10 @@ class TestLegacyClaudeCLIPromotion:
             "codex",
             "pi",
             "cursor-agent",
+            "cortex",
         ]
-        assert all(r.enabled == "auto" for r in oc.agent_cli_reviewers)
+        # cortex is a paid reviewer nobody asked for until they name it.
+        assert [r.enabled for r in oc.agent_cli_reviewers] == ["auto"] * 4 + [False]
 
     def test_every_seed_is_named_after_its_binary(self) -> None:
         """``cli_path`` defaults to ``name``, so a seed named anything else sends
@@ -833,7 +839,7 @@ class TestLegacyClaudeCLIPromotion:
             agent_cli_reviewers=[AgentCLIReviewerConfig(name="mycorp-agent", cli_path="mc")]
         )
         names = {r.name for r in oc.agent_cli_reviewers}
-        assert names == {"mycorp-agent", "claude", "codex", "pi", "cursor-agent"}
+        assert names == {"mycorp-agent", "claude", "codex", "pi", "cursor-agent", "cortex"}
 
     def test_disabled_builtin_respected_not_reseeded(self) -> None:
         oc = OperatorConfig(
@@ -1294,3 +1300,125 @@ class TestReadOnlyFlags:
         start = argv.index(CLAUDE_READONLY_ARGS[0])
         assert argv[start : start + len(CLAUDE_READONLY_ARGS)] == list(CLAUDE_READONLY_ARGS)
         assert "--x" in argv
+
+
+class TestUsageLimitPause:
+    """Out of usage, cursor-agent failed every reviewer on every PR — 750 times in
+    a day — and each failure was recorded as that reviewer's turn."""
+
+    _STDERR = (
+        "ActionRequiredError: You've reached your monthly usage limit This limit is "
+        "managed by your organization's group policy."
+    )
+
+    def _run(self, config: AgentCLIReviewerConfig) -> None:
+        executor = _executor_returning(
+            ExecResult(returncode=0, stdout="diff --git a/x b/x\n", stderr=""),
+            ExecResult(returncode=1, stdout="", stderr=self._STDERR),
+        )
+        run_agent_cli_review(cwd="/r", base_commit="b", config=config, executor=executor)
+
+    def test_pauses_every_reviewer_on_the_same_command(self) -> None:
+        cursor = AgentCLIReviewerConfig(name="cursor-agent")
+        grok = AgentCLIReviewerConfig(name="cursor-agent-grok", cli_path="cursor-agent")
+        claude = AgentCLIReviewerConfig(name="claude")
+        with pytest.raises(AgentCLIUsageLimitError):
+            self._run(cursor)
+        assert usage_paused(cursor)
+        assert usage_paused(grok)
+        assert not usage_paused(claude)
+
+    def test_the_pause_expires(self) -> None:
+        cursor = AgentCLIReviewerConfig(name="cursor-agent")
+        with pytest.raises(AgentCLIUsageLimitError):
+            self._run(cursor)
+        with patch(
+            "franktheunicorn.review.agent_cli.time.monotonic",
+            return_value=time.monotonic() + USAGE_LIMIT_PAUSE_SECONDS + 1,
+        ):
+            assert not usage_paused(cursor)
+
+    def test_an_ordinary_failure_does_not_pause(self) -> None:
+        cursor = AgentCLIReviewerConfig(name="cursor-agent")
+        executor = _executor_returning(
+            ExecResult(returncode=0, stdout="diff --git a/x b/x\n", stderr=""),
+            ExecResult(returncode=1, stdout="", stderr="rate limit"),
+        )
+        with pytest.raises(AgentCLIRunError) as exc_info:
+            run_agent_cli_review(cwd="/r", base_commit="b", config=cursor, executor=executor)
+        assert not isinstance(exc_info.value, AgentCLIUsageLimitError)
+        assert not usage_paused(cursor)
+
+    def test_a_review_quoting_usage_limit_does_not_pause(self) -> None:
+        cursor = AgentCLIReviewerConfig(name="cursor-agent")
+        executor = _executor_returning(
+            ExecResult(returncode=0, stdout="diff --git a/x b/x\n", stderr=""),
+            ExecResult(returncode=1, stdout="x.py:1 - [Low] check the usage limit", stderr="boom"),
+        )
+        with pytest.raises(AgentCLIRunError):
+            run_agent_cli_review(cwd="/r", base_commit="b", config=cursor, executor=executor)
+        assert not usage_paused(cursor)
+
+    def test_exit_0_with_nothing_but_the_limit_pauses(self) -> None:
+        cursor = AgentCLIReviewerConfig(name="cursor-agent")
+        executor = _executor_returning(
+            ExecResult(returncode=0, stdout="diff --git a/x b/x\n", stderr=""),
+            ExecResult(returncode=0, stdout="", stderr=self._STDERR),
+        )
+        with pytest.raises(AgentCLIUsageLimitError):
+            run_agent_cli_review(cwd="/r", base_commit="b", config=cursor, executor=executor)
+
+    def test_claude_puts_its_limit_on_stdout(self) -> None:
+        claude = AgentCLIReviewerConfig(name="claude")
+        executor = _executor_returning(
+            ExecResult(returncode=0, stdout="diff --git a/x b/x\n", stderr=""),
+            ExecResult(returncode=1, stdout="Claude AI usage limit reached|1793308403", stderr=""),
+        )
+        with pytest.raises(AgentCLIUsageLimitError):
+            run_agent_cli_review(cwd="/r", base_commit="b", config=claude, executor=executor)
+
+    def test_the_ssh_host_is_part_of_the_key(self) -> None:
+        a, b = (
+            AgentCLIReviewerConfig(
+                name=f"cursor-{h}",
+                cli_path="cursor-agent",
+                remote=RemoteExecutionConfig(mode="ssh", host=h),
+            )
+            for h in ("a", "b")
+        )
+        with pytest.raises(AgentCLIUsageLimitError):
+            self._run(a)
+        assert usage_paused(a)
+        assert not usage_paused(b)
+
+
+def test_a_coco_entry_on_cortex_gets_the_read_only_flags() -> None:
+    from franktheunicorn.config.models import COCO_READONLY_ARGS
+
+    oc = OperatorConfig(agent_cli_reviewers=[AgentCLIReviewerConfig(name="coco", command="cortex")])
+    coco = next(r for r in oc.agent_cli_reviewers if r.name == "coco")
+    argv = coco.build_invocation("PROMPT")
+    assert argv[0] == "exec"
+    assert argv[-1] == "PROMPT"
+    # --allowed is variadic: a boolean flag must end it before the prompt.
+    assert argv[-2] == "--no-mcp"
+    assert list(COCO_READONLY_ARGS) == argv[1:-1]
+
+
+def test_narration_before_the_sentinel_is_not_a_finding() -> None:
+    """k3 explains why a change is fine, then says Review completed: that's a clean run."""
+    executor = _executor_returning(
+        ExecResult(returncode=0, stdout="diff --git a/x b/x\n", stderr=""),
+        ExecResult(
+            returncode=0,
+            stdout="I checked the semantics; removing it is behavior-neutral.\n\nReview completed",
+            stderr="",
+        ),
+    )
+    findings = run_agent_cli_review(
+        cwd="/r",
+        base_commit="b",
+        config=AgentCLIReviewerConfig(name="cursor-agent"),
+        executor=executor,
+    )
+    assert findings == []

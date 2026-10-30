@@ -94,6 +94,18 @@
 </dl>
 {% endif %}
 
+{% if pr.mergeability_verdict %}
+<h3 style="margin-top: 1.5rem;">Mergeability Triage</h3>
+<p>
+    <strong>{{ pr.mergeability_verdict }}</strong>
+    {% if pr.mergeability_detail.touches_area %}&middot; touches an area of interest{% endif %}
+    {% if pr.mergeability_sha != pr.head_sha %}&middot; <span class="fainter">for an older head</span>{% endif %}
+    <span class="fainter">&middot; {{ pr.mergeability_detail.source }}</span>
+    <br>{{ pr.mergeability_detail.summary }}
+    {% if pr.mergeability_detail.suggestion %}<br><em>To land:</em> {{ pr.mergeability_detail.suggestion }}{% endif %}
+</p>
+{% endif %}
+
 {% if candidate %}
 <h3 style="margin-top: 1.5rem;">Merge Readiness</h3>
 {% include "dashboard/_merge_candidate.html" with cand=candidate %}

@@ -697,6 +697,35 @@ _BARE_CODE_TOKEN_RE = re.compile(
 )
 
 
+#: A body whose last word is the agent deciding not to comment ("... Semantically
+#: equivalent. Nothing here earns a comment."): its own verdict, so it is not a finding
+#: however much analysis comes before it. Also the tone guard's "nothing to rewrite".
+#: Absolute only: "no *other* issues" / "nothing *else*" signs off after a real finding.
+_NO_COMMENT_RE = re.compile(
+    r"^(?:so,? |overall,? )?(?:"
+    r"nothing (?:here |in (?:this|the) (?:diff|pr|change) )?"
+    r"(?:earns|warrants|merits|needs|deserves|is worth) (?:a |any )?(?:comment|flagging|raising)"
+    r"|no (?:issues|concerns|findings|comments|problems)"
+    r"(?: found| to (?:raise|report|flag))?(?: here)?"
+    r"|nothing (?:(?:new|left|substantive)\s+)*"
+    r"(?:to (?:add|flag|report|raise|comment on)|worth (?:flagging|raising|a comment))"
+    r"|(?:the provided input|there) contains? no comments to rewrite"
+    r")\W*$",
+    re.IGNORECASE,
+)
+
+
+def is_no_comment_body(text: str) -> bool:
+    """Whether *text* ends by saying there is nothing to comment on."""
+    lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
+    if lines and lines[-1].rstrip(".").lower() == "review completed":
+        lines.pop()
+    if not lines:
+        return False
+    last = re.split(r"(?<=[.!?])\s+", lines[-1])[-1]
+    return _NO_COMMENT_RE.match(last) is not None
+
+
 def _is_nonsense_body(text: str) -> bool:
     """Whether *text* is a bare literal or lone token with no review content.
 
@@ -705,7 +734,7 @@ def _is_nonsense_body(text: str) -> bool:
     field the model echoed, not a comment — drop it like the bare literals.
     """
     stripped = text.strip().strip("\"'")
-    if stripped.lower() in _NONSENSE_BODIES:
+    if stripped.lower() in _NONSENSE_BODIES or is_no_comment_body(stripped):
         return True
     return len(stripped) < 40 and _BARE_CODE_TOKEN_RE.match(stripped) is not None
 

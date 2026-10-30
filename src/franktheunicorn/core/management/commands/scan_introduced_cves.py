@@ -38,7 +38,7 @@ class Command(BaseCommand):
         )
         parser.add_argument(
             "--cadence",
-            choices=["daily", "weekly", "monthly"],
+            choices=["daily", "weekly", "monthly", "month-end"],
             help="Override the project's configured cadence for this run.",
         )
         parser.add_argument(

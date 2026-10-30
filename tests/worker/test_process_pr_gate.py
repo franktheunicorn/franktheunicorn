@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from franktheunicorn.config.models import OperatorConfig, ProjectConfig
+from franktheunicorn.config.models import AgentCLIReviewerConfig, OperatorConfig, ProjectConfig
 from franktheunicorn.core.models import ReviewDraft
 from franktheunicorn.worker.runner import _should_auto_review, process_pr
 from tests.factories import PullRequestFactory
@@ -170,3 +170,150 @@ class TestProcessPrReviewGate:
 
         assert state["called"] is True
         assert result == ["DRAFT"]
+
+
+@pytest.mark.django_db
+class TestOnlyOwedReviewersRun:
+    """A reviewer coming back from a usage-limit pause is owed one turn. The rest
+    of the PR's reviewers already had theirs and must not re-run and re-file."""
+
+    def _setup(self) -> tuple[Any, ProjectConfig, OperatorConfig]:
+        pr = PullRequestFactory(state="open", author="holdenk", head_sha="abc")
+        done = {"status": "ok", "findings": 0, "head_sha": "abc"}
+        pr.agent_runs = {"llm": done, "claude": done}
+        pr.save()
+        oc = _op()
+        # Set directly: resolving would seed whichever agent binaries this box has.
+        oc._resolved_agent_cli_reviewers = [
+            AgentCLIReviewerConfig(name="claude", enabled=True),
+            AgentCLIReviewerConfig(name="cursor-agent", enabled=True),
+        ]
+        return pr, ProjectConfig(owner=pr.project.owner, repo=pr.project.repo), oc
+
+    def _ran(self, *, paused: bool, force: bool = False) -> list[str]:
+        pr, pc, oc = self._setup()
+        ran: list[str] = []
+        with (
+            patch("franktheunicorn.review.drafter.draft_review", return_value=[]),
+            patch(
+                "franktheunicorn.worker.runner._run_agent_cli_for_pr",
+                side_effect=lambda _pr, reviewer, *a, **k: ran.append(reviewer.name) or "ok",
+            ),
+            patch("franktheunicorn.review.agent_cli.usage_paused", return_value=paused),
+        ):
+            process_pr(pr, pc, operator_config=oc, forge_client=_forge_client(), force=force)
+        return ran
+
+    def test_only_the_missing_reviewer_runs(self) -> None:
+        assert self._ran(paused=False) == ["cursor-agent"]
+
+    def test_a_paused_reviewer_is_not_owed(self) -> None:
+        assert self._ran(paused=True) == []
+
+    def test_force_probes_a_paused_reviewer(self) -> None:
+        assert self._ran(paused=True, force=True) == ["claude", "cursor-agent"]
+
+    def test_a_sibling_pausing_mid_loop_stops_the_next(self) -> None:
+        pr, pc, oc = self._setup()
+        pr.agent_runs = {"llm": pr.agent_runs["llm"]}
+        pr.save()
+        ran: list[str] = []
+        paused = {"now": False}
+
+        def _run(_pr: Any, reviewer: Any, *a: Any, **k: Any) -> str:
+            ran.append(reviewer.name)
+            paused["now"] = True
+            return "paused"
+
+        with (
+            patch("franktheunicorn.review.drafter.draft_review", return_value=[]),
+            patch("franktheunicorn.worker.runner._run_agent_cli_for_pr", side_effect=_run),
+            patch(
+                "franktheunicorn.review.agent_cli.usage_paused",
+                side_effect=lambda _rc: paused["now"],
+            ),
+        ):
+            process_pr(pr, pc, operator_config=oc, forge_client=_forge_client())
+        assert ran == ["claude"]
+
+
+@pytest.mark.django_db
+class TestTriagePolicy:
+    """policy: triage — every PR gets the cheap call, only some get the full review."""
+
+    def _run(self, verdict: str, **pr_kw: Any) -> tuple[bool, Any]:
+        from franktheunicorn.review.mergeability import Triage
+
+        defaults: dict[str, Any] = {
+            "state": "open",
+            "author": "alice",
+            "requested_reviewers": [],
+            "assignees": [],
+            "body": "",
+            "head_sha": "abc",
+        }
+        pr = PullRequestFactory(**{**defaults, **pr_kw})
+        pc = ProjectConfig(
+            owner=pr.project.owner, repo=pr.project.repo, auto_review_policy="triage"
+        )
+        state, fake = _tracking_draft_review()
+        with (
+            patch("franktheunicorn.review.drafter.draft_review", side_effect=fake),
+            patch(
+                "franktheunicorn.review.mergeability.run_triage",
+                return_value=Triage(verdict, "why", source="openai/qwen"),
+            ) as mock_triage,
+        ):
+            process_pr(pr, pc, operator_config=_op(), forge_client=_forge_client())
+        pr.refresh_from_db()
+        assert mock_triage.called
+        assert pr.mergeability_verdict == verdict
+        return state["called"], pr
+
+    def test_needs_work_gets_no_full_review(self) -> None:
+        ran, _ = self._run("needs-work")
+        assert ran is False
+
+    def test_likely_mergeable_gets_the_full_review(self) -> None:
+        ran, _ = self._run("likely-mergeable")
+        assert ran is True
+
+    def test_an_interesting_pr_is_reviewed_anyway(self) -> None:
+        ran, _ = self._run("needs-work", author="holdenk")
+        assert ran is True
+
+    def test_a_triaged_head_is_skipped_before_any_fetch(self) -> None:
+        from franktheunicorn.worker.runner import review_skip_reason
+
+        _, pr = self._run("needs-work")
+        pc = ProjectConfig(
+            owner=pr.project.owner, repo=pr.project.repo, auto_review_policy="triage"
+        )
+        skip = review_skip_reason(pr, pc, _op(), force=False)
+        assert skip is not None and skip.reason == "triage-not-mergeable"
+
+
+@pytest.mark.django_db
+class TestClosedMidCycle:
+    def test_a_pr_closed_since_it_was_read_is_skipped(self) -> None:
+        from franktheunicorn.core.models import PullRequest
+        from franktheunicorn.worker.runner import review_skip_reason
+
+        pr = PullRequestFactory(state="open", author="holdenk")
+        PullRequest.objects.filter(pk=pr.pk).update(state="closed")
+        pc = ProjectConfig(owner=pr.project.owner, repo=pr.project.repo)
+        skip = review_skip_reason(pr, pc, _op(), force=False)
+        assert skip is not None and skip.reason == "closed"
+
+    def test_the_reap_is_throttled(self) -> None:
+        from franktheunicorn.worker import runner
+
+        pc = ProjectConfig(owner="apache", repo="spark")
+        clients = {pc.forge: MagicMock()}
+        runner._last_closed_reap = float("-inf")
+        with patch(
+            "franktheunicorn.backends.poller.reap_closed_pull_requests", return_value=2
+        ) as reap:
+            runner._reap_closed_prs_if_due(clients, [pc])
+            runner._reap_closed_prs_if_due(clients, [pc])
+        assert reap.call_count == 1

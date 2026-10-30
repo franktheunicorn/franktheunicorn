@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from django.db.models import QuerySet
@@ -1772,3 +1772,19 @@ class TestMultiQueueRouting:
         assert (
             PullRequest.objects.filter(PullRequest.queue_filter("review")).filter(pk=pr.pk).exists()
         )
+
+
+@pytest.mark.django_db
+def test_reap_closed_pull_requests_relists_and_closes() -> None:
+    from franktheunicorn.backends.poller import reap_closed_pull_requests
+    from franktheunicorn.config.models import ProjectConfig
+    from tests.factories import ProjectFactory, PullRequestFactory
+
+    project = ProjectFactory(owner="apache", repo="spark")
+    PullRequestFactory(project=project, number=1, state="open")
+    PullRequestFactory(project=project, number=2, state="open")
+    client = MagicMock()
+    client.lists_all_open_pull_requests = True
+    client.list_pull_requests.return_value = [{"number": 1}]
+    assert reap_closed_pull_requests(ProjectConfig(owner="apache", repo="spark"), client) == 1
+    assert project.pull_requests.get(number=2).state == "closed"

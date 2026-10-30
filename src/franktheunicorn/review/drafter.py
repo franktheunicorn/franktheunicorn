@@ -19,7 +19,12 @@ from franktheunicorn.review.antipattern import (
     record_anti_pattern_matches,
 )
 from franktheunicorn.review.backends import get_backend
-from franktheunicorn.review.backends.base import PRContext, ReviewFinding, ReviewResult
+from franktheunicorn.review.backends.base import (
+    PRContext,
+    ReviewFinding,
+    ReviewResult,
+    is_no_comment_body,
+)
 from franktheunicorn.review.context_builder import build_context_strings
 from franktheunicorn.review.dedup import (
     deduplicate_findings_with_groups,
@@ -400,6 +405,13 @@ def create_drafts_from_findings(
 
     with transaction.atomic():
         for idx, finding in enumerate(findings):
+            if is_no_comment_body(finding.body):
+                logger.info(
+                    "Dropped %s finding %r: it says nothing earns a comment",
+                    source,
+                    finding.title[:40],
+                )
+                continue
             # Decided here, applied after the two gates below. The rewrite
             # replaces the body those gates key on: an anti-pattern the operator
             # wrote to kill this finding no longer matches "+1 @bob", and the

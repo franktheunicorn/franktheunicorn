@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from django.utils import timezone
@@ -75,7 +75,19 @@ CADENCE_INTERVAL: dict[str, timedelta] = {
     "daily": timedelta(days=1),
     "weekly": timedelta(days=7),
     "monthly": timedelta(days=30),
+    # Monthly, but on the calendar's last day (is_due); the day keeps it to one run.
+    "month-end": timedelta(days=1),
 }
+
+
+def _month_end_due(project: Project, now: datetime) -> bool:
+    """On the month's last day, or later if the last month-end went unscanned."""
+    today = timezone.localtime(now).date()
+    if (today + timedelta(days=1)).month != today.month:
+        return True
+    previous_end = today.replace(day=1) - timedelta(days=1)
+    last = IntroducedScanRun.objects.filter(project=project).order_by("-started_at").first()
+    return last is not None and timezone.localtime(last.started_at).date() < previous_end
 
 
 @dataclass
@@ -143,6 +155,8 @@ def is_due(
     if interval is None:
         return False
     now = now or timezone.now()
+    if config.cadence == "month-end" and not _month_end_due(project, now):
+        return False
     last = IntroducedScanRun.objects.filter(project=project).order_by("-started_at").first()
     if last is None:
         return True

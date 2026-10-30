@@ -327,6 +327,9 @@ class AgentCLIReviewerConfig(BaseModel):
     #: findings are attributed by entry name, so one entry doing both jobs
     #: would cost the general pass.
     review_focus: Literal["general", "security"] = "general"
+    #: Reviewers, by name, that take this one's turn while it is paused on a usage
+    #: limit. They need not be enabled: a fallback-only entry is ``enabled: false``.
+    fallback: list[str] = Field(default_factory=list)
     #: Flags that tell this CLI the working directory is one we meant to point it
     #: at. Separate from ``extra_args`` because it answers a different question:
     #: ``extra_args`` is how the operator wants the agent to behave, this is what
@@ -503,6 +506,12 @@ CODEX_READONLY_ARGS: tuple[str, ...] = ("-s", "read-only", "--ignore-user-config
 #: stop) is kept away by the agent guard instead.
 PI_READONLY_ARGS: tuple[str, ...] = ("--tools", "read,grep,find,ls")
 
+#: Cortex Code (``cortex exec``, "coco") with exactly Read, Grep and Glob, no MCP
+#: servers and no saved history. ``--allowed`` is variadic and swallows the
+#: positional prompt, so the boolean flags go after it to end the list. Verified
+#: with Cortex Code v0.26.1029: a write attempt was refused.
+COCO_READONLY_ARGS: tuple[str, ...] = ("--allowed", "Read,Grep,Glob", "--no-history", "--no-mcp")
+
 
 def _default_agent_cli_reviewers() -> list[AgentCLIReviewerConfig]:
     """Seed the registry with the auto-detected agent reviewers.
@@ -570,6 +579,16 @@ def _default_agent_cli_reviewers() -> list[AgentCLIReviewerConfig]:
             prompt_arg="-p",
             trust_args=["--trust"],
             readonly_args=list(CURSOR_READONLY_ARGS),
+        ),
+        # Cortex Code ("coco"). Off, not auto: it is a paid reviewer on every PR, and
+        # the reason to name it is usually as somebody's ``fallback`` or a
+        # mergeability triager. ``- name: coco`` needs ``command: cortex``.
+        AgentCLIReviewerConfig(
+            name="cortex",
+            enabled=False,
+            prompt_mode="subcommand",
+            prompt_arg="exec",
+            readonly_args=list(COCO_READONLY_ARGS),
         ),
     ]
 
@@ -1844,8 +1863,9 @@ class IntroducedScanConfig(BaseModel):
     #: AND the cadence is due, so setting it true alone doesn't fire anything
     #: immediately — the next due check does.
     enabled: bool = False
-    #: daily / weekly / monthly. Daily looks at the last ``lookback_days``;
-    #: weekly and monthly look at the diff from the last final release tag.
+    #: daily / weekly / monthly / month-end. Daily looks at the last
+    #: ``lookback_days``; the rest at the diff from the last final release tag.
+    #: month-end runs on the last day of each month (local time).
     cadence: str = "daily"
     #: Commits to consider on the daily cadence. Ignored on weekly/monthly.
     lookback_days: int = 2
@@ -2254,6 +2274,19 @@ class SecurityTriageConfig(BaseModel):
     cve_api: SecurityCVEAPIConfig = Field(default_factory=SecurityCVEAPIConfig)
 
 
+class MergeabilityTriageConfig(BaseModel):
+    """Who answers "is this PR close to mergeable?" for ``auto_review_policy: triage``.
+
+    One cheap call per PR head (``review/mergeability.py``). ``backends`` is tried
+    in order until one answers: ``"llm"`` means every ``llm_backends`` entry, any
+    other name is an ``agent_cli_reviewers`` entry run as an LLM in a scratch dir
+    (enabled or not; a usage-paused one is skipped).
+    """
+
+    backends: list[str] = Field(default_factory=lambda: ["llm"])
+    max_diff_chars: int = Field(default=40_000, gt=0)
+
+
 class ZombieQueueConfig(BaseModel):
     """The closed-PR follow-up scan (``review/zombie.py``, the Zombie Queue tab).
 
@@ -2484,6 +2517,7 @@ class OperatorConfig(BaseModel):
     security_triage: SecurityTriageConfig = Field(default_factory=SecurityTriageConfig)
     worker_pool: WorkerPoolConfig = Field(default_factory=WorkerPoolConfig)
     zombie_queue: ZombieQueueConfig = Field(default_factory=ZombieQueueConfig)
+    mergeability_triage: MergeabilityTriageConfig = Field(default_factory=MergeabilityTriageConfig)
     merge_intent: MergeIntentConfig = Field(default_factory=MergeIntentConfig)
     # Multiple LLM backends can run in parallel. Each produces findings
     # independently; results are combined and deduped via anti-patterns.
@@ -2946,6 +2980,13 @@ class ProjectConfig(BaseModel):
     #                             assignee, or @-mentioned in the PR body). The
     #                             default — on high-volume repos (e.g. Spark)
     #                             this avoids burning tokens reviewing every PR.
+    #   "triage"                — every PR gets a cheap mergeability triage
+    #                             (``mergeability_triage`` in operator.yaml); the
+    #                             full review runs on the ones it calls likely
+    #                             mergeable or touching review_areas_of_interest,
+    #                             and on PRs you're involved in, from
+    #                             frequent_contributors/committers, under
+    #                             watched_paths, or already approved / almost ready.
     #   "none"                  — never auto-review.
     # This gates ONLY the review pipeline: every PR is still ingested, scored,
     # routed, and shown on the dashboard regardless of policy. The dashboard
@@ -3128,7 +3169,7 @@ class ProjectConfig(BaseModel):
     @classmethod
     def auto_review_policy_valid(cls, v: str) -> str:
         v = v.strip().lower()
-        known = {"all", "mentioned_or_authored", "none"}
+        known = {"all", "mentioned_or_authored", "triage", "none"}
         if v not in known:
             msg = f"auto_review_policy must be one of {sorted(known)}, got {v!r}"
             raise ValueError(msg)
@@ -3186,8 +3227,11 @@ class ProjectConfig(BaseModel):
         # A cadence the scheduler doesn't recognise would never fire and look
         # like a silent bug, so normalise and reject at load, not at run time.
         v.cadence = v.cadence.strip().lower()
-        if v.cadence not in {"daily", "weekly", "monthly"}:
-            msg = f"introduced_scan.cadence must be one of daily/weekly/monthly, got {v.cadence!r}"
+        if v.cadence not in {"daily", "weekly", "monthly", "month-end"}:
+            msg = (
+                "introduced_scan.cadence must be one of daily/weekly/monthly/month-end, "
+                f"got {v.cadence!r}"
+            )
             raise ValueError(msg)
         if v.lookback_days < 1:
             msg = "introduced_scan.lookback_days must be >= 1"

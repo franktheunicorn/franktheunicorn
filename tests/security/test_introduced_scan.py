@@ -217,6 +217,41 @@ class TestIsDue:
         )
         assert is_due(project, _scan()) is True
 
+    def test_month_end_is_due_only_on_the_last_day(self) -> None:
+        from datetime import datetime
+
+        project = ProjectFactory()
+        tz = timezone.get_current_timezone()
+        assert is_due(
+            project, _scan(cadence="month-end"), now=datetime(2026, 10, 31, 12, tzinfo=tz)
+        )
+        assert not is_due(
+            project, _scan(cadence="month-end"), now=datetime(2026, 10, 30, 12, tzinfo=tz)
+        )
+
+    def test_a_missed_month_end_catches_up(self) -> None:
+        from datetime import datetime
+
+        project = ProjectFactory()
+        tz = timezone.get_current_timezone()
+        IntroducedScanRun.objects.create(
+            project=project, started_at=datetime(2026, 9, 30, 1, tzinfo=tz), cadence="month-end"
+        )
+        # The worker was down on Oct 31; Nov 2 still owes October's run.
+        assert is_due(project, _scan(cadence="month-end"), now=datetime(2026, 11, 2, tzinfo=tz))
+
+    def test_month_end_runs_once_that_day(self) -> None:
+        from datetime import datetime
+
+        project = ProjectFactory()
+        tz = timezone.get_current_timezone()
+        IntroducedScanRun.objects.create(
+            project=project, started_at=datetime(2026, 2, 28, 1, tzinfo=tz), cadence="month-end"
+        )
+        assert not is_due(
+            project, _scan(cadence="month-end"), now=datetime(2026, 2, 28, 20, tzinfo=tz)
+        )
+
     def test_a_run_three_days_ago_is_not_due_for_weekly(self) -> None:
         project = ProjectFactory()
         IntroducedScanRun.objects.create(
