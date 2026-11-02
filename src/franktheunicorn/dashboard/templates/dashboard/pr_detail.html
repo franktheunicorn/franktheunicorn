@@ -12,6 +12,12 @@
     </span>
 </div>
 
+{% if pr.state != "open" and pr.queue != "zombie" %}
+<div class="context-panel" style="border-left: 4px solid #c0392b; font-weight: bold;">
+    This PR has been {% if pr.state == "merged" %}merged{% else %}closed{% endif %}. It is kept here for reference and no longer appears in the queues.
+</div>
+{% endif %}
+
 <h2>{{ pr.project }} #{{ pr.number }}: {{ pr.title|render_markdown_inline }}</h2>
 
 <div class="pr-meta" style="margin-top: 0.5rem;">
