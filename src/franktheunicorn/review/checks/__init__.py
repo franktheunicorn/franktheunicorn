@@ -28,6 +28,8 @@ from franktheunicorn.review.drafter import build_pr_context, create_drafts_from_
 from franktheunicorn.review.tone_guard import apply_tone_guard_batch
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from franktheunicorn.backends.base import ForgeClient
     from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig, ProjectConfig
     from franktheunicorn.core.models import PullRequest, ReviewDraft
@@ -52,6 +54,19 @@ class BaseCheck(ABC):
     def parse_response(self, raw_text: str) -> list[ReviewFinding]:
         """Parse LLM output into findings. Override for custom formats."""
         return parse_llm_response(raw_text)
+
+    def applies_to(self, changed_files: Sequence[str]) -> bool:
+        """Whether this check's subject matter can exist in *changed_files*.
+
+        Deterministic pre-gate (relevance.check_applies): a security check on
+        a docs-only PR cannot find anything but still costs a full LLM call,
+        so the runner skips it. An empty file list means "unknown" and runs
+        everything — the gate may only skip on positive evidence, never on a
+        data gap.
+        """
+        from franktheunicorn.review.checks.relevance import check_applies
+
+        return check_applies(self.name, changed_files)
 
 
 def _get_registry() -> dict[str, type[BaseCheck]]:
@@ -137,6 +152,7 @@ def run_enabled_checks(
         return []
 
     registry = _get_registry()
+    from franktheunicorn.review.checks.relevance import describe_required
     from franktheunicorn.review.prior_comments import format_prior_comments
 
     # repo_path and diff both reach the context build: an over-cap file now
@@ -175,6 +191,7 @@ def run_enabled_checks(
     backend_config = backend_configs[0]
 
     all_drafts: list[ReviewDraft] = []
+    changed_files = pr.changed_files or []
 
     for check_name in enabled:
         check_cls = registry.get(check_name)
@@ -182,8 +199,24 @@ def run_enabled_checks(
             logger.warning("Unknown LLM check '%s'; skipping.", check_name)
             continue
 
-        source = f"check:{check_name}"
         check = _instantiate_check(check_cls, check_name, project_config, repo_path, forge_client)
+        # Deterministic relevance gate: a docs-only PR cannot contain what a
+        # security or code-semantics check looks for, so the LLM call is
+        # skipped rather than asked to hallucinate a finding. Deliberately not
+        # recorded in agent_runs — "not run" must not read as "ran clean" on
+        # the dashboard.
+        if not check.applies_to(changed_files):
+            logger.info(
+                "LLM check '%s' skipped: no %s file(s) among the %d changed. "
+                "Enable per-file logging at DEBUG for the full list.",
+                check_name,
+                describe_required(check_name),
+                len(changed_files),
+            )
+            logger.debug("PR #%d changed files: %s", pr.number, list(changed_files))
+            continue
+
+        source = f"check:{check_name}"
         try:
             findings = _run_check_dispatch(check, pr, diff, pr_context, backend_config)
         except Exception:
