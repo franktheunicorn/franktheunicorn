@@ -3023,6 +3023,17 @@ class ProjectConfig(BaseModel):
     # all on a high-volume repo: the policy lets everything through and this
     # flag decides what actually gets reviewed.
     minimize_reviews: bool = False
+    # Re-review debounce. ``head_seen_at`` is stamped when the poller first
+    # sees a PR's head (open or push), and a review owed on that head waits
+    # out a quiet window so a burst of pushes costs one re-review, not one
+    # per push. A PR we have never reviewed settles in
+    # ``fresh_pr_quiet_minutes`` (a brand-new PR usually gets a follow-up
+    # push within minutes); a PR we have reviewed before settles in
+    # ``rereview_quiet_minutes``. 0 disables either window and reviews
+    # immediately. The window only delays — every owed review still runs on
+    # the next cycle after it lapses, and Force Run Agents bypasses it.
+    fresh_pr_quiet_minutes: int = 30
+    rereview_quiet_minutes: int = 60
     # Poll cost control. A PR whose upstream ``updated_at`` hasn't moved since
     # the last poll — and whose listed title, description, head SHA, labels,
     # reviewers, assignees, and draft state are unchanged — is skipped: no
@@ -3218,6 +3229,14 @@ class ProjectConfig(BaseModel):
     def review_activity_days_valid(cls, v: int) -> int:
         if v < 0:
             msg = "review_activity_days must be >= 0 (0 re-reviews every push)"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("fresh_pr_quiet_minutes", "rereview_quiet_minutes")
+    @classmethod
+    def review_quiet_minutes_valid(cls, v: int) -> int:
+        if v < 0:
+            msg = "review quiet minutes must be >= 0 (0 disables the settling window)"
             raise ValueError(msg)
         return v
 

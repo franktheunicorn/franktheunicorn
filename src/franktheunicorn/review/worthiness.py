@@ -19,6 +19,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from franktheunicorn.core.untrusted import UNTRUSTED_CONTENT_RULE, fence, fence_note, fresh_nonce
@@ -92,6 +93,46 @@ def looks_close_to_mergeable(pr: PullRequest) -> str:
     if triage is not None and triage.verdict == LIKELY_MERGEABLE:
         return "triage said likely-mergeable"
     return ""
+
+
+def blame_touches_operator(
+    pr: PullRequest, operator_username: str, repo_path: Path | str | None
+) -> str:
+    """Whether the PR rewrites lines the operator authored — "" if not.
+
+    Deterministic interest signal for the minimize_reviews gate, run after
+    the cheap row-level checks and before the model screen: no configuration
+    listing can say which code is *yours the way blame can*, so a PR editing
+    your code earns a review even when nothing else about it looks
+    interesting. Local git only — no tokens — and bounded by the blame
+    fetcher's file cap. Returns the reason string so the gate can log why.
+    """
+    if not operator_username or repo_path is None or not pr.changed_files:
+        return ""
+    try:
+        from franktheunicorn.scoring.blame_fetcher import fetch_blame_for_files
+
+        blame = fetch_blame_for_files(
+            Path(str(repo_path)),
+            list(pr.changed_files or []),
+            base_ref=pr.base_sha or "HEAD",
+            head_ref=pr.head_sha or None,
+        )
+    except Exception:
+        logger.debug("Blame interest check failed for PR #%d", pr.number, exc_info=True)
+        return ""
+    operator = operator_username.lower()
+    for entry in blame:
+        if operator in _lowered_set(entry.get("authors")):
+            return "it rewrites code you wrote"
+    return ""
+
+
+def _lowered_set(value: object) -> set[str]:
+    """Safely extract a set of lowered strings from a blame entry field."""
+    if isinstance(value, list):
+        return {str(item).lower() for item in value}
+    return set()
 
 
 def current_worthiness(pr: PullRequest) -> Worthiness | None:

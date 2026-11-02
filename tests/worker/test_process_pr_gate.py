@@ -9,6 +9,7 @@ gated — that happens in the poller, upstream of ``process_pr``.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -572,3 +573,93 @@ class TestMinimizeReviews:
             )
         assert state["called"] is True
         mock_screen2.assert_not_called()
+
+    def test_blame_on_operator_code_reviews_without_a_screen(self) -> None:
+        """A PR rewriting the operator's own code is interesting, always."""
+        pr = PullRequestFactory(**{**self._defaults(), "changed_files": ["python/pyspark/x.py"]})
+        with (
+            patch("franktheunicorn.review.drafter.draft_review", return_value=[]),
+            patch(
+                "franktheunicorn.scoring.blame_fetcher.fetch_blame_for_files",
+                return_value=[{"file_path": "x.py", "authors": ["holdenk"], "near_authors": []}],
+            ),
+            patch("franktheunicorn.review.worthiness.run_worthiness_screen") as mock_screen,
+        ):
+            process_pr(
+                pr,
+                self._pc(pr),
+                operator_config=_op(),
+                forge_client=_forge_client(),
+                repo_path=Path("/nonexistent"),
+            )
+        mock_screen.assert_not_called()
+
+
+@pytest.mark.django_db
+class TestSettlingWindow:
+    """The re-review debounce: a fresh head waits out a quiet window."""
+
+    def _pc(self, pr: PullRequest, **kw: object) -> ProjectConfig:
+        return ProjectConfig(
+            owner=pr.project.owner, repo=pr.project.repo, auto_review_policy="all", **kw
+        )
+
+    def test_a_fresh_pr_settles_30_minutes(self) -> None:
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        from franktheunicorn.worker.runner import review_skip_reason
+
+        pr = PullRequestFactory(state="open", author="holdenk", head_seen_at=timezone.now())
+        skip = review_skip_reason(pr, self._pc(pr), _op(), force=False)
+        assert skip is not None and skip.reason == "settling"
+        assert "30-minute" in skip.explanation
+
+        # Half an hour later the window has lapsed.
+        pr.head_seen_at = timezone.now() - timedelta(minutes=31)
+        assert review_skip_reason(pr, self._pc(pr), _op(), force=False) is None
+
+    def test_a_reviewed_pr_gets_the_longer_window(self) -> None:
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        from franktheunicorn.worker.runner import review_skip_reason
+
+        pr = PullRequestFactory(state="open", author="holdenk", head_seen_at=timezone.now())
+        pr.agent_runs = {"llm": {"status": "ok", "head_sha": "old"}}
+        skip = review_skip_reason(pr, self._pc(pr), _op(), force=False)
+        assert skip is not None and skip.reason == "settling"
+        assert "60-minute" in skip.explanation
+
+        # 35 minutes is past the fresh window but inside the re-review one.
+        pr.head_seen_at = timezone.now() - timedelta(minutes=35)
+        skip = review_skip_reason(pr, self._pc(pr), _op(), force=False)
+        assert skip is not None and skip.reason == "settling"
+
+        pr.head_seen_at = timezone.now() - timedelta(minutes=61)
+        assert review_skip_reason(pr, self._pc(pr), _op(), force=False) is None
+
+    def test_zero_disables_the_window(self) -> None:
+        from django.utils import timezone
+
+        from franktheunicorn.worker.runner import review_skip_reason
+
+        pr = PullRequestFactory(state="open", author="holdenk", head_seen_at=timezone.now())
+        pc = self._pc(pr, fresh_pr_quiet_minutes=0, rereview_quiet_minutes=0)
+        assert review_skip_reason(pr, pc, _op(), force=False) is None
+
+    def test_no_stamp_means_no_window(self) -> None:
+        from franktheunicorn.worker.runner import review_skip_reason
+
+        pr = PullRequestFactory(state="open", author="holdenk", head_seen_at=None)
+        assert review_skip_reason(pr, self._pc(pr), _op(), force=False) is None
+
+    def test_force_bypasses_the_window(self) -> None:
+        from django.utils import timezone
+
+        from franktheunicorn.worker.runner import review_skip_reason
+
+        pr = PullRequestFactory(state="open", author="holdenk", head_seen_at=timezone.now())
+        assert review_skip_reason(pr, self._pc(pr), _op(), force=True) is None

@@ -1192,6 +1192,48 @@ def missing_review_sources(
     return expected_review_sources(operator_config) - satisfied
 
 
+def settling_window_remaining(pr: PullRequest, pc: ProjectConfig) -> str:
+    """Why *pr* is inside its post-push quiet window, or "" to review now.
+
+    ``head_seen_at`` is stamped when the poller first saw the current head
+    (row created or push seen). A review owed on a fresh head waits out a
+    quiet window so a burst of pushes costs one re-review, not one per push:
+    a PR we have never reviewed settles in ``fresh_pr_quiet_minutes`` (a
+    brand-new PR usually gets a follow-up push within minutes), a PR we have
+    reviewed before settles in ``rereview_quiet_minutes``. 0 disables the
+    window. The window only delays — the review runs on the next cycle after
+    it lapses — and NULL ``head_seen_at`` (not refreshed since tracking
+    existed) means no window at all.
+    """
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    seen = pr.head_seen_at
+    if seen is None:
+        return ""
+    if timezone.is_naive(seen):
+        from datetime import UTC
+
+        seen = timezone.make_aware(seen, UTC)
+    reviewed_before = bool(pr.agent_runs) or pr.review_drafts.exists()
+    minutes = pc.rereview_quiet_minutes if reviewed_before else pc.fresh_pr_quiet_minutes
+    if minutes <= 0:
+        return ""
+    age = timezone.now() - seen
+    if age >= timedelta(minutes=minutes):
+        return ""
+    remaining = timedelta(minutes=minutes) - age
+    remaining_min = max(1, int(remaining.total_seconds() // 60))
+    which = "re-review" if reviewed_before else "first review"
+    return (
+        f"Its head is only {int(age.total_seconds() // 60)} minute(s) old; the "
+        f"{which} waits out the {minutes}-minute quiet window (about {remaining_min} "
+        f"more) so a burst of pushes costs one review, not one per push. "
+        f"Set fresh_pr_quiet_minutes / rereview_quiet_minutes to 0 to disable."
+    )
+
+
 def review_skip_reason(
     pr: PullRequest,
     pc: ProjectConfig,
@@ -1228,6 +1270,9 @@ def review_skip_reason(
             "reviewed-clean",
             "Every configured reviewer has had a turn and none found anything.",
         )
+    settling = settling_window_remaining(pr, pc)
+    if settling:
+        return ReviewSkip("settling", settling)
     if pr.queue == "wip":
         return ReviewSkip(
             "wip",
@@ -1446,6 +1491,7 @@ def process_pr(
         if getattr(pc, "minimize_reviews", False) and effective_config is not None and not force:
             from franktheunicorn.review.mergeability import interest_reason
             from franktheunicorn.review.worthiness import (
+                blame_touches_operator,
                 current_worthiness,
                 looks_close_to_mergeable,
                 record_worthiness,
@@ -1455,6 +1501,8 @@ def process_pr(
             why = interest_reason(pr, pc, effective_config.github_username)
             if not why:
                 why = looks_close_to_mergeable(pr)
+            if not why:
+                why = blame_touches_operator(pr, effective_config.github_username, repo_path)
             if not why:
                 screen = current_worthiness(pr)
                 # No diff, no screen: an empty-diff verdict would stick to this head.
@@ -1685,6 +1733,14 @@ def process_pr(
                 logger.exception("Error in LLM checks for PR #%d", pr.number)
 
         _log("Agent run complete.")
+        # Approved-but-critical is recomputed from current state after every
+        # run that leaves (or clears) drafts, like the readiness re-score below.
+        try:
+            from franktheunicorn.review.approved_critical import update_approved_critical
+
+            update_approved_critical(pr, pc)
+        except Exception:
+            logger.debug("Approved-critical refresh failed for PR #%d", pr.number, exc_info=True)
         _refresh_merge_readiness_after_review(pr, pc, operator_config)
         return drafts
     finally:
@@ -2237,6 +2293,9 @@ _SKIP_ADVICE = {
     "one on demand.",
     "screen-unavailable": "minimize_reviews is on but no worthiness backend answered; "
     "those PRs are retried next cycle. Check review_worthiness in operator.yaml.",
+    "settling": "Those PRs were pushed within their quiet window; the review runs on "
+    "the next cycle after it lapses. Set fresh_pr_quiet_minutes / "
+    "rereview_quiet_minutes to 0 in the project YAML to review immediately.",
 }
 
 

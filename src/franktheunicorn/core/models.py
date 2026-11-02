@@ -236,6 +236,18 @@ class PullRequest(models.Model):
     worthiness_verdict = models.CharField(max_length=20, blank=True, default="")
     worthiness_sha = models.CharField(max_length=64, blank=True, default="")
     worthiness_detail = models.JSONField(default=dict, blank=True)
+    # When the poller first saw the current head (row created or push seen).
+    # The re-review debounce (review_skip_reason) waits out a quiet window
+    # from this stamp so a burst of pushes costs one re-review, not one per
+    # push. NULL means "before tracking existed" — no window, review now.
+    head_seen_at = models.DateTimeField(null=True, blank=True)
+    # "A committer approved this but we found something critical" flag
+    # (review/approved_critical.py), written after every agent run that
+    # leaves drafts. Not a routing queue — like the almost-ready verdict it
+    # cuts across the queues and the dashboard tab filters on it. detail
+    # carries the committer approvers and the critical draft ids behind it.
+    approved_critical = models.BooleanField(default=False)
+    approved_critical_detail = models.JSONField(default=dict, blank=True)
     # "Ask the author to rebase" bookkeeping: the head it was asked on, when,
     # and which checks were failing. When the head moves, the poller looks at
     # those checks again — green now is a confirmed flake, still red is a real

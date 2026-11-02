@@ -368,12 +368,20 @@ def _refresh_pull_request(
         _mark_reviews_stale(pr_obj)
     if base_sha and pr_obj.base_sha != base_sha:
         pr_obj.base_sha = base_sha
-    if head_sha and pr_obj.head_sha != head_sha:
+    # When we first saw this head: now, on creation or on a push. The
+    # re-review debounce measures the quiet window from here; an unchanged
+    # head keeps its original stamp. Rows that predate the field are stamped
+    # on their next refresh (a one-time window), and NULL only ever means
+    # "not refreshed since tracking existed" — never "settling forever".
+    head_is_new = bool(head_sha) and pr_obj.head_sha != head_sha
+    if head_is_new:
         pr_obj.head_sha = head_sha
         # A push invalidates the stored CI verdict. Cleared here, not where
         # the fresh one is read, so a failed read leaves "unknown" and never
         # an old head's "pass" that the merge queue would act on.
         pr_obj.ci_status = ""
+    if head_sha and (pr_obj.head_seen_at is None or head_is_new):
+        pr_obj.head_seen_at = timezone.now()
     if head_branch and pr_obj.head_branch != head_branch:
         pr_obj.head_branch = head_branch
     if base_branch and pr_obj.base_branch != base_branch:

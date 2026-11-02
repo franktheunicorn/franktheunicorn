@@ -82,6 +82,12 @@ logger = logging.getLogger(__name__)
 #: ``review`` queue AND have security findings, so it shows under both tabs.
 SECURITY_FINDINGS_QUEUE = "security-findings"
 
+#: The "Approved w/ Critical" tab key. Also not a ``PullRequest.queue`` value:
+#: it filters open PRs flagged by review/approved_critical.py — a committer
+#: has approved (so it is probably about to merge) and a reviewer found a
+#: critical-severity draft. Rare by design; every row deserves a look today.
+APPROVED_CRITICAL_QUEUE = "approved-critical"
+
 # Queue definitions for the tab bar. "almost-ready" is not a PullRequest.queue
 # value: it cuts across the moderation queues (a new contributor's PR can be
 # almost ready) and is filtered on merge_readiness_verdict instead.
@@ -93,6 +99,10 @@ QUEUE_TABS: list[dict[str, str]] = [
         "key": SECURITY_FINDINGS_QUEUE,
         "label": "Security Findings",
         "icon": "dashboard/img/shield.svg",
+    },
+    {
+        "key": APPROVED_CRITICAL_QUEUE,
+        "label": "Approved w/ Critical",
     },
     {"key": "your-prs", "label": "Your PRs"},
     {"key": "mentioned", "label": "Mentioned"},
@@ -182,6 +192,10 @@ def _queue_members_q(queue: str, readiness_off: Q | None = None) -> Q:
             category__in=("security", "security-context"),
         ).values_list("pull_request_id", flat=True)
         return Q(state="open", pk__in=security_pr_ids)
+    if queue == APPROVED_CRITICAL_QUEUE:
+        # A committer approved it and a reviewer left a critical-severity
+        # draft — recomputed on every agent run (review/approved_critical.py).
+        return Q(state="open", approved_critical=True)
     # A PR can be in several queues at once; match membership, not just the
     # primary queue, so e.g. a mentioned new-contributor PR shows under both
     # tabs. PullRequest.queue_filter is SQLite-safe (no JSON-array contains).

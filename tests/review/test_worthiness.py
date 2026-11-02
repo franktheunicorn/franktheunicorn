@@ -20,6 +20,7 @@ from franktheunicorn.review.worthiness import (
     UNCLEAR,
     WORTH_REVIEWING,
     Worthiness,
+    blame_touches_operator,
     current_worthiness,
     looks_close_to_mergeable,
     parse_worthiness,
@@ -161,3 +162,58 @@ class TestRecordAndCurrent:
         # CI finished red since the screen ran — the answer may be different now.
         pr.ci_status = "failure"
         assert current_worthiness(pr) is None
+
+
+@pytest.mark.django_db
+class TestBlameTouchesOperator:
+    def test_operator_among_changed_line_authors(self) -> None:
+        pr = PullRequestFactory(changed_files=["python/pyspark/sql.py"], base_sha="b", head_sha="h")
+        blame = [
+            {
+                "file_path": "python/pyspark/sql.py",
+                # Real blame identities carry name, full email, and local part.
+                "authors": ["Holden Karau", "holdenk@apache.org", "holdenk"],
+                "near_authors": [],
+            }
+        ]
+        with patch(
+            "franktheunicorn.scoring.blame_fetcher.fetch_blame_for_files",
+            return_value=blame,
+        ) as mock_blame:
+            why = blame_touches_operator(pr, "holdenk", "/nonexistent-repo")
+        assert why == "it rewrites code you wrote"
+        assert mock_blame.call_args.kwargs["base_ref"] == "b"
+        assert mock_blame.call_args.kwargs["head_ref"] == "h"
+
+    def test_email_local_part_matches_too(self) -> None:
+        pr = PullRequestFactory(changed_files=["x.py"])
+        # The porcelain parser adds the email local-part as its own identity.
+        blame = [
+            {"file_path": "x.py", "authors": ["holdenk@example.org", "holdenk"], "near_authors": []}
+        ]
+        with patch(
+            "franktheunicorn.scoring.blame_fetcher.fetch_blame_for_files", return_value=blame
+        ):
+            assert blame_touches_operator(pr, "holdenk", "/repo")
+
+    def test_near_authors_do_not_count(self) -> None:
+        pr = PullRequestFactory(changed_files=["x.py"])
+        blame = [{"file_path": "x.py", "authors": ["someone"], "near_authors": ["holdenk"]}]
+        with patch(
+            "franktheunicorn.scoring.blame_fetcher.fetch_blame_for_files", return_value=blame
+        ):
+            assert blame_touches_operator(pr, "holdenk", "/repo") == ""
+
+    def test_no_files_no_repo_no_call(self) -> None:
+        pr = PullRequestFactory(changed_files=[])
+        assert blame_touches_operator(pr, "holdenk", "/repo") == ""
+        assert blame_touches_operator(pr, "holdenk", None) == ""
+        assert blame_touches_operator(pr, "", "/repo") == ""
+
+    def test_a_blame_failure_is_not_interesting(self) -> None:
+        pr = PullRequestFactory(changed_files=["x.py"])
+        with patch(
+            "franktheunicorn.scoring.blame_fetcher.fetch_blame_for_files",
+            side_effect=RuntimeError("no clone"),
+        ):
+            assert blame_touches_operator(pr, "holdenk", "/repo") == ""
