@@ -52,6 +52,18 @@ logger = logging.getLogger(__name__)
 # True if the PR text declares a backport/cherry-pick at all (cue anywhere).
 _DECLARES_BACKPORT = re.compile(r"back[\s-]?port|cherry[\s-]?pick", re.IGNORECASE)
 
+# Forward-looking asks that a change BE backported/cherry-picked someday — not
+# a backport PR. Covers prose ("should be backported", "please cherry-pick this")
+# and common labels on the *original* ("needs-backport", "backport-needed").
+_FORWARD_LOOKING_BACKPORT = re.compile(
+    r"(?:should|needs?\s+to|must|please|will)\s+(?:be\s+)?"
+    r"(?:back[\s-]?port|cherry[\s-]?pick)"
+    r"|(?:back[\s-]?port|cherry[\s-]?pick)\s+(?:this|it)\b"
+    r"|needs?-?(?:to-?)?(?:back[\s-]?port|cherry[\s-]?pick)"
+    r"|(?:back[\s-]?port|cherry[\s-]?pick)-?needed",
+    re.IGNORECASE,
+)
+
 # A single source reference: a commit SHA (optionally qualified by
 # "commit"/"sha") or a PR reference (``#123`` / ``org/repo#123``). The trailing
 # ``\b`` anchors keep us from matching hex-adjacent substrings. A short,
@@ -97,6 +109,22 @@ _CONNECTOR_REF = re.compile(
 # marker; an HTML interstitial / rate-limit page / login redirect carries
 # neither. Used to reject non-diff 200 bodies before parsing.
 _DIFF_MARKERS = ("diff --git", "@@ -")
+
+
+def declares_backport(title: str, body: str, labels: list[object], owner: str, repo: str) -> bool:
+    """Whether a PR is a backport: cue anywhere in title, body, or a label.
+
+    A forward-looking ask alone ("should be backported", "please cherry-pick
+    this", label ``needs-backport``) is not — those mark the original, not the
+    backport. ``owner``/``repo`` are unused (kept so call sites stay stable).
+    """
+    del owner, repo
+    text = "\n".join([title or "", body or "", *(str(label) for label in labels)])
+    if not _DECLARES_BACKPORT.search(text):
+        return False
+    # Drop forward-looking asks; a remaining cue means this PR is the backport.
+    cleaned = _FORWARD_LOOKING_BACKPORT.sub(" ", text)
+    return bool(_DECLARES_BACKPORT.search(cleaned))
 
 
 @dataclass(frozen=True)
