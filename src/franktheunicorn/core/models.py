@@ -83,6 +83,7 @@ class PullRequest(models.Model):
     QUEUE_CHOICES = [
         ("review", "Review"),
         ("intending-to-merge", "Intending to Merge"),
+        ("backport", "Backport"),
         ("ai-generated", "AI-Generated"),
         ("new-contributor", "New Contributor"),
         ("consider-closing", "Consider Closing"),

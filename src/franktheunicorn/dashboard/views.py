@@ -95,6 +95,7 @@ QUEUE_TABS: list[dict[str, str]] = [
     {"key": "review", "label": "Review"},
     {"key": ALMOST_READY_QUEUE, "label": "Almost Ready to Merge"},
     {"key": "intending-to-merge", "label": "Intending to Merge"},
+    {"key": "backport", "label": "Backports"},
     {
         "key": SECURITY_FINDINGS_QUEUE,
         "label": "Security Findings",
@@ -679,6 +680,36 @@ def _adjacent_prs(pr: PullRequest) -> tuple[PullRequest | None, PullRequest | No
     return prev_pr, next_pr
 
 
+def _refresh_closed_state(pr: PullRequest) -> None:
+    """Flip an "open" row to closed/merged if the forge says it already is.
+
+    Best-effort: the poller reaps these hourly, this just stops the page lying
+    in between. A forge error leaves the stored state alone.
+    """
+    try:
+        from franktheunicorn.backends import make_client
+        from franktheunicorn.config.loader import get_operator_config, get_project_config
+        from franktheunicorn.config.resolver import get_forge_entry
+
+        operator_config = get_operator_config()
+        project_config = get_project_config(pr.project.full_name)
+        entry = get_forge_entry(operator_config, getattr(project_config, "forge", None) or "github")
+        data = make_client(entry, pace_requests=False).get_pull_request(
+            pr.project.owner, pr.project.repo, pr.number
+        )
+    except Exception:
+        logger.warning(
+            "Live closed-state check failed for PR #%d; showing stored state",
+            pr.number,
+            exc_info=True,
+        )
+        return
+    if data.get("state") not in ("closed", "merged"):
+        return
+    pr.state = "merged" if data.get("merged") or data.get("merged_at") else "closed"
+    pr.save(update_fields=["state"])
+
+
 def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
     """Detail view for a single PR showing drafts and score breakdown."""
     pr = get_object_or_404(
@@ -687,6 +718,8 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
         ),
         pk=pr_id,
     )
+    if pr.state == "open":
+        _refresh_closed_state(pr)
     drafts = (
         ReviewDraft.objects.filter(
             pull_request=pr,

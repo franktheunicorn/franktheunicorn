@@ -973,6 +973,7 @@ def _route_pr_to_queue(
     project_config: ProjectConfig | None = None,
 ) -> None:
     """Set queue and boolean flags based on moderation flags."""
+    from franktheunicorn.review.checks.backport import declares_backport
     from franktheunicorn.scoring.moderation import compute_moderation_flags
 
     pr_dict: dict[str, object] = {
@@ -1045,6 +1046,12 @@ def _route_pr_to_queue(
             queues.append("intending-to-merge")
         if pr_obj.is_operator_pr:
             queues.append("your-prs")
+        # Backports are reviewed upstream already and time-boxed by the release,
+        # so they sit ahead of the general pile (but not the digest's Your PRs).
+        if declares_backport(
+            pr_obj.title, pr_obj.body, pr_obj.labels, pr_obj.project.owner, pr_obj.project.repo
+        ):
+            queues.append("backport")
         if pr_obj.is_mentioned:
             queues.append("mentioned")
         if pr_obj.likely_ai_generated or "bot" in flags:
