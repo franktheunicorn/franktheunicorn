@@ -1170,6 +1170,10 @@ def missing_review_sources(
     and is treated as fully reviewed. That exemption is deliberate and it is about
     money: without it, deploying this would re-review every open PR in the
     database once, at LLM cost, to discover something the operator already knows.
+    A rebase-needed draft (``backend_used="auto-conflict"``) does not count: it
+    is filed without any reviewer having run, so a PR carrying only that draft
+    still owes a real review — otherwise a conflicted PR would read as reviewed
+    and never get one even after the rebase un-conflicted it.
 
     A push invalidates a run that recorded a different ``head_sha``. That
     re-review only happens when the PR moved within ``review_activity_days``.
@@ -1177,7 +1181,7 @@ def missing_review_sources(
     from franktheunicorn.backends.poller import activity_is_recent
 
     runs = pr.agent_runs or {}
-    if not runs and pr.review_drafts.exists():
+    if not runs and pr.review_drafts.exclude(backend_used="auto-conflict").exists():
         return set()
     re_review = activity_is_recent(pr.github_updated_at, review_activity_days)
     satisfied = {
@@ -1298,7 +1302,7 @@ def process_pr(
     import contextlib
 
     from franktheunicorn.config.loader import get_operator_config
-    from franktheunicorn.review.drafter import draft_review
+    from franktheunicorn.review.drafter import draft_review, ensure_conflict_draft
 
     if operator_config is None:
         with contextlib.suppress(Exception):
@@ -1341,6 +1345,26 @@ def process_pr(
             # reaches this point is the poll cycle, whose audience is the
             # aggregate line _log_cycle_summary prints.
             logger.debug("PR #%d: no agent run — %s. %s", pr.number, skip.reason, skip.explanation)
+            return []
+
+        # Deterministic pre-gate: a PR GitHub reports as conflicted cannot be
+        # merged, and a full review on top of a conflict is mostly waste — every
+        # backend, check and agent CLI runs at full cost and the answer changes
+        # completely after the rebase. File the rebase-needed draft and stop.
+        # ``mergeable is None`` means GitHub has not computed it yet, not
+        # "conflicted" — those PRs still run. ``force`` bypasses: the dashboard's
+        # Force Run Agents means redo the lot. The stored verdict refreshes on the
+        # next poll that sees the PR move (or the poll_refresh_hours timer catches
+        # a base-branch-advance conflict), so a rebased PR is picked up then.
+        if pr.mergeable is False and not force:
+            ensure_conflict_draft(pr)
+            if decisions is not None:
+                decisions["conflicted"] += 1
+            logger.debug(
+                "PR #%d: no agent run — conflicted. Filed the rebase-needed draft; "
+                "the full review waits for the rebase.",
+                pr.number,
+            )
             return []
 
         if decisions is not None:
@@ -2164,6 +2188,8 @@ _SKIP_ADVICE = {
     "mergeability_triage.backends entry failed); those PRs are retried next cycle.",
     "not-involved": "auto_review_policy is 'mentioned_or_authored' and none of these PRs "
     "involve you; set auto_review_policy: all in the project YAML to review every PR.",
+    "conflicted": "The conflicted PRs were filed a rebase-needed draft and skipped; "
+    "they are reviewed after the rebase, or on demand via Force Run Agents.",
 }
 
 

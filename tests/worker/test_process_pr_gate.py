@@ -317,3 +317,119 @@ class TestClosedMidCycle:
             runner._reap_closed_prs_if_due(clients, [pc])
             runner._reap_closed_prs_if_due(clients, [pc])
         assert reap.call_count == 1
+
+
+@pytest.mark.django_db
+class TestConflictedGate:
+    """A PR GitHub reports as conflicted gets the rebase-needed draft and nothing
+    else — the full review on top of a conflict is wasted spend, and the answer
+    changes after the rebase anyway. ``mergeable is None`` (not yet computed) is
+    not conflicted and must still run."""
+
+    def test_conflicted_pr_files_rebase_draft_and_skips(self) -> None:
+        pr = PullRequestFactory(state="open", author="holdenk", mergeable=False)
+        config = ProjectConfig(owner=pr.project.owner, repo=pr.project.repo)
+
+        state, fake = _tracking_draft_review()
+        with patch("franktheunicorn.review.drafter.draft_review", side_effect=fake):
+            result = process_pr(pr, config, operator_config=_op(), forge_client=_forge_client())
+
+        assert result == []
+        assert state["called"] is False
+        drafts = ReviewDraft.objects.filter(pull_request=pr)
+        assert drafts.count() == 1
+        assert drafts.get().backend_used == "auto-conflict"
+
+    def test_unknown_mergeable_still_runs(self) -> None:
+        pr = PullRequestFactory(state="open", author="holdenk", mergeable=None)
+        config = ProjectConfig(owner=pr.project.owner, repo=pr.project.repo)
+
+        state, fake = _tracking_draft_review()
+        with patch("franktheunicorn.review.drafter.draft_review", side_effect=fake):
+            process_pr(pr, config, operator_config=_op(), forge_client=_forge_client())
+
+        assert state["called"] is True
+
+    def test_mergeable_pr_still_runs(self) -> None:
+        pr = PullRequestFactory(state="open", author="holdenk", mergeable=True)
+        config = ProjectConfig(owner=pr.project.owner, repo=pr.project.repo)
+
+        state, fake = _tracking_draft_review()
+        with patch("franktheunicorn.review.drafter.draft_review", side_effect=fake):
+            process_pr(pr, config, operator_config=_op(), forge_client=_forge_client())
+
+        assert state["called"] is True
+
+    def test_force_bypasses_conflict_gate(self) -> None:
+        pr = PullRequestFactory(state="open", author="holdenk", mergeable=False)
+        config = ProjectConfig(owner=pr.project.owner, repo=pr.project.repo)
+
+        state, fake = _tracking_draft_review()
+        with patch("franktheunicorn.review.drafter.draft_review", side_effect=fake):
+            result = process_pr(
+                pr, config, operator_config=_op(), forge_client=_forge_client(), force=True
+            )
+
+        assert state["called"] is True
+        assert result == ["DRAFT"]
+
+    def test_skip_is_counted_for_the_cycle_summary(self) -> None:
+        from collections import Counter
+
+        pr = PullRequestFactory(state="open", author="holdenk", mergeable=False)
+        config = ProjectConfig(owner=pr.project.owner, repo=pr.project.repo)
+        decisions: Counter[str] = Counter()
+
+        with patch("franktheunicorn.review.drafter.draft_review", return_value=[]):
+            process_pr(
+                pr,
+                config,
+                operator_config=_op(),
+                forge_client=_forge_client(),
+                decisions=decisions,
+            )
+
+        assert decisions["conflicted"] == 1
+        assert decisions["ran"] == 0
+
+    def test_conflict_draft_is_not_duplicated_on_a_second_pass(self) -> None:
+        pr = PullRequestFactory(state="open", author="holdenk", mergeable=False)
+        config = ProjectConfig(owner=pr.project.owner, repo=pr.project.repo)
+
+        with patch("franktheunicorn.review.drafter.draft_review", return_value=[]):
+            process_pr(pr, config, operator_config=_op(), forge_client=_forge_client())
+            process_pr(pr, config, operator_config=_op(), forge_client=_forge_client())
+
+        assert ReviewDraft.objects.filter(pull_request=pr).count() == 1
+
+    def test_a_rebased_pr_gets_its_real_review(self) -> None:
+        """The conflict draft alone must not mark the PR reviewed: once the
+        rebase lands (new head, mergeable again) the full pipeline owes a run."""
+        pr = PullRequestFactory(
+            state="open", author="holdenk", mergeable=False, head_sha="conflicted-head"
+        )
+        config = ProjectConfig(owner=pr.project.owner, repo=pr.project.repo)
+
+        with patch("franktheunicorn.review.drafter.draft_review", return_value=[]):
+            process_pr(pr, config, operator_config=_op(), forge_client=_forge_client())
+        assert ReviewDraft.objects.filter(pull_request=pr).count() == 1
+
+        # The rebase: new head, conflicts gone. Same PR row, next cycle.
+        pr.mergeable = True
+        pr.head_sha = "rebased-head"
+        pr.save()
+        state, fake = _tracking_draft_review()
+        with patch("franktheunicorn.review.drafter.draft_review", side_effect=fake):
+            process_pr(pr, config, operator_config=_op(), forge_client=_forge_client())
+
+        assert state["called"] is True
+
+    def test_a_conflict_only_pr_is_not_already_reviewed(self) -> None:
+        from franktheunicorn.worker.runner import review_skip_reason
+
+        pr = PullRequestFactory(state="open", author="holdenk", mergeable=False)
+        config = ProjectConfig(owner=pr.project.owner, repo=pr.project.repo)
+        process_pr(pr, config, operator_config=_op(), forge_client=_forge_client())
+
+        skip = review_skip_reason(pr, config, _op(), force=False)
+        assert skip is None  # owed a real review; the conflicted gate decides, not this
