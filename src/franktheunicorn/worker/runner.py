@@ -1440,6 +1440,48 @@ def process_pr(
                 logger.debug("PR #%d: no full review; triage %s", pr.number, triage)
                 return []
 
+        # Minimize mode: the policy let it through, but the PR still has to earn
+        # a full review. Deterministic interest first (no model call); whatever
+        # is left gets one cheap Y/N screen, cached per head + CI/review state.
+        if getattr(pc, "minimize_reviews", False) and effective_config is not None and not force:
+            from franktheunicorn.review.mergeability import interest_reason
+            from franktheunicorn.review.worthiness import (
+                current_worthiness,
+                looks_close_to_mergeable,
+                record_worthiness,
+                run_worthiness_screen,
+            )
+
+            why = interest_reason(pr, pc, effective_config.github_username)
+            if not why:
+                why = looks_close_to_mergeable(pr)
+            if not why:
+                screen = current_worthiness(pr)
+                # No diff, no screen: an empty-diff verdict would stick to this head.
+                if screen is None and pr_diff:
+                    screen = run_worthiness_screen(pr, pc, effective_config, pr_diff)
+                    if screen is not None:
+                        record_worthiness(pr, screen)
+                if screen is None:
+                    if decisions is not None:
+                        decisions["ran"] -= 1
+                        decisions["screen-unavailable"] += 1
+                    logger.debug("PR #%d: no full review; worthiness screen unavailable", pr.number)
+                    return []
+                if not screen.worth_reviewing:
+                    if decisions is not None:
+                        decisions["ran"] -= 1
+                        decisions["screen-no"] += 1
+                    logger.debug(
+                        "PR #%d: no full review; worthiness screen (%s) %s: %s",
+                        pr.number,
+                        screen.source,
+                        screen.verdict,
+                        screen.reason,
+                    )
+                    return []
+                _log(f"Worthiness screen ({screen.source}): {screen.verdict}: {screen.reason}")
+
         community_ctx = ""
         jira_ctx = ""
         sentry_ctx = ""
@@ -2190,6 +2232,11 @@ _SKIP_ADVICE = {
     "involve you; set auto_review_policy: all in the project YAML to review every PR.",
     "conflicted": "The conflicted PRs were filed a rebase-needed draft and skipped; "
     "they are reviewed after the rebase, or on demand via Force Run Agents.",
+    "screen-no": "minimize_reviews is on and the cheap worthiness screen said these PRs "
+    "don't earn a full review — that is the flag working. Force Run Agents reviews "
+    "one on demand.",
+    "screen-unavailable": "minimize_reviews is on but no worthiness backend answered; "
+    "those PRs are retried next cycle. Check review_worthiness in operator.yaml.",
 }
 
 

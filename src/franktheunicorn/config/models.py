@@ -2287,6 +2287,20 @@ class MergeabilityTriageConfig(BaseModel):
     max_diff_chars: int = Field(default=40_000, gt=0)
 
 
+class ReviewWorthinessConfig(BaseModel):
+    """Who answers "is this PR worth a full review?" for ``minimize_reviews: true``.
+
+    One cheap call per PR head (``review/worthiness.py``), cached against the
+    head + CI/review state so a PR is screened once, not once a cycle. The
+    explicit ``backend`` exists so the screen can use a small cheap model while
+    the review pipeline uses a bigger one; unset falls back to every
+    ``llm_backends`` entry in order.
+    """
+
+    backend: LLMBackendConfig | None = None
+    max_diff_chars: int = Field(default=12_000, gt=0)
+
+
 class ZombieQueueConfig(BaseModel):
     """The closed-PR follow-up scan (``review/zombie.py``, the Zombie Queue tab).
 
@@ -2518,6 +2532,7 @@ class OperatorConfig(BaseModel):
     worker_pool: WorkerPoolConfig = Field(default_factory=WorkerPoolConfig)
     zombie_queue: ZombieQueueConfig = Field(default_factory=ZombieQueueConfig)
     mergeability_triage: MergeabilityTriageConfig = Field(default_factory=MergeabilityTriageConfig)
+    review_worthiness: ReviewWorthinessConfig = Field(default_factory=ReviewWorthinessConfig)
     merge_intent: MergeIntentConfig = Field(default_factory=MergeIntentConfig)
     # Multiple LLM backends can run in parallel. Each produces findings
     # independently; results are combined and deduped via anti-patterns.
@@ -2993,6 +3008,21 @@ class ProjectConfig(BaseModel):
     # "Force Run Agents" button (force=True) always bypasses the gate. Configs
     # written before this field existed default to "mentioned_or_authored".
     auto_review_policy: str = "mentioned_or_authored"
+    # Token-saver mode (off by default). When a project sets this, a PR that
+    # passes the auto_review_policy gate still has to earn its full review.
+    # Deterministic signals come first, no model call: you are involved
+    # (interest_reason — authored/requested/assigned/mentioned), the author is
+    # a followed contributor, it touches watched_paths, or it is already close
+    # to merging (merge intent, an almost-ready verdict, at least one approval,
+    # or a cached likely-mergeable triage). Anything left goes to one cheap
+    # model call (review_worthiness in operator.yaml) that answers Y/N on
+    # whether a full review is worth the spend; "unclear" counts as N — the
+    # screen exists to cut volume, and every PR stays reviewable on demand via
+    # the dashboard's Force Run Agents. Skips are counted in the cycle summary
+    # as screen-no / screen-unavailable. Most useful with auto_review_policy:
+    # all on a high-volume repo: the policy lets everything through and this
+    # flag decides what actually gets reviewed.
+    minimize_reviews: bool = False
     # Poll cost control. A PR whose upstream ``updated_at`` hasn't moved since
     # the last poll — and whose listed title, description, head SHA, labels,
     # reviewers, assignees, and draft state are unchanged — is skipped: no

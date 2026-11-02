@@ -226,6 +226,16 @@ class PullRequest(models.Model):
     mergeability_verdict = models.CharField(max_length=20, blank=True, default="")
     mergeability_sha = models.CharField(max_length=64, blank=True, default="")
     mergeability_detail = models.JSONField(default=dict, blank=True)
+    # The cheap "is this PR worth a full review?" screen (review/worthiness.py)
+    # that gates the full review when a project sets minimize_reviews. Verdict
+    # is "worth-reviewing" / "not-worth-reviewing" / "unclear" (unclear counts
+    # as not — the screen exists to cut volume), for worthiness_sha only;
+    # detail carries reason, source, and the CI/review state it was screened
+    # against, so a check run finishing or a review landing re-screens without
+    # waiting for a push.
+    worthiness_verdict = models.CharField(max_length=20, blank=True, default="")
+    worthiness_sha = models.CharField(max_length=64, blank=True, default="")
+    worthiness_detail = models.JSONField(default=dict, blank=True)
     # "Ask the author to rebase" bookkeeping: the head it was asked on, when,
     # and which checks were failing. When the head moves, the poller looks at
     # those checks again — green now is a confirmed flake, still red is a real

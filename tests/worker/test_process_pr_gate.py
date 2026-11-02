@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from franktheunicorn.config.models import AgentCLIReviewerConfig, OperatorConfig, ProjectConfig
-from franktheunicorn.core.models import ReviewDraft
+from franktheunicorn.core.models import PullRequest, ReviewDraft
 from franktheunicorn.worker.runner import _should_auto_review, process_pr
 from tests.factories import PullRequestFactory
 
@@ -433,3 +433,142 @@ class TestConflictedGate:
 
         skip = review_skip_reason(pr, config, _op(), force=False)
         assert skip is None  # owed a real review; the conflicted gate decides, not this
+
+
+@pytest.mark.django_db
+class TestMinimizeReviews:
+    """minimize_reviews: deterministic interest first, one cheap screen for the rest."""
+
+    def _pc(self, pr: PullRequest) -> ProjectConfig:
+        return ProjectConfig(
+            owner=pr.project.owner,
+            repo=pr.project.repo,
+            auto_review_policy="all",
+            minimize_reviews=True,
+        )
+
+    def _defaults(self) -> dict[str, Any]:
+        return {
+            "state": "open",
+            "author": "alice",
+            "requested_reviewers": [],
+            "assignees": [],
+            "body": "",
+            "head_sha": "abc",
+        }
+
+    def _run(self, pr: PullRequest, **screen_kw: Any) -> tuple[bool, Any]:
+        from franktheunicorn.review.worthiness import Worthiness
+
+        screen = Worthiness(**screen_kw) if screen_kw else None
+        state, fake = _tracking_draft_review()
+        with (
+            patch("franktheunicorn.review.drafter.draft_review", side_effect=fake),
+            patch(
+                "franktheunicorn.review.worthiness.run_worthiness_screen",
+                return_value=screen,
+            ) as mock_screen,
+        ):
+            process_pr(pr, self._pc(pr), operator_config=_op(), forge_client=_forge_client())
+        return state["called"], mock_screen
+
+    def test_an_involved_pr_reviews_without_a_screen(self) -> None:
+        pr = PullRequestFactory(**{**self._defaults(), "author": "holdenk"})
+        ran, mock_screen = self._run(pr, verdict="not-worth-reviewing")
+        assert ran is True
+        mock_screen.assert_not_called()
+
+    def test_an_approved_pr_reviews_without_a_screen(self) -> None:
+        pr = PullRequestFactory(**{**self._defaults(), "approval_count": 2})
+        ran, mock_screen = self._run(pr, verdict="not-worth-reviewing")
+        assert ran is True
+        mock_screen.assert_not_called()
+
+    def test_an_uninteresting_pr_gets_the_screen(self) -> None:
+        pr = PullRequestFactory(**self._defaults())
+        ran, mock_screen = self._run(pr, verdict="worth-reviewing", reason="risky")
+        assert ran is True
+        mock_screen.assert_called_once()
+
+    def test_screen_no_skips_and_is_counted(self) -> None:
+        from collections import Counter
+
+        from franktheunicorn.review.worthiness import Worthiness
+
+        pr = PullRequestFactory(**self._defaults())
+        decisions: Counter[str] = Counter()
+        screen = {"verdict": "not-worth-reviewing", "reason": "typo fixes"}
+        with (
+            patch("franktheunicorn.review.drafter.draft_review", return_value=[]),
+            patch(
+                "franktheunicorn.review.worthiness.run_worthiness_screen",
+                return_value=Worthiness(**screen),
+            ),
+        ):
+            process_pr(
+                pr,
+                self._pc(pr),
+                operator_config=_op(),
+                forge_client=_forge_client(),
+                decisions=decisions,
+            )
+        assert decisions["screen-no"] == 1
+        assert decisions["ran"] == 0
+
+    def test_screen_unavailable_skips_and_is_counted(self) -> None:
+        from collections import Counter
+
+        pr = PullRequestFactory(**self._defaults())
+        decisions: Counter[str] = Counter()
+        with (
+            patch("franktheunicorn.review.drafter.draft_review", return_value=[]),
+            patch("franktheunicorn.review.worthiness.run_worthiness_screen", return_value=None),
+        ):
+            process_pr(
+                pr,
+                self._pc(pr),
+                operator_config=_op(),
+                forge_client=_forge_client(),
+                decisions=decisions,
+            )
+        assert decisions["screen-unavailable"] == 1
+
+    def test_a_screened_head_is_not_rescreened_next_cycle(self) -> None:
+        pr = PullRequestFactory(**self._defaults())
+        self._run(pr, verdict="not-worth-reviewing", reason="chore")
+        pr.refresh_from_db()
+        assert pr.worthiness_verdict == "not-worth-reviewing"
+        ran, mock_screen = self._run(pr, verdict="worth-reviewing")
+        assert ran is False  # the cached screen still says no
+        mock_screen.assert_not_called()
+
+    def test_minimize_off_reviews_everything(self) -> None:
+        pr = PullRequestFactory(**self._defaults())
+        pc = ProjectConfig(owner=pr.project.owner, repo=pr.project.repo, auto_review_policy="all")
+        state, fake = _tracking_draft_review()
+        with (
+            patch("franktheunicorn.review.drafter.draft_review", side_effect=fake),
+            patch("franktheunicorn.review.worthiness.run_worthiness_screen") as mock_screen,
+        ):
+            process_pr(pr, pc, operator_config=_op(), forge_client=_forge_client())
+        assert state["called"] is True
+        mock_screen.assert_not_called()
+
+    def test_force_bypasses_the_screen(self) -> None:
+        pr = PullRequestFactory(**self._defaults())
+        ran, _ = self._run(pr, verdict="not-worth-reviewing")
+        assert ran is False
+        state, fake = _tracking_draft_review()
+        with (
+            patch("franktheunicorn.review.drafter.draft_review", side_effect=fake),
+            patch("franktheunicorn.review.worthiness.run_worthiness_screen") as mock_screen2,
+        ):
+            process_pr(
+                pr,
+                self._pc(pr),
+                operator_config=_op(),
+                forge_client=_forge_client(),
+                force=True,
+            )
+        assert state["called"] is True
+        mock_screen2.assert_not_called()
