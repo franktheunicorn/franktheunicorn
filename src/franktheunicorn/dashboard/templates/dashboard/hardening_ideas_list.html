@@ -1,0 +1,76 @@
+{% extends "dashboard/base.html" %}
+{% block title %}Hardening Ideas — franktheunicorn{% endblock %}
+{% block content %}
+<h2>Hardening Ideas</h2>
+<p style="font-size: 0.85rem; color: var(--muted); margin-bottom: 1rem;">
+    Ordinary hardening / improvement ideas mined from CVE reports — things worth
+    filing the normal way, not as security issues. Separate from the security
+    triage queue so they can be churned through without drowning it.
+    Press <em>Mine Hardening Ideas</em> on the Security list to fill this.
+</p>
+
+<nav class="tabs" aria-label="Filter by status">
+    <a href="{% url 'dashboard:hardening_ideas_list' %}?status=all&sort={{ active_sort }}"
+       {% if active_status == 'all' %}class="active" aria-current="true"{% endif %}>
+        All <span class="tab-count">{{ tab_counts.all }}</span>
+    </a>
+    <a href="{% url 'dashboard:hardening_ideas_list' %}?status=worklist&sort={{ active_sort }}"
+       {% if active_status == 'worklist' %}class="active" aria-current="true"{% endif %}>
+        Worklist <span class="tab-count">{{ tab_counts.worklist }}</span>
+    </a>
+    <a href="{% url 'dashboard:hardening_ideas_list' %}?status=confirmed&sort={{ active_sort }}"
+       {% if active_status == 'confirmed' %}class="active" aria-current="true"{% endif %}>
+        Confirmed <span class="tab-count">{{ tab_counts.confirmed }}</span>
+    </a>
+    <a href="{% url 'dashboard:hardening_ideas_list' %}?status=filed&sort={{ active_sort }}"
+       {% if active_status == 'filed' %}class="active" aria-current="true"{% endif %}>
+        Filed <span class="tab-count">{{ tab_counts.filed }}</span>
+    </a>
+    <a href="{% url 'dashboard:hardening_ideas_list' %}?status=fixed&sort={{ active_sort }}"
+       {% if active_status == 'fixed' %}class="active" aria-current="true"{% endif %}>
+        Fixed <span class="tab-count">{{ tab_counts.fixed }}</span>
+    </a>
+    <a href="{% url 'dashboard:hardening_ideas_list' %}?status=dismissed&sort={{ active_sort }}"
+       {% if active_status == 'dismissed' %}class="active" aria-current="true"{% endif %}>
+        Dismissed <span class="tab-count">{{ tab_counts.dismissed }}</span>
+    </a>
+</nav>
+
+{% if active_project %}
+<p style="font-size: 0.85rem; margin-bottom: 0.5rem;">
+    Filtered to <strong>{{ active_project }}</strong>.
+    <a href="{% url 'dashboard:hardening_ideas_list' %}?sort={{ active_sort }}{% if active_status != 'all' %}&status={{ active_status|urlencode }}{% endif %}">Show all projects</a>
+</p>
+{% endif %}
+
+{% if ideas %}
+<table class="data-table">
+    <thead>
+        <tr>
+            <th>Title</th>
+            <th>Project</th>
+            <th>Category</th>
+            <th>Severity</th>
+            <th>Still exists</th>
+            <th>Status</th>
+            <th>Found</th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for idea in ideas %}
+        <tr>
+            <td><a href="{% url 'dashboard:hardening_idea_detail' idea.id %}">{{ idea.title }}</a></td>
+            <td><a href="{% url 'dashboard:hardening_ideas_list' %}?project={{ idea.project.owner }}/{{ idea.project.repo }}">{{ idea.project.owner }}/{{ idea.project.repo }}</a></td>
+            <td>{{ idea.category }}</td>
+            <td>{{ idea.severity }}</td>
+            <td>{{ idea.still_exists|default:"—" }}</td>
+            <td>{{ idea.status }}</td>
+            <td>{{ idea.created_at|date:"Y-m-d H:i" }}</td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p>No ideas on this tab.</p>
+{% endif %}
+{% endblock %}

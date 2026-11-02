@@ -131,6 +131,9 @@ _COMMAND_COST_TIER: dict[str, int] = {
     "verify_security_report": 2,
     "verify_exploit": 2,
     "evaluate_patch": 2,
+    "mine_report_hardening": 2,
+    "mine_hardening_ideas": 2,
+    "confirm_hardening_idea": 2,
     "scan_introduced_cves": 2,
     "scan_security_variants": 2,
     "run_agents": 2,
@@ -401,6 +404,9 @@ def _dispatch(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
         "verify_security_report": _verify_security_report,
         "verify_exploit": _verify_exploit,
         "evaluate_patch": _evaluate_patch,
+        "mine_report_hardening": _mine_report_hardening,
+        "mine_hardening_ideas": _mine_hardening_ideas,
+        "confirm_hardening_idea": _confirm_hardening_idea,
         "map_report_versions": _map_report_versions,
         "find_report_introduction": _find_report_introduction,
         "poll_security_rechecks": _poll_security_rechecks,
@@ -679,6 +685,58 @@ def _evaluate_patch(cmd: WorkerCommand, operator_config: OperatorConfig) -> None
             cmd.security_report.pk,
             run.error,
         )
+
+
+def _mine_report_hardening(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
+    """Mine ordinary hardening ideas from one CVE report."""
+    if cmd.security_report is None:
+        msg = "mine_report_hardening requires a security_report target"
+        raise ValueError(msg)
+
+    from franktheunicorn.security.hardening_ideas import mine_report
+
+    run = mine_report(cmd.security_report, operator_config)
+    cmd.log = run.summary_line()
+    if run.error:
+        logger.info(
+            "Hardening mine for report #%s: %s",
+            cmd.security_report.pk,
+            run.error,
+        )
+
+
+def _mine_hardening_ideas(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
+    """Bulk mine: unscanned CVE reports in the queued agent scope."""
+    from franktheunicorn.security.agent_source import SCOPE_ALL, parse_scope, scope_suffix
+    from franktheunicorn.security.hardening_ideas import mine_backlog
+
+    raw = (cmd.kwargs or {}).get("agent_scope", SCOPE_ALL)
+    scope = parse_scope(raw) if isinstance(raw, str) else None
+    if scope is None:
+        cmd.log = f"hardening sweep: agent_scope {raw!r} doesn't parse; nothing mined"
+        logger.warning("%s (command #%s)", cmd.log, cmd.pk)
+        return
+    result = mine_backlog(operator_config, agent_scope=scope)
+    cmd.log = f"{result.summary_line()}{scope_suffix(scope)}"
+    if result.errors:
+        cmd.log += "; " + "; ".join(result.errors[:5])
+
+
+def _confirm_hardening_idea(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
+    """Re-confirm that one HardeningIdea still exists in the tree."""
+    from franktheunicorn.core.models import HardeningIdea
+    from franktheunicorn.security.hardening_ideas import confirm_idea
+
+    idea_id = (cmd.kwargs or {}).get("idea_id")
+    if not isinstance(idea_id, int):
+        msg = "confirm_hardening_idea requires kwargs.idea_id"
+        raise ValueError(msg)
+    idea = HardeningIdea.objects.filter(pk=idea_id).select_related("project").first()
+    if idea is None:
+        cmd.log = f"hardening confirm: idea #{idea_id} gone"
+        return
+    note = confirm_idea(idea, operator_config)
+    cmd.log = f"hardening confirm for idea #{idea_id}: {note}"
 
 
 def _poll_security_rechecks(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:

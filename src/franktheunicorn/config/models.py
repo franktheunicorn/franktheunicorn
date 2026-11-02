@@ -1830,6 +1830,34 @@ class PatchEvalConfig(BaseModel):
     fresh_worktree: bool = False
 
 
+class HardeningIdeasConfig(BaseModel):
+    """Mine ordinary hardening / improvement ideas from CVE reports.
+
+    Walks CVE-carrying reports the operator has not already mined, puts a
+    coding agent in the checkout, and asks for non-security ideas worth filing
+    the normal way — plus whether each still exists in the tree. Ideas land as
+    :class:`~franktheunicorn.core.models.HardeningIdea` rows; each scanned
+    report is stamped so a re-press does not re-issue.
+
+    ``enabled`` defaults True for the same reason patch_eval does: nothing runs
+    until the list/detail button presses it.
+    """
+
+    enabled: bool = True
+    #: Override the reviewer's model. Empty means "use the verifier's model".
+    model: str = ""
+    extra_args: list[str] = Field(default_factory=list)
+    timeout_seconds: int = 1800
+    max_report_chars: int = 12_000
+    #: Cap how many reports one bulk sweep pays for. A CVE backlog is hundreds;
+    #: one press must not burn the day's budget. The next press picks up where
+    #: this left off (scanned reports are stamped).
+    max_reports_per_run: int = Field(default=20, gt=0)
+    prompt_addendum: str = ""
+    workspace_subdir: str = "security-hardening-ideas"
+    fresh_worktree: bool = False
+
+
 class IntroducedScanConfig(BaseModel):
     """Per-project config for the introduced-CVE scan (a scheduled check-in).
 
@@ -2267,6 +2295,7 @@ class SecurityTriageConfig(BaseModel):
     verifier: SecurityVerifierConfig = Field(default_factory=SecurityVerifierConfig)
     exploit_verify: ExploitVerifyConfig = Field(default_factory=ExploitVerifyConfig)
     patch_eval: PatchEvalConfig = Field(default_factory=PatchEvalConfig)
+    hardening_ideas: HardeningIdeasConfig = Field(default_factory=HardeningIdeasConfig)
     cve_match: SecurityCveMatchConfig = Field(default_factory=SecurityCveMatchConfig)
     duplicates: SecurityDuplicateConfig = Field(default_factory=SecurityDuplicateConfig)
     fix_agent: SecurityFixAgentConfig = Field(default_factory=SecurityFixAgentConfig)

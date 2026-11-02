@@ -23,6 +23,7 @@ from franktheunicorn.core.models import (
     CVEAPIToken,
     DependencyChange,
     EmailScanRecord,
+    HardeningIdea,
     IntroducedBug,
     LLMBackendFallback,
     MergeReadinessFeedback,
@@ -264,6 +265,26 @@ class SecurityReportFactory(factory.django.DjangoModelFactory):  # type: ignore[
     cve_matches = factory.LazyFunction(list)
     matched_cve_id = ""
     operator_notes = ""
+
+
+class HardeningIdeaFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
+    """Factory for HardeningIdea (ordinary improvement mined from a CVE report)."""
+
+    class Meta:
+        model = HardeningIdea
+
+    project = factory.SubFactory(ProjectFactory)
+    source_report = factory.SubFactory(SecurityReportFactory)
+    fingerprint = factory.Sequence(lambda n: f"{'a' * 63}{n % 10}")
+    title = factory.Sequence(lambda n: f"Tighten validation #{n}")
+    description = factory.Faker("paragraph")
+    category = "hardening"
+    severity = "minor"
+    file_path = "src/example.py"
+    draft_ticket_title = factory.LazyAttribute(lambda o: o.title)
+    draft_ticket_body = ""
+    still_exists = "yes"
+    status = "new"
 
 
 class CVEAPITokenFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]

@@ -112,6 +112,36 @@ def queue_patch_evaluation(report: SecurityReport, *, priority: int = PRIORITY_B
     return queue_command("evaluate_patch", report=report, priority=priority)
 
 
+def queue_hardening_mine(report: SecurityReport, *, priority: int = PRIORITY_INTERACTIVE) -> bool:
+    """Queue mining hardening ideas from one CVE report.
+
+    Interactive by default: the detail-page button. A double-click is one run.
+    """
+    return queue_command("mine_report_hardening", report=report, priority=priority)
+
+
+def queue_hardening_sweep(*, priority: int = PRIORITY_BULK, agent_scope: str = SCOPE_ALL) -> bool:
+    """Queue the bulk hardening-ideas mine unless one covering this scope is in flight."""
+    return queue_targetless("mine_hardening_ideas", priority=priority, agent_scope=agent_scope)
+
+
+def queue_hardening_confirm(idea_id: int, *, priority: int = PRIORITY_INTERACTIVE) -> bool:
+    """Queue a re-confirm that one hardening idea still exists."""
+    command = "confirm_hardening_idea"
+    in_flight = WorkerCommand.objects.filter(command=command, status__in=_IN_FLIGHT_STATUSES)
+    for kwargs in in_flight.values_list("kwargs", flat=True):
+        if (kwargs or {}).get("idea_id") == idea_id:
+            logger.info("%s already in flight for idea #%s", command, idea_id)
+            return False
+    WorkerCommand.objects.create(
+        command=command,
+        priority=priority,
+        kwargs={"idea_id": idea_id},
+    )
+    logger.info("Queued %s for idea #%s (priority %d)", command, idea_id, priority)
+    return True
+
+
 def queue_version_map(report: SecurityReport, *, priority: int = PRIORITY_BULK) -> bool:
     """Queue the cheap version-mapper: cited files and whether the patch applies.
 

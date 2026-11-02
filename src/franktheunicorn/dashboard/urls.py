@@ -279,6 +279,16 @@ urlpatterns = [
         views.security_report_evaluate_patch,
         name="security_evaluate_patch",
     ),
+    path(
+        "security/<int:report_id>/mine-hardening/",
+        views.security_report_mine_hardening,
+        name="security_mine_hardening",
+    ),
+    path(
+        "security/mine-hardening-ideas/",
+        views.security_mine_hardening_ideas,
+        name="security_mine_hardening_ideas",
+    ),
     # One-click fix: a Cursor cloud agent applies the scanner's patch, scrubs
     # the wording, and pushes an innocuously-named branch to the fork. The
     # refresh asks the API and the fork where the run got to.
@@ -337,4 +347,27 @@ urlpatterns = [
     path("bugs/<int:bug_id>/", views.bug_review_detail, name="bug_review_detail"),
     path("bugs/<int:bug_id>/dismiss/", views.bug_review_dismiss, name="bug_review_dismiss"),
     path("bugs/<int:bug_id>/fix/", views.bug_review_fix, name="bug_review_fix"),
+    # Hardening ideas — ordinary improvements mined from CVE reports.
+    path("hardening/", views.hardening_ideas_list, name="hardening_ideas_list"),
+    path("hardening/<int:idea_id>/", views.hardening_idea_detail, name="hardening_idea_detail"),
+    path(
+        "hardening/<int:idea_id>/dismiss/",
+        views.hardening_idea_dismiss,
+        name="hardening_idea_dismiss",
+    ),
+    path(
+        "hardening/<int:idea_id>/filed/",
+        views.hardening_idea_filed,
+        name="hardening_idea_filed",
+    ),
+    path(
+        "hardening/<int:idea_id>/fixed/",
+        views.hardening_idea_fixed,
+        name="hardening_idea_fixed",
+    ),
+    path(
+        "hardening/<int:idea_id>/confirm/",
+        views.hardening_idea_confirm,
+        name="hardening_idea_confirm",
+    ),
 ]

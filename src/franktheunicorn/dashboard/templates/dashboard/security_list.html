@@ -143,6 +143,16 @@
     {# The two git-only sweeps. No agent and no model, so cents rather than #}
     {# dollars — but slow: a fetch plus two git logs per branch per project. #}
     {# Worker commands at bulk priority; the flash says where to watch. #}
+    <form method="post" action="{% url 'dashboard:security_mine_hardening_ideas' %}" style="display: inline;">
+        {% csrf_token %}
+        <input type="hidden" name="agent" value="{{ agent_scope }}">
+        <button type="submit" class="action-btn"
+                style="font-size: 0.85rem; padding: 0.4rem 0.8rem;"
+                hx-post="{% url 'dashboard:security_mine_hardening_ideas' %}"
+                hx-confirm="Mine ordinary hardening / improvement ideas from unscanned CVE reports? A coding agent reads each report against the default branch, confirms each idea still exists, and files action items under Hardening. Each report is stamped so a re-press does not re-issue. Cap per press is configured (default 20). Acting on: {{ agent_scope_label }}.">
+            ⌂ Mine Hardening Ideas
+        </button>
+    </form>
     <form method="post" action="{% url 'dashboard:security_match_branches' %}" style="display: inline;">
         {% csrf_token %}
         <input type="hidden" name="agent" value="{{ agent_scope }}">

@@ -1227,6 +1227,14 @@ class SecurityReport(models.Model):
     patch_eval_result = models.TextField(blank=True, default="")
     patch_eval_checked_at = models.DateTimeField(null=True, blank=True)
 
+    # Hardening-ideas mine: an agent read this CVE report looking for ordinary
+    # hardening / improvement ideas that are not (or no longer) security issues,
+    # and filed HardeningIdea rows. Stamped whether or not any ideas came out —
+    # a re-press must not re-issue the same ideas against a report we already
+    # walked. See security/hardening_ideas.py.
+    hardening_scanned_at = models.DateTimeField(null=True, blank=True)
+    hardening_idea_count = models.IntegerField(default=0)
+
     # CVE dedup — against the *public* record.
     cve_matches = models.JSONField(default=list, blank=True)
     matched_cve_id = models.CharField(max_length=50, blank=True, default="")
@@ -2482,6 +2490,98 @@ class IntroducedBug(models.Model):
 
     def __str__(self) -> str:
         return f"IntroducedBug[{self.project}] {self.title[:60]} ({self.status})"
+
+
+class HardeningIdea(models.Model):
+    """An ordinary hardening / improvement idea mined from a CVE report.
+
+    The security backlog is full of reports that are wrong-as-CVE but right-as-
+    cleanup: a missing validation, a tighter check, a clearer error path. The
+    "Mine hardening ideas" button walks CVE-carrying reports, asks an agent for
+    those non-security ideas (and whether each still exists in the tree), and
+    files them here so the operator can churn through filing and fixing without
+    them drowning the security queue.
+
+    Status cycle mirrors :class:`IntroducedBug`: ``new`` → ``confirmed`` /
+    ``dismissed`` / ``filed`` / ``fixed``. ``still_exists`` is the agent's answer
+    at mine (or re-confirm) time — ``new`` ideas with ``still_exists=no`` are
+    skipped at create time so the worklist stays actionable.
+    """
+
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="hardening_ideas")
+    source_report = models.ForeignKey(
+        SecurityReport,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="hardening_ideas",
+    )
+    #: Dedup key so a re-mine of the same report (or a twin report) does not
+    #: re-issue. Hash of project + normalised title + file_path.
+    fingerprint = models.CharField(max_length=64, db_index=True)
+    title = models.CharField(max_length=500)
+    description = models.TextField(blank=True, default="")
+    #: hardening / validation / correctness / api / docs / other
+    category = models.CharField(max_length=30, default="hardening")
+    #: major / important / minor
+    severity = models.CharField(max_length=20, default="minor")
+    file_path = models.CharField(max_length=500, blank=True, default="")
+    #: Innocuous ticket draft (no CVE / vuln / exploit language) for filing
+    #: through the normal contributor path.
+    draft_ticket_title = models.CharField(max_length=200, blank=True, default="")
+    draft_ticket_body = models.TextField(blank=True, default="")
+    #: yes / no / unclear — agent's confirmation that the problem still exists.
+    STILL_EXISTS_CHOICES = [
+        ("", "Not checked"),
+        ("yes", "Still present"),
+        ("no", "Gone"),
+        ("unclear", "Unclear"),
+    ]
+    still_exists = models.CharField(
+        max_length=10, blank=True, default="", choices=STILL_EXISTS_CHOICES
+    )
+    still_exists_evidence = models.TextField(blank=True, default="")
+    still_exists_checked_at = models.DateTimeField(null=True, blank=True)
+    #: new / confirmed / dismissed / filed / fixed
+    STATUS_NEW = "new"
+    STATUS_CONFIRMED = "confirmed"
+    STATUS_DISMISSED = "dismissed"
+    STATUS_FILED = "filed"
+    STATUS_FIXED = "fixed"
+    STATUS_CHOICES = (
+        (STATUS_NEW, "New"),
+        (STATUS_CONFIRMED, "Confirmed"),
+        (STATUS_DISMISSED, "Dismissed"),
+        (STATUS_FILED, "Filed"),
+        (STATUS_FIXED, "Fixed"),
+    )
+    status = models.CharField(max_length=20, default=STATUS_NEW, choices=STATUS_CHOICES)
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    objects: models.Manager[HardeningIdea] = models.Manager()
+
+    #: Cross-cutting worklist filter: ideas still awaiting a first look.
+    WORKLIST_FILTER = "worklist"
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["project", "fingerprint"]),
+            models.Index(fields=["status", "-created_at"]),
+        ]
+
+    @classmethod
+    def list_filters(cls) -> set[str]:
+        """Every legal value of the ideas list page's ``?status=`` parameter."""
+        return {key for key, _ in cls.STATUS_CHOICES} | {cls.WORKLIST_FILTER}
+
+    @staticmethod
+    def worklist_q() -> Q:
+        """Ideas still awaiting the operator: new or confirmed, still present."""
+        return Q(status__in=("new", "confirmed")) & ~Q(still_exists="no")
+
+    def __str__(self) -> str:
+        return f"HardeningIdea[{self.project}] {self.title[:60]} ({self.status})"
 
 
 class TentativeCveMatch(models.Model):

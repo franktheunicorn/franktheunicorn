@@ -1,11 +1,16 @@
-{# Answer to the Verify / Exploit / Patch-eval buttons. Three outcomes, all #}
+{# Answer to the Verify / Exploit / Patch-eval / Hardening buttons. Outcomes #}
 {# said out loud: the gate declined, the run was queued, or one was already in #}
 {# flight. A button that swaps in nothing is indistinguishable from a broken one. #}
 {% if blocked %}
 <div class="verify-result error-note">{{ blocked }}</div>
 {% elif created %}
 <div class="verify-result queued-note">
-    {% if patch_eval %}
+    {% if hardening_ideas %}
+    Hardening-ideas mine queued. The agent will read this CVE report against the
+    default branch, list ordinary improvement ideas that still exist, and file
+    them under Hardening. The report is stamped so a re-press does not re-issue.
+    Expect minutes. Reload, then check the Hardening tab.
+    {% elif patch_eval %}
     Patch evaluation queued. The agent will read the proposed patch against the
     default branch and judge it on its merits — is this a good change, security
     aside — and draft a JIRA-style ticket for the non-security version of it.
@@ -24,7 +29,9 @@
 </div>
 {% else %}
 <div class="verify-result queued-note">
-    {% if patch_eval %}
+    {% if hardening_ideas %}
+    A hardening-ideas mine is already running for this report. Reload to see it land.
+    {% elif patch_eval %}
     A patch evaluation is already running for this report. Reload to see it land.
     {% elif exploit %}
     An exploit verification is already running for this report. Reload to see it land.

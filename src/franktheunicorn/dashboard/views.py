@@ -44,6 +44,7 @@ from franktheunicorn.core.models import (
     CostRecord,
     DependencyChange,
     EmailScanRecord,
+    HardeningIdea,
     IntroducedBug,
     MergeReadinessFeedback,
     OperatorAction,
@@ -4191,6 +4192,139 @@ def security_report_evaluate_patch(request: HttpRequest, report_id: int) -> Http
 
 
 @require_POST
+def security_report_mine_hardening(request: HttpRequest, report_id: int) -> HttpResponse:
+    """Queue mining ordinary hardening ideas from one CVE report (htmx)."""
+    report = get_object_or_404(SecurityReport.objects.select_related("project"), pk=report_id)
+
+    from franktheunicorn.config.loader import get_operator_config
+    from franktheunicorn.security.queue import PRIORITY_INTERACTIVE, queue_hardening_mine
+    from franktheunicorn.security.verifier import resolve_verifier_reviewer
+
+    operator_config = get_operator_config()
+    hardening = operator_config.security_triage.hardening_ideas
+    verifier = operator_config.security_triage.verifier
+    if not hardening.enabled:
+        return render(
+            request,
+            "dashboard/_security_verify_queued.html",
+            {
+                "report": report,
+                "blocked": (
+                    "Hardening-idea mining has been switched off "
+                    "(security_triage.hardening_ideas.enabled: false)."
+                ),
+            },
+        )
+    if report.hardening_scanned_at is not None:
+        return render(
+            request,
+            "dashboard/_security_verify_queued.html",
+            {
+                "report": report,
+                "blocked": (
+                    f"Already mined on {report.hardening_scanned_at:%Y-%m-%d %H:%M} "
+                    f"({report.hardening_idea_count} idea"
+                    f"{'' if report.hardening_idea_count == 1 else 's'}). "
+                    "Clear hardening_scanned_at in the admin to re-run."
+                ),
+            },
+        )
+    if not (report.matched_cve_id or report.cve_matches):
+        return render(
+            request,
+            "dashboard/_security_verify_queued.html",
+            {
+                "report": report,
+                "blocked": "This mine is for CVE-carrying reports — match or assign a CVE first.",
+            },
+        )
+    if report.project is None:
+        return render(
+            request,
+            "dashboard/_security_verify_queued.html",
+            {
+                "report": report,
+                "blocked": "No project attached, so there is no repo to read against.",
+            },
+        )
+    if resolve_verifier_reviewer(operator_config, verifier) is None:
+        return render(
+            request,
+            "dashboard/_security_verify_queued.html",
+            {
+                "report": report,
+                "blocked": (
+                    f"No agent_cli_reviewers entry named '{verifier.reviewer}' "
+                    "to borrow for the mine."
+                ),
+            },
+        )
+
+    created = queue_hardening_mine(report, priority=PRIORITY_INTERACTIVE)
+    return render(
+        request,
+        "dashboard/_security_verify_queued.html",
+        {"report": report, "created": created, "hardening_ideas": hardening},
+    )
+
+
+@require_POST
+def security_mine_hardening_ideas(request: HttpRequest) -> HttpResponse:
+    """Queue the bulk hardening-ideas mine over unscanned CVE reports."""
+    from franktheunicorn.config.loader import get_operator_config
+    from franktheunicorn.security.hardening_ideas import (
+        cve_report_candidates,
+        projects_with_cve_candidates,
+    )
+    from franktheunicorn.security.queue import queue_hardening_sweep
+    from franktheunicorn.security.verifier import resolve_verifier_reviewer
+
+    scope = _bulk_scope(request)
+    if scope is None:
+        return _back_to_security_list(request)
+    operator_config = get_operator_config()
+    hardening = operator_config.security_triage.hardening_ideas
+    if not hardening.enabled:
+        messages.error(
+            request,
+            "Hardening-idea mining is off (security_triage.hardening_ideas.enabled: false).",
+        )
+        return _back_to_security_list(request)
+    if resolve_verifier_reviewer(operator_config, operator_config.security_triage.verifier) is None:
+        messages.error(
+            request,
+            "No coding-agent reviewer is configured for the verifier to borrow — "
+            "point security_triage.verifier.reviewer at an agent_cli_reviewers entry.",
+        )
+        return _back_to_security_list(request)
+    if not projects_with_cve_candidates(scope):
+        messages.info(
+            request,
+            f"No unscanned CVE-carrying report{agent_source.scope_suffix(scope)} to mine. "
+            "Reports already stamped, without a CVE, or closed/invalid/duplicate are skipped.",
+        )
+        return _back_to_security_list(request)
+
+    pending = cve_report_candidates(scope).count()
+    cap = hardening.max_reports_per_run
+    if queue_hardening_sweep(agent_scope=scope):
+        messages.success(
+            request,
+            f"Queued the hardening-ideas mine{agent_source.scope_suffix(scope)}: "
+            f"up to {min(pending, cap)} of {pending} unscanned CVE report"
+            f"{'' if pending == 1 else 's'} (cap {cap}/press). "
+            "Each report is stamped so a re-press picks up the rest. "
+            "Ideas land under Hardening Ideas.",
+        )
+    else:
+        messages.info(
+            request,
+            "A hardening-ideas mine covering these reports is already queued or running.",
+        )
+    return _back_to_security_list(request)
+
+
+@require_POST
 def security_report_fix(request: HttpRequest, report_id: int) -> HttpResponse:
     """Launch the one-click fix agent (htmx).
 
@@ -6190,3 +6324,92 @@ def bug_review_fix(request: HttpRequest, bug_id: int) -> HttpResponse:
     if request.headers.get("HX-Request"):
         return HttpResponse(bug.status)
     return redirect("dashboard:bug_review_detail", bug_id=bug_id)
+
+
+def hardening_ideas_list(request: HttpRequest) -> HttpResponse:
+    """Action-item queue for ordinary hardening ideas mined from CVE reports."""
+    status_filter = request.GET.get("status", HardeningIdea.WORKLIST_FILTER)
+    if status_filter != "all" and status_filter not in HardeningIdea.list_filters():
+        status_filter = HardeningIdea.WORKLIST_FILTER
+    sort = request.GET.get("sort", "-created_at")
+    if sort not in {"-created_at", "created_at", "severity", "-severity", "title"}:
+        sort = "-created_at"
+    parsed_project = _parse_project_slug(request.GET.get("project", ""))
+    active_project = request.GET.get("project", "") if parsed_project is not None else ""
+
+    ideas = HardeningIdea.objects.select_related("project", "source_report")
+    if parsed_project is not None:
+        ideas = ideas.filter(project__owner=parsed_project[0], project__repo=parsed_project[1])
+
+    tab_qs: dict[str, QuerySet[HardeningIdea]] = {
+        key: ideas.filter(status=key) for key, _label in HardeningIdea.STATUS_CHOICES
+    }
+    tab_qs[HardeningIdea.WORKLIST_FILTER] = ideas.filter(HardeningIdea.worklist_q())
+    tab_qs["all"] = ideas
+
+    if status_filter == HardeningIdea.WORKLIST_FILTER:
+        ideas = ideas.filter(HardeningIdea.worklist_q())
+    elif status_filter != "all":
+        ideas = ideas.filter(status=status_filter)
+    ideas = ideas.order_by(sort)
+
+    context = {
+        "ideas": ideas[:200],
+        "active_status": status_filter,
+        "active_sort": sort,
+        "active_project": active_project,
+        "tab_counts": {
+            "all": tab_qs["all"].count(),
+            "worklist": tab_qs[HardeningIdea.WORKLIST_FILTER].count(),
+            "new": tab_qs["new"].count(),
+            "confirmed": tab_qs["confirmed"].count(),
+            "filed": tab_qs["filed"].count(),
+            "fixed": tab_qs["fixed"].count(),
+            "dismissed": tab_qs["dismissed"].count(),
+        },
+    }
+    return render(request, "dashboard/hardening_ideas_list.html", context)
+
+
+def hardening_idea_detail(request: HttpRequest, idea_id: int) -> HttpResponse:
+    idea = get_object_or_404(
+        HardeningIdea.objects.select_related("project", "source_report"), pk=idea_id
+    )
+    return render(request, "dashboard/hardening_idea_detail.html", {"idea": idea})
+
+
+@require_POST
+def hardening_idea_dismiss(request: HttpRequest, idea_id: int) -> HttpResponse:
+    idea = get_object_or_404(HardeningIdea, pk=idea_id)
+    idea.status = HardeningIdea.STATUS_DISMISSED
+    idea.save(update_fields=["status", "updated_at"])
+    return redirect("dashboard:hardening_idea_detail", idea_id=idea_id)
+
+
+@require_POST
+def hardening_idea_filed(request: HttpRequest, idea_id: int) -> HttpResponse:
+    idea = get_object_or_404(HardeningIdea, pk=idea_id)
+    idea.status = HardeningIdea.STATUS_FILED
+    idea.save(update_fields=["status", "updated_at"])
+    return redirect("dashboard:hardening_idea_detail", idea_id=idea_id)
+
+
+@require_POST
+def hardening_idea_fixed(request: HttpRequest, idea_id: int) -> HttpResponse:
+    idea = get_object_or_404(HardeningIdea, pk=idea_id)
+    idea.status = HardeningIdea.STATUS_FIXED
+    idea.save(update_fields=["status", "updated_at"])
+    return redirect("dashboard:hardening_idea_detail", idea_id=idea_id)
+
+
+@require_POST
+def hardening_idea_confirm(request: HttpRequest, idea_id: int) -> HttpResponse:
+    """Queue a re-confirm that the idea still exists in the tree."""
+    from franktheunicorn.security.queue import queue_hardening_confirm
+
+    idea = get_object_or_404(HardeningIdea, pk=idea_id)
+    if queue_hardening_confirm(idea.pk):
+        messages.success(request, "Queued a re-check that this idea still exists.")
+    else:
+        messages.info(request, "A re-check for this idea is already queued or running.")
+    return redirect("dashboard:hardening_idea_detail", idea_id=idea_id)

@@ -437,10 +437,28 @@
                 📋 Evaluate the proposed patch
             </button>
         </div>
+        <div>
+            <button class="action-btn"
+                    hx-post="{% url 'dashboard:security_mine_hardening' report.pk %}"
+                    hx-target="#hardening-mine-result"
+                    hx-swap="innerHTML"
+                    hx-confirm="Mine ordinary hardening / improvement ideas from this CVE report? A read-only coding agent confirms each idea still exists and files action items under Hardening. The report is stamped so a re-press does not re-issue. Minutes.">
+                ⌂ Mine hardening ideas
+            </button>
+        </div>
     </div>
     <div id="verify-result"></div>
     <div id="version-map-result"></div>
     <div id="introduction-result"></div>
+    <div id="hardening-mine-result">
+        {% if report.hardening_scanned_at %}
+        <div class="verify-result queued-note">
+            Hardening ideas mined {{ report.hardening_scanned_at|date:"Y-m-d H:i" }}
+            — {{ report.hardening_idea_count }} idea{{ report.hardening_idea_count|pluralize }} filed.
+            <a href="{% url 'dashboard:hardening_ideas_list' %}">Open Hardening</a>
+        </div>
+        {% endif %}
+    </div>
     <div id="exploit-result">
         {% if report.exploit_requested %}
         <div class="exploit-summary">

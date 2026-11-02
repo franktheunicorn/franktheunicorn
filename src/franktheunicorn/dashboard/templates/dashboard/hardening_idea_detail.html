@@ -1,0 +1,65 @@
+{% extends "dashboard/base.html" %}
+{% block title %}{{ idea.title }} — Hardening{% endblock %}
+{% block content %}
+<p style="font-size: 0.85rem; color: var(--muted);">
+    <a href="{% url 'dashboard:hardening_ideas_list' %}">Hardening Ideas</a>
+    ·
+    <a href="{% url 'dashboard:hardening_ideas_list' %}?project={{ idea.project.owner }}/{{ idea.project.repo }}">{{ idea.project.owner }}/{{ idea.project.repo }}</a>
+    {% if idea.source_report_id %}
+    · source <a href="{% url 'dashboard:security_detail' idea.source_report_id %}">report #{{ idea.source_report_id }}</a>
+    {% endif %}
+</p>
+
+<h2>{{ idea.title }}</h2>
+<p>
+    <span class="badge">{{ idea.category }}</span>
+    <span class="badge">{{ idea.severity }}</span>
+    <span class="badge">{{ idea.status }}</span>
+    {% if idea.still_exists %}
+    <span class="badge">still exists: {{ idea.still_exists }}</span>
+    {% endif %}
+</p>
+
+{% if idea.file_path %}
+<p><strong>File:</strong> <code>{{ idea.file_path }}</code></p>
+{% endif %}
+
+{% if idea.description %}
+<h3>Description</h3>
+<pre class="verify-evidence">{{ idea.description }}</pre>
+{% endif %}
+
+{% if idea.still_exists_evidence %}
+<h3>Still-exists evidence</h3>
+<pre class="verify-evidence">{{ idea.still_exists_evidence }}</pre>
+{% if idea.still_exists_checked_at %}
+<p class="muted" style="font-size: 0.85rem;">Checked {{ idea.still_exists_checked_at|date:"Y-m-d H:i" }}</p>
+{% endif %}
+{% endif %}
+
+{% if idea.draft_ticket_title or idea.draft_ticket_body %}
+<h3>Draft ticket (innocuous — paste into the tracker)</h3>
+{% if idea.draft_ticket_title %}<p><strong>{{ idea.draft_ticket_title }}</strong></p>{% endif %}
+{% if idea.draft_ticket_body %}<pre class="verify-evidence">{{ idea.draft_ticket_body }}</pre>{% endif %}
+{% endif %}
+
+<div style="margin-top: 1.5rem; display: flex; gap: 0.5rem; flex-wrap: wrap;">
+    <form method="post" action="{% url 'dashboard:hardening_idea_confirm' idea.id %}" style="display: inline;">
+        {% csrf_token %}
+        <button type="submit" class="action-btn">↻ Re-confirm still exists</button>
+    </form>
+    <form method="post" action="{% url 'dashboard:hardening_idea_filed' idea.id %}" style="display: inline;">
+        {% csrf_token %}
+        <button type="submit" class="action-btn post">Filed a ticket</button>
+    </form>
+    <form method="post" action="{% url 'dashboard:hardening_idea_fixed' idea.id %}" style="display: inline;">
+        {% csrf_token %}
+        <button type="submit" class="action-btn post">Mark fixed</button>
+    </form>
+    <form method="post" action="{% url 'dashboard:hardening_idea_dismiss' idea.id %}" style="display: inline;">
+        {% csrf_token %}
+        <button type="submit" class="action-btn reject">Dismiss</button>
+    </form>
+    <a href="{% url 'dashboard:hardening_ideas_list' %}" class="action-btn" style="background: var(--muted);">Back</a>
+</div>
+{% endblock %}
