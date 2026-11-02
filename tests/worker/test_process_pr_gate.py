@@ -627,7 +627,15 @@ class TestSettlingWindow:
 
         from franktheunicorn.worker.runner import review_skip_reason
 
-        pr = PullRequestFactory(state="open", author="holdenk", head_seen_at=timezone.now())
+        # Current head must differ from the recorded run: an empty head_sha
+        # never counts as "moved", so a lone llm run would read as reviewed-clean
+        # (and CI has no agent CLIs, so expected sources is just {llm}).
+        pr = PullRequestFactory(
+            state="open",
+            author="holdenk",
+            head_seen_at=timezone.now(),
+            head_sha="new",
+        )
         pr.agent_runs = {"llm": {"status": "ok", "head_sha": "old"}}
         skip = review_skip_reason(pr, self._pc(pr), _op(), force=False)
         assert skip is not None and skip.reason == "settling"
