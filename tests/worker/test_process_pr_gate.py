@@ -627,7 +627,11 @@ class TestSettlingWindow:
 
         from franktheunicorn.worker.runner import review_skip_reason
 
-        pr = PullRequestFactory(state="open", author="holdenk", head_seen_at=timezone.now())
+        # head_sha must differ from the prior agent_runs entry — otherwise the
+        # reviewed-clean gate fires first and this never reaches settling.
+        pr = PullRequestFactory(
+            state="open", author="holdenk", head_sha="new", head_seen_at=timezone.now()
+        )
         pr.agent_runs = {"llm": {"status": "ok", "head_sha": "old"}}
         skip = review_skip_reason(pr, self._pc(pr), _op(), force=False)
         assert skip is not None and skip.reason == "settling"
