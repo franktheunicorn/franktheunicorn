@@ -144,7 +144,7 @@ class OllamaBackend(BaseLLMBackend):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_message},
             ],
-            format="json",
+            format="json" if self._json_output else "",
             options={"temperature": self._config.temperature},
         )
         # Ollama reports token counts on the response as ``prompt_eval_count``
