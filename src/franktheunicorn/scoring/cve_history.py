@@ -140,10 +140,9 @@ def _scan_cve_grep(repo_path: Path) -> set[str]:
             # Header line: NUL + subject
             subject = line[1:]
             current_is_cve = bool(CVE_PATTERN.search(subject))
-        elif line.strip() and current_is_cve:
+        elif line.strip() and current_is_cve and not _is_build_file(line.strip()):
             # File path line belonging to a CVE commit.
-            if not _is_build_file(line.strip()):
-                files.add(line.strip())
+            files.add(line.strip())
 
     return files
 
@@ -194,9 +193,8 @@ def _scan_terse_commits(repo_path: Path) -> set[str]:
                 and not _has_issue_link(subject)
                 and not _is_skip_commit(subject)
             )
-        elif line.strip() and current_is_terse:
-            if not _is_build_file(line.strip()):
-                files.add(line.strip())
+        elif line.strip() and current_is_terse and not _is_build_file(line.strip()):
+            files.add(line.strip())
 
     return files
 
