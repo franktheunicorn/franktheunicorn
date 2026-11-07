@@ -93,6 +93,32 @@ def _looks_like_meta_response(text: str) -> bool:
     return any(marker in low for marker in _META_RESPONSE_MARKERS)
 
 
+#: A rewrite shorter than this fraction of the original's words lost the
+#: comment rather than softening it. Chosen from 410 live tone-guarded drafts
+#: on llm.apache.org: every genuine rewrite kept >= 38% of the words (removing
+#: snark trims, it does not gut), while every one under 30% was a lone code
+#: token, a mid-sentence fragment, or "No input provided to rewrite."
+_MIN_KEPT_WORD_RATIO = 0.35
+#: Below this many words the ratio is too coarse to judge ("nit: rename" ->
+#: "rename" is fine), so short originals are left to the other checks.
+_MIN_WORDS_FOR_RATIO = 8
+
+
+def _collapsed(original: str, rewritten: str) -> bool:
+    """Whether the rewrite kept too little of the original to be a rewrite.
+
+    The tone prompt says "do not lengthen" and "rewrite only to remove
+    abrasiveness" — a softened comment is about as long as the harsh one. A
+    weaker model (or a JSON-mode server forcing an object the prose was then
+    salvaged from) instead returns a fragment: ``workerDir``, ``:Geometry``,
+    ``If `py.import(``. The original carries the review's content; keep it.
+    """
+    n_original = len(original.split())
+    if n_original < _MIN_WORDS_FOR_RATIO:
+        return False
+    return len(rewritten.split()) < _MIN_KEPT_WORD_RATIO * n_original
+
+
 def _dropped_leading_subject(original: str, rewritten: str) -> bool:
     """Whether the rewrite silently dropped the comment's leading subject.
 
@@ -157,6 +183,10 @@ def apply_tone_guard(
             action_type="tone-guard",
             project_id=project_id,
             pr_id=pr_id,
+            # The reply IS the comment. Forced JSON mode made the model wrap it
+            # in an object whose longest string was often a fragment or a lone
+            # code token (~10% of tone-guarded drafts on llm.apache.org).
+            json_output=False,
         )
     except Exception:
         logger.warning("Tone guard LLM call failed; returning original finding.", exc_info=True)
@@ -186,6 +216,14 @@ def apply_tone_guard(
     # keep it rather than posting a fragment.
     if _dropped_leading_subject(finding.body, rewritten):
         logger.debug("Tone guard dropped the leading subject; keeping original body.")
+        return finding, False
+
+    if _collapsed(finding.body, rewritten):
+        logger.info(
+            "Tone guard rewrite kept %d of %d words; keeping the original body.",
+            len(rewritten.split()),
+            len(finding.body.split()),
+        )
         return finding, False
 
     return ReviewFinding(
