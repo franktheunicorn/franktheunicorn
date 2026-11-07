@@ -945,9 +945,12 @@ def _run_ci_analysis(
     diff = ""
     if use_llm:
         from franktheunicorn.config.loader import get_operator_config
+        from franktheunicorn.config.model_routing import routed_backend
 
         oc = get_operator_config()
-        backend_cfg = oc.llm_backends[0] if oc.llm_backends else None
+        backend_cfg = routed_backend(oc, "ci_analysis") or (
+            oc.llm_backends[0] if oc.llm_backends else None
+        )
         # The LLM layer compares a failure against the changed code, so it needs
         # the diff. The manual worker path fetches it; the poll path must too, or
         # every prompt says the PR's code is unavailable (best-effort — a failed

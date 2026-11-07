@@ -98,7 +98,9 @@ def generate_shepherd_drafts(
 
         backend_configs = [LLMBackendConfig()]
 
-    backend_config = backend_configs[0]
+    from franktheunicorn.config.model_routing import routed_backend
+
+    backend_config = routed_backend(operator_config, "shepherding") or backend_configs[0]
     backend = get_backend(backend_config)
 
     drafts: list[ReviewDraft] = []

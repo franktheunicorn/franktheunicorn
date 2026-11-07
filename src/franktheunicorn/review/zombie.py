@@ -219,12 +219,14 @@ def zombie_projects() -> list[tuple[Project, ProjectConfig]]:
 def resolve_backend(operator_config: OperatorConfig) -> BaseLLMBackend | None:
     """The backend the assessment uses, or None when nothing is configured.
 
-    ``zombie_queue.llm_backend`` first, then ``llm_backends`` in order, then
+    ``zombie_queue.llm_backend`` first, then the routed ``zombie_assessment``
+    tier (reasoning by default), then ``llm_backends`` in order, then
     resolved ``agent_cli_reviewers`` — security triage's fallthrough, borrowed
     rather than re-derived, so a deployment that gets triage gets this too.
     The first that builds as an LLM backend wins; there is no circuit breaker
     here because one run makes at most ``max_assessments_per_run`` calls.
     """
+    from franktheunicorn.config.model_routing import with_routed_first
     from franktheunicorn.review.backends import get_backend
     from franktheunicorn.review.backends.base import BaseLLMBackend
     from franktheunicorn.security.triage import _agent_cli_triage_configs
@@ -232,7 +234,9 @@ def resolve_backend(operator_config: OperatorConfig) -> BaseLLMBackend | None:
     configs = []
     if operator_config.zombie_queue.llm_backend is not None:
         configs.append(operator_config.zombie_queue.llm_backend)
-    configs.extend(operator_config.llm_backends)
+    configs.extend(
+        with_routed_first(operator_config, "zombie_assessment", list(operator_config.llm_backends))
+    )
     configs.extend(_agent_cli_triage_configs(operator_config))
     for cfg in configs:
         try:

@@ -166,6 +166,7 @@ def parse_triage(raw: str) -> Triage | None:
 
 
 def triage_backend_configs(operator_config: OperatorConfig) -> list[LLMBackendConfig]:
+    from franktheunicorn.config.model_routing import with_routed_first
     from franktheunicorn.config.models import LLMBackendConfig
     from franktheunicorn.review.agent_cli import usage_paused
 
@@ -173,7 +174,11 @@ def triage_backend_configs(operator_config: OperatorConfig) -> list[LLMBackendCo
     configs: list[LLMBackendConfig] = []
     for name in operator_config.mergeability_triage.backends:
         if name == "llm":
-            configs.extend(operator_config.llm_backends)
+            configs.extend(
+                with_routed_first(
+                    operator_config, "mergeability_triage", list(operator_config.llm_backends)
+                )
+            )
         elif name in by_name and not usage_paused(by_name[name]):
             configs.append(LLMBackendConfig(provider="agent-cli", reviewer=name))
     return configs

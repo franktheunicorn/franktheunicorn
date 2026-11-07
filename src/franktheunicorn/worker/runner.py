@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from franktheunicorn.config.models import (
         AgentCLIReviewerConfig,
         CodeRabbitConfig,
+        LLMBackendConfig,
         OperatorConfig,
         ProjectConfig,
         SnowflakeReviewConfig,
@@ -256,6 +257,9 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
     from franktheunicorn.review.backends.preflight import record_disabled_at_boot
 
     record_disabled_at_boot(disabled_backends)
+    # Before the triage seed below: that probes the triage candidate list, which
+    # includes the routed reasoning tier only while the tier is not disabled.
+    _check_model_tiers(operator_config)
     # Seed triage's own backend health so a backend the boot preflight 86'd
     # is skipped by triage too — without this, triage read llm_backends directly
     # and tried a backend _check_backends had already disabled. Probes the
@@ -581,6 +585,55 @@ def _check_backends(operator_config: OperatorConfig) -> frozenset[int]:
 
     _report_triage_backend(operator_config)
     return frozenset(disabled)
+
+
+def _check_model_tiers(operator_config: OperatorConfig) -> None:
+    """Probe each ``model_routing.tiers`` backend once and log the routing table.
+
+    A tier that fails its probe is marked disabled, so every task routed to it
+    falls back (to ``standard``, then the call site's default) instead of each
+    call failing — the same contract ``_check_backends`` gives llm_backends.
+    Tiers sharing a connection + model share one probe.
+    """
+    from franktheunicorn.config.model_routing import (
+        describe_routing,
+        mark_tier_disabled,
+        reset_disabled_tiers,
+        routing_warnings,
+    )
+    from franktheunicorn.review.backends.preflight import probe_llm_backend
+
+    reset_disabled_tiers()
+    for warning in routing_warnings(operator_config):
+        logger.warning("%s", warning)
+
+    def identity(bc: LLMBackendConfig) -> tuple[str, str, str, str, str]:
+        return (bc.provider, bc.model, bc.base_url, bc.api_key_env, bc.reviewer)
+
+    verdicts: dict[tuple[str, str, str, str, str], tuple[bool, str]] = {}
+    for name, bc in sorted(operator_config.model_routing.tiers.items()):
+        key = identity(bc)
+        if key not in verdicts:
+            result = probe_llm_backend(bc)
+            # No probe for this provider: nothing proven, nothing disabled.
+            verdicts[key] = (result.ok or not result.probed, result.reason or "")
+            if result.ok and result.token_param is not None:
+                _seed_token_param_fallback(
+                    bc.model or "gpt-4o", bc.base_url or "", result.token_param
+                )
+        ok, reason = verdicts[key]
+        if not ok:
+            mark_tier_disabled(name)
+            logger.warning(
+                "Model tier %s (%s/%s): DISABLED — preflight failed: %s. Tasks routed "
+                "to it fall back to the standard tier / llm_backends[0].",
+                name,
+                bc.provider,
+                bc.model or "default",
+                reason,
+            )
+    for line in describe_routing(operator_config):
+        logger.info("%s", line)
 
 
 def _report_triage_backend(operator_config: OperatorConfig) -> None:

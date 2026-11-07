@@ -13,6 +13,7 @@ import logging
 import re
 from typing import TYPE_CHECKING
 
+from franktheunicorn.config.model_routing import routed_backend
 from franktheunicorn.core.models import AgentVibe, ReviewDraft
 from franktheunicorn.review.antipattern import (
     check_against_anti_patterns,
@@ -801,7 +802,11 @@ def draft_review(
     if judge_config is not None and judge_config.enabled and deduped:
         from franktheunicorn.review.judge import apply_verdicts, judge_findings
 
-        judge_backend = judge_config.backend or (backend_configs[0] if backend_configs else None)
+        judge_backend = (
+            judge_config.backend
+            or routed_backend(operator_config, "judge")
+            or (backend_configs[0] if backend_configs else None)
+        )
         verdicts = judge_findings(
             deduped,
             pr_context,
@@ -821,7 +826,9 @@ def draft_review(
 
     # Apply tone guard rewrite pass. apply_tone_guard_batch is 1:1 over the
     # input list, so the parallel lists stay aligned with deduped after this.
-    tone_backend = backend_configs[0] if backend_configs else None
+    tone_backend = routed_backend(operator_config, "tone_guard") or (
+        backend_configs[0] if backend_configs else None
+    )
     is_new_contributor = getattr(pr, "is_new_contributor", False)
     new_contributor_addendum = ""
     if project_config and hasattr(project_config, "new_contributor_addendum"):

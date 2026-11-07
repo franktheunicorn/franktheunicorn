@@ -1041,7 +1041,11 @@ def _analyze_pr_ci(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
         return
 
     client = _forge_client_for(project_config, operator_config)
-    backend = operator_config.llm_backends[0] if operator_config.llm_backends else None
+    from franktheunicorn.config.model_routing import routed_backend
+
+    backend = routed_backend(operator_config, "ci_analysis") or (
+        operator_config.llm_backends[0] if operator_config.llm_backends else None
+    )
     diff = ""
     if client is not None and backend is not None:
         try:

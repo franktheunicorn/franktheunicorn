@@ -200,11 +200,16 @@ def parse_worthiness(raw: str) -> Worthiness | None:
 
 
 def worthiness_backend_configs(operator_config: OperatorConfig) -> list[LLMBackendConfig]:
-    """The explicit cheap backend, else every llm_backends entry in order."""
+    """The explicit cheap backend, else the routed tier (``worthiness_screen``,
+    fast by default) then every llm_backends entry in order."""
+    from franktheunicorn.config.model_routing import with_routed_first
+
     cfg: ReviewWorthinessConfig = operator_config.review_worthiness
     if cfg.backend is not None:
         return [cfg.backend]
-    return list(operator_config.llm_backends)
+    return with_routed_first(
+        operator_config, "worthiness_screen", list(operator_config.llm_backends)
+    )
 
 
 def run_worthiness_screen(
