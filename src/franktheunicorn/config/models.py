@@ -2488,6 +2488,67 @@ class JudgeConfig(BaseModel):
     max_reask: int = 5
 
 
+#: The built-in difficulty tiers. ``standard`` is the review model — unset, it
+#: *is* ``llm_backends[0]``; ``fast`` and ``reasoning`` fall back to it when
+#: unset. Operators may define further tier names (e.g. ``long-context``) and
+#: point tasks at them; an unconfigured custom tier also falls back to standard.
+TIER_FAST = "fast"
+TIER_STANDARD = "standard"
+TIER_REASONING = "reasoning"
+KNOWN_MODEL_TIERS: tuple[str, ...] = (TIER_FAST, TIER_STANDARD, TIER_REASONING)
+
+#: Fields a tier entry inherits from ``llm_backends[0]`` when it does not set
+#: them: how to *reach* the model, not which model or how to sample it. So a
+#: tier on the same gateway is one line (``fast: {model: qwen3-8b}``) while
+#: ``temperature`` / ``max_tokens`` / ``extra_body`` stay the tier's own —
+#: a thinking-mode toggle that suits one model is wrong for another.
+TIER_INHERITED_FIELDS: tuple[str, ...] = (
+    "provider",
+    "base_url",
+    "api_key_env",
+    "transport",
+    "cli_path",
+    "acp_command",
+    "cli_timeout_seconds",
+    "reviewer",
+)
+
+
+class ModelRoutingConfig(BaseModel):
+    """Which model handles which difficulty of task (config/model_routing.py).
+
+    Difficulty used to live only in prompt text: every consumer called
+    ``llm_backends[0]`` and a hard task (security triage, the zombie
+    assessment) got the same model as a yes/no screen. Here a task names a
+    *tier* and a tier names a model, so "use the 27B for triage and the 8B for
+    the judge" is two lines of config rather than four nested ``backend:``
+    blocks.
+
+    Precedence at every call site: a feature's own explicit backend
+    (``judge.backend``, ``security_triage.llm_backend``, ...) wins, then the
+    routed tier, then whatever the site used before. With no ``tiers`` set,
+    nothing routes and behaviour is exactly the pre-routing behaviour.
+    """
+
+    #: Tier name -> backend. Connection fields left unset are inherited from
+    #: ``llm_backends[0]`` (see TIER_INHERITED_FIELDS).
+    tiers: dict[str, LLMBackendConfig] = Field(default_factory=dict)
+    #: Task -> tier overrides of the built-in defaults
+    #: (``model_routing.TASK_DEFAULT_TIERS``). ``check:<name>`` addresses one
+    #: llm_check; ``llm_check`` addresses all of them.
+    tasks: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("tasks")
+    @classmethod
+    def normalise_task_tiers(cls, v: dict[str, str]) -> dict[str, str]:
+        return {str(k).strip(): str(t).strip().lower() for k, t in v.items()}
+
+    @field_validator("tiers")
+    @classmethod
+    def normalise_tier_names(cls, v: dict[str, LLMBackendConfig]) -> dict[str, LLMBackendConfig]:
+        return {str(k).strip().lower(): cfg for k, cfg in v.items()}
+
+
 class WorkerPoolConfig(BaseModel):
     """How many bulk commands the worker runs at once.
 
@@ -2570,6 +2631,10 @@ class OperatorConfig(BaseModel):
     # Second-level judge that screens draft comments before they become drafts.
     judge: JudgeConfig = Field(default_factory=JudgeConfig)
 
+    #: Difficulty-tiered model selection: fast / standard / reasoning (and any
+    #: custom tier), each task routed to one. See ModelRoutingConfig.
+    model_routing: ModelRoutingConfig = Field(default_factory=ModelRoutingConfig)
+
     # Legacy single-backend field — still accepted for backwards compat.
     # If set and llm_backends is empty, it is promoted into llm_backends.
     llm: LLMBackendConfig | None = Field(default=None, exclude=True)
@@ -2597,6 +2662,46 @@ class OperatorConfig(BaseModel):
     # left empty, a default ``github`` entry is synthesized from the legacy
     # ``github_token``/``github_username`` fields.
     forges: list[ForgeRegistryEntry] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def inherit_tier_connection(cls, data: object) -> object:
+        """Fill each ``model_routing.tiers`` entry's unset connection fields
+        from ``llm_backends[0]`` (or the legacy ``llm:``).
+
+        Done on the raw mapping, before validation, because afterwards an unset
+        ``provider`` and an explicit ``provider: stub`` are indistinguishable.
+        """
+        if not isinstance(data, dict):
+            return data
+        routing = data.get("model_routing")
+        if not isinstance(routing, dict) or not isinstance(routing.get("tiers"), dict):
+            return data
+        base: object = None
+        backends = data.get("llm_backends")
+        if isinstance(backends, list) and backends:
+            base = backends[0]
+        elif data.get("llm") is not None:
+            base = data.get("llm")
+        if isinstance(base, LLMBackendConfig):
+            base = base.model_dump()
+        if not isinstance(base, dict):
+            return data
+        tiers: dict[object, object] = {}
+        for name, tier in routing["tiers"].items():
+            # A tier naming a different provider is a different connection
+            # altogether; borrowing base_url/key from another provider is wrong.
+            own_provider = isinstance(tier, dict) and "provider" in tier
+            if isinstance(tier, dict) and (
+                not own_provider
+                or str(tier["provider"]).strip().lower()
+                == str(base.get("provider", "")).strip().lower()
+            ):
+                merged = {f: base[f] for f in TIER_INHERITED_FIELDS if f in base}
+                merged.update(tier)
+                tier = merged
+            tiers[name] = tier
+        return {**data, "model_routing": {**routing, "tiers": tiers}}
 
     @model_validator(mode="after")
     def migrate_legacy_llm(self) -> OperatorConfig:

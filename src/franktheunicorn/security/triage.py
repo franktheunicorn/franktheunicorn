@@ -728,16 +728,21 @@ _triage_backend_health = _BackendHealth()
 def _triage_backend_configs(operator_config: OperatorConfig) -> list[LLMBackendConfig]:
     """The configs triage would consider, in order, before health filtering.
 
-    Override first if set, then ``llm_backends``, then resolved
+    Override first if set, then the routed ``security_triage`` tier (reasoning by
+    default, see config/model_routing.py), then ``llm_backends``, then resolved
     ``agent_cli_reviewers`` as agent-cli backends — the same shape
     :func:`_get_triage_backends` builds backends from — minus dedup and minus
     health, so the health check and the live build see the same candidates.
     """
+    from franktheunicorn.config.model_routing import with_routed_first
+
     configs: list[LLMBackendConfig] = []
     override = operator_config.security_triage.llm_backend
     if override is not None:
         configs.append(override)
-    configs.extend(operator_config.llm_backends)
+    configs.extend(
+        with_routed_first(operator_config, "security_triage", list(operator_config.llm_backends))
+    )
     configs.extend(_agent_cli_triage_configs(operator_config))
     return configs
 
@@ -871,7 +876,6 @@ def _get_triage_backends(operator_config: OperatorConfig) -> list[BaseLLMBackend
     from franktheunicorn.review.backends import get_backend
     from franktheunicorn.review.backends.base import BaseLLMBackend
 
-    configs: list[LLMBackendConfig] = []
     override = operator_config.security_triage.llm_backend
     if override is not None:
         logger.info(
@@ -879,9 +883,9 @@ def _get_triage_backends(operator_config: OperatorConfig) -> list[BaseLLMBackend
             override.provider,
             override.model or "default model",
         )
-        configs.append(override)
-    configs.extend(operator_config.llm_backends)
-    configs.extend(_agent_cli_triage_configs(operator_config))
+    # One candidate list for the health check and the live build (see
+    # _triage_backend_configs), so the routed tier is in both.
+    configs = _triage_backend_configs(operator_config)
 
     backends: list[BaseLLMBackend] = []
     seen: set[tuple[str, str, str, str, str]] = set()

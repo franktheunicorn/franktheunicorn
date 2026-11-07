@@ -117,7 +117,12 @@ def build_review_guidance(
         logger.info("Review guidance build skipped: %s", result.error)
         return result
 
-    if not operator_config.llm_backends:
+    from franktheunicorn.config.model_routing import routed_backend
+
+    guidance_backend = routed_backend(operator_config, "security_guidance") or (
+        operator_config.llm_backends[0] if operator_config.llm_backends else None
+    )
+    if guidance_backend is None:
         result.error = "no llm_backends configured — guidance distillation needs an LLM"
         logger.info("Review guidance build skipped for %s: %s", project.full_name, result.error)
         return result
@@ -169,7 +174,7 @@ def build_review_guidance(
         logger.warning("Review guidance build for %s: %s", project.full_name, result.error)
         return result
 
-    backend = get_backend(operator_config.llm_backends[0])
+    backend = get_backend(guidance_backend)
     from franktheunicorn.security.review_guidance_prompt import (
         DISTILL_SYSTEM,
         PER_COMMIT_SYSTEM,

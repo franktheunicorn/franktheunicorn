@@ -133,12 +133,17 @@ def distill_triage_guidance(
     if not feedback and not rulings:
         return None
 
-    if not operator_config.llm_backends:
+    from franktheunicorn.config.model_routing import routed_backend
+
+    backend_config = routed_backend(operator_config, "security_learning") or (
+        operator_config.llm_backends[0] if operator_config.llm_backends else None
+    )
+    if backend_config is None:
         return None
 
     from franktheunicorn.review.backends import get_backend
 
-    backend = get_backend(operator_config.llm_backends[0])
+    backend = get_backend(backend_config)
 
     user_message = _render_feedback_for_distillation(feedback)
     if rulings:

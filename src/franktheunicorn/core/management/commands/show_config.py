@@ -108,6 +108,14 @@ class Command(BaseCommand):
             )
             self.stdout.write(f"  {label:38} {flag(str(value))}")
 
+        from franktheunicorn.config.model_routing import describe_routing, routing_warnings
+
+        self.stdout.write(self.style.MIGRATE_HEADING("\nModel routing (task -> tier -> model)"))
+        for line in describe_routing(config):
+            self.stdout.write(f"  {line}")
+        for warning in routing_warnings(config):
+            self.stdout.write(self.style.WARNING(f"  {warning}"))
+
         # The specific gate the security features check, spelled out, because
         # "enabled: true" in the file and "enabled" in force are different claims
         # and this command exists to tell them apart.

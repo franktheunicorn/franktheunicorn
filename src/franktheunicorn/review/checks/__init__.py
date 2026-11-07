@@ -17,6 +17,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from franktheunicorn.config.model_routing import routed_backend
 from franktheunicorn.review.backends.base import (
     BaseLLMBackend,
     PRContext,
@@ -186,9 +187,13 @@ def run_enabled_checks(
                 _MAX_CHECK_PROMPT_CHARS,
             )
 
-    # Use first configured backend (or stub fallback).
+    # Default: first configured backend (or stub fallback). Each check may be
+    # routed to its own difficulty tier (check:<name> / llm_check in
+    # model_routing.tasks) — a template-conformance check does not need the
+    # model a concurrency audit does.
     backend_configs = operator_config.llm_backends or [LLMBackendConfig()]
-    backend_config = backend_configs[0]
+    default_backend_config = backend_configs[0]
+    tone_backend_config = routed_backend(operator_config, "tone_guard")
 
     all_drafts: list[ReviewDraft] = []
     changed_files = pr.changed_files or []
@@ -217,6 +222,7 @@ def run_enabled_checks(
             continue
 
         source = f"check:{check_name}"
+        backend_config = routed_backend(operator_config, source) or default_backend_config
         try:
             findings = _run_check_dispatch(check, pr, diff, pr_context, backend_config)
         except Exception:
@@ -246,7 +252,7 @@ def run_enabled_checks(
             findings, _ = apply_tone_guard_batch(
                 findings,
                 pr_context,
-                backend_config=backend_config,
+                backend_config=tone_backend_config or backend_config,
                 is_new_contributor=getattr(pr, "is_new_contributor", False),
                 new_contributor_addendum=getattr(project_config, "new_contributor_addendum", ""),
                 project_id=pr.project_id,

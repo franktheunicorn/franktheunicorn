@@ -229,6 +229,49 @@ digest_enabled: false
 #     temperature: 0.1
 #     max_tokens: 2048
 
+# --- Model routing by task difficulty ---
+# Without this block every LLM task uses llm_backends[0] unless that feature
+# has its own `backend:` override, so a yes/no screen and a security-report
+# verdict run on the same model. With it, each task names a difficulty
+# tier and each tier names a model:
+#
+#   fast      — screens and rewrites: judge, tone_guard, worthiness_screen,
+#               mergeability_triage, check:pr-description, check:malicious-prompt
+#   standard  — reads a diff to find something: llm_check (all other checks),
+#               ci_analysis, shepherding. Unset = llm_backends[0].
+#   reasoning — verdicts someone acts on: security_triage, security_guidance,
+#               security_learning, zombie_assessment
+#
+# The main review always runs every llm_backends entry, and is not routed.
+# Precedence at each call site: the feature's own explicit backend
+# (judge.backend, security_triage.llm_backend, zombie_queue.llm_backend,
+# review_worthiness.backend) beats the tier, and the tier beats the old
+# default. An unset fast/reasoning tier falls back to standard. A tier that
+# fails the worker's boot probe is disabled, and its tasks fall back.
+#
+# A tier inherits provider / base_url / api_key_env (and the other connection
+# fields) from llm_backends[0] unless it names a different provider, so a tier
+# on the same gateway is just a model. temperature / max_tokens / extra_body
+# are NOT inherited, so set them per tier. `manage.py show_config` prints the
+# resulting task -> tier -> model table, and so does the worker at startup.
+#
+# Example: ASF-hosted models at llm.apache.org (llm_backends[0] = gemma4-26b)
+# model_routing:
+#   tiers:
+#     fast:
+#       model: "qwen3-8b"
+#       temperature: 0.1
+#       max_tokens: 2048
+#     reasoning:
+#       model: "qwen3.8-27b"      # thinking model; give it room to think
+#       temperature: 0.2
+#       max_tokens: 16384
+#   tasks:                        # optional: re-point a task at another tier
+#     check:concurrency: reasoning
+#     check:correctness: reasoning
+#     # llm_check: reasoning      # every check without its own default
+#     # ci_analysis: long-ctx     # custom tier names work too, define them above
+
 # --- Agent Feedback Channel (v1.25) ---
 # Direct feedback to AI agent sessions that created PRs.
 # When a PR description contains a session link (Claude Code, Codex),
