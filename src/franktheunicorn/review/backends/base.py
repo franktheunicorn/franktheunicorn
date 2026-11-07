@@ -118,6 +118,7 @@ class LLMBackend(Protocol):
         project_id: int | None = None,
         pr_id: int | None = None,
         api_key: str | None = None,
+        json_output: bool = True,
     ) -> str:
         """One-off completion with cost accounting. The choke point for every
         LLM call outside the main ``generate_review`` path — tone guard,
@@ -294,6 +295,15 @@ class BaseLLMBackend:
                 )
                 self._sdk_available = False
 
+    #: Whether ``_call_api`` asks the provider for structured JSON output
+    #: (``response_format`` / ``response_mime_type`` / Ollama ``format``).
+    #: Right for every call that parses JSON, which is nearly all of them —
+    #: and badly wrong for a prose task: a server enforcing JSON (vLLM guided
+    #: decoding at llm.apache.org) makes the model emit an object anyway, and
+    #: the longest string salvaged from it is often a fragment. Set per call
+    #: via ``metered_call(json_output=False)``.
+    _json_output: bool = True
+
     # Cost tracking: subclasses set these after _call_api to record usage.
     _last_tokens_in: int = 0
     _last_tokens_out: int = 0
@@ -365,6 +375,7 @@ class BaseLLMBackend:
         project_id: int | None = None,
         pr_id: int | None = None,
         api_key: str | None = None,
+        json_output: bool = True,
     ) -> str:
         """Invoke the LLM and record its cost in one call.
 
@@ -382,9 +393,12 @@ class BaseLLMBackend:
         """
         if api_key is None:
             api_key = self._resolve_api_key()
+        previous = self._json_output
+        self._json_output = json_output
         try:
             return self._invoke(system_prompt, user_message, api_key)
         finally:
+            self._json_output = previous
             self.record_cost(project_id, pr_id, action_type=action_type)
 
     def complete(self, prompt: str, *, system: str = "") -> str:

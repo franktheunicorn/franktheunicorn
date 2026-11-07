@@ -87,7 +87,9 @@ class OpenAIBackend(BaseLLMBackend):
 
         def _create() -> ChatCompletion:
             effective_system = (
-                system_prompt if self._supports_json_object else system_prompt + _JSON_ONLY_REMINDER
+                system_prompt
+                if self._supports_json_object or not self._json_output
+                else system_prompt + _JSON_ONLY_REMINDER
             )
             request_kwargs: dict[str, Any] = {
                 "model": self._model,
@@ -102,7 +104,7 @@ class OpenAIBackend(BaseLLMBackend):
                 # Gateway-specific request fields (e.g. disabling a thinking
                 # mode whose reasoning eats the output budget).
                 request_kwargs["extra_body"] = dict(self._config.extra_body)
-            if self._supports_json_object:
+            if self._supports_json_object and self._json_output:
                 request_kwargs["response_format"] = {"type": "json_object"}
             # The ``**request_kwargs`` (dict[str, Any]) splat defeats overload
             # resolution, so mypy sees the return as Any; the SDK returns

@@ -24,7 +24,7 @@ class GeminiBackend(BaseLLMBackend):
                 system_instruction=system_prompt,
                 temperature=self._config.temperature,
                 max_output_tokens=self._config.max_tokens,
-                response_mime_type="application/json",
+                response_mime_type="application/json" if self._json_output else "text/plain",
             ),
         )
         # google-genai reports usage on ``usage_metadata``. Absent (or with
