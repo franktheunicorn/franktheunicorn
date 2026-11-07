@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from franktheunicorn.review.backends.base import ReviewFinding
 from franktheunicorn.review.tone_guard import (
     _build_tone_prompt,
@@ -339,3 +341,83 @@ class TestToneGuardPersonality:
         prompt = _build_tone_prompt(make_pr_context())
         assert "Do not lengthen" in prompt
         assert "This seems suspicious" in prompt
+
+
+class TestToneGuardProseAndCollapse:
+    """The tone guard asks for prose, and rejects a rewrite that lost the comment."""
+
+    _ORIGINAL = (
+        "We call `chmod700` on `workerDir` and then `appDir`. If `appDir` is a "
+        "subdirectory of `workerDir`, the second call is redundant."
+    )
+
+    def _run(self, reply: str) -> tuple[ReviewFinding, bool, MagicMock]:
+        from franktheunicorn.config.models import LLMBackendConfig
+
+        mock_backend = MagicMock()
+        mock_backend.metered_call.return_value = reply
+        finding = ReviewFinding(body=self._ORIGINAL, file_path="a.scala")
+        with patch("franktheunicorn.review.backends.get_backend", return_value=mock_backend):
+            result, ok = apply_tone_guard(
+                finding, make_pr_context(), backend_config=LLMBackendConfig(provider="openai")
+            )
+        return result, ok, mock_backend
+
+    def test_requests_prose_not_json(self) -> None:
+        _, _, backend = self._run(self._ORIGINAL)
+        assert backend.metered_call.call_args.kwargs["json_output"] is False
+
+    @pytest.mark.parametrize(
+        "reply",
+        [
+            "workerDir",  # lone token (also caught by _is_nonsense_body)
+            "is a subdirectory",  # mid-sentence fragment
+            '{"comment": "the second call"}',  # JSON wrapper around a fragment
+            "No input provided to rewrite.",
+        ],
+    )
+    def test_collapsed_rewrite_keeps_original(self, reply: str) -> None:
+        result, ok, _ = self._run(reply)
+        assert ok is False
+        assert result.body == self._ORIGINAL
+
+    def test_genuine_trim_is_kept(self) -> None:
+        reply = (
+            "We chmod `workerDir` then `appDir`; if `appDir` is inside it, the second is redundant."
+        )
+        result, ok, _ = self._run(reply)
+        assert ok is True
+        assert result.body == reply
+
+    def test_short_original_not_ratio_checked(self) -> None:
+        from franktheunicorn.review.tone_guard import _collapsed
+
+        assert _collapsed("nit: rename this var", "rename") is False
+
+
+class TestJsonOutputFlag:
+    def test_openai_omits_response_format_for_prose(self) -> None:
+        from franktheunicorn.config.models import LLMBackendConfig
+        from franktheunicorn.review.backends.openai_backend import OpenAIBackend
+
+        backend = OpenAIBackend(LLMBackendConfig(provider="openai", model="m"))
+        backend._supports_json_object = True
+        seen: list[dict[str, object]] = []
+
+        class _Resp:
+            choices = [MagicMock(message=MagicMock(content="ok"))]
+            usage = None
+
+        def create(**kwargs: object) -> _Resp:
+            seen.append(kwargs)
+            return _Resp()
+
+        client = MagicMock()
+        client.chat.completions.create.side_effect = create
+        with patch("openai.OpenAI", return_value=client):
+            backend.metered_call("s", "u", action_type="t", api_key="k", json_output=False)
+            backend.metered_call("s", "u", action_type="t", api_key="k")
+        assert "response_format" not in seen[0]
+        assert seen[1]["response_format"] == {"type": "json_object"}
+        # Restored after the prose call.
+        assert backend._json_output is True
