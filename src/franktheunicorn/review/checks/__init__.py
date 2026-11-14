@@ -29,7 +29,7 @@ from franktheunicorn.review.drafter import build_pr_context, create_drafts_from_
 from franktheunicorn.review.tone_guard import apply_tone_guard_batch
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from franktheunicorn.backends.base import ForgeClient
     from franktheunicorn.config.models import LLMBackendConfig, OperatorConfig, ProjectConfig
@@ -128,10 +128,11 @@ def run_enabled_checks(
     repo_path: Path | str | None = None,
     forge_client: ForgeClient | None = None,
     prior_comments: list[PriorComment] | None = None,
+    can_review: Callable[[], bool] | None = None,
 ) -> list[ReviewDraft]:
     """Run all LLM checks enabled in project config and return resulting drafts.
 
-    Each check builds a focused prompt, calls the first configured LLM backend,
+    Each check builds a focused prompt, calls its routed or default LLM backend,
     parses findings, and feeds them through ``create_drafts_from_findings`` for
     anti-pattern gating and persistence.
 
@@ -140,6 +141,9 @@ def run_enabled_checks(
     restates an existing comment becomes a ``+1`` or is dropped. The checks
     are a finding source like any other — "security:" restating a reviewer's
     own point is the comment this is meant to stop.
+
+    ``can_review`` rechecks upstream state before each check and stops the
+    remaining checks when the PR no longer permits a normal review.
     """
     from franktheunicorn.config.models import LLMBackendConfig
     from franktheunicorn.config.models import OperatorConfig as DefaultOperatorConfig
@@ -222,7 +226,17 @@ def run_enabled_checks(
             continue
 
         source = f"check:{check_name}"
-        backend_config = routed_backend(operator_config, source) or default_backend_config
+        check_backend = routed_backend(operator_config, source)
+        if (
+            check_backend is None
+            and not operator_config.llm_backends
+            and operator_config.model_routing.tiers
+        ):
+            logger.info("LLM check '%s' skipped: no usable routed or default backend.", check_name)
+            continue
+        backend_config = check_backend or default_backend_config
+        if can_review is not None and not can_review():
+            break
         try:
             findings = _run_check_dispatch(check, pr, diff, pr_context, backend_config)
         except Exception:
