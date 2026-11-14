@@ -52,6 +52,8 @@ class MockForgeClient(ForgeClient):
                 return result
         return {
             "number": pr_number,
+            "state": "open",
+            "merged": False,
             "mergeable": True,
             "mergeable_state": "clean",
             "base": {

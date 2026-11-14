@@ -189,7 +189,7 @@ class TestProcessPrSkipsWip:
         assert result == []
         mock_draft_review.assert_not_called()
 
-    def test_process_pr_force_ignores_wip_queue(self) -> None:
+    def test_process_pr_force_ignores_wip_queue(self, tmp_path: Path) -> None:
         from franktheunicorn.worker.runner import process_pr
 
         pr = PullRequestFactory(queue="wip", state="open")
@@ -197,6 +197,12 @@ class TestProcessPrSkipsWip:
 
         mock_draft_review = MagicMock(return_value=[])
         with patch("franktheunicorn.review.drafter.draft_review", mock_draft_review):
-            process_pr(pr, config, operator_config=None, force=True)
+            process_pr(
+                pr,
+                config,
+                operator_config=None,
+                force=True,
+                forge_client=MockGitHubClient(tmp_path),
+            )
 
         mock_draft_review.assert_called_once()

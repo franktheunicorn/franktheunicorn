@@ -323,3 +323,45 @@ class TestBootPreflight:
         assert not is_tier_disabled("fast")
         assert "Model tier reasoning (openai/gone): DISABLED" in caplog.text
         assert "security_triage -> reasoning: default openai/gemma4-26b" in caplog.text
+
+
+@pytest.mark.django_db
+def test_checks_without_routed_or_default_backend_skip_instead_of_using_stub(db_pr) -> None:
+    from franktheunicorn.config.models import ProjectConfig
+    from franktheunicorn.review.checks import run_enabled_checks
+
+    cfg = _asf_config(
+        tiers={"reasoning": {"model": "alive"}}, tasks={"check:security": "reasoning"}
+    )
+    cfg.llm_backends = []
+    project = ProjectConfig(owner="apache", repo="spark", llm_checks=["coverage", "security"])
+    with patch("franktheunicorn.review.checks._run_single_check", return_value=[]) as run:
+        run_enabled_checks(db_pr, "diff", project_config=project, operator_config=cfg)
+    assert run.call_count == 1
+    assert run.call_args.args[0].name == "security"
+    assert run.call_args.args[-1].model == "alive"
+    db_pr.refresh_from_db()
+    assert "check:coverage" not in db_pr.agent_runs
+    assert db_pr.agent_runs["check:security"]["status"] == "ok"
+
+
+@pytest.mark.django_db
+def test_checks_stop_when_pr_closes_between_models(db_pr) -> None:
+    from franktheunicorn.config.models import ProjectConfig
+    from franktheunicorn.review.checks import run_enabled_checks
+
+    project = ProjectConfig(owner="apache", repo="spark", llm_checks=["coverage", "security"])
+    state_gate = MagicMock(side_effect=[True, False])
+    with patch("franktheunicorn.review.checks._run_single_check", return_value=[]) as run:
+        run_enabled_checks(
+            db_pr,
+            "diff",
+            project_config=project,
+            operator_config=_asf_config(),
+            can_review=state_gate,
+        )
+    assert run.call_count == 1
+    assert state_gate.call_count == 2
+    db_pr.refresh_from_db()
+    assert db_pr.agent_runs["check:coverage"]["status"] == "ok"
+    assert "check:security" not in db_pr.agent_runs

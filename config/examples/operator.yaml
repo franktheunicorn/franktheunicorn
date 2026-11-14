@@ -419,11 +419,13 @@ digest_enabled: false
 #   - name: "codex"
 #     prompt_mode: "subcommand"      # codex is subcommand-style: <cli> exec <prompt>
 #     prompt_arg: "exec"
+#     fallback: ["cursor-agent"]    # missing CLI, login failure, timeout or usage limit
 #   - name: "pi"
 #     prompt_mode: "flag"
 #     prompt_arg: "-p"
 #     # readonly_args: ["--tools", "read,grep,find,ls"] is seeded
 #   - name: "cursor-agent"           # the binary is cursor-agent, not cursor
+#     enabled: false                # fallback-only; Codex names it above
 #     prompt_mode: "flag"
 #     prompt_arg: "-p"
 #     trust_args: ["--trust"]        # without this it refuses; NOT --yolo, which

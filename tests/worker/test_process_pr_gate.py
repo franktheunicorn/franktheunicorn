@@ -40,6 +40,7 @@ def _op(username: str = "holdenk") -> OperatorConfig:
 
 def _forge_client() -> MagicMock:
     client = MagicMock()
+    client.get_pull_request.return_value = {"state": "open", "merged": False}
     client.get_pull_request_diff.return_value = "diff --git a/x b/x"
     return client
 

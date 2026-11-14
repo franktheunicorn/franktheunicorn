@@ -327,8 +327,9 @@ class AgentCLIReviewerConfig(BaseModel):
     #: findings are attributed by entry name, so one entry doing both jobs
     #: would cost the general pass.
     review_focus: Literal["general", "security"] = "general"
-    #: Reviewers, by name, that take this one's turn while it is paused on a usage
-    #: limit. They need not be enabled: a fallback-only entry is ``enabled: false``.
+    #: Reviewers, by name, that take this one's turn when its CLI cannot review
+    #: (missing binary, failed login, timeout, error, or usage-limit pause).
+    #: They need not be enabled: a fallback-only entry is ``enabled: false``.
     fallback: list[str] = Field(default_factory=list)
     #: Flags that tell this CLI the working directory is one we meant to point it
     #: at. Separate from ``extra_args`` because it answers a different question:

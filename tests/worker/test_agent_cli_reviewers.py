@@ -1087,3 +1087,91 @@ class TestUsageLimitFallback:
         primary = AgentCLIReviewerConfig(name="cursor-agent", fallback=["ghost"])
         oc = OperatorConfig(agent_cli_reviewers=[primary, AgentCLIReviewerConfig(name="ghost")])
         assert _fallbacks(primary, oc) == []
+
+
+@pytest.mark.django_db
+class TestUnavailableFallback:
+    @pytest.mark.parametrize("status", ["failed", "no-checkout"])
+    def test_unavailable_primary_uses_fallback(self, db_pr: PullRequest, status: str) -> None:
+        from franktheunicorn.worker.runner import _take_agent_cli_turn, record_agent_run
+
+        primary = AgentCLIReviewerConfig(name="codex", enabled=True, fallback=["cursor-agent"])
+        fallback = AgentCLIReviewerConfig(name="cursor-agent", enabled=False)
+        oc = OperatorConfig(agent_cli_reviewers=[primary, fallback])
+        names: list[str] = []
+
+        def run(rc: AgentCLIReviewerConfig) -> str:
+            names.append(rc.name)
+            record_agent_run(db_pr, rc.name, status=status if rc is primary else "ok")
+            return "outcome"
+
+        with patch("franktheunicorn.review.agent_cli.usage_paused", return_value=False):
+            outcome = _take_agent_cli_turn(
+                db_pr, primary, oc, force=False, run=run, ran={}, log=lambda msg: None
+            )
+        assert names == ["codex", "cursor-agent"]
+        assert outcome.startswith("unavailable; cursor-agent took its turn")
+        db_pr.refresh_from_db()
+        assert db_pr.agent_runs["codex"]["status"] == "fallback:cursor-agent"
+
+    @pytest.mark.parametrize("status", ["ok", "merge-conflict"])
+    def test_completed_or_conflicted_primary_does_not_fall_back(
+        self, db_pr: PullRequest, status: str
+    ) -> None:
+        from franktheunicorn.worker.runner import _take_agent_cli_turn, record_agent_run
+
+        primary = AgentCLIReviewerConfig(name="codex", fallback=["cursor-agent"])
+        oc = OperatorConfig(
+            agent_cli_reviewers=[
+                primary,
+                AgentCLIReviewerConfig(name="cursor-agent", enabled=False),
+            ]
+        )
+        names: list[str] = []
+
+        def run(rc: AgentCLIReviewerConfig) -> str:
+            names.append(rc.name)
+            record_agent_run(db_pr, rc.name, status=status, findings=0)
+            return status
+
+        with patch("franktheunicorn.review.agent_cli.usage_paused", return_value=False):
+            outcome = _take_agent_cli_turn(
+                db_pr, primary, oc, force=True, run=run, ran={}, log=lambda msg: None
+            )
+        assert outcome == status
+        assert names == ["codex"]
+
+    def test_missing_auto_primary_is_scheduled_when_fallback_is_installed(self) -> None:
+        primary = AgentCLIReviewerConfig(name="codex", fallback=["cursor-agent"])
+        oc = OperatorConfig(
+            agent_cli_reviewers=[
+                primary,
+                AgentCLIReviewerConfig(name="cursor-agent", enabled=False),
+            ]
+        )
+        with patch(
+            "shutil.which", side_effect=lambda cmd: "/bin/cursor" if cmd == "cursor-agent" else None
+        ):
+            assert resolve_agent_cli_reviewers(oc) == [primary]
+
+    def test_state_gate_after_checkout_cleans_branch_without_calling_model(
+        self, db_pr: PullRequest
+    ) -> None:
+        with (
+            patch(
+                "franktheunicorn.worker.runner._resolve_cwd_for_tool",
+                return_value=("/checkout", "origin/main", "temp"),
+            ),
+            patch("franktheunicorn.worker.runner._cleanup_review_branch") as cleanup,
+            patch("franktheunicorn.review.agent_cli.run_agent_cli_review") as review,
+        ):
+            outcome = _run_agent_cli_for_pr(
+                db_pr,
+                AgentCLIReviewerConfig(name="codex"),
+                repo_path=None,
+                can_review=lambda: False,
+            )
+        review.assert_not_called()
+        cleanup.assert_called_once()
+        assert outcome.startswith("skipped: upstream PR state")
+        assert not db_pr.agent_runs

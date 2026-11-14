@@ -699,8 +699,8 @@ def resolve_agent_cli_reviewers(
     """Resolve which agent-CLI reviewers should run for this operator.
 
     Enablement is tri-state. An explicit ``True``/``False`` wins. The default
-    ``"auto"`` means "use it iff installed": in local mode we probe
-    ``shutil.which``; in SSH mode we enable optimistically and rely on the
+    ``"auto"`` means "use it iff it or a fallback is installed": in local
+    mode we probe ``shutil.which``; in SSH mode we enable optimistically and rely on the
     executor's graceful-skip (a missing remote binary yields ``[]``) rather
     than paying for a per-PR remote probe.
 
@@ -716,7 +716,14 @@ def resolve_agent_cli_reviewers(
     resolved: list[AgentCLIReviewerConfig] = []
     for rc in operator_config.agent_cli_reviewers:
         if rc.enabled == "auto":
-            active = rc.remote.mode == "ssh" or _agent_cli_available_locally(rc)
+            active = (
+                rc.remote.mode == "ssh"
+                or _agent_cli_available_locally(rc)
+                or any(
+                    fallback.remote.mode == "ssh" or _agent_cli_available_locally(fallback)
+                    for fallback in _fallbacks(rc, operator_config)
+                )
+            )
         else:
             active = bool(rc.enabled)
         if active:
@@ -1118,7 +1125,7 @@ def _take_agent_cli_turn(
     ran: dict[str, str],
     log: Callable[[str], None],
 ) -> str:
-    """Run *reviewer*, or while it's usage-paused its first free fallback.
+    """Run *reviewer*, or its first usable fallback when it cannot review.
 
     *ran* is this PR's runs so far: three paused cursor entries naming coco cost one
     coco run, and the rest are recorded as covered by it so they aren't owed again.
@@ -1127,22 +1134,29 @@ def _take_agent_cli_turn(
 
     if reviewer.name in ran:
         return f"already ran on this PR ({ran[reviewer.name]})"
+    unavailable = False
     if force or not usage_paused(reviewer):
         log(f"Running {reviewer.name} agent CLI review...")
         ran[reviewer.name] = run(reviewer)
-        if not usage_paused(reviewer):
+        info = (pr.agent_runs or {}).get(reviewer.name, {})
+        unavailable = isinstance(info, dict) and info.get("status") in {"failed", "no-checkout"}
+        if not usage_paused(reviewer) and not unavailable:
             return ran[reviewer.name]
+    reason = "unavailable" if unavailable else "paused on a usage limit"
     for fallback in _fallbacks(reviewer, operator_config) if operator_config else []:
         if usage_paused(fallback):
             continue
         # A fallback that already reviewed this head isn't run again: drafts would double.
         if fallback.name not in ran and not _reviewed_this_head(pr, fallback.name):
-            log(f"{reviewer.name} is paused on a usage limit; running {fallback.name}...")
+            log(f"{reviewer.name} is {reason}; running {fallback.name}...")
             ran[fallback.name] = run(fallback)
         if not _reviewed_this_head(pr, fallback.name):
             continue
         record_agent_run(pr, reviewer.name, status=f"fallback:{fallback.name}")
-        return f"paused; {fallback.name} took its turn ({ran.get(fallback.name, 'earlier')})"
+        state = "unavailable" if unavailable else "paused"
+        return f"{state}; {fallback.name} took its turn ({ran.get(fallback.name, 'earlier')})"
+    if unavailable:
+        return f"unavailable: {ran[reviewer.name]}; no fallback reviewed it"
     return "paused: its CLI hit a usage limit and no fallback reviewed it"
 
 
@@ -1302,6 +1316,20 @@ def review_skip_reason(
     returned an empty list silently, and the wip case logged at DEBUG. So a cycle
     that reviewed nothing looked exactly like a cycle that never ran.
     """
+    from franktheunicorn.core.models import PullRequest as PullRequestModel
+
+    # Force bypasses review policy, never the requirement for an open PR.
+    if (
+        pr.state != "open"
+        or pr.merged_at is not None
+        or (
+            pr.pk
+            and not PullRequestModel.objects.filter(
+                pk=pr.pk, state="open", merged_at__isnull=True
+            ).exists()
+        )
+    ):
+        return ReviewSkip("closed", "It was closed or merged upstream.")
     if force:
         return None
     missing = missing_review_sources(
@@ -1361,14 +1389,54 @@ def review_skip_reason(
             f"is not the author, a requested reviewer, an assignee, or @-mentioned. "
             f"Set auto_review_policy: all to review every PR.",
         )
-    from franktheunicorn.core.models import PullRequest as PullRequestModel
-
-    # Last, so only a PR about to be reviewed pays the query. The row, not *pr*: a
-    # mid-cycle reap may have closed it since *pr* was read.
-    if pr.pk and not PullRequestModel.objects.filter(pk=pr.pk, state="open").exists():
-        return ReviewSkip("closed", "It was closed or merged upstream.")
     # policy == "all" falls through to the full pipeline.
     return None
+
+
+def refresh_review_state(
+    pr: PullRequest, pc: ProjectConfig, forge_client: ForgeClient | None
+) -> ReviewSkip | None:
+    """Require a fresh, explicitly open forge response before normal reviews.
+
+    Failed reads and incomplete responses leave the stored state alone and
+    defer the review. Zombie assessments use their own closed-PR path.
+    """
+    if forge_client is None:
+        return ReviewSkip("state-unavailable", "No forge client can confirm that the PR is open.")
+    try:
+        data = forge_client.get_pull_request(pc.owner, pc.repo, pr.number)
+    except Exception as exc:
+        return ReviewSkip("state-unavailable", f"Could not confirm upstream PR state: {exc}")
+    if (
+        not isinstance(data, dict)
+        or not isinstance(data.get("state"), str)
+        or data["state"] not in {"open", "closed", "merged"}
+    ):
+        return ReviewSkip(
+            "state-unavailable", "The forge response did not include a known PR state."
+        )
+    if data["state"] == "open" and data.get("merged") is not True and not data.get("merged_at"):
+        return None
+
+    from django.utils import timezone
+    from django.utils.dateparse import parse_datetime
+
+    from franktheunicorn.core.models import PullRequest as PullRequestModel
+
+    pr.state = "closed"
+    fields = {"state": "closed", "updated_at": timezone.now()}
+    merged_at = data.get("merged_at")
+    try:
+        parsed = parse_datetime(merged_at) if isinstance(merged_at, str) else None
+    except ValueError:
+        parsed = None
+    if parsed is not None:
+        if timezone.is_naive(parsed):
+            parsed = timezone.make_aware(parsed)
+        pr.merged_at = parsed
+        fields["merged_at"] = parsed
+    PullRequestModel.objects.filter(pk=pr.pk).update(**fields)
+    return ReviewSkip("closed", "The forge confirms that the PR is closed or merged.")
 
 
 def process_pr(
@@ -1400,6 +1468,7 @@ def process_pr(
     import contextlib
 
     from franktheunicorn.config.loader import get_operator_config
+    from franktheunicorn.config.model_routing import routed_backend
     from franktheunicorn.review.drafter import draft_review, ensure_conflict_draft
 
     if operator_config is None:
@@ -1407,6 +1476,7 @@ def process_pr(
             operator_config = get_operator_config()
 
     close_http = False
+    close_forge = False
     if diff_http is None:
         diff_http = _shared_http_client(operator_config)
         close_http = True
@@ -1426,6 +1496,19 @@ def process_pr(
         if log_lines is not None:
             log_lines.append(msg)
 
+    live_skip: ReviewSkip | None = None
+
+    def _still_open() -> bool:
+        """Recheck before each reviewer, including any fallback invocation."""
+        nonlocal live_skip
+        live_skip = refresh_review_state(pr, pc, forge_client)
+        if live_skip is None:
+            return True
+        if decisions is not None:
+            decisions[live_skip.reason] += 1
+        _log(f"PR #{pr.number}: review skipped — {live_skip.explanation}")
+        return False
+
     try:
         skip = review_skip_reason(pr, pc, operator_config, force=force)
         if skip:
@@ -1435,14 +1518,21 @@ def process_pr(
             # run, and if not, which gate stopped them".
             if decisions is not None:
                 decisions[skip.reason] += 1
-            # DEBUG only, and deliberately no log_lines branch: the dashboard's
-            # force-run is the only caller that passes log_lines and it always
-            # passes force=True, which review_skip_reason short-circuits — so a
-            # "put the reason in front of the operator" branch here could never
-            # execute, while its comment claimed otherwise. Everything that
-            # reaches this point is the poll cycle, whose audience is the
-            # aggregate line _log_cycle_summary prints.
-            logger.debug("PR #%d: no agent run — %s. %s", pr.number, skip.reason, skip.explanation)
+            # The dashboard must see why even a forced review was declined.
+            if force:
+                _log(f"PR #{pr.number}: review skipped — {skip.explanation}")
+            else:
+                logger.debug(
+                    "PR #%d: no agent run — %s. %s", pr.number, skip.reason, skip.explanation
+                )
+            return []
+
+        if forge_client is None and operator_config is not None:
+            from franktheunicorn.worker.commands import _forge_client_for
+
+            forge_client = _forge_client_for(pc, operator_config)
+            close_forge = forge_client is not None
+        if not _still_open():
             return []
 
         # Deterministic pre-gate: a PR GitHub reports as conflicted cannot be
@@ -1517,6 +1607,8 @@ def process_pr(
             triage = current_triage(pr)
             # No diff, no triage: an empty-diff "unclear" would stick to this head.
             if triage is None and pr_diff:
+                if not _still_open():
+                    return []
                 triage = run_triage(pr, pc, effective_config, pr_diff)
                 if triage is not None:
                     record_triage(pr, triage)
@@ -1560,6 +1652,8 @@ def process_pr(
                 screen = current_worthiness(pr)
                 # No diff, no screen: an empty-diff verdict would stick to this head.
                 if screen is None and pr_diff:
+                    if not _still_open():
+                        return []
                     screen = run_worthiness_screen(pr, pc, effective_config, pr_diff)
                     if screen is not None:
                         record_worthiness(pr, screen)
@@ -1662,6 +1756,8 @@ def process_pr(
             review_activity_days=getattr(pc, "review_activity_days", 30),
         )
         if force or LLM_REVIEW_SOURCE in owed:
+            if not _still_open():
+                return []
             _log("Running LLM review pipeline...")
             drafts = draft_review(
                 pr,
@@ -1689,6 +1785,8 @@ def process_pr(
         clone_url = _clone_url_for_project(pc, operator_config)
 
         if cr_config is not None and (force or "coderabbit" in owed):
+            if not _still_open():
+                return drafts
             _log("Running CodeRabbit...")
             outcome = _run_coderabbit_for_pr(
                 pr,
@@ -1698,6 +1796,7 @@ def process_pr(
                 project_config=pc,
                 operator_config=effective_config,
                 diff_http=diff_http,
+                can_review=_still_open,
             )
             # The outcome goes into log_lines too: the force-run WorkerCommand
             # log is built from those, and "Running codex..." followed by
@@ -1706,6 +1805,8 @@ def process_pr(
             _log(f"CodeRabbit: {outcome}")
 
         def _run_reviewer(rc: AgentCLIReviewerConfig) -> str:
+            if not _still_open():
+                return "skipped: upstream PR state does not permit review"
             return _run_agent_cli_for_pr(
                 pr,
                 rc,
@@ -1714,6 +1815,7 @@ def process_pr(
                 project_config=pc,
                 operator_config=effective_config,
                 diff_http=diff_http,
+                can_review=_still_open,
                 prior_comments=prior_comments,
             )
 
@@ -1733,7 +1835,11 @@ def process_pr(
                 log=_log,
             )
             _log(f"{reviewer.name}: {outcome}")
+            if live_skip is not None:
+                return drafts
         if snowflake_config is not None and (force or "snowflake" in owed):
+            if not _still_open():
+                return drafts
             _log("Running Snowflake review...")
             outcome = _run_snowflake_for_pr(
                 pr,
@@ -1743,6 +1849,7 @@ def process_pr(
                 project_config=pc,
                 operator_config=effective_config,
                 diff_http=diff_http,
+                can_review=_still_open,
             )
             _log(f"Snowflake review: {outcome}")
 
@@ -1751,6 +1858,7 @@ def process_pr(
             and disabled_backends
             and effective_config
             and not effective_config.llm_backends
+            and not any(routed_backend(effective_config, f"check:{name}") for name in pc.llm_checks)
         ):
             # Without this the checks fall back to the stub and file canned drafts.
             logger.warning(
@@ -1758,6 +1866,8 @@ def process_pr(
                 pr.number,
             )
         elif pc.llm_checks:
+            if not _still_open():
+                return drafts
             try:
                 from franktheunicorn.data_access.github.diff_fetcher import DiffFetcher
                 from franktheunicorn.review.checks import run_enabled_checks
@@ -1772,9 +1882,9 @@ def process_pr(
                     pr,
                     check_diff,
                     project_config=pc,
-                    # Not operator_config: checks use llm_backends[0], and that
-                    # must not be a backend preflight already disabled.
+                    # Keep healthy tiers, but remove disabled default backends.
                     operator_config=effective_config,
+                    can_review=_still_open,
                     repo_path=repo_path,
                     forge_client=forge_client,
                     prior_comments=prior_comments,
@@ -1797,6 +1907,8 @@ def process_pr(
         _refresh_merge_readiness_after_review(pr, pc, operator_config)
         return drafts
     finally:
+        if close_forge and forge_client is not None:
+            forge_client.close()
         if close_http:
             diff_http.close()
 
@@ -2329,6 +2441,9 @@ def _log_cycle_summary(seen: int, refreshed: int, decisions: Counter[str]) -> No
 #: whole cycle ("all of them were already reviewed" is fine; "all of them were
 #: filtered by policy" probably isn't what the operator wanted).
 _SKIP_ADVICE = {
+    "closed": "The PRs were closed or merged; normal reviews require an open PR.",
+    "state-unavailable": "The forge could not confirm the PRs are open; those reviews "
+    "are deferred until a fresh state read succeeds.",
     "already-reviewed": "That is the steady state — every open PR already has drafts.",
     "wip": "Every candidate is in the wip queue (draft, or a WIP title).",
     "policy-none": "auto_review_policy is 'none' in the project YAML; set it to 'all' "
@@ -3178,6 +3293,7 @@ def _run_review_tool_for_pr(
     run_review: Callable[..., Sequence[_ReviewToolFinding]],
     create_drafts: Callable[..., list[ReviewDraft]],
     tool_config: object,
+    can_review: Callable[[], bool] | None = None,
 ) -> str:
     """Shared scaffold for all CLI review tool runners. Never raises.
 
@@ -3229,6 +3345,8 @@ def _run_review_tool_for_pr(
     executor = make_executor(remote_config)  # type: ignore[arg-type]
     real_branch: str | None = None if temp_branch == _REMOTE else temp_branch
     try:
+        if can_review is not None and not can_review():
+            return "skipped: upstream PR state does not permit review"
         findings = run_review(cwd, base_ref, tool_config, executor=executor)
         # Outside the `if findings:` — a reviewer that ran and found nothing used
         # to log nothing, so "it worked and the PR is clean" and "it never ran"
@@ -3275,6 +3393,7 @@ def _run_coderabbit_for_pr(
     project_config: ProjectConfig | None = None,
     operator_config: OperatorConfig | None = None,
     diff_http: httpx.Client | None = None,
+    can_review: Callable[[], bool] | None = None,
 ) -> str:
     """Run CodeRabbit CLI review for a single PR. Never raises."""
     from franktheunicorn.review.coderabbit import (
@@ -3293,6 +3412,7 @@ def _run_coderabbit_for_pr(
         diff_http,
         run_review=run_coderabbit_review,
         create_drafts=create_drafts_from_coderabbit,
+        can_review=can_review,
         tool_config=cr_config,
     )
 
@@ -3306,6 +3426,7 @@ def _run_agent_cli_for_pr(
     operator_config: OperatorConfig | None = None,
     diff_http: httpx.Client | None = None,
     prior_comments: list[PriorComment] | None = None,
+    can_review: Callable[[], bool] | None = None,
 ) -> str:
     """Run one agent-CLI reviewer (claude/codex/pi/...) for a PR. Never raises.
 
@@ -3384,6 +3505,7 @@ def _run_agent_cli_for_pr(
         diff_http,
         run_review=run_review,
         create_drafts=create_drafts,
+        can_review=can_review,
         tool_config=reviewer,
     )
 
@@ -3396,6 +3518,7 @@ def _run_snowflake_for_pr(
     project_config: ProjectConfig | None = None,
     operator_config: OperatorConfig | None = None,
     diff_http: httpx.Client | None = None,
+    can_review: Callable[[], bool] | None = None,
 ) -> str:
     """Run the Snowflake code review CLI for a single PR. Never raises."""
     from franktheunicorn.review.snowflake_review import (
@@ -3414,6 +3537,7 @@ def _run_snowflake_for_pr(
         diff_http,
         run_review=run_snowflake_review,
         create_drafts=create_drafts_from_snowflake,
+        can_review=can_review,
         tool_config=snowflake_config,
     )
 
