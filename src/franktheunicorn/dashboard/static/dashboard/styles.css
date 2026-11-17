@@ -776,6 +776,42 @@ thead th { border-bottom: 2px solid var(--border); }
 .mc-result { margin-top: 0.3rem; }
 .mc-evaluated { font-size: 0.72rem; margin-top: 0.2rem; }
 
+/* CI Failures queue: one PR's panel (_ci_failure_panel.html). Shares the
+   merge-candidate action row; the left border says whose problem it is. */
+.ci-failure {
+    margin-top: 0.5rem;
+    padding: 0.5rem 0.65rem;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--muted);
+    border-radius: var(--radius, 4px);
+    font-size: 0.82rem;
+    background: var(--card);
+}
+.ci-failure.cif-cause-pr, .ci-failure.cif-cause-setup { border-left-color: var(--red); }
+.ci-failure.cif-cause-flake, .ci-failure.cif-cause-pre-existing { border-left-color: var(--yellow); }
+.ci-failure.cif-cause-mixed { border-left-color: var(--orange); }
+.cif-head { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
+.cif-badge { display: inline-block; padding: 0.05rem 0.4rem; border-radius: 3px; font-weight: 600; font-size: 0.75rem; }
+.cif-pr, .cif-setup { background: var(--red-bg); color: var(--red); }
+.cif-flake, .cif-mixed { background: var(--yellow-bg); color: var(--orange); }
+.cif-resolved { background: var(--green-bg); color: var(--green); }
+.cif-unclassified, .cif-unknown { background: var(--border); color: var(--muted); }
+.cif-chip { display: inline-block; padding: 0.05rem 0.35rem; border-radius: 3px; font-size: 0.75rem; background: var(--code-bg); color: var(--text); }
+.cif-findings { margin: 0.4rem 0 0; padding-left: 1.3rem; }
+.cif-findings li { margin-bottom: 0.4rem; }
+.cif-summary { margin-top: 0.15rem; }
+.cif-fix { margin-top: 0.15rem; overflow-wrap: anywhere; }
+.cif-evidence summary { cursor: pointer; color: var(--accent); font-size: 0.75rem; }
+.cif-evidence pre { font-size: 0.72rem; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0.25rem 0 0; padding: 0.4rem; background: var(--code-bg); border-radius: 3px; }
+.cif-note { margin-top: 0.35rem; }
+.cif-draft { margin-top: 0.5rem; }
+.cif-draft summary { display: inline-block; list-style: none; }
+.cif-draft summary::-webkit-details-marker { display: none; }
+.cif-draft-form { display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; margin-top: 0.4rem; }
+.cif-draft-form textarea { flex: 1 1 100%; width: 100%; box-sizing: border-box; font-family: inherit; font-size: 0.8rem; }
+.cif-toolbar .action-btn { font-size: 0.85rem; padding: 0.3rem 0.6rem; }
+.cif-classify:disabled { opacity: 0.6; cursor: default; }
+
 @media (max-width: 600px) {
     body { padding: 0.5rem; }
     .tab-bar a { padding: 0.4rem 0.6rem; font-size: 0.75rem; }

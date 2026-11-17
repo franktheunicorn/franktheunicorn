@@ -1664,3 +1664,29 @@ class TestZombieCommands:
         cmd.refresh_from_db()
         assert cmd.status == "failed"
         assert "requires a pull_request" in cmd.error
+
+    def test_classify_ci_dispatches_to_classify_pr(self, db_pr: PullRequest) -> None:
+        cmd = WorkerCommand.objects.create(command="classify_pr_ci", pull_request=db_pr)
+        operator_config = MagicMock()
+        with patch(
+            "franktheunicorn.review.ci_failure.classify_pr",
+            return_value="PR #1: 1 failed job(s) -> 1 cause(s) [rule 1]: Style / lint check",
+        ) as classify_pr:
+            process_pending_commands(operator_config)
+        cmd.refresh_from_db()
+        assert cmd.status == "completed"
+        assert "Style / lint check" in cmd.log
+        assert classify_pr.call_args[0] == (db_pr, operator_config)
+
+    def test_classify_ci_requires_a_pr(self) -> None:
+        cmd = WorkerCommand.objects.create(command="classify_pr_ci")
+        process_pending_commands(MagicMock())
+        cmd.refresh_from_db()
+        assert cmd.status == "failed"
+        assert "requires a pull_request" in cmd.error
+
+    def test_classify_ci_is_a_cheap_command(self) -> None:
+        """Tier 1: one model call at most, so it is claimed ahead of the agent runs."""
+        from franktheunicorn.worker.commands import _COMMAND_COST_TIER
+
+        assert _COMMAND_COST_TIER["classify_pr_ci"] == 1

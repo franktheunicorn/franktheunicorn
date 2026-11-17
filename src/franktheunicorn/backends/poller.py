@@ -392,7 +392,12 @@ def _refresh_pull_request(
     # merge-intent sync below reuses the reviews and, with checks read, skips
     # its own CI call.
     readiness_on = project_config.merge_readiness.enabled
-    reviews = refresh_review_and_ci_state(client, pr_obj, project_config) if readiness_on else None
+    # The CI Failures queue (review/ci_failure.py) needs the same check runs on
+    # the row and is switched independently: a project can classify red CI
+    # without ranking merge candidates. Reading them here for either keeps it
+    # one read, and the verdict below is still gated on readiness alone.
+    ci_state_on = readiness_on or project_config.ci_failure.enabled
+    reviews = refresh_review_and_ci_state(client, pr_obj, project_config) if ci_state_on else None
 
     # Fetch blame data if repo clone is available (v1.25).
     blame_data: list[dict[str, object]] | None = None
@@ -492,7 +497,7 @@ def _refresh_pull_request(
         merge_intent,
         comments=fetched_comments,
         reviews=reviews,
-        read_ci=not readiness_on,
+        read_ci=not ci_state_on,
     )
 
     # Populate JIRA cache before scoring so JIRA-derived ranking signals are

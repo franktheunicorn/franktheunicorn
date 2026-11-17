@@ -19,6 +19,7 @@ from franktheunicorn.core.models import (
     Alert,
     AntiPattern,
     CICheckHistory,
+    CIFailureAssessment,
     CostRecord,
     CVEAPIToken,
     DependencyChange,
@@ -455,6 +456,34 @@ class ZombieAssessmentFactory(factory.django.DjangoModelFactory):  # type: ignor
     )
     verdict = "unassessed"
     needed_changes = factory.LazyFunction(list)
+    disposition = "pending"
+    attempts = 0
+
+
+class CIFailureAssessmentFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
+    """Factory for CIFailureAssessment: an open PR whose CI is red on its head.
+
+    The PR it hangs off is failing CI on ``head1`` by default, and the row
+    describes that head — the state the CI Failures tab lists.
+    """
+
+    class Meta:
+        model = CIFailureAssessment
+
+    pull_request = factory.SubFactory(
+        PullRequestFactory,
+        head_sha="head1",
+        ci_checks_sha="head1",
+        ci_status="fail",
+        ci_checks=factory.LazyFunction(
+            lambda: [{"name": "Build", "status": "completed", "conclusion": "failure"}]
+        ),
+    )
+    head_sha = factory.LazyAttribute(lambda o: o.pull_request.head_sha)
+    status = "unclassified"
+    failing_checks = factory.LazyFunction(lambda: ["Build"])
+    failures = factory.LazyFunction(list)
+    categories = factory.LazyFunction(list)
     disposition = "pending"
     attempts = 0
 

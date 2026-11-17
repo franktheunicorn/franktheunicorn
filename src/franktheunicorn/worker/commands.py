@@ -123,6 +123,7 @@ _COMMAND_COST_TIER: dict[str, int] = {
     "run_security_triage": 1,
     "run_security_sandbox": 1,
     "analyze_pr_ci": 1,
+    "classify_pr_ci": 1,
     "assess_zombie_pr": 1,
     "scan_zombie_prs": 1,
     "poll_security_rechecks": 1,
@@ -419,6 +420,7 @@ def _dispatch(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
         "scan_zombie_prs": _scan_zombie_prs,
         "assess_zombie_pr": _assess_zombie_pr,
         "analyze_pr_ci": _analyze_pr_ci,
+        "classify_pr_ci": _classify_pr_ci,
         "match_cves_to_reports": _match_cves_to_reports,
         "scan_introduced_cves": _scan_introduced_cves,
         "scan_security_variants": _scan_security_variants,
@@ -1065,6 +1067,22 @@ def _analyze_pr_ci(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
     verdicts = analysis.get("verdicts", {})
     base = analysis.get("base_failing", [])
     cmd.log = f"CI analysis: {len(verdicts)} verdict(s); also failing on base: {base or 'none'}"
+
+
+def _classify_pr_ci(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
+    """Classify one PR's CI failure and draft the comment for its author.
+
+    Queued by the CI Failures tab, the detail page's button, or the per-cycle
+    pass of a project with ``ci_failure.enabled``. Rules first, a model only
+    for what no rule explains; nothing is posted (review/ci_failure.py).
+    """
+    if cmd.pull_request is None:
+        msg = "classify_pr_ci requires a pull_request target"
+        raise ValueError(msg)
+
+    from franktheunicorn.review.ci_failure import classify_pr
+
+    cmd.log = classify_pr(cmd.pull_request, operator_config)
 
 
 def _match_cves_to_reports(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:

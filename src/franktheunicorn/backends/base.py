@@ -221,6 +221,19 @@ class ForgeClient(ABC):
         """
         raise NotImplementedError(f"{type(self).__name__} does not support get_commit_checks()")
 
+    def get_commit_check_failures(self, owner: str, repo: str, sha: str) -> list[dict[str, Any]]:
+        """What failed on a commit: one entry per failed job, with a log excerpt.
+
+        Each entry is ``{"check", "job", "step", "conclusion", "url", "title",
+        "summary", "log", "linked_run"}`` — see ``GitHubClient`` for the shape
+        and for why a check and a job are not the same thing. The default raises
+        ``NotImplementedError``; CI-failure classification (review/ci_failure.py)
+        then works from the check names ``get_commit_checks`` gave it.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support get_commit_check_failures()"
+        )
+
     def create_issue_comment(
         self, owner: str, repo: str, issue_number: int, body: str
     ) -> dict[str, Any]:

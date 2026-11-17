@@ -413,6 +413,31 @@ def queue_ci_analysis(pr: PullRequest, *, priority: int = PRIORITY_INTERACTIVE) 
     return queue_command("analyze_pr_ci", pull_request=pr, priority=priority)
 
 
+def queue_ci_failure_classification(pr: PullRequest, *, priority: int = PRIORITY_BULK) -> bool:
+    """Queue "classify this PR's CI failure" (review/ci_failure.py) unless one is in flight.
+
+    Bulk by default: the usual caller is the per-cycle pass or the tab's "Find
+    failing PRs" button, queueing a batch nobody is watching one by one. The
+    per-PR button passes :data:`PRIORITY_INTERACTIVE` — and when its PR is
+    already sitting in the bulk lane, that pending row is promoted instead of
+    the click being told "already queued" about a run that is behind the whole
+    batch. The dedup would otherwise turn the interactive lane into the bulk
+    one for exactly the PR somebody is looking at.
+    """
+    command = "classify_pr_ci"
+    if queue_command(command, pull_request=pr, priority=priority):
+        return True
+    if priority > PRIORITY_BULK:
+        promoted = WorkerCommand.objects.filter(
+            command=command, pull_request=pr, status="pending", priority__lt=priority
+        ).update(priority=priority)
+        if promoted:
+            logger.info(
+                "Promoted the queued %s for PR #%s to priority %d", command, pr.pk, priority
+            )
+    return False
+
+
 def cancel_pending_for_reports(report_ids: list[int]) -> int:
     """Drop pending worker jobs for *report_ids* before the reports themselves go.
 

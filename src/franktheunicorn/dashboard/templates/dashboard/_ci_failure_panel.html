@@ -1,0 +1,140 @@
+{% load markdown_filters %}
+{% comment %}
+  One PR's CI-failure panel: what failed, whose problem it looks like, and the
+  drafted comment for the author. Rendered per row on the "CI Failures" tab and
+  on the PR detail page. Every button posts back and swaps this whole panel
+  (outerHTML), so the id has to be stable across re-renders. `cif` comes from
+  views._ci_failure_context; `cif.row` is None for a red PR nobody classified yet.
+{% endcomment %}
+<div class="ci-failure cif-cause-{{ cif.row.cause|default:'none' }}" id="ci-failure-{{ pr.pk }}">
+  {% if not cif.row %}
+  <div class="cif-head">
+    <span class="cif-badge cif-unclassified">CI failing</span>
+    <span class="muted">Not classified yet.</span>
+  </div>
+  {% else %}
+  <div class="cif-head">
+    {% if cif.row.status == "resolved" %}
+    <span class="cif-badge cif-resolved" title="CI was no longer failing the last time this was read">CI no longer failing</span>
+    {% elif not cif.row.is_classified %}
+    <span class="cif-badge cif-unclassified" title="Found, not yet read: the worker classifies these most recently updated first">Not yet classified</span>
+    {% elif cif.row.cause == "pr" %}
+    <span class="cif-badge cif-pr" title="The failure looks caused by this change">Author's to fix</span>
+    {% elif cif.row.cause == "setup" %}
+    <span class="cif-badge cif-setup" title="CI did not run, or could not start: the author's fork or branch needs attention">Fork / CI setup</span>
+    {% elif cif.row.cause == "flake" %}
+    <span class="cif-badge cif-flake" title="Nothing for the author to change: a re-run should do it">Probably a flake</span>
+    {% elif cif.row.cause == "pre-existing" %}
+    <span class="cif-badge cif-flake" title="Already failing on the base branch">Not this PR</span>
+    {% elif cif.row.cause == "mixed" %}
+    <span class="cif-badge cif-mixed" title="More than one thing failed, for different reasons">Mixed</span>
+    {% else %}
+    <span class="cif-badge cif-unknown" title="frank could not tell why this failed">Unclear</span>
+    {% endif %}
+    {% if cif.row.is_classified %}
+      {% for finding in cif.findings %}<span class="cif-chip" title="decided by: {{ finding.source }}{% if finding.rule %} ({{ finding.rule }}){% endif %}">{{ finding.label }}</span>{% endfor %}
+    {% else %}
+      {% for name in cif.row.failing_checks %}<span class="cif-chip">{{ name }}</span>{% endfor %}
+    {% endif %}
+    {% if cif.row.head_sha %}<span class="fainter" title="The commit this describes">@ {{ cif.row.head_sha|slice:":7" }}</span>{% endif %}
+    {% if not cif.is_current %}<span class="warn-note" title="The PR's head has moved since this was written">for an older commit</span>{% endif %}
+    {% if cif.row.disposition == "posted" %}<span class="ok-note">&#10003; posted{% if cif.row.posted_at %} {{ cif.row.posted_at|timesince }} ago{% endif %}</span>
+    {% elif cif.row.disposition == "dismissed" %}<span class="neutral-chip cif-chip">dismissed{% if cif.row.dismiss_reason %}: {{ cif.row.get_dismiss_reason_display }}{% endif %}</span>
+    {% elif cif.row.posted_at %}<span class="warn-note" title="A CI comment already went out on this PR, for commit {{ cif.row.posted_sha|slice:':7' }}">you commented on this PR's CI {{ cif.row.posted_at|timesince }} ago</span>{% endif %}
+  </div>
+
+  {% if cif.row.is_classified %}
+  <ol class="cif-findings">
+    {% for finding in cif.findings %}
+    <li>
+      <strong>{{ finding.label }}</strong>
+      <span class="muted">&mdash; {{ finding.jobs|slice:":3"|join:", " }}{% if finding.jobs|length > 3 %} and {{ finding.jobs|length|add:"-3" }} more{% endif %}{% if finding.step %} &middot; step <em>{{ finding.step }}</em>{% endif %}</span>
+      {% if finding.url %}<a href="{{ finding.url }}" target="_blank" rel="noopener noreferrer" title="Open the failed job">log &nearr;</a>{% endif %}
+      {# Rule or model text: inline markdown only (code, emphasis), HTML escaped, no links. #}
+      <div class="cif-summary">{{ finding.summary|render_markdown_inline }}</div>
+      {% if finding.remediation %}<div class="cif-fix"><span class="muted">Fix:</span> {{ finding.remediation|render_markdown_inline }}</div>{% endif %}
+      {% if finding.evidence %}
+      <details class="cif-evidence">
+        <summary>from the log</summary>
+        <pre>{{ finding.evidence }}</pre>
+      </details>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ol>
+  {% if cif.row.anti_pattern_hits %}
+  <div class="warn-note cif-note">The draft matches {{ cif.row.anti_pattern_hits|length }} of your anti-pattern{{ cif.row.anti_pattern_hits|length|pluralize }}: {{ cif.row.anti_pattern_hits|join:"; "|truncatechars:200 }}</div>
+  {% endif %}
+  {% if cif.row.last_error %}<div class="muted cif-note">Note: {{ cif.row.last_error }}</div>{% endif %}
+
+  {% if cif.row.disposition == "pending" %}
+  <details class="cif-draft"{% if cif.draft_open %} open{% endif %}>
+    <summary class="action-btn">{% if cif.is_own %}Drafted note{% else %}Review &amp; post comment&hellip;{% endif %}</summary>
+    <form class="cif-draft-form"
+          hx-post="{% url 'dashboard:ci_failure_post' pr.pk %}"
+          hx-target="#ci-failure-{{ pr.pk }}" hx-swap="outerHTML"
+          {% if not cif.is_own %}hx-confirm="Post this comment on {{ pr.project }} #{{ pr.number }}?"{% endif %}>
+      {% csrf_token %}
+      <textarea name="body" id="cif-body-{{ pr.pk }}" rows="12" aria-label="Comment for the PR author">{{ cif.body }}</textarea>
+      {% if cif.is_own %}
+      <span class="mc-hint">Your own PR &mdash; nothing to post, but that is what failed.</span>
+      {% elif not cif.is_current %}
+      <span class="mc-hint">Drafted for an older commit &mdash; re-classify before posting.</span>
+      {% else %}
+      <button type="submit" class="action-btn post">Post comment</button>
+      <span class="mc-hint">Goes out as a conversation comment. Edits are kept.</span>
+      {% endif %}
+    </form>
+  </details>
+  {% endif %}
+  {% elif cif.row.status == "unclassified" %}
+  <div class="muted cif-note">
+    {% if cif.in_flight %}Queued for the worker &mdash; reload in a minute.
+    {% elif cif.row.gave_up %}Not classified: {{ cif.row.attempts }} attempts failed{% if cif.row.last_error %} ({{ cif.row.last_error }}){% endif %}. Classify to try again.
+    {% elif cif.row.last_error %}{{ cif.row.last_error }}
+    {% else %}Waiting for the worker's next pass, or press Classify.{% endif %}
+  </div>
+  {% endif %}
+  {% endif %}
+
+  <div class="mc-actions">
+    <button type="button" class="action-btn cif-classify"
+            hx-post="{% url 'dashboard:ci_failure_classify' pr.pk %}"
+            hx-target="#ci-failure-{{ pr.pk }}" hx-swap="outerHTML"
+            {% if cif.in_flight %}disabled title="Already queued or running"{% else %}title="Read the failed jobs and their logs, and draft what to tell the author. Rules first; a model only for what no rule explains."{% endif %}>{% if cif.row.is_classified %}Re-classify{% else %}Classify CI failure{% endif %}</button>
+    <a class="action-btn" href="{{ pr.url }}" target="_blank" rel="noopener noreferrer">Open on forge &nearr;</a>
+    {% if cif.row and cif.row.disposition == "dismissed" %}
+    <button type="button" class="action-btn"
+            hx-post="{% url 'dashboard:ci_failure_dismiss' pr.pk %}" hx-vals='{"restore": "1"}'
+            hx-target="#ci-failure-{{ pr.pk }}" hx-swap="outerHTML">Restore</button>
+    {% elif cif.row and cif.row.disposition == "pending" %}
+    <details class="mc-dismiss">
+      <summary class="action-btn reject">Dismiss&hellip;</summary>
+      <form class="mc-dismiss-form"
+            hx-post="{% url 'dashboard:ci_failure_dismiss' pr.pk %}"
+            hx-target="#ci-failure-{{ pr.pk }}" hx-swap="outerHTML">
+        {% csrf_token %}
+        <select name="reason" aria-label="Why not post this?">
+          {% for code, label in cif.reason_choices %}
+          <option value="{{ code }}">{{ label }}</option>
+          {% endfor %}
+        </select>
+        <input type="text" name="note" maxlength="500" placeholder="why (optional; remembered)">
+        <button type="submit" class="action-btn reject">Dismiss</button>
+      </form>
+    </details>
+    {% endif %}
+  </div>
+  <div class="mc-result">
+    {% if cif.note %}<span class="{% if cif.error %}error-note{% else %}ok-note{% endif %}">{{ cif.note }}</span>{% endif %}
+    {% if cif.post_blocked %}
+    <button type="button" class="action-btn"
+            hx-post="{% url 'dashboard:ci_failure_post' pr.pk %}" hx-vals='{"force": "1"}'
+            hx-include="#cif-body-{{ pr.pk }}"
+            hx-target="#ci-failure-{{ pr.pk }}" hx-swap="outerHTML"
+            hx-confirm="Post anyway, without the live check?">Post anyway</button>
+    {% endif %}
+    {% if cif.last_failed %}<span class="error-note">Last classification failed: {{ cif.last_failed.error|truncatechars:200 }}</span>{% endif %}
+  </div>
+  {% if cif.row.classified_at %}<div class="mc-evaluated fainter">classified {{ cif.row.classified_at|timesince }} ago{% if cif.row.backend_used %} &middot; model: {{ cif.row.backend_used }}{% else %} &middot; rules only{% endif %}</div>{% endif %}
+</div>
