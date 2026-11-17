@@ -1569,6 +1569,12 @@ class TestRecallAndPostWithMock:
                 "franktheunicorn.backends.github.GitHubClient",
                 side_effect=Exception("connection failed"),
             ),
+            # The dashboard conftest's autouse fake forge would otherwise stand in
+            # for the failing client above and the post would "succeed".
+            patch(
+                "franktheunicorn.backends.make_client",
+                side_effect=Exception("connection failed"),
+            ),
             patch("django.conf.settings.FRANK_GITHUB_TOKEN", "test-token", create=True),
         ):
             response = client.post(f"/pr/{db_pr.pk}/post/")

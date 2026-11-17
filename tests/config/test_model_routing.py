@@ -351,7 +351,9 @@ def test_checks_stop_when_pr_closes_between_models(db_pr) -> None:
     from franktheunicorn.review.checks import run_enabled_checks
 
     project = ProjectConfig(owner="apache", repo="spark", llm_checks=["coverage", "security"])
-    state_gate = MagicMock(side_effect=[True, False])
+    # Before the concurrent batch, then before each result is recorded: the PR
+    # closes while the calls are out, after coverage's result is in.
+    state_gate = MagicMock(side_effect=[True, True, False])
     with patch("franktheunicorn.review.checks._run_single_check", return_value=[]) as run:
         run_enabled_checks(
             db_pr,
@@ -360,8 +362,8 @@ def test_checks_stop_when_pr_closes_between_models(db_pr) -> None:
             operator_config=_asf_config(),
             can_review=state_gate,
         )
-    assert run.call_count == 1
-    assert state_gate.call_count == 2
+    assert run.call_count == 2
+    assert state_gate.call_count == 3
     db_pr.refresh_from_db()
     assert db_pr.agent_runs["check:coverage"]["status"] == "ok"
     assert "check:security" not in db_pr.agent_runs

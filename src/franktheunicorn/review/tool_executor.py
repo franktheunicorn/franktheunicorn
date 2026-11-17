@@ -699,6 +699,11 @@ def workspace_lane(name: str) -> Iterator[None]:
         _workspace_lane.reset(token)
 
 
+def current_workspace_lane() -> str:
+    """This thread's checkout lane — for handing it on to a helper thread."""
+    return _workspace_lane.get()
+
+
 def lane_subdir(workspace_subdir: str) -> str:
     """*workspace_subdir* widened to this thread's lane.
 

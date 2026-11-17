@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from typing import TYPE_CHECKING, Any, cast
 
 from franktheunicorn.review.backends.base import BaseLLMBackend
@@ -20,6 +21,28 @@ _JSON_ONLY_REMINDER = (
     "\n\nIMPORTANT: Respond with ONLY the JSON object described above. "
     "No prose, no explanation, no markdown fences — just the raw JSON."
 )
+
+
+_gateway_slots: dict[tuple[str, str], threading.BoundedSemaphore] = {}
+_gateway_slots_lock = threading.Lock()
+
+
+def gateway_slots(config: LLMBackendConfig) -> threading.BoundedSemaphore | None:
+    """The process-wide in-flight limit for *config*'s gateway, or None if unlimited.
+
+    Keyed on (base_url, api_key_env): the limit is the gateway's, per key, so every
+    model and tier behind it draws on the same slots. The first size seen wins —
+    the tiers inherit the field, so they agree unless one overrides it.
+    """
+    limit = config.max_parallel_requests
+    if limit <= 0:
+        return None
+    key = (config.base_url or "", config.api_key_env or "")
+    with _gateway_slots_lock:
+        slots = _gateway_slots.get(key)
+        if slots is None:
+            slots = _gateway_slots[key] = threading.BoundedSemaphore(limit)
+        return slots
 
 
 class OpenAIBackend(BaseLLMBackend):
@@ -111,7 +134,11 @@ class OpenAIBackend(BaseLLMBackend):
             # ChatCompletion and the caller reads .choices/.usage off it.
             # String forward-ref so ChatCompletion stays a TYPE_CHECKING import
             # (openai is lazy-loaded inside _call_api, not at module import).
-            return cast("ChatCompletion", client.chat.completions.create(**request_kwargs))
+            slots = gateway_slots(self._config)
+            if slots is None:
+                return cast("ChatCompletion", client.chat.completions.create(**request_kwargs))
+            with slots:
+                return cast("ChatCompletion", client.chat.completions.create(**request_kwargs))
 
         # Retry once per known compatibility quirk (token-param name and
         # response_format support). Cap attempts so an unrelated 400 can't loop.

@@ -105,9 +105,17 @@ else:
             # The web app and worker share this file. WAL lets readers and a
             # writer coexist, and the busy timeout makes contending writers
             # wait instead of failing fast with "database is locked".
+            #
+            # IMMEDIATE: a transaction takes the write lock when it begins. The
+            # default (DEFERRED) starts as a reader and upgrades on its first
+            # write, and an upgrade that collides with another writer fails at
+            # once — SQLite cannot honour the busy timeout there without risking
+            # deadlock. With the worker reviewing on ten threads that collision
+            # is routine, not rare.
             "OPTIONS": {
                 "timeout": 20,
                 "init_command": "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;",
+                "transaction_mode": "IMMEDIATE",
             },
         }
     }

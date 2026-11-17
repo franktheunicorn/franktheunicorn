@@ -142,8 +142,9 @@ def run_enabled_checks(
     are a finding source like any other — "security:" restating a reviewer's
     own point is the comment this is meant to stop.
 
-    ``can_review`` rechecks upstream state before each check and stops the
-    remaining checks when the PR no longer permits a normal review.
+    ``can_review`` rechecks upstream state before the (concurrent) calls and
+    again before each check's results are recorded, and stops there when the PR
+    no longer permits a normal review.
     """
     from franktheunicorn.config.models import LLMBackendConfig
     from franktheunicorn.config.models import OperatorConfig as DefaultOperatorConfig
@@ -202,6 +203,8 @@ def run_enabled_checks(
     all_drafts: list[ReviewDraft] = []
     changed_files = pr.changed_files or []
 
+    # Phase 1, serial and cheap: instantiate, gate, pick a backend.
+    planned: list[tuple[str, BaseCheck, LLMBackendConfig]] = []
     for check_name in enabled:
         check_cls = registry.get(check_name)
         if check_cls is None:
@@ -225,8 +228,7 @@ def run_enabled_checks(
             logger.debug("PR #%d changed files: %s", pr.number, list(changed_files))
             continue
 
-        source = f"check:{check_name}"
-        check_backend = routed_backend(operator_config, source)
+        check_backend = routed_backend(operator_config, f"check:{check_name}")
         if (
             check_backend is None
             and not operator_config.llm_backends
@@ -234,15 +236,29 @@ def run_enabled_checks(
         ):
             logger.info("LLM check '%s' skipped: no usable routed or default backend.", check_name)
             continue
-        backend_config = check_backend or default_backend_config
+        planned.append((check_name, check, check_backend or default_backend_config))
+
+    if not planned or (can_review is not None and not can_review()):
+        return all_drafts
+
+    # Phase 2: the LLM calls, concurrently. They are independent and each is a
+    # long network wait — run one after another, a PR with eight checks took the
+    # sum of eight completions. The gateway's own in-flight cap
+    # (max_parallel_requests) is enforced in the backend, so this can be wide.
+    outcomes = _dispatch_concurrently(planned, pr, diff, pr_context)
+
+    # Phase 3, serial and in config order: record, calibrate, tone-guard, persist.
+    for (check_name, _check, backend_config), outcome in zip(planned, outcomes, strict=True):
+        source = f"check:{check_name}"
+        # Re-asked per result, as it used to be per call: the batch takes as
+        # long as its slowest check, and a PR merged meanwhile gets no drafts.
         if can_review is not None and not can_review():
             break
-        try:
-            findings = _run_check_dispatch(check, pr, diff, pr_context, backend_config)
-        except Exception:
-            logger.exception("LLM check '%s' failed.", check_name)
+        if isinstance(outcome, BaseException):
+            logger.error("LLM check '%s' failed.", check_name, exc_info=outcome)
             record_agent_run(pr, source, status="failed")
             continue
+        findings = outcome
 
         # Recorded even at zero findings, or a clean check reads as "not run".
         record_agent_run(pr, source, status="ok", findings=len(findings))
@@ -368,6 +384,58 @@ def _cap_diff_for_checks(diff: str, pr_context: PRContext) -> str:
         diff[:cutoff] + "\n[...diff truncated: the checks reviewed the first part; "
         "the agent CLI reviewers see the full diff in the checkout...]"
     )
+
+
+#: Most check calls one PR has in flight at once. The gateway limit is the real
+#: bound (see LLMBackendConfig.max_parallel_requests); this only stops one PR
+#: from parking more threads than there are checks worth waiting on.
+MAX_CONCURRENT_CHECKS = 8
+
+
+def _dispatch_concurrently(
+    planned: Sequence[tuple[str, BaseCheck, LLMBackendConfig]],
+    pr: PullRequest,
+    diff: str,
+    pr_context: PRContext,
+) -> list[list[ReviewFinding] | BaseException]:
+    """Run each planned check's dispatch, in parallel; results in *planned* order.
+
+    A failure comes back as the exception rather than raising, so one check
+    blowing up cannot cost the others' findings. A single check runs inline —
+    no thread for nothing.
+    """
+    if len(planned) == 1:
+        _name, check, backend_config = planned[0]
+        try:
+            return [_run_check_dispatch(check, pr, diff, pr_context, backend_config)]
+        except Exception as exc:
+            return [exc]
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    from franktheunicorn.review.tool_executor import current_workspace_lane, workspace_lane
+
+    lane = current_workspace_lane()
+
+    def run(item: tuple[str, BaseCheck, LLMBackendConfig]) -> list[ReviewFinding] | BaseException:
+        from django.db import connection
+
+        _name, check, backend_config = item
+        try:
+            # Same checkout lane as the caller: a scan() that reads the clone
+            # must not wander into the default lane's tree from a pool thread.
+            with workspace_lane(lane):
+                return _run_check_dispatch(check, pr, diff, pr_context, backend_config)
+        except Exception as exc:
+            return exc
+        finally:
+            # Each pool thread opened its own connection (cost records); close it
+            # or a worker that reviews all day leaks one per check call.
+            connection.close()
+
+    workers = min(len(planned), MAX_CONCURRENT_CHECKS)
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix=f"checks-{pr.number}") as ex:
+        return list(ex.map(run, planned))
 
 
 def _run_check_dispatch(

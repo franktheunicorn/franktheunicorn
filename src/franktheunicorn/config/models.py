@@ -927,6 +927,13 @@ class LLMBackendConfig(BaseModel):
     #: completion — observed on qwen3.8 at llm.apache.org, where prompts over
     #: ~100K chars reliably came back empty with thinking on.
     extra_body: dict[str, object] = Field(default_factory=dict)
+    #: How many requests this process may have in flight to this gateway (same
+    #: ``base_url`` + ``api_key_env``) at once; 0 is unlimited. Shared across every
+    #: tier on the gateway, since tiers inherit both. llm.apache.org enforces
+    #: ``max_parallel_requests: 4`` per key and answers the fifth with a 429 —
+    #: with concurrent reviews and concurrent checks that is the normal case, so
+    #: the worker waits for a slot instead of spending a retry on it.
+    max_parallel_requests: int = 0
     # Only consulted when ``provider == "claude-code"``: talks to a local
     # Claude Code agent instead of calling the Anthropic API, so no API key
     # is needed (billed via the agent's own logged-in auth). ``transport``
@@ -2512,6 +2519,7 @@ TIER_INHERITED_FIELDS: tuple[str, ...] = (
     "acp_command",
     "cli_timeout_seconds",
     "reviewer",
+    "max_parallel_requests",
 )
 
 
@@ -2577,6 +2585,15 @@ class WorkerPoolConfig(BaseModel):
     #: behaviour. 0 is treated as 1 — there is no "no pool" mode; the pool is the
     #: worker. Each thread holds its own DB connection and checkout lane.
     concurrency: int = 3
+
+    #: How many PRs the poll cycle reviews at once, each on its own runner thread
+    #: and checkout lane (``review-<n>``). The cycle used to review one at a time,
+    #: and a Spark cycle of a few hundred refreshed PRs ran most of a day. LLM
+    #: calls are additionally bounded per gateway by
+    #: ``LLMBackendConfig.max_parallel_requests``, so this can exceed the gateway's
+    #: limit — the runners overlap their forge fetches and context building with
+    #: each other's model calls. 1 restores the old in-line, one-at-a-time cycle.
+    review_concurrency: int = 10
 
 
 class OperatorConfig(BaseModel):

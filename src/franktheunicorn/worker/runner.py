@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     from franktheunicorn.review.coderabbit import CodeRabbitFinding
     from franktheunicorn.review.prior_comments import PriorComment
     from franktheunicorn.review.snowflake_review import SnowflakeFinding
+    from franktheunicorn.worker.review_pool import ReviewItem, ReviewPool
 
     #: The finding lists the per-tool ``run_review`` callables return. Three
     #: independent dataclasses — no shared base — so the union is the honest
@@ -2172,41 +2173,119 @@ def _sync_open_prs_mid_cycle(
     operator_username: str,
     operator_config: OperatorConfig | None,
     *,
-    disabled_backends: frozenset[int],
-    diff_http: httpx.Client,
-    decisions: Counter[str] | None,
     repo_paths: Mapping[str, Path | None],
     reviewed_pks: set[int | None],
+    pool: ReviewPool,
 ) -> None:
-    """The throttled reap, plus a review of every PR it found opened mid-cycle.
+    """The throttled reap, queueing every PR it found opened mid-cycle for review.
 
-    New PRs go straight to ``process_pr`` rather than waiting for the backfill:
-    they are what the operator is most likely to be looking for, and the backfill
-    is capped and ordered by draft count, so it might not reach them this cycle.
+    New PRs join the back of the review queue — except the operator's own, which
+    go to the front: those are the ones somebody is sitting there waiting on.
+    Queued here rather than left to the backfill, which is capped and ordered by
+    draft count and so might not reach them this cycle.
     """
     from django.conf import settings
+
+    from franktheunicorn.worker.review_pool import ReviewItem
 
     for pr, pc, client in _reap_closed_prs_if_due(
         clients, project_configs, operator_username, operator_config, repo_paths
     ):
+        if pr.pk in reviewed_pks:
+            continue
         reviewed_pks.add(pr.pk)
         repo_path = repo_paths.get(pc.full_name)
         if repo_path is None:
             candidate = Path(settings.FRANK_REPOS_DIR) / pc.owner / pc.repo
             repo_path = candidate if candidate.is_dir() else None
-        try:
-            process_pr(
-                pr,
-                pc,
-                operator_config,
-                disabled_backends=disabled_backends,
-                diff_http=diff_http,
-                repo_path=repo_path,
-                forge_client=client,  # type: ignore[arg-type]
-                decisions=decisions,
+        own = bool(getattr(pr, "is_operator_pr", False))
+        logger.info(
+            "Queued mid-cycle PR #%d (%s) at the %s of %d pending review(s)",
+            pr.number,
+            pc.full_name,
+            "front" if own else "back",
+            pool.pending(),
+        )
+        pool.submit(ReviewItem(pr, pc, client, repo_path), front=own)
+
+
+def _review_concurrency(operator_config: OperatorConfig | None) -> int:
+    """How many PRs the cycle reviews at once (worker_pool.review_concurrency)."""
+    if operator_config is None:
+        return 1
+    return max(1, operator_config.worker_pool.review_concurrency)
+
+
+def _review_one(
+    item: ReviewItem,
+    operator_config: OperatorConfig | None,
+    *,
+    disabled_backends: frozenset[int],
+    diff_http: httpx.Client,
+    diff_fetcher: DiffFetcher,
+    test_runner: object,
+    decisions: Counter[str],
+    decisions_lock: threading.Lock,
+) -> None:
+    """Everything the cycle does for one refreshed PR — on a review runner thread."""
+    from django.conf import settings
+
+    from franktheunicorn.review.copypasta import check_copypasta
+
+    pr, pc = item.pr, item.pc
+    logger.debug(
+        "Processing PR #%d (%s) score=%.2f",
+        pr.number,
+        pc.full_name,
+        getattr(pr, "interest_score", 0.0),
+    )
+    # Per-item, merged under the lock: Counter's += is not atomic across threads.
+    local: Counter[str] = Counter()
+    try:
+        drafts = process_pr(
+            pr,
+            pc,
+            operator_config,
+            disabled_backends=disabled_backends,
+            diff_http=diff_http,
+            repo_path=item.repo_path,
+            forge_client=item.client,  # type: ignore[arg-type]
+            decisions=local,
+        )
+        if item.backfill:
+            logger.info("  Backfill PR #%d: %d drafts generated", pr.number, len(drafts))
+    finally:
+        with decisions_lock:
+            decisions.update(local)
+    if item.backfill:
+        return
+
+    # Differential test verification (§9).
+    try:
+        test_run = test_runner.run_differential_test(pr, pc, item.repo_path)  # type: ignore[attr-defined]
+        if test_run:
+            logger.info(
+                "  PR #%d: test verdict=%s",
+                pr.number,
+                test_run.differential_verdict or "pending",
             )
-        except Exception:
-            logger.exception("Error reviewing mid-cycle PR #%d (%s)", pr.number, pc.full_name)
+    except Exception:
+        logger.exception("Error in test verification for PR #%d", pr.number)
+
+    # Copy-pasta detection (runs even if drafts already exist)
+    if pc.copypasta_enabled:
+        repo_path = Path(settings.FRANK_REPOS_DIR) / pc.owner / pc.repo
+        if repo_path.is_dir():
+            try:
+                diff = diff_fetcher.fetch(pc.owner, pc.repo, pr.number)
+                cp_drafts = check_copypasta(pr, diff, pc, repo_path)
+                if cp_drafts:
+                    logger.info("  PR #%d: %d copy-pasta findings", pr.number, len(cp_drafts))
+            except Exception:
+                logger.exception("Error in copy-pasta check for PR #%d", pr.number)
+        else:
+            logger.debug("Repo clone not found at %s, skipping copy-pasta check", repo_path)
+    logger.debug("Finished processing PR #%d (%s)", pr.number, pc.full_name)
 
 
 def _run_cycle(
@@ -2217,6 +2296,42 @@ def _run_cycle(
     disabled_backends: frozenset[int] = frozenset(),
 ) -> None:
     """Run one polling cycle across all configured projects.
+
+    The main thread polls and queues; ``worker_pool.review_concurrency`` runner
+    threads review (see ``worker/review_pool.py``). The pool is owned here so its
+    threads are stopped however the cycle ends.
+    """
+    from franktheunicorn.worker.review_pool import ReviewPool
+
+    with ReviewPool(_review_concurrency(operator_config)) as pool:
+        _run_cycle_in(
+            pool, clients, project_configs, operator_username, operator_config, disabled_backends
+        )
+
+
+def _wait_for_reviews(pool: ReviewPool, tick: Callable[[], None], phase: str) -> None:
+    """Wait out the runners after *phase*, saying how much there is to wait for."""
+    pending = pool.pending()
+    if pending:
+        logger.info(
+            "Waiting on %d PR review(s) from the %s phase (%d runner(s))",
+            pending,
+            phase,
+            pool.size,
+        )
+    pool.wait_idle(tick)
+
+
+def _run_cycle_in(
+    pool: ReviewPool,
+    clients: Mapping[str, object],
+    project_configs: Sequence[object],
+    operator_username: str,
+    operator_config: OperatorConfig | None,
+    disabled_backends: frozenset[int],
+) -> None:
+    """The cycle itself; ``_run_cycle`` owns *pool*. Run one polling cycle across
+    all configured projects.
 
     ``clients`` maps forge-name → ``ForgeClient``. Projects are dispatched
     to their respective forge client based on ``ProjectConfig.forge``.
@@ -2229,7 +2344,6 @@ def _run_cycle(
     from franktheunicorn.backends.poller import poll_project
     from franktheunicorn.config.models import ProjectConfig
     from franktheunicorn.data_access.github.diff_fetcher import DiffFetcher
-    from franktheunicorn.review.copypasta import check_copypasta
     from franktheunicorn.security.queue import PRIORITY_INTERACTIVE
     from franktheunicorn.worker.test_runner import TestRunner
 
@@ -2276,6 +2390,41 @@ def _run_cycle(
     refreshed_prs = 0
     # Per-project local clone, kept for the backfill pass after the poll loop.
     repo_paths: dict[str, Path | None] = {}
+
+    from franktheunicorn.worker.review_pool import ReviewItem
+
+    decisions_lock = threading.Lock()
+
+    def review(item: ReviewItem) -> None:
+        _review_one(
+            item,
+            operator_config,
+            disabled_backends=disabled_backends,
+            diff_http=diff_http,
+            diff_fetcher=diff_fetcher,
+            test_runner=test_runner,
+            decisions=decisions,
+            decisions_lock=decisions_lock,
+        )
+
+    def mid_cycle_tick() -> None:
+        # The main thread's turn while the runners review: pick up PRs opened
+        # since the poll (and drop the closed ones), and answer button presses.
+        _sync_open_prs_mid_cycle(
+            clients,
+            project_configs,
+            operator_username,
+            operator_config,
+            repo_paths=repo_paths,
+            reviewed_pks=reviewed_pks,
+            pool=pool,
+        )
+        _drain_worker_commands(operator_config, min_priority=PRIORITY_INTERACTIVE)
+
+    pool.work = review
+    pool.start()
+    if not pool.inline:
+        logger.info("Reviewing with %d concurrent runner(s) this cycle", pool.size)
 
     for pc in project_configs:
         if not isinstance(pc, ProjectConfig) or not pc.enabled:
@@ -2354,82 +2503,21 @@ def _run_cycle(
                 all_prs.append(pr)
                 pr_to_config[pr.pk] = pc
                 reviewed_pks.add(pr.pk)
-                logger.debug(
-                    "Processing PR #%d (%s/%s) score=%.2f",
-                    pr.number,
-                    pc.owner,
-                    pc.repo,
-                    getattr(pr, "interest_score", 0.0),
-                )
-
-                _sync_open_prs_mid_cycle(
-                    clients,
-                    project_configs,
-                    operator_username,
-                    operator_config,
-                    disabled_backends=disabled_backends,
-                    diff_http=diff_http,
-                    decisions=decisions,
-                    repo_paths=repo_paths,
-                    reviewed_pks=reviewed_pks,
-                )
-                process_pr(
-                    pr,
-                    pc,
-                    operator_config,
-                    disabled_backends=disabled_backends,
-                    diff_http=diff_http,
-                    repo_path=repo_path,
-                    forge_client=client,  # type: ignore[arg-type]
-                    decisions=decisions,
-                )
-
-                # Differential test verification (§9).
-                try:
-                    test_run = test_runner.run_differential_test(pr, pc, repo_path)
-                    if test_run:
-                        logger.info(
-                            "  PR #%d: test verdict=%s",
-                            pr.number,
-                            test_run.differential_verdict or "pending",
-                        )
-                except Exception:
-                    logger.exception("Error in test verification for PR #%d", pr.number)
-
-                # Copy-pasta detection (runs even if drafts already exist)
-                if pc.copypasta_enabled:
-                    repo_path = Path(settings.FRANK_REPOS_DIR) / pc.owner / pc.repo
-                    if repo_path.is_dir():
-                        try:
-                            diff = diff_fetcher.fetch(pc.owner, pc.repo, pr.number)
-                            cp_drafts = check_copypasta(pr, diff, pc, repo_path)
-                            if cp_drafts:
-                                logger.info(
-                                    "  PR #%d: %d copy-pasta findings",
-                                    pr.number,
-                                    len(cp_drafts),
-                                )
-                        except Exception:
-                            logger.exception("Error in copy-pasta check for PR #%d", pr.number)
-                    else:
-                        logger.debug(
-                            "Repo clone not found at %s, skipping copy-pasta check",
-                            repo_path,
-                        )
-                logger.debug("Finished processing PR #%d (%s/%s)", pr.number, pc.owner, pc.repo)
-
-                # Operator-triggered work (security triage, forced test runs)
-                # shouldn't sit behind the rest of the cycle. Interactive
-                # priority only: a bulk row takes as long as the PR loop it
-                # would interrupt — it drains in the poll sleep window.
-                _drain_worker_commands(operator_config, min_priority=PRIORITY_INTERACTIVE)
+                pool.submit(ReviewItem(pr, pc, client, repo_path))
+            if pool.inline:
+                # Inline the reviews already ran; give the mid-cycle sync and the
+                # button presses the turn between projects they used to get per PR.
+                mid_cycle_tick()
         except Exception:
             logger.exception("Error polling %s/%s", pc.owner, pc.repo)
 
-        # Also drain per project, not only per PR: in the steady state the
-        # unchanged-PR skip leaves `prs` empty, so the per-PR drain above never
-        # runs while the cycle still does plenty of work below.
+        # Also drain per project: with the runners reviewing, the main thread's
+        # turn comes between projects (and in the wait below).
         _drain_worker_commands(operator_config, min_priority=PRIORITY_INTERACTIVE)
+
+    # Every project is polled; now wait for the runners, taking the mid-cycle
+    # sync's and the button presses' turns while they work.
+    _wait_for_reviews(pool, mid_cycle_tick, "poll")
 
     # Fetch dependency changelogs reusing the same HTTP client.
     _fetch_dependency_changelogs_for_cycle(
@@ -2475,8 +2563,9 @@ def _run_cycle(
         clients=clients,
         decisions=decisions,
         repo_paths=repo_paths,
-        operator_username=operator_username,
+        submit=pool.submit,
     )
+    _wait_for_reviews(pool, mid_cycle_tick, "backfill")
 
     # Alert mode: working-overlap + security-report alerts, batched email.
     # Runs last so PRs and reports ingested anywhere in this cycle are seen.
@@ -2702,9 +2791,12 @@ def _backfill_unreviewed_prs(
     clients: Mapping[str, object] | None = None,
     decisions: Counter[str] | None = None,
     repo_paths: Mapping[str, Path | None] | None = None,
-    operator_username: str = "",
+    submit: Callable[[ReviewItem], None] | None = None,
 ) -> None:
     """Draft reviews for open PRs in the DB that have no review drafts yet.
+
+    With *submit* (the cycle's review pool) the reviews are queued rather than
+    run here, and the caller waits for them; without it they run inline.
 
     Handles PRs ingested via lookup_pr or other paths that bypass the normal
     poll cycle (which only sees PRs currently open on the forge).
@@ -2770,24 +2862,27 @@ def _backfill_unreviewed_prs(
         # each would be ~900 a cycle on Spark — breaking the same "per-PR detail
         # stays at DEBUG" rule this work added to CLAUDE.md.
         considered += 1
-        _sync_open_prs_mid_cycle(
-            clients,
-            project_configs,
-            operator_username,
-            operator_config,
-            disabled_backends=disabled_backends,
-            diff_http=diff_http,
-            decisions=decisions,
-            repo_paths=repo_paths or {},
-            reviewed_pks=already_polled_pks,
-        )
         if review_skip_reason(pr, pc, operator_config, force=False) is not None:
             continue
 
         reviewed += 1
         logger.info("Backfilling review for PR #%d (%s)", pr.number, full_name)
+        forge_client = clients.get(pc.forge) if clients else None
+        if submit is not None:
+            from franktheunicorn.worker.review_pool import ReviewItem
+
+            already_polled_pks.add(pr.pk)
+            submit(
+                ReviewItem(
+                    pr,
+                    pc,
+                    forge_client,
+                    (repo_paths or {}).get(full_name),
+                    backfill=True,
+                )
+            )
+            continue
         try:
-            forge_client = clients.get(pc.forge) if clients else None
             drafts = process_pr(
                 pr,
                 pc,

@@ -127,7 +127,9 @@ class TestRunEnabledChecksGating:
 
         with patch("franktheunicorn.review.checks._run_check_dispatch", side_effect=fake):
             run_enabled_checks(db_pr, "diff", project_config=config, operator_config=op_config)
-        return ran
+        # The calls run concurrently, so dispatch order is not config order.
+        order = config.llm_checks
+        return sorted(ran, key=order.index)
 
     def test_docs_only_pr_runs_only_metadata_checks(self, db_pr: PullRequest) -> None:
         ran = self._run(db_pr, ["README.md", "docs/contributing.md"])
