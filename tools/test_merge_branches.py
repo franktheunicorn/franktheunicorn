@@ -202,22 +202,22 @@ class CiStatus(unittest.TestCase):
         # GitHub cancels a superseded job as a matter of course -- a re-run on
         # the same sha, concurrency: cancel-in-progress -- while the jobs still
         # queued go on to pass
-        self.assertEqual(ci_status([("completed", "cancelled"), ("queued", "")]),
-                         "running")
+        self.assertEqual(ci_status([("completed", "cancelled"), ("queued", "")]), "running")
 
     def test_a_gate_waiting_on_a_person_is_not_a_failure_either(self):
-        self.assertEqual(ci_status([("completed", "action_required"), ("queued", "")]),
-                         "running")
+        self.assertEqual(ci_status([("completed", "action_required"), ("queued", "")]), "running")
 
     def test_a_real_failure_still_does(self):
         for bad in ("failure", "timed_out", "startup_failure"):
             with self.subTest(bad=bad):
-                self.assertEqual(ci_status([("completed", bad), ("queued", "")]),
-                                 "running-with-failures")
+                self.assertEqual(
+                    ci_status([("completed", bad), ("queued", "")]), "running-with-failures"
+                )
 
     def test_a_cancelled_job_is_still_not_a_pass_once_everything_is_done(self):
-        self.assertEqual(ci_status([("completed", "cancelled"),
-                                    ("completed", "success")]), "failing")
+        self.assertEqual(
+            ci_status([("completed", "cancelled"), ("completed", "success")]), "failing"
+        )
 
     def test_running_wins_over_a_failure_but_says_so(self):
         # A branch still building is "come back later", not "rejected" -- but an
@@ -373,17 +373,27 @@ class Families(unittest.TestCase):
 class UnlistedSiblings(unittest.TestCase):
     """The pair that arrives when a change will not apply to every release."""
 
-    def make(self, listed, on_fork, targets=("master", "branch-4.1", "branch-3.5"),
-             local=(), base="master", held=()):
+    def make(
+        self,
+        listed,
+        on_fork,
+        targets=("master", "branch-4.1", "branch-3.5"),
+        local=(),
+        base="master",
+        held=(),
+    ):
         import merge_branches
         from types import SimpleNamespace
 
         bp = object.__new__(merge_branches.Backporter)
-        bp.cfg = SimpleNamespace(strip_suffixes=["-aok", "-squashed"],
-                                 fork_remote="origin", targets=list(targets),
-                                 branch_file="branches_to_merge.txt",
-                                 hold_list="HELD_BRANCHES.txt",
-                                 adopt_siblings=True)
+        bp.cfg = SimpleNamespace(
+            strip_suffixes=["-aok", "-squashed"],
+            fork_remote="origin",
+            targets=list(targets),
+            branch_file="branches_to_merge.txt",
+            hold_list="HELD_BRANCHES.txt",
+            adopt_siblings=True,
+        )
         bp.listed = list(listed)
         bp.held = {name: "listed" for name in held}
         # the base the listed branch was cut from decides where it goes, and so
@@ -394,8 +404,10 @@ class UnlistedSiblings(unittest.TestCase):
         refs |= {f"refs/heads/{name}" for name in local}
         bp.git = SimpleNamespace(
             has_ref=lambda ref: ref in refs,
-            rev_parse=lambda ref: "forkhead" if ref.rstrip("^{commit}") in refs
-            or ref.split("^")[0] in refs else None)
+            rev_parse=lambda ref: (
+                "forkhead" if ref.rstrip("^{commit}") in refs or ref.split("^")[0] in refs else None
+            ),
+        )
         return bp
 
     def test_a_pinned_branch_has_no_siblings_to_look_for(self):
@@ -413,64 +425,70 @@ class UnlistedSiblings(unittest.TestCase):
 
     def test_a_cut_that_really_is_missing_is_found(self):
         bp = self.make(["myfix-aok"], ["myfix", "myfix-branch-3.5"])
-        self.assertEqual(bp.unlisted_sibling(Source("myfix-aok"), "branch-3.5"),
-                         "myfix-branch-3.5")
+        self.assertEqual(bp.unlisted_sibling(Source("myfix-aok"), "branch-3.5"), "myfix-branch-3.5")
 
     def test_a_missing_cut_is_taken_in(self):
         bp = self.make(["myfix-aok"], ["myfix", "myfix-branch-3.5"])
-        self.assertEqual([src.name for src in bp.adopt_siblings([Source("myfix-aok")])],
-                         ["myfix-branch-3.5"])
+        self.assertEqual(
+            [src.name for src in bp.adopt_siblings([Source("myfix-aok")])], ["myfix-branch-3.5"]
+        )
 
     def test_it_is_taken_in_under_the_local_rewrite_name(self):
         # squash-magic leaves the rewrite as -aok and never touches the original,
         # so adopting the fork spelling would make resolve_pick_ref() pick from
         # that untouched, un-squashed original
         bp = self.make(["myfix-aok"], ["myfix", "myfix-4.1"], local=["myfix-4.1-aok"])
-        self.assertEqual([src.name for src in bp.adopt_siblings([Source("myfix-aok")])],
-                         ["myfix-4.1-aok"])
+        self.assertEqual(
+            [src.name for src in bp.adopt_siblings([Source("myfix-aok")])], ["myfix-4.1-aok"]
+        )
 
     def test_the_ref_it_matched_is_carried_with_it(self):
         # the rewrite can be spelled quite differently from the fork's copy, and
         # resolve_on_fork() would go looking for a ref that is not there
-        bp = self.make(["myfix-aok"], ["myfix", "myfix-branch-4.1"],
-                       local=["myfix-4.1-aok"])
+        bp = self.make(["myfix-aok"], ["myfix", "myfix-branch-4.1"], local=["myfix-4.1-aok"])
         taken = bp.adopt_siblings([Source("myfix-aok")])
-        self.assertEqual([(src.name, src.fork_name) for src in taken],
-                         [("myfix-4.1-aok", "myfix-branch-4.1")])
+        self.assertEqual(
+            [(src.name, src.fork_name) for src in taken], [("myfix-4.1-aok", "myfix-branch-4.1")]
+        )
 
     def test_a_superseded_rewrite_is_not_taken_for_the_redo(self):
         # the fork has r2 and we pick it, but cut_identity drops the -rN, so the
         # rewrite of the superseded r1 answers to the same identity.  Taking it
         # would merge r1's commits under r2's green tick.
-        bp = self.make(["myfix-aok"], ["myfix", "myfix-4.1", "myfix-4.1-r2"],
-                       local=["myfix-4.1-aok"])
+        bp = self.make(
+            ["myfix-aok"], ["myfix", "myfix-4.1", "myfix-4.1-r2"], local=["myfix-4.1-aok"]
+        )
         taken = bp.adopt_siblings([Source("myfix-aok")])
-        self.assertEqual([(src.name, src.fork_name) for src in taken],
-                         [("myfix-4.1-r2", "myfix-4.1-r2")])
+        self.assertEqual(
+            [(src.name, src.fork_name) for src in taken], [("myfix-4.1-r2", "myfix-4.1-r2")]
+        )
 
     def test_the_rewrite_of_the_right_revision_is_taken(self):
-        bp = self.make(["myfix-aok"], ["myfix", "myfix-4.1-r2"],
-                       local=["myfix-4.1-aok", "myfix-4.1-r2-aok"])
+        bp = self.make(
+            ["myfix-aok"], ["myfix", "myfix-4.1-r2"], local=["myfix-4.1-aok", "myfix-4.1-r2-aok"]
+        )
         taken = bp.adopt_siblings([Source("myfix-aok")])
         self.assertEqual([src.name for src in taken], ["myfix-4.1-r2-aok"])
 
     def test_the_rewrite_is_found_under_a_different_spelling(self):
         # the fork carries myfix-branch-4.1, squash-magic left myfix-4.1-aok:
         # the same cut, and sticking "-aok" on the fork name finds neither
-        bp = self.make(["myfix-aok"], ["myfix", "myfix-branch-4.1"],
-                       local=["myfix-4.1-aok"])
-        self.assertEqual([src.name for src in bp.adopt_siblings([Source("myfix-aok")])],
-                         ["myfix-4.1-aok"])
+        bp = self.make(["myfix-aok"], ["myfix", "myfix-branch-4.1"], local=["myfix-4.1-aok"])
+        self.assertEqual(
+            [src.name for src in bp.adopt_siblings([Source("myfix-aok")])], ["myfix-4.1-aok"]
+        )
 
     def test_the_untouched_original_is_not_mistaken_for_a_rewrite(self):
         bp = self.make(["myfix-aok"], ["myfix", "myfix-4.1"], local=["myfix-4.1"])
-        self.assertEqual([src.name for src in bp.adopt_siblings([Source("myfix-aok")])],
-                         ["myfix-4.1"])
+        self.assertEqual(
+            [src.name for src in bp.adopt_siblings([Source("myfix-aok")])], ["myfix-4.1"]
+        )
 
     def test_without_a_local_rewrite_the_fork_name_is_used(self):
         bp = self.make(["myfix-aok"], ["myfix", "myfix-4.1"])
-        self.assertEqual([src.name for src in bp.adopt_siblings([Source("myfix-aok")])],
-                         ["myfix-4.1"])
+        self.assertEqual(
+            [src.name for src in bp.adopt_siblings([Source("myfix-aok")])], ["myfix-4.1"]
+        )
 
     def test_it_is_taken_in_once_however_many_branches_point_at_it(self):
         # two cuts of the same work in the list, one sibling between them
@@ -491,8 +509,9 @@ class UnlistedSiblings(unittest.TestCase):
 
     def test_a_cut_for_a_release_the_parent_does_go_to_is_taken(self):
         bp = self.make(["myfix-aok"], ["myfix", "myfix-4.1"], base="master")
-        self.assertEqual([src.name for src in bp.adopt_siblings([Source("myfix-aok")])],
-                         ["myfix-4.1"])
+        self.assertEqual(
+            [src.name for src in bp.adopt_siblings([Source("myfix-aok")])], ["myfix-4.1"]
+        )
 
     def test_nothing_is_adopted_when_the_base_cannot_be_worked_out(self):
         bp = self.make(["myfix-aok"], ["myfix", "myfix-4.1"], base=None)
@@ -513,14 +532,12 @@ class UnlistedSiblings(unittest.TestCase):
         # -r2 is understood everywhere else; a generator that never emitted it
         # made the redone cut invisible to the one check meant to find it
         bp = self.make(["myfix-aok"], ["myfix", "myfix-4.1-r2"])
-        self.assertEqual(bp.unlisted_sibling(Source("myfix-aok"), "branch-4.1"),
-                         "myfix-4.1-r2")
+        self.assertEqual(bp.unlisted_sibling(Source("myfix-aok"), "branch-4.1"), "myfix-4.1-r2")
 
     def test_the_newest_redo_wins_when_both_are_lying_about(self):
         # -r2 exists because -r1 was superseded, and both usually survive
         bp = self.make(["myfix-aok"], ["myfix", "myfix-4.1", "myfix-4.1-r2"])
-        self.assertEqual(bp.unlisted_sibling(Source("myfix-aok"), "branch-4.1"),
-                         "myfix-4.1-r2")
+        self.assertEqual(bp.unlisted_sibling(Source("myfix-aok"), "branch-4.1"), "myfix-4.1-r2")
 
     def test_a_redone_cut_still_counts_as_listed(self):
         # -r2 marks a cut that was redone, so the first one is exactly the stale
@@ -547,18 +564,18 @@ class UnlistedSiblings(unittest.TestCase):
     def test_the_fork_copy_wins_over_a_stale_local_ref(self):
         # a local myfix-4.1 is generated first, but only a fork ref can be
         # adopted -- returning the local one hides the cut that is really there
-        bp = self.make(["myfix-aok"], ["myfix", "myfix-branch-4.1"],
-                       local=["myfix-4.1"])
-        self.assertEqual(bp.unlisted_sibling(Source("myfix-aok"), "branch-4.1"),
-                         "myfix-branch-4.1")
-        self.assertEqual([src.name for src in bp.adopt_siblings([Source("myfix-aok")])],
-                         ["myfix-branch-4.1"])
+        bp = self.make(["myfix-aok"], ["myfix", "myfix-branch-4.1"], local=["myfix-4.1"])
+        self.assertEqual(bp.unlisted_sibling(Source("myfix-aok"), "branch-4.1"), "myfix-branch-4.1")
+        self.assertEqual(
+            [src.name for src in bp.adopt_siblings([Source("myfix-aok")])], ["myfix-branch-4.1"]
+        )
 
     def test_a_listed_cut_wins_over_a_stale_ref_spelled_differently(self):
         # myfix-4.1 is generated before myfix-branch-4.1, so a stale ref under
         # the first spelling must not beat the cut you actually listed
-        bp = self.make(["myfix-aok", "myfix-branch-4.1-aok"],
-                       ["myfix", "myfix-branch-4.1", "myfix-4.1"])
+        bp = self.make(
+            ["myfix-aok", "myfix-branch-4.1-aok"], ["myfix", "myfix-branch-4.1", "myfix-4.1"]
+        )
         self.assertIsNone(bp.unlisted_sibling(Source("myfix-aok"), "branch-4.1"))
         self.assertEqual(bp.adopt_siblings([Source("myfix-aok")]), [])
 
@@ -567,13 +584,15 @@ class UnlistedSiblings(unittest.TestCase):
         # the sibling for having no CI, leaving nobody on that release
         bp = self.make(["myfix-aok"], ["myfix"], local=["myfix-4.1"])
         self.assertEqual(bp.adopt_siblings([Source("myfix-aok")]), [])
-        self.assertEqual(bp.unlisted_sibling(Source("myfix-aok"), "branch-4.1"),
-                         "myfix-4.1")          # still worth warning about
+        self.assertEqual(
+            bp.unlisted_sibling(Source("myfix-aok"), "branch-4.1"), "myfix-4.1"
+        )  # still worth warning about
 
 
 class AdoptionIsOptIn(unittest.TestCase):
     def test_it_is_off_unless_asked_for(self):
         import merge_branches
+
         self.assertFalse(merge_branches.parse_args([]).adopt_siblings)
         self.assertTrue(merge_branches.parse_args(["--adopt-siblings"]).adopt_siblings)
 
@@ -582,9 +601,15 @@ class IsSiblingCut(unittest.TestCase):
     """Which existing branch names are a cut of this work for this release."""
 
     def test_every_spelling_of_the_same_cut_counts(self):
-        for name in ("myfix-3.5", "myfix-3.5-aok", "myfix-3.5-squashed",
-                     "myfix-branch-3.5", "myfix-branch-3.5-aok", "myfix-3.5-r2",
-                     "myfix-branch-3.5-r7-squashed"):
+        for name in (
+            "myfix-3.5",
+            "myfix-3.5-aok",
+            "myfix-3.5-squashed",
+            "myfix-branch-3.5",
+            "myfix-branch-3.5-aok",
+            "myfix-3.5-r2",
+            "myfix-branch-3.5-r7-squashed",
+        ):
             with self.subTest(name=name):
                 self.assertTrue(is_sibling_cut(name, "myfix", "branch-3.5"))
 
@@ -682,8 +707,7 @@ class HoldList(unittest.TestCase):
         # branch was located, approved and pushed
         for body in ("myfix\t\n", "myfix\n", "myfix\t   \n"):
             with self.subTest(body=body):
-                self.assertEqual(load_hold_list(self.hold_file(body)),
-                                 {"myfix": "listed"})
+                self.assertEqual(load_hold_list(self.hold_file(body)), {"myfix": "listed"})
 
     def test_the_first_reason_wins_for_a_repeated_branch(self):
         path = self.hold_file("foo-aok\tabc\tfirst reason\nfoo-aok\tdef\tlater reason\n")
@@ -730,10 +754,16 @@ class FailingCiGetsOneRetry(unittest.TestCase):
         from types import SimpleNamespace
 
         bp = object.__new__(merge_branches.Backporter)
-        bp.cfg = SimpleNamespace(dry_run=False, fork_remote="fork",
-                                 fork_repo="holdenk/spark", ci_poll_minutes=0,
-                                 ci_wait_hours=0, ci_standin_tasks=["test"],
-                                 ci_standin_timeout=21600, refresh_before_retry=False)
+        bp.cfg = SimpleNamespace(
+            dry_run=False,
+            fork_remote="fork",
+            fork_repo="holdenk/spark",
+            ci_poll_minutes=0,
+            ci_wait_hours=0,
+            ci_standin_tasks=["test"],
+            ci_standin_timeout=21600,
+            refresh_before_retry=False,
+        )
         bp.git = SimpleNamespace(run=lambda *a, **k: None)
         self.written = []
         self.recorded = []
@@ -750,7 +780,8 @@ class FailingCiGetsOneRetry(unittest.TestCase):
         bp.resolve_on_fork = lambda name: heads.get(name, (name, name + "-head"))
         bp.git.rev_parse = lambda ref: heads.get(
             ref.rsplit("/", 1)[-1].split("^")[0],
-            (None, ref.rsplit("/", 1)[-1].split("^")[0] + "-head"))[1]
+            (None, ref.rsplit("/", 1)[-1].split("^")[0] + "-head"),
+        )[1]
         return bp
 
     def source(self, name):
@@ -1017,14 +1048,19 @@ class BuildInsteadOfWaiting(unittest.TestCase):
         from types import SimpleNamespace
 
         bp = object.__new__(merge_branches.Backporter)
-        bp.cfg = SimpleNamespace(dry_run=False, fork_remote="fork", fork_repo="holdenk/spark",
-                                 ci_poll_minutes=0, ci_wait_hours=0,
-                                 local_stand_in=stand_in, do_compile=compile_,
-                                 ci_standin_tasks=["test"],
-                                 ci_standin_timeout=21600)
+        bp.cfg = SimpleNamespace(
+            dry_run=False,
+            fork_remote="fork",
+            fork_repo="holdenk/spark",
+            ci_poll_minutes=0,
+            ci_wait_hours=0,
+            local_stand_in=stand_in,
+            do_compile=compile_,
+            ci_standin_tasks=["test"],
+            ci_standin_timeout=21600,
+        )
         self.events = []
-        bp.git = SimpleNamespace(run=lambda *a, **k: None, ok=lambda *a: True,
-                                 why=lambda: "")
+        bp.git = SimpleNamespace(run=lambda *a, **k: None, ok=lambda *a: True, why=lambda: "")
         bp.reports = SimpleNamespace(write=lambda name, *cols: None)
         bp._checkout_failed = set()
         bp.record = lambda name, target, why: None
@@ -1054,8 +1090,7 @@ class BuildInsteadOfWaiting(unittest.TestCase):
     def test_it_works_its_way_down_the_queue_one_at_a_time(self):
         bp = self.make({"a-head": "running", "b-head": "running", "c-head": "running"})
         bp.revisit(self.work("a", "b", "c"))
-        self.assertEqual(self.events, ["build:a", "build:b",
-                                       "build:c"])
+        self.assertEqual(self.events, ["build:a", "build:b", "build:c"])
 
     def test_a_branch_that_went_green_is_merged_before_anything_is_built(self):
         bp = self.make({"a-head": "passing", "b-head": "running"})
@@ -1251,11 +1286,17 @@ class WaitingForCi(unittest.TestCase):
         from types import SimpleNamespace
 
         bp = object.__new__(merge_branches.Backporter)
-        bp.cfg = SimpleNamespace(dry_run=False, fork_remote="fork",
-                                 fork_repo="holdenk/spark", ci_poll_minutes=0,
-                                 ci_wait_hours=0, local_stand_in=False,
-                                 do_compile=False, ci_standin_tasks=["test"],
-                                 ci_standin_timeout=21600)
+        bp.cfg = SimpleNamespace(
+            dry_run=False,
+            fork_remote="fork",
+            fork_repo="holdenk/spark",
+            ci_poll_minutes=0,
+            ci_wait_hours=0,
+            local_stand_in=False,
+            do_compile=False,
+            ci_standin_tasks=["test"],
+            ci_standin_timeout=21600,
+        )
         bp.git = SimpleNamespace(run=lambda *a, **k: None)
         self.written = []
         self.merged = []
@@ -1285,16 +1326,20 @@ class WaitingForCi(unittest.TestCase):
 
     def test_a_blip_that_never_clears_is_given_up_on(self):
         import merge_branches
+
         bp = self.make({"a-head": ["none"] * merge_branches.CI_MISREADS_ALLOWED})
         bp.revisit([(self.source("a"), ["master"])])
         self.assertEqual((self.merged, self.written), ([], ["TO_MERGE_LATER.txt"]))
 
     def test_a_usable_answer_in_between_resets_the_count(self):
         import merge_branches
-        answers = (["none"] * (merge_branches.CI_MISREADS_ALLOWED - 1)
-                   + ["running"]
-                   + ["none"] * (merge_branches.CI_MISREADS_ALLOWED - 1)
-                   + ["passing"])
+
+        answers = (
+            ["none"] * (merge_branches.CI_MISREADS_ALLOWED - 1)
+            + ["running"]
+            + ["none"] * (merge_branches.CI_MISREADS_ALLOWED - 1)
+            + ["passing"]
+        )
         bp = self.make({"a-head": answers})
         bp.revisit([(self.source("a"), ["master"])])
         self.assertEqual((self.merged, self.written), (["a"], []))
@@ -1304,12 +1349,14 @@ class WaitingForCi(unittest.TestCase):
         # not there at all -- a branch we are only re-asking about has no tick
         # to stand in for
         import merge_branches
+
         bp = self.make({"a-head": ["none"] * merge_branches.CI_MISREADS_ALLOWED})
         bp.cfg.local_stand_in = True
         bp.cfg.do_compile = True
         nudged = []
-        bp.build_instead_of_waiting = lambda queue, deadline=None: nudged.append(
-            [src.name for src, _ in queue]) or None
+        bp.build_instead_of_waiting = lambda queue, deadline=None: (
+            nudged.append([src.name for src, _ in queue]) or None
+        )
         bp.revisit([(self.source("a"), ["master"])])
         self.assertTrue(all(offered == [] for offered in nudged), nudged)
         self.assertEqual((self.merged, self.written), ([], ["TO_MERGE_LATER.txt"]))
@@ -1324,23 +1371,26 @@ class WaitingForCi(unittest.TestCase):
         bp.cfg.local_stand_in = True
         bp.cfg.do_compile = True
         nudged = []
-        bp.build_instead_of_waiting = lambda queue, deadline=None: nudged.append(
-            [src.name for src, _ in queue]) or None
+        bp.build_instead_of_waiting = lambda queue, deadline=None: (
+            nudged.append([src.name for src, _ in queue]) or None
+        )
         late = bp.revisit([(self.source("a"), ["master"])])
-        self.assertEqual(nudged, [])              # never offered to a local build
+        self.assertEqual(nudged, [])  # never offered to a local build
         self.assertEqual(self.merged, [])
-        self.assertEqual([src.name for src, _ in late], ["a"])   # kept for the retry
+        self.assertEqual([src.name for src, _ in late], ["a"])  # kept for the retry
 
     def test_a_branch_that_really_is_building_can_be_stood_in_for(self):
         # ...but only once the queue has been quiet long enough to be worth hours
         import merge_branches
+
         quiet = merge_branches.IDLE_ROUNDS_BEFORE_STANDING_IN
         bp = self.make({"a-head": ["running"] * quiet + ["passing"]})
         bp.cfg.local_stand_in = True
         bp.cfg.do_compile = True
         nudged = []
-        bp.build_instead_of_waiting = lambda queue, deadline=None: nudged.append(
-            [src.name for src, _ in queue]) or None
+        bp.build_instead_of_waiting = lambda queue, deadline=None: (
+            nudged.append([src.name for src, _ in queue]) or None
+        )
         bp.revisit([(self.source("a"), ["master"])])
         self.assertEqual(nudged, [["a"]])
         self.assertEqual(self.merged, ["a"])
@@ -1350,16 +1400,18 @@ class WaitingForCi(unittest.TestCase):
         # and may all go green a minute later; committing to a multi-hour test
         # run then means noticing none of them for the length of it
         import merge_branches
+
         quiet = merge_branches.IDLE_ROUNDS_BEFORE_STANDING_IN
         bp = self.make({"a-head": ["running"] * (quiet - 1) + ["passing"]})
         bp.cfg.local_stand_in = True
         bp.cfg.do_compile = True
         nudged = []
-        bp.build_instead_of_waiting = lambda queue, deadline=None: nudged.append(
-            [src.name for src, _ in queue]) or None
+        bp.build_instead_of_waiting = lambda queue, deadline=None: (
+            nudged.append([src.name for src, _ in queue]) or None
+        )
         bp.revisit([(self.source("a"), ["master"])])
-        self.assertEqual(nudged, [])              # never asked
-        self.assertEqual(self.merged, ["a"])      # and it merged on its own tick
+        self.assertEqual(nudged, [])  # never asked
+        self.assertEqual(self.merged, ["a"])  # and it merged on its own tick
 
     def test_the_failing_endpoint_is_named_once(self):
         # "could not read CI" is the same line whichever half broke, and the fix
@@ -1376,7 +1428,7 @@ class WaitingForCi(unittest.TestCase):
         with mock.patch.object(merge_branches, "warn", said.append):
             for _ in range(5):
                 bp.ci_status_of("deadbeef")
-        self.assertEqual(len(said), 1)                 # said once, not per branch
+        self.assertEqual(len(said), 1)  # said once, not per branch
         self.assertIn("commit statuses", said[0])
         self.assertIn("Commit statuses: read", said[0])
 
@@ -1428,8 +1480,10 @@ class WaitingForCi(unittest.TestCase):
         bp = object.__new__(merge_branches.Backporter)
         bp.cfg = SimpleNamespace(fork_repo="holdenk/spark")
         bp._gh_complained = set()
-        runs = ['{"status": "completed", "conclusion": "failure"}',
-                '{"status": "queued", "conclusion": null}']
+        runs = [
+            '{"status": "completed", "conclusion": "failure"}',
+            '{"status": "queued", "conclusion": null}',
+        ]
         bp._gh_lines = lambda path, jq: runs if "check-runs" in path else None
         self.assertEqual(bp.ci_status_of("deadbeef"), "running-with-failures")
 
@@ -1573,7 +1627,8 @@ class MasterAlreadyCarriesIt(unittest.TestCase):
         bp.on_master_already = lambda src: ["upstream-master-sha"]
         picked = {}
         bp.backport = lambda src, target, from_commits=None: (
-            picked.__setitem__(target, from_commits) or ["landed"])
+            picked.__setitem__(target, from_commits) or ["landed"]
+        )
         src = Source("myfix")
         src.base, src.commits, src.base_branch = "base", ["c1"], "master"
         bp.execute(src, ["master", "branch-4.1"])
@@ -1604,12 +1659,13 @@ class MasterAlreadyCarriesIt(unittest.TestCase):
         bp.ensure_target = lambda target: True
         bp.on_master_already = lambda src: order.append("asked") or ["sha"]
         bp.backport = lambda src, target, from_commits=None: (
-            order.append(f"backport:{target}") or ["landed"])
+            order.append(f"backport:{target}") or ["landed"]
+        )
         src = Source("myfix-4.1")
         src.base, src.commits, src.base_branch = "base", ["c1"], "master"
         bp.execute(src, ["branch-4.1", "branch-3.5"])
         self.assertEqual(order[0], "asked")
-        self.assertEqual(order.count("asked"), 1)   # once, not once per target
+        self.assertEqual(order.count("asked"), 1)  # once, not once per target
 
     def test_a_rolled_back_master_leaves_the_trailer_off(self):
         # nothing on master and nothing to find: no sha to point at, so the
@@ -1626,8 +1682,7 @@ class ReviewGate(unittest.TestCase):
         from types import SimpleNamespace
 
         bp = object.__new__(merge_branches.Backporter)
-        bp.cfg = SimpleNamespace(sanity=True, dry_run=False, jobs=1,
-                                 operator_review=True, **flags)
+        bp.cfg = SimpleNamespace(sanity=True, dry_run=False, jobs=1, operator_review=True, **flags)
         bp.claude_alive = False
         self.written = []
         bp.reports = SimpleNamespace(write=lambda name, *cols: self.written.append(name))
@@ -1651,7 +1706,7 @@ class ReviewGate(unittest.TestCase):
     def test_a_dry_run_stands_in_a_verdict_instead_of_paying_for_one(self):
         bp = self.gate()
         bp.cfg.dry_run = True
-        bp.claude_alive = True          # even so, it is not asked
+        bp.claude_alive = True  # even so, it is not asked
         self.assertTrue(bp.sanity_check("topic", "master", "a..b"))
         self.assertEqual(self.written, [])
 
@@ -1714,14 +1769,20 @@ class WhatTheBuildIsAsked(unittest.TestCase):
         from unittest import mock
 
         bp = object.__new__(merge_branches.Backporter)
-        bp.cfg = SimpleNamespace(do_compile=True, dry_run=False,
-                                 sbt_tasks=["compile", "Test/compile"],
-                                 ci_standin_tasks=["test"],
-                                 sbt_timeout=7200, ci_standin_timeout=21600,
-                                 log_dir=Path(tempfile.mkdtemp()), sbt=None)
+        bp.cfg = SimpleNamespace(
+            do_compile=True,
+            dry_run=False,
+            sbt_tasks=["compile", "Test/compile"],
+            ci_standin_tasks=["test"],
+            sbt_timeout=7200,
+            ci_standin_timeout=21600,
+            log_dir=Path(tempfile.mkdtemp()),
+            sbt=None,
+        )
         bp.stamp = "stamp"
-        bp.git = SimpleNamespace(root=Path("."), short=lambda rev: "abc1234",
-                                 out=lambda *a: "", run=lambda *a, **k: None)
+        bp.git = SimpleNamespace(
+            root=Path("."), short=lambda rev: "abc1234", out=lambda *a: "", run=lambda *a, **k: None
+        )
         bp.sbt_launcher = lambda: Path("/bin/true")
         seen = {}
 
@@ -1743,8 +1804,11 @@ class WhatTheBuildIsAsked(unittest.TestCase):
         # the stand-in's log is the only record that the tests were ever run, and
         # the backport check on the same target would open it with "w"
         import merge_branches
-        self.assertNotEqual(merge_branches.ref_slug("topic--master"),
-                            merge_branches.ref_slug("topic--master--ci-standin"))
+
+        self.assertNotEqual(
+            merge_branches.ref_slug("topic--master"),
+            merge_branches.ref_slug("topic--master--ci-standin"),
+        )
 
     def test_a_ci_stand_in_runs_the_tests(self):
         # nothing here has been run anywhere, so a compile answers none of what
@@ -1768,14 +1832,20 @@ class NothingFailsUntilItFailsFromClean(unittest.TestCase):
         import merge_branches
 
         bp = object.__new__(merge_branches.Backporter)
-        bp.cfg = SimpleNamespace(do_compile=True, dry_run=False,
-                                 sbt_tasks=tasks or ["compile", "Test/compile"],
-                                 ci_standin_tasks=tasks or ["test"],
-                                 sbt_timeout=7200, ci_standin_timeout=21600,
-                                 log_dir=Path(tempfile.mkdtemp()), sbt=None)
+        bp.cfg = SimpleNamespace(
+            do_compile=True,
+            dry_run=False,
+            sbt_tasks=tasks or ["compile", "Test/compile"],
+            ci_standin_tasks=tasks or ["test"],
+            sbt_timeout=7200,
+            ci_standin_timeout=21600,
+            log_dir=Path(tempfile.mkdtemp()),
+            sbt=None,
+        )
         bp.stamp = "stamp"
-        bp.git = SimpleNamespace(root=Path("."), short=lambda rev: "abc1234",
-                                 out=lambda *a: "", run=lambda *a, **k: None)
+        bp.git = SimpleNamespace(
+            root=Path("."), short=lambda rev: "abc1234", out=lambda *a: "", run=lambda *a, **k: None
+        )
         bp.sbt_launcher = lambda: Path("/bin/true")
         runs = []
 
@@ -1796,8 +1866,10 @@ class NothingFailsUntilItFailsFromClean(unittest.TestCase):
     def test_a_failed_build_is_run_again_from_clean(self):
         failure, runs = self.compile_with(False, [1, 0])
         self.assertIsNone(failure)
-        self.assertEqual(runs, [["-batch", "compile", "Test/compile"],
-                                ["-batch", "clean", "compile", "Test/compile"]])
+        self.assertEqual(
+            runs,
+            [["-batch", "compile", "Test/compile"], ["-batch", "clean", "compile", "Test/compile"]],
+        )
 
     def test_a_failed_test_run_is_run_again_from_clean_too(self):
         # it used to be the compile only, on the grounds that a red test is
@@ -1833,6 +1905,7 @@ class NothingFailsUntilItFailsFromClean(unittest.TestCase):
         import io
 
         import merge_branches
+
         stderr = io.StringIO()
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(stderr):
             merge_branches.parse_args(["--no-clean-retry"])
@@ -1846,6 +1919,7 @@ class AStandInIsBothOfItsRuns(unittest.TestCase):
         from types import SimpleNamespace
 
         import merge_branches
+
         cfg = SimpleNamespace(ci_standin_tasks=["test"], ci_standin_timeout=100)
         self.assertEqual(merge_branches.stand_in_seconds(cfg), 200)
 
@@ -1853,14 +1927,17 @@ class AStandInIsBothOfItsRuns(unittest.TestCase):
         from types import SimpleNamespace
 
         import merge_branches
+
         cfg = SimpleNamespace(ci_standin_tasks=["clean", "test"], ci_standin_timeout=100)
         self.assertEqual(merge_branches.stand_in_seconds(cfg), 100)
 
     def test_one_run_is_six_hours_by_default(self):
         import merge_branches
+
         self.assertEqual(merge_branches.parse_args([]).ci_standin_timeout, 21600)
-        self.assertEqual(merge_branches.parse_args(["--ci-standin-timeout", "18000"])
-                         .ci_standin_timeout, 18000)
+        self.assertEqual(
+            merge_branches.parse_args(["--ci-standin-timeout", "18000"]).ci_standin_timeout, 18000
+        )
 
 
 class TheStandInGatesTheMerge(unittest.TestCase):
@@ -1871,18 +1948,22 @@ class TheStandInGatesTheMerge(unittest.TestCase):
         from types import SimpleNamespace
 
         bp = object.__new__(merge_branches.Backporter)
-        bp.cfg = SimpleNamespace(local_stand_in=True, do_compile=True,
-                                 fork_remote="fork", ci_standin_tasks=["test"],
-                                 ci_standin_timeout=60, ci_wait_hours=12.0,
-                                 log_dir=Path("."))
+        bp.cfg = SimpleNamespace(
+            local_stand_in=True,
+            do_compile=True,
+            fork_remote="fork",
+            ci_standin_tasks=["test"],
+            ci_standin_timeout=60,
+            ci_wait_hours=12.0,
+            log_dir=Path("."),
+        )
         self.events = []
-        bp.reports = SimpleNamespace(
-            write=lambda name, *cols: self.events.append(f"report:{name}"))
+        bp.reports = SimpleNamespace(write=lambda name, *cols: self.events.append(f"report:{name}"))
         bp._checkout_failed = set()
         bp.record = lambda name, target, why: None
         bp.git = SimpleNamespace(ok=lambda *a: True, why=lambda: "")
         bp.execute = lambda src, targets: self.events.append("merge")
-        bp.stand_in_for_ci = lambda src: (self.events.append("test") or failure)
+        bp.stand_in_for_ci = lambda src: self.events.append("test") or failure
         src = Source("a")
         src.fork_name = "a"
         return bp, [(src, ["master", "branch-4.1"])]
@@ -1898,12 +1979,13 @@ class TheStandInGatesTheMerge(unittest.TestCase):
         bp, work = self.make(None)
         bp.git.ok = lambda *a: False
         bp.git.why = lambda: "your local changes would be overwritten"
-        self.assertIsNone(bp.build_instead_of_waiting(work))   # no turn taken
-        self.assertEqual(self.events, [])                      # nothing reported
+        self.assertIsNone(bp.build_instead_of_waiting(work))  # no turn taken
+        self.assertEqual(self.events, [])  # nothing reported
 
     def test_a_failure_merges_nothing_at_all(self):
         # not "master went out and then 4.1 failed" -- nothing is pushed
         import merge_branches
+
         bp, work = self.make(merge_branches.CompileFailure(Path("log"), "ref", "boom"))
         self.assertEqual(bp.build_instead_of_waiting(work), "a")
         self.assertEqual(self.events, ["test", "report:COMPILE_FAILED.txt"])
@@ -1922,8 +2004,7 @@ class StandInForCi(unittest.TestCase):
         self.compiled = {}
 
         def compile_target(src, target, pre_pick, ci_stand_in=False):
-            self.compiled = dict(src=src, target=target, pre_pick=pre_pick,
-                                 ci_stand_in=ci_stand_in)
+            self.compiled = dict(src=src, target=target, pre_pick=pre_pick, ci_stand_in=ci_stand_in)
             return None
 
         bp.compile_target = compile_target
@@ -1951,10 +2032,15 @@ class TheStandInFitsTheWait(unittest.TestCase):
         from types import SimpleNamespace
 
         bp = object.__new__(merge_branches.Backporter)
-        bp.cfg = SimpleNamespace(local_stand_in=True, do_compile=True,
-                                 fork_remote="fork", ci_standin_tasks=["test"],
-                                 ci_standin_timeout=timeout, ci_wait_hours=12.0,
-                                 log_dir=Path("."))
+        bp.cfg = SimpleNamespace(
+            local_stand_in=True,
+            do_compile=True,
+            fork_remote="fork",
+            ci_standin_tasks=["test"],
+            ci_standin_timeout=timeout,
+            ci_wait_hours=12.0,
+            log_dir=Path("."),
+        )
         ran = []
         bp.git = SimpleNamespace(ok=lambda *a: True, why=lambda: "")
         bp._checkout_failed = set()
@@ -1967,6 +2053,7 @@ class TheStandInFitsTheWait(unittest.TestCase):
 
     def test_one_that_fits_runs(self):
         import time
+
         nudged, ran = self.stand_in(60, time.time() + 3600)
         self.assertEqual((nudged, ran), ("a", ["a"]))
 
@@ -1980,10 +2067,16 @@ class TheStandInFitsTheWait(unittest.TestCase):
         from unittest import mock
 
         bp = object.__new__(merge_branches.Backporter)
-        bp.cfg = SimpleNamespace(dry_run=False, fork_remote="fork",
-                                 ci_poll_minutes=0, ci_wait_hours=1.0,
-                                 local_stand_in=True, do_compile=True,
-                                 ci_standin_tasks=["test"], ci_standin_timeout=21600)
+        bp.cfg = SimpleNamespace(
+            dry_run=False,
+            fork_remote="fork",
+            ci_poll_minutes=0,
+            ci_wait_hours=1.0,
+            local_stand_in=True,
+            do_compile=True,
+            ci_standin_tasks=["test"],
+            ci_standin_timeout=21600,
+        )
         bp.git = SimpleNamespace(run=lambda *a, **k: None)
         bp.reports = SimpleNamespace(write=lambda *a: None)
         bp._checkout_failed = set()
@@ -1996,7 +2089,8 @@ class TheStandInFitsTheWait(unittest.TestCase):
         bp.ci_status_of = lambda sha: "running"
         offered = []
         bp.build_instead_of_waiting = lambda queue, deadline=None: (
-            offered.append(deadline) or queue[0][0].name)
+            offered.append(deadline) or queue[0][0].name
+        )
         now = time.time()
         with mock.patch.object(merge_branches.time, "sleep", lambda s: None):
             bp.revisit([(self.src("a"), ["master"])])
@@ -2012,10 +2106,15 @@ class TheStandInFitsTheWait(unittest.TestCase):
         from types import SimpleNamespace
 
         bp = object.__new__(merge_branches.Backporter)
-        bp.cfg = SimpleNamespace(local_stand_in=True, do_compile=True,
-                                 fork_remote="fork", ci_standin_tasks=["test"],
-                                 ci_standin_timeout=60, ci_wait_hours=12.0,
-                                 log_dir=Path("."))
+        bp.cfg = SimpleNamespace(
+            local_stand_in=True,
+            do_compile=True,
+            fork_remote="fork",
+            ci_standin_tasks=["test"],
+            ci_standin_timeout=60,
+            ci_wait_hours=12.0,
+            log_dir=Path("."),
+        )
         bp._checkout_failed = set()
         bp.record = lambda *a: None
         bp.reports = SimpleNamespace(write=lambda *a: None)
@@ -2023,8 +2122,9 @@ class TheStandInFitsTheWait(unittest.TestCase):
         bp.stand_in_for_ci = lambda src: None
         bp.execute = lambda src, targets: tested.append(src.name)
         # "a" can never be checked out; "b" can
-        bp.git = SimpleNamespace(ok=lambda *args: args[-1] != "a-head",
-                                 why=lambda: "untracked files in the way")
+        bp.git = SimpleNamespace(
+            ok=lambda *args: args[-1] != "a-head", why=lambda: "untracked files in the way"
+        )
 
         def source(name):
             src = Source(name)
@@ -2032,7 +2132,7 @@ class TheStandInFitsTheWait(unittest.TestCase):
             return src
 
         work = [(source("a"), ["master"]), (source("b"), ["master"])]
-        self.assertIsNone(bp.build_instead_of_waiting(work))   # "a" fails
+        self.assertIsNone(bp.build_instead_of_waiting(work))  # "a" fails
         self.assertEqual(bp.build_instead_of_waiting(work), "b")
         self.assertEqual(tested, ["b"])
 
@@ -2040,6 +2140,7 @@ class TheStandInFitsTheWait(unittest.TestCase):
         # nothing else is checked while it runs, so overrunning the wait holds
         # every other branch out of its own CI check too
         import time
+
         nudged, ran = self.stand_in(21600, time.time() + 600)
         self.assertEqual((nudged, ran), (None, []))
 
@@ -2047,6 +2148,7 @@ class TheStandInFitsTheWait(unittest.TestCase):
         # one run fits in 90s at a 60s cap; the run from clean a failure gets
         # does not, and a failure is when it is needed
         import time
+
         nudged, ran = self.stand_in(60, time.time() + 90)
         self.assertEqual((nudged, ran), (None, []))
 
@@ -2058,11 +2160,16 @@ class TheStandInFitsTheWait(unittest.TestCase):
         from unittest import mock
 
         bp = object.__new__(merge_branches.Backporter)
-        bp.cfg = SimpleNamespace(dry_run=False, fork_remote="fork",
-                                 ci_poll_minutes=0, ci_wait_hours=1.0,
-                                 local_stand_in=True, do_compile=True,
-                                 ci_standin_tasks=["test"],
-                                 ci_standin_timeout=21600)
+        bp.cfg = SimpleNamespace(
+            dry_run=False,
+            fork_remote="fork",
+            ci_poll_minutes=0,
+            ci_wait_hours=1.0,
+            local_stand_in=True,
+            do_compile=True,
+            ci_standin_tasks=["test"],
+            ci_standin_timeout=21600,
+        )
         seen = []
         bp.git = SimpleNamespace(run=lambda *a, **k: None)
         bp.reports = SimpleNamespace(write=lambda name, *cols: seen.append(name))
@@ -2073,16 +2180,18 @@ class TheStandInFitsTheWait(unittest.TestCase):
         bp.resolve_on_fork = lambda name: (name, name + "-head")
         bp.git.rev_parse = lambda ref: ref.rsplit("/", 1)[-1].split("^")[0] + "-head"
         bp._gh_complained = set()
-        bp.ci_status_of = lambda sha: "running"     # nothing ever settles
+        bp.ci_status_of = lambda sha: "running"  # nothing ever settles
         clock = [1000.0]
 
         def nudge(queue, deadline=None):
-            clock[0] += 3600           # the merge took the whole wait
+            clock[0] += 3600  # the merge took the whole wait
             return queue[0][0].name
 
         bp.build_instead_of_waiting = nudge
-        with mock.patch.object(merge_branches.time, "time", lambda: clock[0]), \
-                mock.patch.object(merge_branches.time, "sleep", lambda s: None):
+        with (
+            mock.patch.object(merge_branches.time, "time", lambda: clock[0]),
+            mock.patch.object(merge_branches.time, "sleep", lambda s: None),
+        ):
             bp.revisit([(self.src("a"), ["master"]), (self.src("b"), ["master"])])
         # Each round nudges one branch and the merge eats the whole wait.  Charged
         # to the others, the second round finds the deadline already gone and
@@ -2102,10 +2211,16 @@ class TheStandInFitsTheWait(unittest.TestCase):
         from unittest import mock
 
         bp = object.__new__(merge_branches.Backporter)
-        bp.cfg = SimpleNamespace(dry_run=False, fork_remote="fork",
-                                 ci_poll_minutes=0, ci_wait_hours=1.0,
-                                 local_stand_in=True, do_compile=True,
-                                 ci_standin_tasks=["test"], ci_standin_timeout=60)
+        bp.cfg = SimpleNamespace(
+            dry_run=False,
+            fork_remote="fork",
+            ci_poll_minutes=0,
+            ci_wait_hours=1.0,
+            local_stand_in=True,
+            do_compile=True,
+            ci_standin_tasks=["test"],
+            ci_standin_timeout=60,
+        )
         seen = []
         bp.git = SimpleNamespace(run=lambda *a, **k: None)
         bp.reports = SimpleNamespace(write=lambda name, *cols: seen.append(name))
@@ -2116,16 +2231,18 @@ class TheStandInFitsTheWait(unittest.TestCase):
         bp.resolve_on_fork = lambda name: (name, name + "-head")
         bp.git.rev_parse = lambda ref: ref.rsplit("/", 1)[-1].split("^")[0] + "-head"
         bp._gh_complained = set()
-        bp.ci_status_of = lambda sha: "running"      # nothing ever settles
+        bp.ci_status_of = lambda sha: "running"  # nothing ever settles
         clock = [1000.0]
 
         def nudge(queue, deadline=None):
-            clock[0] += 3600            # each merge costs the whole wait
+            clock[0] += 3600  # each merge costs the whole wait
             return queue[0][0].name
 
         bp.build_instead_of_waiting = nudge
-        with mock.patch.object(merge_branches.time, "time", lambda: clock[0]), \
-                mock.patch.object(merge_branches.time, "sleep", lambda s: None):
+        with (
+            mock.patch.object(merge_branches.time, "time", lambda: clock[0]),
+            mock.patch.object(merge_branches.time, "sleep", lambda s: None),
+        ):
             bp.revisit([(self.src(n), ["master"]) for n in "abc"])
         # Each round credits the hour back, so the soft deadline never arrives.
         # The outer bound does, and the last branch is written off rather than
@@ -2187,9 +2304,11 @@ class MasterCutGoesFirst(unittest.TestCase):
         bp.cfg = SimpleNamespace(strip_suffixes=["-aok"], jobs=1)
         order = []
         bp.execute = lambda src, targets: order.append(src.name)
-        work = [(Source("myfix-aok"), ["branch-4.1"]),
-                (Source("other"), ["branch-3.5"]),
-                (Source("myfix-master-aok"), ["master"])]
+        work = [
+            (Source("myfix-aok"), ["branch-4.1"]),
+            (Source("other"), ["branch-3.5"]),
+            (Source("myfix-master-aok"), ["master"]),
+        ]
         bp.merge_all(work)
         self.assertEqual(order[0], "myfix-master-aok")
 
@@ -2209,6 +2328,7 @@ class RemovedFlags(unittest.TestCase):
     def test_assume_yes_is_refused_with_a_reason(self):
         import contextlib, io
         import merge_branches
+
         stderr = io.StringIO()
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(stderr):
             merge_branches.parse_args(["-y"])
@@ -2217,6 +2337,7 @@ class RemovedFlags(unittest.TestCase):
     def test_it_is_not_advertised_in_the_help(self):
         import contextlib, io
         import merge_branches
+
         stdout = io.StringIO()
         with self.assertRaises(SystemExit), contextlib.redirect_stdout(stdout):
             merge_branches.parse_args(["--help"])
@@ -2258,8 +2379,13 @@ class WhyNoStandIn(unittest.TestCase):
     def why(self, **overrides):
         from merge_branches import IDLE_ROUNDS_BEFORE_STANDING_IN, why_no_stand_in
 
-        args = dict(enabled=True, can_build=True,
-                    quiet_rounds=IDLE_ROUNDS_BEFORE_STANDING_IN, went_green=0, building=5)
+        args = dict(
+            enabled=True,
+            can_build=True,
+            quiet_rounds=IDLE_ROUNDS_BEFORE_STANDING_IN,
+            went_green=0,
+            building=5,
+        )
         args.update(overrides)
         return why_no_stand_in(**args)
 
@@ -2309,7 +2435,7 @@ class WaitBudgetRules(unittest.TestCase):
 
     def test_no_wait_is_no_bound(self):
         budget = self.budget(0)
-        self.clock[0] += 10 ** 9
+        self.clock[0] += 10**9
         self.assertFalse(budget.over())
 
     def test_the_wait_runs_out(self):
@@ -2359,7 +2485,8 @@ class OneRoundOfPolling(unittest.TestCase):
         bp.git = SimpleNamespace(run=lambda *a, **k: None)
         self.written = []
         bp.reports = SimpleNamespace(
-            write=lambda name, branch, *cols: self.written.append((name, branch)))
+            write=lambda name, branch, *cols: self.written.append((name, branch))
+        )
         bp.record = lambda *a: None
         bp.warn_if_untested = lambda src: None
         bp.resolve_on_fork = lambda name: (name, name + "-head")
@@ -2378,9 +2505,15 @@ class OneRoundOfPolling(unittest.TestCase):
     def test_each_answer_goes_to_its_own_pile(self):
         from collections import defaultdict
 
-        bp = self.make({"a-head": "passing", "b-head": "running",
-                        "c-head": "running-with-failures", "d-head": "failing",
-                        "e-head": "none"})
+        bp = self.make(
+            {
+                "a-head": "passing",
+                "b-head": "running",
+                "c-head": "running-with-failures",
+                "d-head": "failing",
+                "e-head": "none",
+            }
+        )
         pending = [(self.source(n), ["master"]) for n in "abcde"]
         seen = bp.poll_once(pending, defaultdict(int))
         self.assertEqual(self.names(seen.green), ["a"])
@@ -2402,15 +2535,19 @@ class OneRoundOfPolling(unittest.TestCase):
         from collections import defaultdict
 
         bp = self.make({"a-head": "running", "b-head": "running"})
-        bp.git.rev_parse = lambda ref: (None if "/gone^" in ref
-                                        else ref.rsplit("/", 1)[-1].split("^")[0] + "-head")
-        moved = self.source("a", fork_head="a-old")     # the fork now has a-head
+        bp.git.rev_parse = lambda ref: (
+            None if "/gone^" in ref else ref.rsplit("/", 1)[-1].split("^")[0] + "-head"
+        )
+        moved = self.source("a", fork_head="a-old")  # the fork now has a-head
         gone = self.source("gone")
-        seen = bp.poll_once([(moved, ["master"]), (gone, ["master"]),
-                             (self.source("b"), ["master"])], defaultdict(int))
+        seen = bp.poll_once(
+            [(moved, ["master"]), (gone, ["master"]), (self.source("b"), ["master"])],
+            defaultdict(int),
+        )
         self.assertEqual(self.names(seen.still), ["b"])
-        self.assertEqual(self.written, [("TO_MERGE_LATER.txt", "a"),
-                                        ("TO_MERGE_LATER.txt", "gone")])
+        self.assertEqual(
+            self.written, [("TO_MERGE_LATER.txt", "a"), ("TO_MERGE_LATER.txt", "gone")]
+        )
 
     def test_misreads_are_counted_across_rounds_and_a_good_read_clears_them(self):
         from collections import defaultdict
@@ -2429,7 +2566,7 @@ class OneRoundOfPolling(unittest.TestCase):
         bp.ci_status_settled = lambda sha: "none"
         for _ in range(merge_branches.CI_MISREADS_ALLOWED - 1):
             seen = bp.poll_once(pending, misreads)
-        self.assertEqual(self.names(seen.still), ["a"])           # still not given up on
+        self.assertEqual(self.names(seen.still), ["a"])  # still not given up on
         seen = bp.poll_once(pending, misreads)
         self.assertEqual(seen.still, [])
         self.assertEqual(self.written, [("TO_MERGE_LATER.txt", "a")])
@@ -2445,11 +2582,17 @@ class TheQuietCountSurvivesAStandIn(unittest.TestCase):
         import merge_branches
 
         bp = object.__new__(merge_branches.Backporter)
-        bp.cfg = SimpleNamespace(dry_run=False, fork_remote="fork",
-                                 fork_repo="holdenk/spark", ci_poll_minutes=0,
-                                 ci_wait_hours=0, local_stand_in=True,
-                                 do_compile=True, ci_standin_tasks=["test"],
-                                 ci_standin_timeout=21600)
+        bp.cfg = SimpleNamespace(
+            dry_run=False,
+            fork_remote="fork",
+            fork_repo="holdenk/spark",
+            ci_poll_minutes=0,
+            ci_wait_hours=0,
+            local_stand_in=True,
+            do_compile=True,
+            ci_standin_tasks=["test"],
+            ci_standin_timeout=21600,
+        )
         bp.git = SimpleNamespace(run=lambda *a, **k: None)
         bp.reports = SimpleNamespace(write=lambda *a: None)
         bp._checkout_failed = set()
@@ -2470,7 +2613,8 @@ class TheQuietCountSurvivesAStandIn(unittest.TestCase):
         bp._gh_complained = set()
         self.tested = []
         bp.build_instead_of_waiting = lambda queue, deadline=None: (
-            self.tested.append(queue[0][0].name) or queue[0][0].name)
+            self.tested.append(queue[0][0].name) or queue[0][0].name
+        )
         return bp
 
     def source(self, name):
@@ -2512,9 +2656,17 @@ class EveryRoundSaysWhy(unittest.TestCase):
         import merge_branches
 
         bp = object.__new__(merge_branches.Backporter)
-        settings = dict(dry_run=False, fork_remote="fork", fork_repo="holdenk/spark",
-                        ci_poll_minutes=0, ci_wait_hours=0, local_stand_in=True,
-                        do_compile=True, ci_standin_tasks=["test"], ci_standin_timeout=21600)
+        settings = dict(
+            dry_run=False,
+            fork_remote="fork",
+            fork_repo="holdenk/spark",
+            ci_poll_minutes=0,
+            ci_wait_hours=0,
+            local_stand_in=True,
+            do_compile=True,
+            ci_standin_tasks=["test"],
+            ci_standin_timeout=21600,
+        )
         settings.update(cfg)
         bp.cfg = SimpleNamespace(**settings)
         bp.git = SimpleNamespace(run=lambda *a, **k: None)
