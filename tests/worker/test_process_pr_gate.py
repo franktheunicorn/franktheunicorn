@@ -320,40 +320,45 @@ class TestClosedMidCycle:
             runner._reap_closed_prs_if_due(clients, [pc])
         assert reap.call_count == 1
 
-    def test_prs_opened_mid_cycle_are_ingested_and_reviewed(self) -> None:
-        """The mid-cycle listing used to be read only for closures, so a PR
-        opened after the cycle's poll waited out the whole (hours-long) cycle."""
+    def _sync(self, new_prs: list[Any], reviewed: set[int | None]) -> list[tuple[Any, bool]]:
         from franktheunicorn.worker import runner
 
         pc = ProjectConfig(owner="apache", repo="spark")
-        client = MagicMock()
-        new_pr = PullRequestFactory(state="open")
-        reviewed: set[int | None] = set()
+        pool = MagicMock()
+        pool.pending.return_value = 3
         runner._last_closed_reap = float("-inf")
-        with (
-            patch(
-                "franktheunicorn.backends.poller.sync_open_pull_requests",
-                return_value=(0, [new_pr]),
-            ) as sync,
-            patch.object(runner, "process_pr", return_value=[]) as review,
+        with patch(
+            "franktheunicorn.backends.poller.sync_open_pull_requests",
+            return_value=(0, new_prs),
         ):
             runner._sync_open_prs_mid_cycle(
-                {pc.forge: client},
+                {pc.forge: MagicMock()},
                 [pc],
                 "holdenk",
                 _op(),
-                disabled_backends=frozenset(),
-                diff_http=MagicMock(),
-                decisions=None,
                 repo_paths={},
                 reviewed_pks=reviewed,
+                pool=pool,
             )
-        sync.assert_called_once()
-        review.assert_called_once()
-        assert review.call_args.args[0] == new_pr
-        assert review.call_args.kwargs["forge_client"] is client
+        return [(c.args[0].pr, c.kwargs["front"]) for c in pool.submit.call_args_list]
+
+    def test_prs_opened_mid_cycle_join_the_back_of_the_queue(self) -> None:
+        """The mid-cycle listing used to be read only for closures, so a PR
+        opened after the cycle's poll waited out the whole (hours-long) cycle."""
+        new_pr = PullRequestFactory(state="open", is_operator_pr=False)
+        reviewed: set[int | None] = set()
+        assert self._sync([new_pr], reviewed) == [(new_pr, False)]
         # The backfill must not review it a second time this cycle.
         assert new_pr.pk in reviewed
+
+    def test_the_operators_own_new_pr_jumps_the_queue(self) -> None:
+        theirs = PullRequestFactory(state="open", is_operator_pr=False)
+        mine = PullRequestFactory(state="open", is_operator_pr=True)
+        assert self._sync([theirs, mine], set()) == [(theirs, False), (mine, True)]
+
+    def test_a_pr_already_queued_is_not_queued_twice(self) -> None:
+        pr = PullRequestFactory(state="open")
+        assert self._sync([pr], {pr.pk}) == []
 
     def test_without_an_operator_the_sync_only_reaps(self) -> None:
         from franktheunicorn.worker import runner

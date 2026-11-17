@@ -84,8 +84,15 @@ poll_interval_seconds: 300
 # different branches. The main thread keeps running the poll cycle; the
 # interactive thread keeps handling button presses; the pool handles everything
 # else. Set to 1 to get the old single-threaded behaviour back.
+#
+# review_concurrency is the poll cycle's own PR-review runners (default 10):
+# the main thread polls every project and queues the refreshed PRs, and N
+# threads review them, each in its own checkout lane. PRs opened mid-cycle join
+# the back of that queue — the operator's own go to the front. 1 restores the
+# old one-PR-at-a-time cycle.
 # worker_pool:
 #   concurrency: 3
+#   review_concurrency: 10
 
 # Log level for the worker (CRITICAL/ERROR/WARNING/INFO/DEBUG/NOTSET).
 # Override at the command line with `make worker-debug`, the runner's
@@ -129,6 +136,10 @@ digest_enabled: false
 #     api_key_env: "ANTHROPIC_API_KEY"
 #     temperature: 0.3
 #     max_tokens: 4096
+#     # Optional: most requests this process has in flight to this gateway
+#     # (same base_url + api_key_env) at once; 0 = unlimited. Tiers inherit it,
+#     # so they share the slots. llm.apache.org allows 4 per key.
+#     # max_parallel_requests: 4
 #
 # Example: multiple backends (Claude for quality + local for speed)
 # llm_backends:
@@ -263,9 +274,13 @@ digest_enabled: false
 #       temperature: 0.1
 #       max_tokens: 2048
 #     reasoning:
-#       model: "qwen3.8-27b"      # thinking model; give it room to think
+#       # Not qwen3.8-27b with thinking on: on a ~60K-char diff it spends the
+#       # whole budget reasoning (~7 min) and returns no content. Either use
+#       # gemma4-26b, or keep qwen with
+#       #   extra_body: {chat_template_kwargs: {enable_thinking: false}}
+#       model: "gemma4-26b"
 #       temperature: 0.2
-#       max_tokens: 16384
+#       max_tokens: 8192
 #   tasks:                        # optional: re-point a task at another tier
 #     check:concurrency: reasoning
 #     check:correctness: reasoning

@@ -429,10 +429,12 @@ class _FakeMeteredBackend:
 
 
 class _FakePR:
-    """Just the attrs _metered_call_with_retry reads off the PR."""
+    """Just the attrs _metered_call_with_retry (and the check pool's thread
+    names) read off the PR."""
 
     project_id = 1
     pk = 1
+    number = 1
 
 
 class TestEmptyCompletionRetry:
@@ -632,3 +634,143 @@ class TestContextPassthrough:
             )
         assert seen.get("diff") == "the real diff"
         assert seen.get("repo_path") == tmp_path
+
+
+class TestConcurrentChecks:
+    """The checks' LLM calls run at once; everything after them stays in order."""
+
+    @pytest.mark.django_db
+    def test_calls_overlap_and_results_land_in_config_order(self, db_pr: PullRequest) -> None:
+        import threading
+
+        names = ["coverage", "design", "correctness"]
+        config = ProjectConfig(owner="apache", repo="spark", llm_checks=names)
+        op_config = OperatorConfig(llm_backends=[LLMBackendConfig(provider="stub")])
+        # All three must be inside dispatch together to get past the barrier;
+        # run one after another, it times out and every check fails.
+        barrier = threading.Barrier(len(names), timeout=5)
+
+        def fake_dispatch(check: BaseCheck, *args: object) -> list[ReviewFinding]:
+            barrier.wait()
+            if check.name == "design":
+                msg = "gateway fell over"
+                raise RuntimeError(msg)
+            return []
+
+        recorded: list[tuple[str, str]] = []
+        with (
+            patch.object(BaseCheck, "applies_to", return_value=True),
+            patch("franktheunicorn.review.checks._run_check_dispatch", side_effect=fake_dispatch),
+            patch(
+                "franktheunicorn.worker.runner.record_agent_run",
+                side_effect=lambda pr, source, **kw: recorded.append((source, kw["status"])),
+            ),
+        ):
+            run_enabled_checks(db_pr, "+ x\n", project_config=config, operator_config=op_config)
+
+        assert not barrier.broken
+        assert recorded == [
+            ("check:coverage", "ok"),
+            ("check:design", "failed"),
+            ("check:correctness", "ok"),
+        ]
+
+    @pytest.mark.django_db
+    def test_a_closed_pr_runs_no_checks(self, db_pr: PullRequest) -> None:
+        config = ProjectConfig(owner="apache", repo="spark", llm_checks=["coverage", "design"])
+        op_config = OperatorConfig(llm_backends=[LLMBackendConfig(provider="stub")])
+        with (
+            patch.object(BaseCheck, "applies_to", return_value=True),
+            patch("franktheunicorn.review.checks._run_check_dispatch") as dispatch,
+        ):
+            run_enabled_checks(db_pr, "+ x\n", config, op_config, can_review=lambda: False)
+        dispatch.assert_not_called()
+
+    def test_check_threads_inherit_the_callers_checkout_lane(self) -> None:
+        from franktheunicorn.review.checks import _dispatch_concurrently
+        from franktheunicorn.review.tool_executor import current_workspace_lane, workspace_lane
+        from tests.conftest import make_pr_context
+
+        lanes: list[str] = []
+
+        def fake_dispatch(*args: object) -> list[ReviewFinding]:
+            lanes.append(current_workspace_lane())
+            return []
+
+        cfg = LLMBackendConfig(provider="stub")
+        from franktheunicorn.review.checks.coverage import CoverageCheck
+
+        planned: list[tuple[str, BaseCheck, LLMBackendConfig]] = [
+            ("a", CoverageCheck(), cfg),
+            ("b", CoverageCheck(), cfg),
+        ]
+        with (
+            workspace_lane("review-3"),
+            patch("franktheunicorn.review.checks._run_check_dispatch", side_effect=fake_dispatch),
+        ):
+            _dispatch_concurrently(planned, _FakePR(), "", make_pr_context())  # type: ignore[arg-type]
+        assert lanes == ["review-3", "review-3"]
+
+
+class TestGatewaySlots:
+    def test_unlimited_by_default(self) -> None:
+        from franktheunicorn.review.backends.openai_backend import gateway_slots
+
+        assert gateway_slots(LLMBackendConfig(provider="openai")) is None
+
+    def test_tiers_on_one_gateway_share_one_limit(self) -> None:
+        from franktheunicorn.review.backends.openai_backend import gateway_slots
+
+        base = {"provider": "openai", "base_url": "https://gw.test/v1", "api_key_env": "K"}
+        a = gateway_slots(LLMBackendConfig(**base, model="gemma", max_parallel_requests=4))
+        b = gateway_slots(LLMBackendConfig(**base, model="qwen", max_parallel_requests=4))
+        other = gateway_slots(
+            LLMBackendConfig(**{**base, "api_key_env": "K2"}, max_parallel_requests=4)
+        )
+        assert a is b
+        assert other is not a
+
+    def test_calls_wait_for_a_slot(self) -> None:
+        import threading
+        import time
+        from types import SimpleNamespace
+
+        from franktheunicorn.review.backends.openai_backend import OpenAIBackend
+
+        cfg = LLMBackendConfig(
+            provider="openai",
+            model="m",
+            base_url="https://slots.test/v1",
+            api_key_env="SLOTS_KEY",
+            max_parallel_requests=2,
+        )
+        in_flight = peak = 0
+        lock = threading.Lock()
+
+        def create(**kwargs: object) -> object:
+            nonlocal in_flight, peak
+            with lock:
+                in_flight += 1
+                peak = max(peak, in_flight)
+            time.sleep(0.05)
+            with lock:
+                in_flight -= 1
+            msg = SimpleNamespace(content="{}")
+            return SimpleNamespace(choices=[SimpleNamespace(message=msg)], usage=None)
+
+        fake_client = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+        )
+        with patch("openai.OpenAI", return_value=fake_client):
+            backend = OpenAIBackend.__new__(OpenAIBackend)
+            backend._config = cfg
+            backend._model = "m"
+            backend._json_output = True
+            threads = [
+                threading.Thread(target=backend._call_api, args=("s", "u", "k")) for _ in range(6)
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        assert peak == 2
