@@ -17,6 +17,7 @@ import fnmatch
 import logging
 import re
 import subprocess
+import threading
 from collections import Counter, defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -216,6 +217,20 @@ _REPO_FINGERPRINTS: dict[str, _RepoFingerprints] = {}
 #: Same, for the symilar tier's parsed linesets (see :class:`_RepoLineSets`).
 _REPO_LINESETS: dict[str, _RepoLineSets] = {}
 
+#: One scan per repo at a time. The worker reviews on several threads, the scan
+#: is pure-Python CPU (the GIL gives no parallelism to win), and the caches above
+#: are plain dicts: unlocked, every runner that arrived on a cold cache rebuilt
+#: all of Spark's fingerprints itself (~60s each, ten at once) while the others
+#: mutated the same dicts underneath it.
+_REPO_LOCKS: dict[str, threading.Lock] = {}
+_REPO_LOCKS_GUARD = threading.Lock()
+
+
+def _repo_lock(repo_path: Path) -> threading.Lock:
+    with _REPO_LOCKS_GUARD:
+        return _REPO_LOCKS.setdefault(str(repo_path), threading.Lock())
+
+
 # Scaffolding that is duplicated on purpose in every file that needs it.
 # Matched against whitespace-collapsed lines, so indentation doesn't matter.
 # Deliberately conservative: only lines that carry no logic of their own.
@@ -319,6 +334,21 @@ def check_copypasta(
     if not chunks:
         return []
 
+    with _repo_lock(repo_path):
+        matches = _scan_repo(chunks, diff, project_config, repo_path, extra_patterns, min_lines)
+    return _create_drafts(pr, matches)
+
+
+def _scan_repo(
+    chunks: list[CodeChunk],
+    diff: PRDiff,
+    project_config: ProjectConfig,
+    repo_path: Path,
+    extra_patterns: tuple[re.Pattern[str], ...],
+    min_lines: int,
+) -> list[CopyPastaMatch]:
+    """The repo-reading part of :func:`check_copypasta`; callers hold the repo lock."""
+    exclude_globs = tuple(project_config.copypasta_exclude_paths)
     # Exclude files being modified in this PR to avoid self-matches
     pr_changed_files = {fc.filename for fc in diff.files}
 
@@ -372,7 +402,7 @@ def check_copypasta(
         extra_patterns=extra_patterns,
     )
 
-    return _create_drafts(pr, matches)
+    return matches
 
 
 def _path_excluded(path: str, globs: tuple[str, ...]) -> bool:

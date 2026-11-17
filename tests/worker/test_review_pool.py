@@ -136,3 +136,108 @@ class TestThreaded:
             pool.submit(_item(2))
             pool.wait_idle(interval=0.05)
         assert lanes == {"review-0", "review-1"}
+
+
+class TestCopypastaOncePerHead:
+    """A refresh that didn't move the head must not re-run the CPU-bound scan."""
+
+    def _review(self, pr: Any, tmp_path: Any) -> Any:
+        from collections import Counter
+        from unittest.mock import MagicMock, patch
+
+        from django.test import override_settings
+
+        from franktheunicorn.worker import runner
+
+        (tmp_path / "apache" / "spark").mkdir(parents=True)
+        pc: Any = SimpleNamespace(
+            owner="apache", repo="spark", full_name="apache/spark", copypasta_enabled=True
+        )
+        test_runner = MagicMock()
+        test_runner.run_differential_test.return_value = None
+        with (
+            override_settings(FRANK_REPOS_DIR=str(tmp_path)),
+            patch.object(runner, "process_pr", return_value=[]),
+            patch("franktheunicorn.review.copypasta.check_copypasta", return_value=[]) as scan,
+            patch.object(runner, "record_agent_run") as record,
+        ):
+            runner._review_one(
+                ReviewItem(pr, pc, None, None),
+                None,
+                disabled_backends=frozenset(),
+                diff_http=MagicMock(),
+                diff_fetcher=MagicMock(),
+                test_runner=test_runner,
+                decisions=Counter(),
+                decisions_lock=threading.Lock(),
+            )
+        return scan, record
+
+    def test_unchanged_head_is_not_rescanned(self, tmp_path: Any) -> None:
+        pr: Any = SimpleNamespace(
+            number=1,
+            head_sha="abc123",
+            agent_runs={"copypasta": {"head_sha": "abc123", "status": "ok"}},
+        )
+        scan, record = self._review(pr, tmp_path)
+        scan.assert_not_called()
+        record.assert_not_called()
+
+    def test_new_head_is_scanned_and_recorded(self, tmp_path: Any) -> None:
+        pr: Any = SimpleNamespace(
+            number=1, head_sha="def456", agent_runs={"copypasta": {"head_sha": "abc123"}}
+        )
+        scan, record = self._review(pr, tmp_path)
+        scan.assert_called_once()
+        assert record.call_args.args[1] == "copypasta"
+
+    def test_a_stale_run_is_rescanned(self, tmp_path: Any) -> None:
+        pr: Any = SimpleNamespace(
+            number=1,
+            head_sha="abc123",
+            agent_runs={"copypasta": {"head_sha": "abc123", "stale": True}},
+        )
+        scan, _ = self._review(pr, tmp_path)
+        scan.assert_called_once()
+
+
+def test_copypasta_scans_one_repo_at_a_time(tmp_path: Any) -> None:
+    """Concurrent runners queue on the repo's scan instead of all rebuilding its
+    caches at once."""
+    import time
+    from unittest.mock import patch
+
+    from franktheunicorn.config.models import ProjectConfig
+    from franktheunicorn.review import copypasta
+
+    active = peak = 0
+    lock = threading.Lock()
+
+    def slow_scan(*args: Any, **kwargs: Any) -> list[Any]:
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.05)
+        with lock:
+            active -= 1
+        return []
+
+    chunk = copypasta.CodeChunk(file_path="a.py", start_line=1, lines=("x = 1",) * 10)
+    pc = ProjectConfig(owner="o", repo="r", copypasta_enabled=True)
+    diff: Any = SimpleNamespace(files=[])
+    with (
+        patch.object(copypasta, "extract_added_chunks", return_value=[chunk]),
+        patch.object(copypasta, "_meaningful_lines", return_value=["x"] * 10),
+        patch.object(copypasta, "_scan_repo", side_effect=slow_scan),
+        patch.object(copypasta, "_create_drafts", return_value=[]),
+    ):
+        threads = [
+            threading.Thread(target=copypasta.check_copypasta, args=(None, diff, pc, tmp_path))
+            for _ in range(4)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    assert peak == 1

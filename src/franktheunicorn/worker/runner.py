@@ -2272,13 +2272,21 @@ def _review_one(
     except Exception:
         logger.exception("Error in test verification for PR #%d", pr.number)
 
-    # Copy-pasta detection (runs even if drafts already exist)
+    # Copy-pasta detection (runs even if drafts already exist) — once per head.
+    # A refresh is usually CI, labels or the timer, not a push, and the scan is
+    # the most CPU this cycle spends per PR: re-running it on an unchanged head
+    # is what pinned the worker at a full core with every runner waiting on it.
     if pc.copypasta_enabled:
         repo_path = Path(settings.FRANK_REPOS_DIR) / pc.owner / pc.repo
-        if repo_path.is_dir():
+        last = (pr.agent_runs or {}).get("copypasta")
+        scanned_head = last.get("head_sha") if isinstance(last, dict) else None
+        if pr.head_sha and scanned_head == pr.head_sha and not last.get("stale"):  # type: ignore[union-attr]
+            logger.debug("PR #%d: copy-pasta already scanned head %s", pr.number, pr.head_sha[:12])
+        elif repo_path.is_dir():
             try:
                 diff = diff_fetcher.fetch(pc.owner, pc.repo, pr.number)
                 cp_drafts = check_copypasta(pr, diff, pc, repo_path)
+                record_agent_run(pr, "copypasta", status="ok", findings=len(cp_drafts))
                 if cp_drafts:
                     logger.info("  PR #%d: %d copy-pasta findings", pr.number, len(cp_drafts))
             except Exception:
