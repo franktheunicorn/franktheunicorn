@@ -30,6 +30,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: Actions job logs fetched per ``get_commit_check_outputs`` call (one request each).
+_MAX_JOB_LOGS = 8
+
 
 class GitHubClient(ForgeClient):
     """ForgeClient implementation backed by the GitHub REST API.
@@ -460,8 +463,17 @@ class GitHubClient(ForgeClient):
         ``description``, which ``get_commit_checks`` already surfaces via the
         url. Best-effort: a fetch failure yields no output for that check, which
         the caller treats as "analyse from the name alone".
+
+        A GitHub Actions run's title/summary is usually just "Process completed
+        with exit code 1", so for those the job log is fetched too and cut down
+        to its error regions and tail (:func:`~franktheunicorn.scoring.ci_analysis.excerpt_log`)
+        — that is where the reason is. At most ``_MAX_JOB_LOGS`` logs per call:
+        each is one request and a Spark job log runs to megabytes.
         """
+        from franktheunicorn.scoring.ci_analysis import excerpt_log
+
         outputs: dict[str, Any] = {}
+        logs_fetched = 0
         runs_url = f"/repos/{owner}/{repo}/commits/{sha}/check-runs"
         for page in range(1, 11):
             try:
@@ -485,11 +497,37 @@ class GitHubClient(ForgeClient):
                 title = str(out.get("title") or "")
                 summary = str(out.get("summary") or "")
                 text = f"{title}\n{summary}".strip()
+                app = run.get("app")
+                slug = app.get("slug") if isinstance(app, dict) else None
+                if slug == "github-actions" and run.get("id") and logs_fetched < _MAX_JOB_LOGS:
+                    logs_fetched += 1
+                    log = self._actions_job_log(owner, repo, int(run["id"]))
+                    if log:
+                        text = f"{text}\n\nLog excerpt:\n{excerpt_log(log)}".strip()
                 if text:
                     outputs[run["name"]] = text
             if len(runs) < 100:
                 break
         return outputs
+
+    def _actions_job_log(self, owner: str, repo: str, job_id: int) -> str:
+        """An Actions job's log text, or ``""`` when it can't be had.
+
+        For an Actions check run the check-run id is the job id. The endpoint
+        answers with a 302 to blob storage; httpx drops the auth header on the
+        cross-origin hop, which is what the signed URL expects.
+        """
+        try:
+            resp = self._get(
+                f"/repos/{owner}/{repo}/actions/jobs/{job_id}/logs", follow_redirects=True
+            )
+        except Exception:
+            logger.debug("Could not fetch the log for %s/%s job %d", owner, repo, job_id)
+            return ""
+        if resp.status_code != 200:
+            logger.debug("No log for %s/%s job %d (HTTP %d)", owner, repo, job_id, resp.status_code)
+            return ""
+        return resp.text
 
     def create_issue_comment(
         self, owner: str, repo: str, issue_number: int, body: str

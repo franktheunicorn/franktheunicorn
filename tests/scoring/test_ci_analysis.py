@@ -7,7 +7,12 @@ from typing import Any
 
 import pytest
 
-from franktheunicorn.scoring.ci_analysis import analyze_pr_ci, base_failing_checks
+from franktheunicorn.scoring.ci_analysis import (
+    _clip_output,
+    analyze_pr_ci,
+    base_failing_checks,
+    excerpt_log,
+)
 from franktheunicorn.scoring.merge_readiness import (
     CI_FLAKY,
     CI_RED,
@@ -110,6 +115,41 @@ class TestBaseFailingChecks:
         client = _FakeClient([_fail("pyspark")])
         client.raise_checks = True
         assert base_failing_checks(client, "apache", "spark", "abc") == set()
+
+
+# -- job-log excerpting ------------------------------------------------------
+
+
+class TestExcerptLog:
+    def test_keeps_error_context_and_tail_drops_the_rest(self) -> None:
+        lines = [f"noise {i}" for i in range(500)]
+        lines[100] = "Traceback (most recent call last):"
+        out = excerpt_log("\n".join(lines))
+        assert "Traceback" in out
+        assert "noise 97" in out and "noise 104" in out  # context either side
+        assert "noise 50\n" not in out  # far from any error
+        assert out.endswith("noise 499")  # the tail survives
+
+    def test_strips_actions_timestamps(self) -> None:
+        out = excerpt_log("2026-11-01T12:34:56.1234567Z error: boom")
+        assert out == "error: boom"
+
+    def test_capped_from_the_front(self) -> None:
+        out = excerpt_log("\n".join(f"error {i}" for i in range(5000)))
+        assert len(out) <= 8_000
+        assert out.endswith("error 4999")
+
+
+class TestClipOutput:
+    def test_short_text_unchanged(self) -> None:
+        assert _clip_output("title\nsummary") == "title\nsummary"
+
+    def test_long_text_keeps_head_and_end(self) -> None:
+        text = "HEAD" + "x" * 50_000 + "THE-FAILURE"
+        out = _clip_output(text)
+        assert len(out) < 10_100
+        assert out.startswith("HEAD")
+        assert out.endswith("THE-FAILURE")
 
 
 # -- analyze_pr_ci (Layer 1 + Layer 2) --------------------------------------
