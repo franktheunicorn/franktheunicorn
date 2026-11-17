@@ -914,6 +914,76 @@ def reap_closed_pull_requests(project_config: ProjectConfig, client: ForgeClient
     return _close_missing_pull_requests(project, raw_prs, client)
 
 
+#: How many never-seen PRs one mid-cycle sync ingests per project. A handful open
+#: in ten minutes; the cap is for a project that has never been polled at all,
+#: whose whole backlog belongs to the regular poll rather than a mid-cycle pass.
+MAX_MID_CYCLE_NEW_PRS = 20
+
+
+def sync_open_pull_requests(
+    project_config: ProjectConfig,
+    client: ForgeClient,
+    operator_username: str,
+    *,
+    repo_path: Path | None = None,
+    merge_intent: MergeIntentConfig | None = None,
+) -> tuple[int, list[PullRequest]]:
+    """One open-PR listing: close the rows that left it, ingest the ones new to it.
+
+    ``poll_project`` lists each project once at the top of a cycle, and a cycle
+    that reviews Spark's backlog runs for hours — so a PR opened after the listing
+    was invisible until the next one, which could be most of a day. The mid-cycle
+    reap was already paying for a fresh listing every ten minutes and only reading
+    it for closures. Returns ``(closed, new_prs)``; ``new_prs`` are the rows
+    created here, newest first, for the caller to review.
+    """
+    project = Project.objects.filter(
+        owner=project_config.owner, repo=project_config.repo, enabled=True
+    ).first()
+    if project is None:
+        return 0, []
+    raw_prs = client.list_pull_requests(project_config.owner, project_config.repo)
+    closed = _close_missing_pull_requests(project, raw_prs, client)
+
+    listed = {pr_data["number"]: pr_data for pr_data in raw_prs if pr_data.get("number")}
+    known = set(
+        PullRequest.objects.filter(project=project, number__in=list(listed)).values_list(
+            "number", flat=True
+        )
+    )
+    unseen = sorted((n for n in listed if n not in known), reverse=True)
+    if len(unseen) > MAX_MID_CYCLE_NEW_PRS:
+        logger.info(
+            "%s: %d PR(s) new since the last listing; ingesting the newest %d mid-cycle, "
+            "the rest wait for the next poll",
+            project.full_name,
+            len(unseen),
+            MAX_MID_CYCLE_NEW_PRS,
+        )
+        unseen = unseen[:MAX_MID_CYCLE_NEW_PRS]
+
+    new_prs: list[PullRequest] = []
+    for number in unseen:
+        try:
+            new_prs.append(
+                _refresh_pull_request(
+                    client,
+                    project,
+                    project_config,
+                    listed[number],
+                    operator_username,
+                    repo_path,
+                    merge_intent=merge_intent,
+                )
+            )
+        except Exception:
+            logger.exception(
+                "Could not ingest new PR #%d for %s mid-cycle", number, project.full_name
+            )
+    _reroute_pull_requests(new_prs, operator_username, project_config)
+    return closed, new_prs
+
+
 def _should_analyze_ci(pr_obj: PullRequest, project_config: ProjectConfig) -> bool:
     """Whether to run CI-failure analysis on this PR.
 
