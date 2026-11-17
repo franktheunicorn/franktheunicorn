@@ -139,7 +139,8 @@ class HostileTrailerConfig(unittest.TestCase):
         for number, (key, value) in enumerate(config.items()):
             env[f"GIT_CONFIG_KEY_{number}"] = key.replace("_", ".")
             env[f"GIT_CONFIG_VALUE_{number}"] = value
-        done = subprocess.run([sys.executable, "add_coauthor.py"], input=msg,
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "add_coauthor.py")
+        done = subprocess.run([sys.executable, script], input=msg,
                               stdout=subprocess.PIPE, env=env, check=True)
         return done.stdout
 
