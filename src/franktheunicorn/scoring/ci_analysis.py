@@ -22,6 +22,7 @@ name-prior classifier exactly as it was.
 from __future__ import annotations
 
 import logging
+import re
 from typing import TYPE_CHECKING, Any
 
 from franktheunicorn.review.backends.base import _extract_json_blob
@@ -36,9 +37,22 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 #: How much of the failure output and diff the LLM sees per check. Bounds the
-#: prompt; the check name and summary carry most of the signal.
-_MAX_OUTPUT_CHARS = 4_000
+#: prompt. The output can carry an Actions job-log excerpt, whose end is where
+#: the failure is, so it is clipped from the middle (see :func:`_clip_output`).
+_MAX_OUTPUT_CHARS = 10_000
 _MAX_DIFF_CHARS = 8_000
+
+#: Job-log excerpting (:func:`excerpt_log`): every error-looking line with a few
+#: lines of context, plus the tail, capped from the front.
+_LOG_EXCERPT_CHARS = 8_000
+_LOG_TAIL_LINES = 80
+_LOG_CONTEXT = 4
+_LOG_ERROR_LINE = re.compile(
+    r"error|fail|exception|traceback|assert|panic|killed|out of memory|timed? ?out|\*\*\* ",
+    re.IGNORECASE,
+)
+# Actions prefixes every log line with an ISO timestamp.
+_LOG_TIMESTAMP = re.compile(r"^\d{4}-\d\d-\d\dT[\d:.]+Z ")
 
 _VERDICTS = frozenset({"flake", "real-pr", "real-pre-existing"})
 
@@ -56,6 +70,30 @@ or build step exercises code the diff touches.
 
 Return ONLY a JSON object: {"verdict": "flake"|"real-pr"|"real-pre-existing", \
 "reason": "<one short sentence>"}."""
+
+
+def excerpt_log(log: str) -> str:
+    """The lines around errors plus the tail, capped — a Spark job log is megabytes."""
+    lines = [_LOG_TIMESTAMP.sub("", line) for line in log.splitlines()]
+    keep: set[int] = set(range(max(0, len(lines) - _LOG_TAIL_LINES), len(lines)))
+    for i, line in enumerate(lines):
+        if _LOG_ERROR_LINE.search(line):
+            keep.update(range(max(0, i - _LOG_CONTEXT), min(len(lines), i + _LOG_CONTEXT + 1)))
+    text = "\n".join(lines[i] for i in sorted(keep))
+    # The end of a log is where the failure is; cut from the front.
+    return text[-_LOG_EXCERPT_CHARS:]
+
+
+def _clip_output(text: str) -> str:
+    """Bound failure output to ``_MAX_OUTPUT_CHARS``, keeping its head and its end.
+
+    The head is the check's title/summary; the end is the last of the log
+    excerpt, where a failure is reported. A plain ``[:n]`` cut the log off.
+    """
+    if len(text) <= _MAX_OUTPUT_CHARS:
+        return text
+    head = _MAX_OUTPUT_CHARS // 5
+    return f"{text[:head]}\n[...]\n{text[-(_MAX_OUTPUT_CHARS - head) :]}"
 
 
 def base_failing_checks(client: ForgeClient, owner: str, repo: str, base_sha: str) -> set[str]:
@@ -109,7 +147,7 @@ def _llm_verdict_for(
         f"Conclusion: {check.conclusion or 'failure'}\n"
         f"Also failing on base branch: {'yes' if base_failing else 'no'}\n"
         f"Past history: flaked {flaky}x, judged real {real}x\n\n"
-        f"Failure output:\n{output_text[:_MAX_OUTPUT_CHARS] or '(none available)'}\n\n"
+        f"Failure output:\n{_clip_output(output_text) or '(none available)'}\n\n"
         f"PR changed code (diff):\n{diff[:_MAX_DIFF_CHARS] or '(unavailable)'}"
     )
     try:

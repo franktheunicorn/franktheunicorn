@@ -800,6 +800,71 @@ class TestMergeReadinessEndpoints:
         with pytest.raises(RuntimeError, match="more than 1000 check runs"):
             client.get_commit_checks("org", "repo", "abc")
 
+    def test_check_outputs_add_an_actions_log_excerpt(
+        self, httpx_mock: HTTPXMock, client: GitHubClient
+    ) -> None:
+        """An Actions run's summary says nothing; the job log's error lines do."""
+        httpx_mock.add_response(
+            url="https://api.github.test/repos/org/repo/commits/abc/check-runs?per_page=100&page=1",
+            json={
+                "check_runs": [
+                    {
+                        "id": 11,
+                        "name": "pyspark",
+                        "conclusion": "failure",
+                        "app": {"slug": "github-actions"},
+                        "output": {"title": "Process completed with exit code 1"},
+                    },
+                    {
+                        "id": 12,
+                        "name": "other-app",
+                        "conclusion": "failure",
+                        "app": {"slug": "some-app"},
+                        "output": {"summary": "lint failed"},
+                    },
+                    {"id": 13, "name": "ok", "conclusion": "success"},
+                ]
+            },
+        )
+        log = "\n".join(
+            [f"2026-11-01T00:00:00.0000000Z setup line {i}" for i in range(200)]
+            + ["2026-11-01T00:00:01.0000000Z AssertionError: 1 != 2"]
+            + [f"filler {i}" for i in range(200)]
+        )
+        httpx_mock.add_response(
+            url="https://api.github.test/repos/org/repo/actions/jobs/11/logs", text=log
+        )
+        outputs = client.get_commit_check_outputs("org", "repo", "abc")
+        assert set(outputs) == {"pyspark", "other-app"}
+        assert outputs["pyspark"].startswith("Process completed with exit code 1")
+        assert "Log excerpt:" in outputs["pyspark"]
+        assert "AssertionError: 1 != 2" in outputs["pyspark"]
+        assert "2026-11-01T" not in outputs["pyspark"]  # timestamps stripped
+        assert "setup line 3\n" not in outputs["pyspark"]  # far from any error
+        assert outputs["other-app"] == "lint failed"  # not Actions: no log fetch
+
+    def test_check_outputs_survive_a_missing_actions_log(
+        self, httpx_mock: HTTPXMock, client: GitHubClient
+    ) -> None:
+        httpx_mock.add_response(
+            url="https://api.github.test/repos/org/repo/commits/abc/check-runs?per_page=100&page=1",
+            json={
+                "check_runs": [
+                    {
+                        "id": 11,
+                        "name": "pyspark",
+                        "conclusion": "failure",
+                        "app": {"slug": "github-actions"},
+                        "output": {"title": "exit code 1"},
+                    }
+                ]
+            },
+        )
+        httpx_mock.add_response(
+            url="https://api.github.test/repos/org/repo/actions/jobs/11/logs", status_code=410
+        )
+        assert client.get_commit_check_outputs("org", "repo", "abc") == {"pyspark": "exit code 1"}
+
     def test_create_issue_comment(self, httpx_mock: HTTPXMock, client: GitHubClient) -> None:
         httpx_mock.add_response(
             url="https://api.github.test/repos/org/repo/issues/7/comments",
