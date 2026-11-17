@@ -1788,3 +1788,89 @@ def test_reap_closed_pull_requests_relists_and_closes() -> None:
     client.list_pull_requests.return_value = [{"number": 1}]
     assert reap_closed_pull_requests(ProjectConfig(owner="apache", repo="spark"), client) == 1
     assert project.pull_requests.get(number=2).state == "closed"
+
+
+@pytest.mark.django_db
+class TestSyncOpenPullRequests:
+    """The mid-cycle listing ingests PRs opened since the cycle's poll, not just reaps.
+
+    A Spark cycle runs for hours; before this a PR opened after the top-of-cycle
+    listing stayed invisible until the next cycle, however many mid-cycle
+    listings were fetched in between.
+    """
+
+    def _config(self) -> ProjectConfig:
+        return ProjectConfig(owner="apache", repo="spark")
+
+    def test_new_pr_is_ingested_and_gone_pr_is_closed(self, tmp_path: Path) -> None:
+        from franktheunicorn.backends.poller import sync_open_pull_requests
+
+        client = _CountingMockClient(tmp_path, [_listed_pr(99), _listed_pr(100)])
+        poll_project(client, self._config(), operator_username="holdenk")
+        client.detail_calls.clear()
+
+        client.pr_list = [_listed_pr(100), _listed_pr(101), _listed_pr(102)]
+        closed, new = sync_open_pull_requests(self._config(), client, "holdenk")
+
+        assert closed == 1
+        assert [pr.number for pr in new] == [102, 101]
+        # Only the new PRs cost per-PR calls; #100 is left to the regular poll.
+        assert sorted(client.detail_calls) == [101, 102]
+        assert PullRequest.objects.get(number=99).state == "closed"
+        assert set(PullRequest.objects.filter(state="open").values_list("number", flat=True)) == {
+            100,
+            101,
+            102,
+        }
+        assert all(pr.queue for pr in new)
+
+    def test_nothing_new_costs_no_per_pr_calls(self, tmp_path: Path) -> None:
+        from franktheunicorn.backends.poller import sync_open_pull_requests
+
+        client = _CountingMockClient(tmp_path, [_listed_pr(99)])
+        poll_project(client, self._config(), operator_username="holdenk")
+        client.detail_calls.clear()
+
+        assert sync_open_pull_requests(self._config(), client, "holdenk") == (0, [])
+        assert client.detail_calls == []
+
+    def test_unknown_project_is_left_to_the_regular_poll(self, tmp_path: Path) -> None:
+        from franktheunicorn.backends.poller import sync_open_pull_requests
+
+        client = _CountingMockClient(tmp_path, [_listed_pr(99)])
+        assert sync_open_pull_requests(self._config(), client, "holdenk") == (0, [])
+        assert PullRequest.objects.count() == 0
+
+    def test_new_prs_are_capped_newest_first(self, tmp_path: Path) -> None:
+        from franktheunicorn.backends.poller import (
+            MAX_MID_CYCLE_NEW_PRS,
+            sync_open_pull_requests,
+        )
+
+        ProjectFactory(owner="apache", repo="spark", enabled=True)
+        numbers = list(range(500, 500 + MAX_MID_CYCLE_NEW_PRS + 5))
+        client = _CountingMockClient(tmp_path, [_listed_pr(n) for n in numbers])
+
+        _, new = sync_open_pull_requests(self._config(), client, "holdenk")
+        assert [pr.number for pr in new] == sorted(numbers, reverse=True)[:MAX_MID_CYCLE_NEW_PRS]
+
+    def test_one_failing_pr_does_not_lose_the_others(self, tmp_path: Path) -> None:
+        from franktheunicorn.backends.poller import sync_open_pull_requests
+
+        client = _CountingMockClient(tmp_path, [_listed_pr(99)])
+        poll_project(client, self._config(), operator_username="holdenk")
+        client.pr_list = [_listed_pr(99), _listed_pr(101), _listed_pr(102)]
+
+        from franktheunicorn.backends import poller
+
+        real = poller._refresh_pull_request
+
+        def flaky(*args: Any, **kwargs: Any) -> PullRequest:
+            if args[3]["number"] == 102:
+                msg = "boom"
+                raise RuntimeError(msg)
+            return real(*args, **kwargs)
+
+        with patch.object(poller, "_refresh_pull_request", side_effect=flaky):
+            _, new = sync_open_pull_requests(self._config(), client, "holdenk")
+        assert [pr.number for pr in new] == [101]

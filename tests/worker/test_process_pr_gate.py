@@ -320,6 +320,53 @@ class TestClosedMidCycle:
             runner._reap_closed_prs_if_due(clients, [pc])
         assert reap.call_count == 1
 
+    def test_prs_opened_mid_cycle_are_ingested_and_reviewed(self) -> None:
+        """The mid-cycle listing used to be read only for closures, so a PR
+        opened after the cycle's poll waited out the whole (hours-long) cycle."""
+        from franktheunicorn.worker import runner
+
+        pc = ProjectConfig(owner="apache", repo="spark")
+        client = MagicMock()
+        new_pr = PullRequestFactory(state="open")
+        reviewed: set[int | None] = set()
+        runner._last_closed_reap = float("-inf")
+        with (
+            patch(
+                "franktheunicorn.backends.poller.sync_open_pull_requests",
+                return_value=(0, [new_pr]),
+            ) as sync,
+            patch.object(runner, "process_pr", return_value=[]) as review,
+        ):
+            runner._sync_open_prs_mid_cycle(
+                {pc.forge: client},
+                [pc],
+                "holdenk",
+                _op(),
+                disabled_backends=frozenset(),
+                diff_http=MagicMock(),
+                decisions=None,
+                repo_paths={},
+                reviewed_pks=reviewed,
+            )
+        sync.assert_called_once()
+        review.assert_called_once()
+        assert review.call_args.args[0] == new_pr
+        assert review.call_args.kwargs["forge_client"] is client
+        # The backfill must not review it a second time this cycle.
+        assert new_pr.pk in reviewed
+
+    def test_without_an_operator_the_sync_only_reaps(self) -> None:
+        from franktheunicorn.worker import runner
+
+        pc = ProjectConfig(owner="apache", repo="spark")
+        runner._last_closed_reap = float("-inf")
+        with (
+            patch("franktheunicorn.backends.poller.reap_closed_pull_requests", return_value=0),
+            patch("franktheunicorn.backends.poller.sync_open_pull_requests") as sync,
+        ):
+            assert runner._reap_closed_prs_if_due({pc.forge: MagicMock()}, [pc]) == []
+        sync.assert_not_called()
+
 
 @pytest.mark.django_db
 class TestConflictedGate:

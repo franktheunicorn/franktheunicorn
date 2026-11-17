@@ -2098,39 +2098,115 @@ def _bulk_drain_loop(
         raise
 
 
-#: How often a long cycle re-lists open PRs to drop the ones closed meanwhile.
+#: How often a long cycle re-lists open PRs to drop the ones closed meanwhile
+#: and pick up the ones opened meanwhile.
 _CLOSED_REAP_INTERVAL_SECONDS = 600.0
 _last_closed_reap = float("-inf")
 _closed_reap_lock = threading.Lock()
 
 
 def _reap_closed_prs_if_due(
-    clients: Mapping[str, object] | None, project_configs: Sequence[object]
-) -> None:
-    """Close rows for PRs that left the open listing, at most every 10 minutes.
+    clients: Mapping[str, object] | None,
+    project_configs: Sequence[object],
+    operator_username: str = "",
+    operator_config: OperatorConfig | None = None,
+    repo_paths: Mapping[str, Path | None] | None = None,
+) -> list[tuple[PullRequest, ProjectConfig, object]]:
+    """Re-list open PRs at most every 10 minutes: close the gone, ingest the new.
 
-    poll_project reaps once per project at the top of the cycle, and a cycle that
+    poll_project lists once per project at the top of the cycle, and a cycle that
     reviews hundreds of PRs runs for hours: everything merged meanwhile stayed on
-    the dashboard, and got reviewed. Costs one listing per project (8 calls for Spark).
+    the dashboard and got reviewed, and everything *opened* meanwhile was invisible
+    until the next cycle. Costs one listing per project (8 calls for Spark).
+
+    With ``operator_username`` the never-seen PRs in the listing are ingested and
+    returned as ``(pr, project_config, forge_client)`` for the caller to review
+    now; without it this only closes, as it used to.
     """
     global _last_closed_reap
-    from franktheunicorn.backends.poller import reap_closed_pull_requests
+    from franktheunicorn.backends.poller import (
+        reap_closed_pull_requests,
+        sync_open_pull_requests,
+    )
     from franktheunicorn.config.models import ProjectConfig
 
+    new: list[tuple[PullRequest, ProjectConfig, object]] = []
     with _closed_reap_lock:
         if not clients or time.monotonic() - _last_closed_reap < _CLOSED_REAP_INTERVAL_SECONDS:
-            return
+            return new
         _last_closed_reap = time.monotonic()
     for pc in project_configs:
         if not isinstance(pc, ProjectConfig) or not pc.enabled or pc.forge not in clients:
             continue
+        client = clients[pc.forge]
         try:
-            closed = reap_closed_pull_requests(pc, clients[pc.forge])  # type: ignore[arg-type]
+            if operator_username:
+                closed, prs = sync_open_pull_requests(
+                    pc,
+                    client,  # type: ignore[arg-type]
+                    operator_username,
+                    repo_path=(repo_paths or {}).get(pc.full_name),
+                    merge_intent=operator_config.merge_intent if operator_config else None,
+                )
+            else:
+                closed, prs = reap_closed_pull_requests(pc, client), []  # type: ignore[arg-type]
         except Exception:
-            logger.debug("Mid-cycle closed-PR reap failed for %s", pc.full_name, exc_info=True)
+            logger.debug("Mid-cycle open-PR sync failed for %s", pc.full_name, exc_info=True)
             continue
         if closed:
             logger.info("%s: %d PR(s) closed upstream mid-cycle, dropped", pc.full_name, closed)
+        if prs:
+            logger.info(
+                "%s: %d PR(s) opened mid-cycle, ingested: %s",
+                pc.full_name,
+                len(prs),
+                ", ".join(f"#{pr.number}" for pr in prs),
+            )
+        new.extend((pr, pc, client) for pr in prs)
+    return new
+
+
+def _sync_open_prs_mid_cycle(
+    clients: Mapping[str, object] | None,
+    project_configs: Sequence[object],
+    operator_username: str,
+    operator_config: OperatorConfig | None,
+    *,
+    disabled_backends: frozenset[int],
+    diff_http: httpx.Client,
+    decisions: Counter[str] | None,
+    repo_paths: Mapping[str, Path | None],
+    reviewed_pks: set[int | None],
+) -> None:
+    """The throttled reap, plus a review of every PR it found opened mid-cycle.
+
+    New PRs go straight to ``process_pr`` rather than waiting for the backfill:
+    they are what the operator is most likely to be looking for, and the backfill
+    is capped and ordered by draft count, so it might not reach them this cycle.
+    """
+    from django.conf import settings
+
+    for pr, pc, client in _reap_closed_prs_if_due(
+        clients, project_configs, operator_username, operator_config, repo_paths
+    ):
+        reviewed_pks.add(pr.pk)
+        repo_path = repo_paths.get(pc.full_name)
+        if repo_path is None:
+            candidate = Path(settings.FRANK_REPOS_DIR) / pc.owner / pc.repo
+            repo_path = candidate if candidate.is_dir() else None
+        try:
+            process_pr(
+                pr,
+                pc,
+                operator_config,
+                disabled_backends=disabled_backends,
+                diff_http=diff_http,
+                repo_path=repo_path,
+                forge_client=client,  # type: ignore[arg-type]
+                decisions=decisions,
+            )
+        except Exception:
+            logger.exception("Error reviewing mid-cycle PR #%d (%s)", pr.number, pc.full_name)
 
 
 def _run_cycle(
@@ -2286,7 +2362,17 @@ def _run_cycle(
                     getattr(pr, "interest_score", 0.0),
                 )
 
-                _reap_closed_prs_if_due(clients, project_configs)
+                _sync_open_prs_mid_cycle(
+                    clients,
+                    project_configs,
+                    operator_username,
+                    operator_config,
+                    disabled_backends=disabled_backends,
+                    diff_http=diff_http,
+                    decisions=decisions,
+                    repo_paths=repo_paths,
+                    reviewed_pks=reviewed_pks,
+                )
                 process_pr(
                     pr,
                     pc,
@@ -2389,6 +2475,7 @@ def _run_cycle(
         clients=clients,
         decisions=decisions,
         repo_paths=repo_paths,
+        operator_username=operator_username,
     )
 
     # Alert mode: working-overlap + security-report alerts, batched email.
@@ -2615,6 +2702,7 @@ def _backfill_unreviewed_prs(
     clients: Mapping[str, object] | None = None,
     decisions: Counter[str] | None = None,
     repo_paths: Mapping[str, Path | None] | None = None,
+    operator_username: str = "",
 ) -> None:
     """Draft reviews for open PRs in the DB that have no review drafts yet.
 
@@ -2682,7 +2770,17 @@ def _backfill_unreviewed_prs(
         # each would be ~900 a cycle on Spark — breaking the same "per-PR detail
         # stays at DEBUG" rule this work added to CLAUDE.md.
         considered += 1
-        _reap_closed_prs_if_due(clients, project_configs)
+        _sync_open_prs_mid_cycle(
+            clients,
+            project_configs,
+            operator_username,
+            operator_config,
+            disabled_backends=disabled_backends,
+            diff_http=diff_http,
+            decisions=decisions,
+            repo_paths=repo_paths or {},
+            reviewed_pks=already_polled_pks,
+        )
         if review_skip_reason(pr, pc, operator_config, force=False) is not None:
             continue
 
