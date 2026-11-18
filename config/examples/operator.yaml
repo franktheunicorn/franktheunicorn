@@ -90,9 +90,20 @@ poll_interval_seconds: 300
 # threads review them, each in its own checkout lane. PRs opened mid-cycle join
 # the back of that queue — the operator's own go to the front. 1 restores the
 # old one-PR-at-a-time cycle.
+#
+# refresh_concurrency is how many PRs the cycle *refreshes* (detail, files,
+# comments, reviews, CI, blame) at once — in the poll, the mid-cycle open-PR
+# sync and the own/mentioned-PR scan (default 4; 1 is the old serial refresh).
+#
+# operator_scan_minutes is how often a running cycle re-searches for your own
+# PRs, the ones you reviewed, and the ones you're mentioned, assigned or
+# requested on (default 10; it also runs at the start of every cycle). Only
+# the PRs that changed since their last refresh are re-fetched.
 # worker_pool:
 #   concurrency: 3
 #   review_concurrency: 10
+#   refresh_concurrency: 4
+#   operator_scan_minutes: 10
 
 # Log level for the worker (CRITICAL/ERROR/WARNING/INFO/DEBUG/NOTSET).
 # Override at the command line with `make worker-debug`, the runner's

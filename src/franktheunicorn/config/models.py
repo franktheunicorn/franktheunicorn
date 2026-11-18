@@ -2758,6 +2758,24 @@ class WorkerPoolConfig(BaseModel):
     #: each other's model calls. 1 restores the old in-line, one-at-a-time cycle.
     review_concurrency: int = 10
 
+    #: How many PRs the cycle *refreshes* at once — the per-PR forge reads (detail,
+    #: files, comments, reviews, CI) and blame behind the poll, the mid-cycle
+    #: open-PR sync and the own/mentioned-PR scan. That work is almost all network
+    #: waits, and it used to run one PR at a time on the main thread while the
+    #: review runners sat idle waiting for it. Kept well under GitHub's
+    #: secondary-rate-limit comfort zone: the review runners make forge calls too.
+    #: 1 restores the old serial refresh.
+    refresh_concurrency: int = 4
+
+    #: How often, in minutes, a running cycle re-searches for the operator's own
+    #: PRs, the ones they reviewed, and the ones they're mentioned/assigned/
+    #: requested on, refreshing whichever moved. It also runs at the start of
+    #: every cycle. A Spark cycle runs for hours, and this used to run once, at
+    #: the end of the poll phase — so a review request or a reply on your own PR
+    #: could wait most of a day to show up. Each scan is three searches; only the
+    #: PRs that changed cost per-PR reads.
+    operator_scan_minutes: int = 10
+
 
 class OperatorConfig(BaseModel):
     """Top-level operator config loaded from operator.yaml."""

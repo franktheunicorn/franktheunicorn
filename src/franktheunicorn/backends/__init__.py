@@ -35,7 +35,8 @@ def _rate_limiter_for(db_path: str) -> GitHubRateLimiter | None:
 
     Cached deliberately, for two reasons. Each instance opens a SQLite
     connection it never closes, and ``ingest_single_pr`` builds a client per PR
-    — up to 100 per cycle from the mention scan — so a fresh limiter each time
+    — up to 100 per cycle from the mention scan, when the scan used it — so a
+    fresh limiter each time
     leaked a connection each time. And the header-derived remaining/reset pair
     that the limiter calls its authoritative brake lives in plain instance
     attributes: a new instance starts out blind to quota it has already spent.

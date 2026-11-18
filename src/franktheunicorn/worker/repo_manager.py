@@ -11,10 +11,25 @@ import hashlib
 import logging
 import re
 import subprocess
+import threading
 import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+#: One fetch at a time per clone. The poll refreshes PRs on several threads
+#: (``worker_pool.refresh_concurrency``) and each refresh may fetch a PR's base
+#: and head here: two ``git fetch`` runs into one repo race on its ref locks, and
+#: two first-time fetches from the same fork both try ``git remote add``. The
+#: present-already check is inside the lock too, so a thread waiting on another's
+#: fetch of the same SHA finds it there and fetches nothing.
+_FETCH_LOCKS: dict[str, threading.RLock] = {}
+_FETCH_LOCKS_GUARD = threading.Lock()
+
+
+def _fetch_lock(repo_path: Path) -> threading.RLock:
+    with _FETCH_LOCKS_GUARD:
+        return _FETCH_LOCKS.setdefault(str(repo_path), threading.RLock())
 
 
 def ensure_repo(
@@ -271,7 +286,23 @@ def ensure_sha_fetched(
     4. Fork remote fetch (if *fork_clone_url* is given).
 
     Returns True if the SHA is available after all attempts, False otherwise.
+    Serialised per clone; see ``_FETCH_LOCKS``.
     """
+    with _fetch_lock(repo_path):
+        return _ensure_sha_fetched_locked(
+            repo_path, sha, branch=branch, pr_number=pr_number, fork_clone_url=fork_clone_url
+        )
+
+
+def _ensure_sha_fetched_locked(
+    repo_path: Path,
+    sha: str,
+    *,
+    branch: str,
+    pr_number: int,
+    fork_clone_url: str,
+) -> bool:
+    """:func:`ensure_sha_fetched`'s body; the caller holds the clone's fetch lock."""
     if ensure_ref_available(repo_path, sha):
         return True
 

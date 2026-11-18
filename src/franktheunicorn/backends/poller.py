@@ -9,7 +9,8 @@ and stores results in the database. Works with any ``ForgeClient``
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ from django.utils import timezone
 
 from franktheunicorn.backends.base import MAX_LISTED_PULL_REQUESTS, ForgeClient
 from franktheunicorn.config.models import MergeIntentConfig, ProjectConfig
+from franktheunicorn.core.concurrency import map_ordered
 from franktheunicorn.core.models import Project, PullRequest, ReviewDraft
 from franktheunicorn.core.session_detector import detect_agent_session
 from franktheunicorn.scoring.merge_readiness import (
@@ -60,6 +62,21 @@ _LISTING_FIELDS = (
     "head_sha",
 )
 
+# What the unchanged-PR skip reads off a stored row (see _needs_refresh).
+_KNOWN_FIELDS = (
+    "id",
+    "number",
+    "github_updated_at",
+    "last_polled_at",
+    "base_sha",
+    "score_breakdown",
+    "is_operator_pr",
+    "merge_readiness_verdict",
+    "rebase_requested_sha",
+    "ci_status",
+    *_LISTING_FIELDS,
+)
+
 # Ceiling on how long the operator's own PRs may go without a full refresh,
 # regardless of poll_refresh_hours: shepherding and the merge queue read
 # pr.mergeable, which only the per-PR detail call updates.
@@ -84,30 +101,8 @@ _CONTRIBUTORS_CACHE_EMPTY = "empty"
 _CONTRIBUTORS_CACHE_FAILED = "failed"
 
 
-def poll_project(
-    client: ForgeClient,
-    project_config: ProjectConfig,
-    operator_username: str,
-    *,
-    repo_path: Path | None = None,
-    skipped_prs: list[PullRequest] | None = None,
-    merge_intent: MergeIntentConfig | None = None,
-) -> list[PullRequest]:
-    """
-    Poll a single project for PRs, score them, and store in the DB.
-
-    If repo_path is provided and points to a valid git clone, blame data
-    is fetched for changed files and passed to the scorer.
-
-    *merge_intent* says whose approvals put a PR in the intending-to-merge
-    queue; ``None`` means the defaults, i.e. the operator's own.
-
-    Returns the list of PullRequest objects that were created or updated.
-    PRs skipped as unchanged are not in the returned list; pass a list as
-    *skipped_prs* to collect them. Callers that treat "not returned" as "never
-    seen" need that — the review backfill would otherwise review every skipped
-    PR, and the shepherding / dependency-changelog passes would ignore them.
-    """
+def _project_row(project_config: ProjectConfig) -> Project:
+    """The configured project's row, created (enabled) if this is its first sight."""
     shared = {
         "review_context": project_config.review_context,
         # Sync the dashboard's type filter from YAML governance — nothing
@@ -124,6 +119,53 @@ def poll_project(
         create_defaults={**shared, "enabled": True},
         defaults=shared,
     )
+    return project
+
+
+def _known_rows(project: Project, numbers: Sequence[int]) -> dict[int, dict[str, Any]]:
+    """What we already know about *numbers*, for the unchanged-PR skip.
+
+    Scoped to the PRs asked about — a long-lived project accumulates every PR it
+    has ever ingested, and score_breakdown is a JSONField that has to be
+    deserialized per row.
+    """
+    return {
+        row["number"]: row
+        for row in PullRequest.objects.filter(project=project, number__in=list(numbers)).values(
+            *_KNOWN_FIELDS
+        )
+    }
+
+
+def poll_project(
+    client: ForgeClient,
+    project_config: ProjectConfig,
+    operator_username: str,
+    *,
+    repo_path: Path | None = None,
+    skipped_prs: list[PullRequest] | None = None,
+    merge_intent: MergeIntentConfig | None = None,
+    concurrency: int = 1,
+) -> list[PullRequest]:
+    """
+    Poll a single project for PRs, score them, and store in the DB.
+
+    The changed PRs are refreshed *concurrency* at a time
+    (``worker_pool.refresh_concurrency``); 1 is one at a time on this thread.
+
+    If repo_path is provided and points to a valid git clone, blame data
+    is fetched for changed files and passed to the scorer.
+
+    *merge_intent* says whose approvals put a PR in the intending-to-merge
+    queue; ``None`` means the defaults, i.e. the operator's own.
+
+    Returns the list of PullRequest objects that were created or updated.
+    PRs skipped as unchanged are not in the returned list; pass a list as
+    *skipped_prs* to collect them. Callers that treat "not returned" as "never
+    seen" need that — the review backfill would otherwise review every skipped
+    PR, and the shepherding / dependency-changelog passes would ignore them.
+    """
+    project = _project_row(project_config)
     if not project.enabled:
         # Configured and disabled is a legitimate state, and also invisible: every
         # view gates on enabled AND configured. Said out loud, because the way this
@@ -170,47 +212,40 @@ def poll_project(
     # every PR it has ever ingested, and score_breakdown is a JSONField that
     # has to be deserialized per row.
     listed_numbers = [pr_data["number"] for pr_data in raw_prs if pr_data.get("number")]
-    known = {
-        row["number"]: row
-        for row in PullRequest.objects.filter(project=project, number__in=listed_numbers).values(
-            "id",
-            "number",
-            "github_updated_at",
-            "last_polled_at",
-            "base_sha",
-            "score_breakdown",
-            "is_operator_pr",
-            "merge_readiness_verdict",
-            "rebase_requested_sha",
-            "ci_status",
-            *_LISTING_FIELDS,
-        )
-    }
+    known = _known_rows(project, listed_numbers)
 
     results: list[PullRequest] = []
     skipped_numbers: list[int] = []
     consecutive_failures = 0
 
+    # Decide first (free: the listing is in hand), then spend the per-PR calls on
+    # up to *concurrency* PRs at once. Outcomes come back in listing order, so the
+    # consecutive-failure guard below counts exactly what it counted serially.
+    to_refresh: list[dict[str, Any]] = []
+    # Refreshed PRs with an unchanged one before them in the listing. A skip
+    # resets the failure run: in the steady state almost every PR is skipped, and
+    # counting only across failures meant five bad rows scattered anywhere in a
+    # 900-PR listing tripped the bail-out and abandoned every PR after the fifth,
+    # deterministically and for good, since the listing order is stable and the
+    # same rows fail next cycle. Those PRs reached neither results nor
+    # skipped_prs, so the worker dropped them from the whole cycle: no review, no
+    # shepherding, no dependency pass.
+    after_skip: set[int] = set()
+    skipped_since_last = False
     for pr_data in raw_prs:
-        pr_number: int = pr_data["number"]
+        if _needs_refresh(known.get(pr_data["number"]), pr_data, project_config.poll_refresh_hours):
+            if skipped_since_last:
+                after_skip.add(pr_data["number"])
+            skipped_since_last = False
+            to_refresh.append(pr_data)
+        else:
+            skipped_since_last = True
+            skipped_numbers.append(pr_data["number"])
+            logger.debug("PR #%d unchanged since last poll; skipping", pr_data["number"])
 
-        known_row = known.get(pr_number)
-        if not _needs_refresh(known_row, pr_data, project_config.poll_refresh_hours):
-            skipped_numbers.append(pr_number)
-            logger.debug("PR #%d unchanged since last poll; skipping", pr_number)
-            # Reset here too. The counter is meant to catch "everything is
-            # failing", and in the steady state almost every PR takes this branch
-            # — so counting only across failures meant five bad rows scattered
-            # anywhere in a 900-PR listing tripped the bail-out and abandoned
-            # every PR after the fifth, deterministically and for good, since the
-            # listing order is stable and the same rows fail next cycle. Those PRs
-            # reached neither results nor skipped_prs, so the worker dropped them
-            # from the whole cycle: no review, no shepherding, no dependency pass.
-            consecutive_failures = 0
-            continue
-
+    def refresh(pr_data: dict[str, Any]) -> PullRequest:
         try:
-            pr_obj = _refresh_pull_request(
+            return _refresh_pull_request(
                 client,
                 project,
                 project_config,
@@ -220,14 +255,27 @@ def poll_project(
                 merge_intent=merge_intent,
             )
         except Exception:
+            # Rewound on the thread that failed, before the outcome is read: a
+            # refresh still in flight when the guard below gives up is finished
+            # (and rewound if it failed) before map_ordered lets go of it.
+            _rewind_refresh_marker(project, pr_data["number"], known.get(pr_data["number"]))
+            raise
+
+    outcomes = map_ordered(refresh, to_refresh, concurrency, name="poll")
+    for outcome in outcomes:
+        pr_data = outcome.item
+        pr_number: int = pr_data["number"]
+        if pr_number in after_skip:
+            consecutive_failures = 0
+        if outcome.error is not None:
             # Per-PR, not per-project: this used to raise out of poll_project, and
             # every PR after the bad one went unpolled.
-            logger.exception(
+            logger.error(
                 "Could not refresh PR #%d for %s; skipping it this cycle",
                 pr_number,
                 project.full_name,
+                exc_info=outcome.error,
             )
-            _rewind_refresh_marker(project, pr_number, known_row)
             consecutive_failures += 1
             if consecutive_failures >= _MAX_CONSECUTIVE_REFRESH_FAILURES:
                 # Hand the untouched tail back as skipped. Bailing out is about not
@@ -238,9 +286,13 @@ def poll_project(
                 # skipped_prs, so the worker gives them no review, no shepherding
                 # and no dependency pass. Their stored state is still perfectly
                 # usable by every pass that doesn't re-fetch.
+                # Closing the iterator cancels what hasn't started and waits out
+                # what has; those few in-flight rows are handed back as skipped
+                # too — whatever they wrote, the stored state is usable.
+                outcomes.close()
                 remaining = [
                     d["number"]
-                    for d in raw_prs[raw_prs.index(pr_data) + 1 :]
+                    for d in to_refresh[to_refresh.index(pr_data) + 1 :]
                     if d.get("number") is not None
                 ]
                 skipped_numbers.extend(remaining)
@@ -255,7 +307,8 @@ def poll_project(
             continue
 
         consecutive_failures = 0
-        results.append(pr_obj)
+        assert outcome.result is not None
+        results.append(outcome.result)
 
     _reroute_pull_requests(results, operator_username, project_config)
 
@@ -287,11 +340,16 @@ def _refresh_pull_request(
     repo_path: Path | None,
     *,
     merge_intent: MergeIntentConfig | None = None,
+    pr_detail: dict[str, Any] | None = None,
 ) -> PullRequest:
     """Spend the per-PR API calls on one PR: upsert, enrich, score, route.
 
     Was inline in ``poll_project``'s loop; extracted so it fits in one
     try/except. See the guard at the call site.
+
+    *pr_detail* is the PR's detail payload when the caller already fetched it
+    (the operator scan starts from a search hit, which has no refs, so it has
+    to): the refresh then skips its own detail read.
     """
     pr_number: int = pr_data["number"]
     logger.debug("Fetching changed files for PR #%d ...", pr_number)
@@ -313,17 +371,18 @@ def _refresh_pull_request(
     pr_obj = _upsert_pull_request(project, pr_data, changed_files)
 
     # Fetch PR detail (includes mergeable status + base/head refs).
-    pr_detail: dict[str, Any] = {}
+    detail: dict[str, Any] = pr_detail or {}
     try:
-        pr_detail = client.get_pull_request(project_config.owner, project_config.repo, pr_number)
-        raw_mergeable = pr_detail.get("mergeable")
+        if pr_detail is None:
+            detail = client.get_pull_request(project_config.owner, project_config.repo, pr_number)
+        raw_mergeable = detail.get("mergeable")
         if isinstance(raw_mergeable, bool):
             pr_obj.mergeable = raw_mergeable
         # The list endpoint doesn't carry diff stats, so every
         # list-ingested PR showed up on the dashboard as "0+ / 0-". The
         # detail response has them — keep them.
-        raw_additions = pr_detail.get("additions")
-        raw_deletions = pr_detail.get("deletions")
+        raw_additions = detail.get("additions")
+        raw_deletions = detail.get("deletions")
         if isinstance(raw_additions, int):
             pr_obj.additions = raw_additions
         if isinstance(raw_deletions, int):
@@ -337,8 +396,8 @@ def _refresh_pull_request(
     base_branch = ""
     head_branch = ""
     fork_clone_url = ""
-    base_data = pr_detail.get("base")
-    head_data = pr_detail.get("head")
+    base_data = detail.get("base")
+    head_data = detail.get("head")
     if isinstance(base_data, dict):
         base_sha = base_data.get("sha", "")
         base_branch = base_data.get("ref", "")
@@ -624,6 +683,8 @@ def _needs_refresh(
     known: Mapping[str, object] | None,
     pr_data: dict[str, Any],
     refresh_hours: int,
+    *,
+    partial: bool = False,
 ) -> bool:
     """Decide whether *pr_data* is worth spending per-PR API calls on.
 
@@ -631,6 +692,10 @@ def _needs_refresh(
     fetched, therefore free) listing payload moved, when the stored row is
     incomplete because an earlier cycle was cut short, or when the last full
     refresh is old enough that state the listing can't see may have drifted.
+
+    *partial* is for a payload that carries only some of the listing's fields —
+    a search hit has no head and no requested reviewers — and compares only the
+    fields it has, rather than reading every absent one as a change.
     """
     if refresh_hours <= 0 or known is None:
         return True
@@ -650,7 +715,7 @@ def _needs_refresh(
     # updated_at is the forge's summary of "something happened", but don't
     # trust it alone — reviewer/label/title edits drive routing, and the
     # listing already told us about them for free.
-    for field_name, listed in _listing_values(pr_data).items():
+    for field_name, listed in _listing_values(pr_data, partial=partial).items():
         if listed != known.get(field_name):
             return True
 
@@ -697,11 +762,12 @@ def _listed_head_sha(pr_data: dict[str, Any]) -> str:
     return ""
 
 
-def _listing_values(pr_data: dict[str, Any]) -> dict[str, Any]:
+def _listing_values(pr_data: dict[str, Any], *, partial: bool = False) -> dict[str, Any]:
     """Project a listing payload onto the stored fields it can be compared to.
 
     ``head_sha`` is included only when the listing actually carries one. An
-    empty comparison would treat every stored SHA as a change.
+    empty comparison would treat every stored SHA as a change. With *partial*
+    the same goes for every field: one the payload doesn't carry is left out.
     """
     values: dict[str, Any] = {
         "title": pr_data.get("title", ""),
@@ -715,7 +781,17 @@ def _listing_values(pr_data: dict[str, Any]) -> dict[str, Any]:
     head_sha = _listed_head_sha(pr_data)
     if head_sha:
         values["head_sha"] = head_sha
+    if partial:
+        values = {
+            field: value
+            for field, value in values.items()
+            if _PAYLOAD_KEY.get(field, field) in pr_data
+        }
     return values
+
+
+#: Stored field → the payload key it is read from, where they differ.
+_PAYLOAD_KEY = {"is_draft": "draft", "head_sha": "head"}
 
 
 def _mark_reviews_stale(pr_obj: PullRequest) -> None:
@@ -932,6 +1008,7 @@ def sync_open_pull_requests(
     *,
     repo_path: Path | None = None,
     merge_intent: MergeIntentConfig | None = None,
+    concurrency: int = 1,
 ) -> tuple[int, list[PullRequest]]:
     """One open-PR listing: close the rows that left it, ingest the ones new to it.
 
@@ -967,26 +1044,115 @@ def sync_open_pull_requests(
         )
         unseen = unseen[:MAX_MID_CYCLE_NEW_PRS]
 
+    def ingest(number: int) -> PullRequest:
+        return _refresh_pull_request(
+            client,
+            project,
+            project_config,
+            listed[number],
+            operator_username,
+            repo_path,
+            merge_intent=merge_intent,
+        )
+
     new_prs: list[PullRequest] = []
-    for number in unseen:
-        try:
-            new_prs.append(
-                _refresh_pull_request(
-                    client,
-                    project,
-                    project_config,
-                    listed[number],
-                    operator_username,
-                    repo_path,
-                    merge_intent=merge_intent,
-                )
+    for outcome in map_ordered(ingest, unseen, concurrency, name="sync"):
+        if outcome.error is not None:
+            logger.error(
+                "Could not ingest new PR #%d for %s mid-cycle",
+                outcome.item,
+                project.full_name,
+                exc_info=outcome.error,
             )
-        except Exception:
-            logger.exception(
-                "Could not ingest new PR #%d for %s mid-cycle", number, project.full_name
-            )
+        elif outcome.result is not None:
+            new_prs.append(outcome.result)
     _reroute_pull_requests(new_prs, operator_username, project_config)
     return closed, new_prs
+
+
+@dataclass
+class SearchHitPlan:
+    """Which of a project's search hits are worth a refresh, and which are not.
+
+    ``refresh`` and ``unchanged`` keep the order the hits came in.
+    """
+
+    project: Project
+    refresh: list[int]
+    unchanged: list[int]
+
+
+def plan_search_hit_refresh(
+    client: ForgeClient,
+    project_config: ProjectConfig,
+    items: Sequence[dict[str, Any]],
+) -> SearchHitPlan:
+    """Split one project's issue-search hits into "refresh" and "unchanged".
+
+    The operator scan finds PRs by search, not by listing, and used to give every
+    hit a full refresh every cycle — a few hundred PRs of detail, files, comments,
+    reviews and CI reads for an account that is mostly the same as an hour ago.
+    A search hit carries ``updated_at`` and most of the listing's fields, so it
+    goes through the same :func:`_needs_refresh` as the poll: new, moved,
+    degraded, or past its timer (an hour for the operator's own PRs). A PR the
+    poll refreshed a minute ago is therefore not refreshed again.
+
+    Runs on the calling thread and is where a project's first sighting creates
+    its row and contributors cache, so the refreshes that follow, on several
+    threads at once, never race to do either.
+    """
+    project = _project_row(project_config)
+    if not project.contributors_cache:
+        _refresh_contributors_cache(client, project, project_config.owner, project_config.repo)
+    numbers = [int(item["number"]) for item in items if item.get("number")]
+    known = _known_rows(project, numbers)
+    refresh: list[int] = []
+    unchanged: list[int] = []
+    for item in items:
+        number = item.get("number")
+        if not number:
+            continue
+        if _needs_refresh(
+            known.get(int(number)), item, project_config.poll_refresh_hours, partial=True
+        ):
+            refresh.append(int(number))
+        else:
+            unchanged.append(int(number))
+    return SearchHitPlan(project, refresh, unchanged)
+
+
+def refresh_pull_request_by_number(
+    client: ForgeClient,
+    project: Project,
+    project_config: ProjectConfig,
+    pr_number: int,
+    operator_username: str,
+    *,
+    repo_path: Path | None = None,
+    merge_intent: MergeIntentConfig | None = None,
+) -> PullRequest:
+    """The poll's full per-PR refresh, for a PR known only by number.
+
+    The operator scan used ``ingest_single_pr`` for this, which is the dashboard's
+    lighter on-demand ingest, and it was wrong for a recurring refresh in three
+    ways: it scored without blame or CVE history, so every scan overwrote the
+    poll's score for exactly the PRs the operator is engaged in; a push it saw
+    never marked the earlier reviews stale, so a PR the listing didn't reach was
+    never re-reviewed after one; and it never stamped ``last_polled_at``, so
+    nothing could tell a fresh row from a stale one. This is the poll's refresh,
+    started from the detail payload (a search hit has no refs).
+    """
+    detail = client.get_pull_request(project_config.owner, project_config.repo, pr_number)
+    return _refresh_pull_request(
+        client,
+        project,
+        project_config,
+        detail,
+        operator_username,
+        repo_path,
+        merge_intent=merge_intent,
+        pr_detail=detail,
+    )
 
 
 def _should_analyze_ci(pr_obj: PullRequest, project_config: ProjectConfig) -> bool:
@@ -1417,8 +1583,9 @@ def ingest_single_pr(
 
     # One comments read for scoring and the merge-intent sync below. Scoring
     # without them wrote over the poll's mention bonus, "ball in our court" and
-    # pending-response bumps on every own-PR scan, which is every cycle for
-    # exactly the PRs the operator is engaged in.
+    # pending-response bumps — on every own-PR scan, back when the scan came
+    # through here (it uses refresh_pull_request_by_number now), and still on
+    # every dashboard lookup.
     fetched_comments: list[dict[str, Any]] | None = None
     comment_bodies: list[str] | None = None
     comment_events: list[dict[str, str]] | None = None
@@ -1467,10 +1634,9 @@ def ingest_single_pr(
     if not project.contributors_cache:
         _refresh_contributors_cache(client, project, owner, repo)
 
-    # The operator's own-PR scan lands here for every PR they have reviewed or
-    # commented on — exactly the set whose approvals the intending-to-merge
-    # queue is made of, and the only path that reaches a PR the project poll
-    # could not list. Same two reads as the poll path.
+    # A dashboard lookup reaches PRs the project poll could not list, and those
+    # approvals belong in the intending-to-merge queue too. Same two reads as
+    # the poll path.
     _sync_merge_intent(
         client,
         owner,

@@ -2148,6 +2148,7 @@ def _reap_closed_prs_if_due(
                     operator_username,
                     repo_path=(repo_paths or {}).get(pc.full_name),
                     merge_intent=operator_config.merge_intent if operator_config else None,
+                    concurrency=_refresh_concurrency(operator_config),
                 )
             else:
                 closed, prs = reap_closed_pull_requests(pc, client), []  # type: ignore[arg-type]
@@ -2184,7 +2185,6 @@ def _sync_open_prs_mid_cycle(
     Queued here rather than left to the backfill, which is capped and ordered by
     draft count and so might not reach them this cycle.
     """
-    from django.conf import settings
 
     from franktheunicorn.worker.review_pool import ReviewItem
 
@@ -2194,10 +2194,7 @@ def _sync_open_prs_mid_cycle(
         if pr.pk in reviewed_pks:
             continue
         reviewed_pks.add(pr.pk)
-        repo_path = repo_paths.get(pc.full_name)
-        if repo_path is None:
-            candidate = Path(settings.FRANK_REPOS_DIR) / pc.owner / pc.repo
-            repo_path = candidate if candidate.is_dir() else None
+        repo_path = _clone_path(pc, repo_paths)
         own = bool(getattr(pr, "is_operator_pr", False))
         logger.info(
             "Queued mid-cycle PR #%d (%s) at the %s of %d pending review(s)",
@@ -2207,6 +2204,22 @@ def _sync_open_prs_mid_cycle(
             pool.pending(),
         )
         pool.submit(ReviewItem(pr, pc, client, repo_path), front=own)
+
+
+def _clone_path(pc: ProjectConfig, repo_paths: Mapping[str, Path | None] | None) -> Path | None:
+    """The project's clone: this cycle's, or the one on disk from an earlier cycle.
+
+    A PR queued before the poll has reached its project (the operator scan runs
+    first) still needs a checkout, or its agent CLIs record "no checkout" — which
+    no later pass can tell from a real outage.
+    """
+    from django.conf import settings
+
+    path = (repo_paths or {}).get(pc.full_name)
+    if path is None:
+        candidate = Path(settings.FRANK_REPOS_DIR) / pc.owner / pc.repo
+        path = candidate if candidate.is_dir() else None
+    return path
 
 
 def _review_concurrency(operator_config: OperatorConfig | None) -> int:
@@ -2415,9 +2428,56 @@ def _run_cycle_in(
             decisions_lock=decisions_lock,
         )
 
+    def operator_scan(*, force: bool = False) -> None:
+        # Own/reviewed/mentioned PRs: at the start of the cycle and then every
+        # operator_scan_minutes from the main thread's turns. It used to run once,
+        # after the poll phase's reviews — hours into a Spark cycle.
+        nonlocal refreshed_prs
+        if not operator_username or not (force or _operator_scan_due(operator_config)):
+            return
+        if force:
+            _operator_scan_due(operator_config)  # restart the interval from here
+        try:
+            found = _scan_operator_prs(
+                clients, operator_username, operator_config, project_configs, repo_paths=repo_paths
+            )
+        except Exception:
+            logger.exception("Own/involved PR scan failed")
+            return
+        queued_front = queued_back = 0
+        for hit in found:
+            pr = hit.pr
+            if pr.pk not in pr_to_config:
+                all_prs.append(pr)
+                pr_to_config[pr.pk] = hit.pc
+            # Only what this scan refreshed and is still open; and never a PR this
+            # cycle already queued — two runners on one PR would both review it.
+            if not hit.refreshed or pr.state != "open" or pr.pk in reviewed_pks:
+                continue
+            refreshed_prs += 1
+            reviewed_pks.add(pr.pk)
+            own = bool(getattr(pr, "is_operator_pr", False))
+            if own:
+                queued_front += 1
+            else:
+                queued_back += 1
+            pool.submit(
+                ReviewItem(pr, hit.pc, hit.client, _clone_path(hit.pc, repo_paths)), front=own
+            )
+        if queued_front or queued_back:
+            logger.info(
+                "Own/involved PR scan queued %d PR(s) for review: %d of yours at the front, "
+                "%d at the back",
+                queued_front + queued_back,
+                queued_front,
+                queued_back,
+            )
+
     def mid_cycle_tick() -> None:
         # The main thread's turn while the runners review: pick up PRs opened
-        # since the poll (and drop the closed ones), and answer button presses.
+        # since the poll (and drop the closed ones), refresh the operator's own
+        # and mentioned PRs when due, and answer button presses.
+        operator_scan()
         _sync_open_prs_mid_cycle(
             clients,
             project_configs,
@@ -2433,6 +2493,11 @@ def _run_cycle_in(
     pool.start()
     if not pool.inline:
         logger.info("Reviewing with %d concurrent runner(s) this cycle", pool.size)
+
+    # The operator's PRs first: the runners start on them while the main thread
+    # works through the project listings, and a PR refreshed here is "unchanged"
+    # to the poll a minute later, so it is not fetched twice.
+    operator_scan(force=True)
 
     for pc in project_configs:
         if not isinstance(pc, ProjectConfig) or not pc.enabled:
@@ -2492,6 +2557,7 @@ def _run_cycle_in(
                 repo_path=repo_path,
                 skipped_prs=project_skipped,  # type: ignore[arg-type]
                 merge_intent=operator_config.merge_intent if operator_config else None,
+                concurrency=_refresh_concurrency(operator_config),
             )
             logger.info(
                 "Polled %s/%s: %d refreshed, %d unchanged",
@@ -2510,6 +2576,10 @@ def _run_cycle_in(
             for pr in prs:
                 all_prs.append(pr)
                 pr_to_config[pr.pk] = pc
+                # The operator scan runs first and may have queued it already;
+                # two runners on one PR would both review it.
+                if pr.pk in reviewed_pks:
+                    continue
                 reviewed_pks.add(pr.pk)
                 pool.submit(ReviewItem(pr, pc, client, repo_path))
             if pool.inline:
@@ -2520,12 +2590,18 @@ def _run_cycle_in(
             logger.exception("Error polling %s/%s", pc.owner, pc.repo)
 
         # Also drain per project: with the runners reviewing, the main thread's
-        # turn comes between projects (and in the wait below).
+        # turn comes between projects (and in the wait below). The operator scan
+        # takes the same turn when due — polling Spark alone can take a while.
         _drain_worker_commands(operator_config, min_priority=PRIORITY_INTERACTIVE)
+        operator_scan()
 
     # Every project is polled; now wait for the runners, taking the mid-cycle
     # sync's and the button presses' turns while they work.
     _wait_for_reviews(pool, mid_cycle_tick, "poll")
+
+    # The scan and the poll can both hand over the same PR; the passes below
+    # draft per PR, so each gets it once — the latest copy, which is the freshest.
+    all_prs[:] = list({getattr(pr, "pk", id(pr)): pr for pr in all_prs}.values())
 
     # Fetch dependency changelogs reusing the same HTTP client.
     _fetch_dependency_changelogs_for_cycle(
@@ -2557,11 +2633,9 @@ def _run_cycle_in(
     if operator_config is not None:
         _schedule_variant_scans(operator_config)
 
-    if operator_username:
-        _scan_operator_prs(clients, operator_username, operator_config, project_configs)
-
-    # The mention scan can be 100 ingests and the backfill can be many LLM
-    # reviews; don't make a queued triage wait behind either.
+    # The backfill can be many LLM reviews; don't make a queued triage wait
+    # behind it. (The operator scan runs from the main thread's turns now — at
+    # the start of the cycle, between projects and in the waits — not here.)
     _drain_worker_commands(operator_config, min_priority=PRIORITY_INTERACTIVE)
 
     # Backfill pass: draft reviews for open PRs that were ingested (e.g. via
@@ -2657,13 +2731,48 @@ _SKIP_ADVICE = {
 }
 
 
+@dataclass
+class OperatorScanHit:
+    """One PR the operator scan found in a configured project.
+
+    ``refreshed`` says whether this scan re-fetched it; an unchanged hit is the
+    stored row, still the operator's PR for the passes that read stored state.
+    """
+
+    pr: PullRequest
+    pc: ProjectConfig
+    client: object
+    label: str
+    refreshed: bool
+
+
+#: The scan's three searches, in the order they are run and their hits refreshed:
+#: by how much it costs the operator to miss one, so a scan that gives up part-way
+#: leaves the important sets landed. Their own PRs, then the ones they already
+#: reviewed and are on the hook to re-check, then the wide mention sweep.
+_OPERATOR_SEARCHES = (
+    ("authored", "search_prs_authored_by"),
+    ("reviewed", "search_prs_reviewed_by"),
+    ("involved", "search_prs_involving"),
+)
+
+
+def _refresh_concurrency(operator_config: OperatorConfig | None) -> int:
+    """How many PRs the cycle refreshes at once (worker_pool.refresh_concurrency)."""
+    if operator_config is None:
+        return 1
+    return max(1, operator_config.worker_pool.refresh_concurrency)
+
+
 def _scan_operator_prs(
     clients: Mapping[str, object],
     operator_username: str,
     operator_config: OperatorConfig | None,
     project_configs: Sequence[object] | None = None,
-) -> None:
-    """Ingest the operator's own open PRs, the ones they reviewed, and the rest.
+    *,
+    repo_paths: Mapping[str, Path | None] | None = None,
+) -> list[OperatorScanHit]:
+    """Find the operator's own open PRs, the ones they reviewed, and the rest; refresh the moved.
 
     Three searches per forge, not one. ``search_prs_authored_by`` asks for the
     operator's own PRs by name, ``search_prs_reviewed_by`` for the ones they have
@@ -2675,113 +2784,209 @@ def _scan_operator_prs(
     ``involves:`` returns every thread the operator has ever commented on, one
     page of it, so on a busy account their own PRs could be crowded out of the
     result set entirely — and it is their own PRs that the shepherding pass, the
-    merge queue and the "Your PRs" queue are all built on. Own-PRs are also
-    ingested first, so if anything downstream gives up part-way they are the part
-    that landed.
+    merge queue and the "Your PRs" queue are all built on.
 
-    The searches are account-wide; only enabled project YAML is ingested.
+    The searches are account-wide; only enabled project YAML is refreshed, and
+    only on the forge that project is configured for.
 
-    Each found PR is ingested via ``ingest_single_pr``, which is an idempotent
-    upsert *including* a per-PR detail fetch — so this refreshes mergeable state
-    on a PR the project poll didn't list, which is the other half of the problem:
-    a repo with more open PRs than one listing returns leaves the operator's PR
-    invisible to the poll entirely.
+    A hit is refreshed only when it moved: ``poller.plan_search_hit_refresh``
+    runs it through the poll's own unchanged-PR test (``updated_at``, the
+    fields the hit carries, a degraded row, and the refresh timer — an hour for
+    the operator's own PRs). Refreshing every hit every time was a few hundred
+    PRs of per-PR reads for an account that had mostly not changed. The refresh
+    itself is the poll's (``refresh_pull_request_by_number``), so blame-informed
+    scoring, stale-marking on a push and ``last_polled_at`` all apply — and it
+    runs ``worker_pool.refresh_concurrency`` PRs at a time.
 
-    Failures per-PR are caught individually so one bad PR doesn't stop the rest.
+    Returns every hit in a configured project, refreshed or not, own PRs first;
+    the cycle queues the refreshed ones for review and hands all of them to the
+    passes that read stored state. One PR failing costs only that PR.
     """
-    from franktheunicorn.backends.poller import ingest_single_pr
-    from franktheunicorn.config.loader import configured_owner_repos
+    from django.conf import settings
+
+    from franktheunicorn.backends.poller import (
+        SearchHitPlan,
+        plan_search_hit_refresh,
+        refresh_pull_request_by_number,
+    )
+    from franktheunicorn.config.loader import load_project_configs
     from franktheunicorn.config.models import ProjectConfig
+    from franktheunicorn.core.concurrency import map_ordered
+    from franktheunicorn.core.models import PullRequest as PullRequestModel
 
     if project_configs is None:
-        allowed = frozenset((o.lower(), r.lower()) for o, r in configured_owner_repos())
-    else:
-        allowed = frozenset(
-            (pc.owner.lower(), pc.repo.lower())
-            for pc in project_configs
-            if isinstance(pc, ProjectConfig) and pc.enabled
-        )
-    if not allowed:
+        project_configs = load_project_configs(getattr(settings, "FRANK_PROJECTS_DIR", ""))
+    by_name: dict[tuple[str, str], ProjectConfig] = {
+        (pc.owner.lower(), pc.repo.lower()): pc
+        for pc in project_configs
+        if isinstance(pc, ProjectConfig) and pc.enabled
+    }
+    if not by_name:
         logger.info("Own/involved PR scan skipped: no configured projects")
-        return
+        return []
 
-    total_ingested = 0
-    skipped_unconfigured = 0
-    # Deduped across the two searches and across forges: an authored PR that also
-    # mentions the operator would otherwise be ingested twice, at one detail
-    # fetch plus one files fetch each.
+    # Hits per (forge, project), in search order, deduped across the searches and
+    # forges: an authored PR that also mentions the operator is one refresh.
     seen: set[tuple[str, str, int]] = set()
-
+    found: dict[str, int] = {}
+    skipped_unconfigured = 0
+    hits: dict[tuple[str, str], list[tuple[str, dict[str, Any]]]] = {}
+    configs: dict[tuple[str, str], ProjectConfig] = {}
     for forge_name, client in clients.items():
-        # Ordered by how much it costs the operator to miss one, because a failure
-        # part-way through leaves the earlier sets landed: their own PRs first, then
-        # the ones they have already reviewed and are on the hook to re-check, then
-        # the wide mentioned/assigned sweep.
-        for label, finder in (
-            ("authored", getattr(client, "search_prs_authored_by", None)),
-            ("reviewed", getattr(client, "search_prs_reviewed_by", None)),
-            ("involved", getattr(client, "search_prs_involving", None)),
-        ):
+        for label, method in _OPERATOR_SEARCHES:
+            finder = getattr(client, method, None)
             if finder is None:
                 continue
             try:
                 items = finder(operator_username)
             except Exception:
-                logger.debug("%s PR search failed for forge %s", label, forge_name, exc_info=True)
+                # WARNING: a failed search is a set of PRs that silently stops
+                # refreshing, which is the complaint this scan exists to answer.
+                logger.warning(
+                    "%s PR search failed on forge %s; those PRs are not refreshed until "
+                    "the next scan",
+                    label.capitalize(),
+                    forge_name,
+                    exc_info=True,
+                )
                 continue
-            logger.info(
-                "%s scan (%s): %d open PR(s) for %s",
-                label.capitalize(),
-                forge_name,
-                len(items),
-                operator_username or "(username not set)",
-            )
             for item in items:
-                # Skip plain issues — only process actual PRs.
-                if not item.get("pull_request"):
+                if not item.get("pull_request"):  # a plain issue
                     continue
-
-                # Parse owner/repo from repository_url:
                 # e.g. "https://api.github.com/repos/apache/spark"
-                repo_url: str = item.get("repository_url", "")
-                parts = repo_url.rstrip("/").rsplit("/", 2)
-                if len(parts) < 3:
-                    logger.debug("Could not parse repository_url %r; skipping", repo_url)
+                parts = str(item.get("repository_url", "")).rstrip("/").rsplit("/", 2)
+                number = item.get("number")
+                if len(parts) < 3 or not number:
+                    logger.debug("Unparseable search hit %r; skipping", item.get("url"))
                     continue
-                owner, repo = parts[-2], parts[-1]
-                pr_number: int | None = item.get("number")
-                if not pr_number:
-                    continue
-                key = (owner, repo, pr_number)
+                key = (parts[-2].lower(), parts[-1].lower(), int(number))
                 if key in seen:
                     continue
                 seen.add(key)
-                if (owner.lower(), repo.lower()) not in allowed:
+                found[label] = found.get(label, 0) + 1
+                pc = by_name.get(key[:2])
+                if pc is None or pc.forge != forge_name:
                     skipped_unconfigured += 1
                     continue
+                hits.setdefault((forge_name, pc.full_name), []).append((label, item))
+                configs[(forge_name, pc.full_name)] = pc
 
-                try:
-                    ingest_single_pr(owner, repo, pr_number)
-                    total_ingested += 1
-                except Exception:
-                    logger.warning(
-                        "Could not ingest %s PR %s/%s#%d — it will not appear in the "
-                        "dashboard this cycle",
-                        label,
-                        owner,
-                        repo,
-                        pr_number,
-                        exc_info=True,
-                    )
+    # Plan on this thread: it creates rows and contributor caches on first sight.
+    plans: dict[tuple[str, str], tuple[SearchHitPlan, ProjectConfig, object]] = {}
+    for (forge_name, full_name), project_hits in hits.items():
+        pc = configs[(forge_name, full_name)]
+        client = clients[forge_name]
+        try:
+            plan = plan_search_hit_refresh(
+                client,  # type: ignore[arg-type]
+                pc,
+                [item for _, item in project_hits],
+            )
+        except Exception:
+            logger.warning(
+                "Could not plan the own/involved refresh for %s", full_name, exc_info=True
+            )
+            continue
+        plans[(forge_name, full_name)] = (plan, pc, client)
 
-    if seen or operator_username:
-        logger.info(
-            "Own/involved PR scan: %d distinct PR(s) found, %d ingested or refreshed, "
-            "%d skipped (not a configured project).",
-            len(seen),
-            total_ingested,
-            skipped_unconfigured,
+    labels = {
+        (forge_name, full_name, int(item["number"])): label
+        for (forge_name, full_name), project_hits in hits.items()
+        for label, item in project_hits
+    }
+    order = {label: i for i, (label, _) in enumerate(_OPERATOR_SEARCHES)}
+    to_refresh = sorted(
+        (
+            (forge_name, full_name, number)
+            for (forge_name, full_name), (plan, _, _) in plans.items()
+            for number in plan.refresh
+        ),
+        key=lambda k: order[labels[k]],
+    )
+
+    merge_intent = operator_config.merge_intent if operator_config else None
+
+    def refresh(key: tuple[str, str, int]) -> PullRequest:
+        plan, pc, client = plans[key[:2]]
+        return refresh_pull_request_by_number(
+            client,  # type: ignore[arg-type]
+            plan.project,
+            pc,
+            key[2],
+            operator_username,
+            repo_path=_clone_path(pc, repo_paths),
+            merge_intent=merge_intent,
         )
+
+    result: list[OperatorScanHit] = []
+    failed = 0
+    for outcome in map_ordered(
+        refresh, to_refresh, _refresh_concurrency(operator_config), name="own-scan"
+    ):
+        forge_name, full_name, number = outcome.item
+        _, pc, client = plans[(forge_name, full_name)]
+        if outcome.error is not None or outcome.result is None:
+            failed += 1
+            logger.warning(
+                "Could not refresh %s PR %s#%d; it keeps its stored state until the next scan",
+                labels[outcome.item],
+                full_name,
+                number,
+                exc_info=outcome.error,
+            )
+            continue
+        result.append(OperatorScanHit(outcome.result, pc, client, labels[outcome.item], True))
+
+    unchanged = 0
+    for (forge_name, full_name), (plan, pc, client) in plans.items():
+        if not plan.unchanged:
+            continue
+        rows = PullRequestModel.objects.filter(project=plan.project, number__in=plan.unchanged)
+        for pr in rows.select_related("project"):
+            unchanged += 1
+            label = labels[(forge_name, full_name, pr.number)]
+            result.append(OperatorScanHit(pr, pc, client, label, False))
+    result.sort(key=lambda hit: order[hit.label])
+
+    logger.info(
+        "Own/involved PR scan for %s: %d distinct PR(s) found (%s); %d refreshed, "
+        "%d unchanged, %d failed, %d skipped (not a configured project).",
+        operator_username or "(username not set)",
+        len(seen),
+        ", ".join(f"{label} {found.get(label, 0)}" for label, _ in _OPERATOR_SEARCHES),
+        len(to_refresh) - failed,
+        unchanged,
+        failed,
+        skipped_unconfigured,
+    )
+    return result
+
+
+@dataclass
+class _ScanClock:
+    """When a running cycle last scanned for the operator's PRs (monotonic seconds).
+
+    An object rather than a rebound module global: the cycle's main thread is the
+    only writer, and tests reset it with ``reset()``.
+    """
+
+    last: float = float("-inf")
+
+    def reset(self) -> None:
+        self.last = float("-inf")
+
+
+_operator_scan_clock = _ScanClock()
+
+
+def _operator_scan_due(operator_config: OperatorConfig | None) -> bool:
+    """Whether the mid-cycle operator scan's interval has lapsed; claims it if so."""
+    minutes = operator_config.worker_pool.operator_scan_minutes if operator_config else 10
+    now = time.monotonic()
+    if now - _operator_scan_clock.last < max(0, minutes) * 60:
+        return False
+    _operator_scan_clock.last = now
+    return True
 
 
 #: Reviews the backfill will start in one cycle.

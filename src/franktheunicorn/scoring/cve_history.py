@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import re
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -78,6 +79,11 @@ TERSE_MESSAGE_MAX_LENGTH = 120  # chars
 CACHE_TTL_SECONDS = 86400  # 24 hours
 
 _cache: dict[str, tuple[float, set[str]]] = {}
+#: The poll scores PRs on several threads, and a cold cache is a full ``git log``
+#: of the repo: unlocked, every thread that arrived before the first finished ran
+#: its own. One scan per key; the rest wait for it and read the cache.
+_scan_locks: dict[str, threading.Lock] = {}
+_scan_locks_guard = threading.Lock()
 
 
 def _is_build_file(path: str) -> bool:
@@ -214,17 +220,18 @@ def fetch_cve_affected_files(
     and cached per repo + governance for CACHE_TTL_SECONDS.
     """
     cache_key = f"{repo_path}:{governance}"
-    now = time.monotonic()
-
-    if cache_key in _cache:
-        cached_time, cached_files = _cache[cache_key]
-        if now - cached_time < CACHE_TTL_SECONDS:
-            merged = cached_files | set(extra_cve_files or [])
-            return sorted(merged)
-
-    scanned = _scan_terse_commits(repo_path) if governance == "asf" else _scan_cve_grep(repo_path)
-
-    _cache[cache_key] = (now, scanned)
+    with _scan_locks_guard:
+        lock = _scan_locks.setdefault(cache_key, threading.Lock())
+    with lock:
+        now = time.monotonic()
+        cached = _cache.get(cache_key)
+        if cached is not None and now - cached[0] < CACHE_TTL_SECONDS:
+            scanned = cached[1]
+        else:
+            scanned = (
+                _scan_terse_commits(repo_path) if governance == "asf" else _scan_cve_grep(repo_path)
+            )
+            _cache[cache_key] = (now, scanned)
 
     merged = scanned | set(extra_cve_files or [])
     return sorted(merged)
