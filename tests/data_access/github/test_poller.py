@@ -1544,6 +1544,24 @@ class TestMergeReadinessInPoller:
         assert pr.review_states == {}
         assert pr.merge_readiness_detail == {}
 
+    def test_ci_failure_queue_reads_checks_without_merge_readiness(self, tmp_path: Path) -> None:
+        """The CI Failures queue is switched on its own: a project can classify
+        red CI without ranking merge candidates, and still gets no verdict."""
+        client = _FlakyCIMockClient(tmp_path, [_listed_pr()])
+        config = ProjectConfig(
+            owner="apache",
+            repo="spark",
+            merge_readiness={"enabled": False},
+            ci_failure={"enabled": True},
+        )
+        poll_project(client, config, operator_username="somebody-else")
+        pr = PullRequest.objects.get(number=99)
+        assert pr.ci_status == "fail"
+        assert pr.ci_checks_sha == pr.head_sha == _HEAD_SHA
+        assert [c["name"] for c in pr.ci_checks] == ["build", "slow"]
+        assert pr.merge_readiness_verdict == ""
+        assert pr.merge_readiness_detail == {}
+
     def test_candidates_refresh_hourly(self, tmp_path: Path) -> None:
         """A check finishing never bumps updated_at; a candidate can't wait a day."""
         client = _CountingMockClient(tmp_path, [_listed_pr()])

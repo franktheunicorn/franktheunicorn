@@ -78,6 +78,41 @@ src/franktheunicorn/
                      #   page's Re-assess. Needs the project's jira.enabled +
                      #   jira.server — without them there is no way to tell an
                      #   open ticket from a closed one, and that is the question.
+                     #   ci_failure.py is the "CI Failures" queue: for an open PR
+                     #   whose CI is red on its current head, say what broke and
+                     #   whose problem it is, and draft one conversation comment
+                     #   telling the author what to do. Not the merge-readiness CI
+                     #   reading (scoring/ci_analysis.py asks "is this red run a
+                     #   flake, so the PR is mergeable anyway", only for PRs
+                     #   somebody approved); this asks "what should the author do"
+                     #   and has no approval or green-CI gate in front of it.
+                     #   A job is not a check: on Spark a PR carries one check,
+                     #   `Build`, standing for a workflow run in the contributor's
+                     #   *fork* (update_build_status.js), so the unit is the failed
+                     #   job of that run (ForgeClient.get_commit_check_failures) —
+                     #   and a root cause is not a job: nine jobs dead on one
+                     #   compile error is one finding naming nine jobs. Three
+                     #   layers, first answer wins: rules (project ci_failure.rules,
+                     #   then the built-in Spark table keyed on build_and_test.yml's
+                     #   job and step names, then a short generic one), the base
+                     #   branch, and one model call per PR for what is left. A
+                     #   rule-explained PR costs no model call. The model returns a
+                     #   category, cause and fix per root cause, never the comment:
+                     #   compose_comment assembles it, so the greeting and sign-off
+                     #   are the project's and a log line cannot become the text.
+                     #   One CIFailureAssessment per PR, pinned to head_sha and
+                     #   created `unclassified` before anything is fetched; the tab
+                     #   is not a PullRequest.queue value — CIFailureAssessment.
+                     #   queue_q() reads the PR's live head and ci_status, so a push
+                     #   or a green re-run drops a row with nothing to clean up.
+                     #   ci_failure.enabled gates only the per-cycle pass (database
+                     #   work: sync rows, queue classify_pr_ci at bulk priority, up
+                     #   to max_per_run); the tab's "Find failing PRs" and the
+                     #   per-PR button are their own consent. Posting re-reads the
+                     #   PR live first (open, same head, still red). Learning is the
+                     #   CICheckHistory ledger: a posted "flake"/"your change"
+                     #   comment, or a dismissal with "it's a flake" / "it's real",
+                     #   counts for or against that job.
   backends/          # Forge clients (GitHub, Gitea, GitLab) + posters
   personalities/     # Reviewer voice loader (markdown personalities)
   security/          # Security-report triage pipeline (CVE lookup,
@@ -103,7 +138,11 @@ src/franktheunicorn/
                      #   and priority (PRIORITY_INTERACTIVE for the dashboard
                      #   buttons, PRIORITY_BULK for ingest/import — the worker
                      #   claims by -priority then created_at, so a click does
-                     #   not wait behind a bulk import's backlog). zip_import.py bulk-imports an archive
+                     #   not wait behind a bulk import's backlog). One command
+                     #   crosses the lanes: classify_pr_ci is queued in bulk by
+                     #   the CI-failure pass, and a click on a PR already in that
+                     #   batch promotes the pending row instead of being told
+                     #   "already queued". zip_import.py bulk-imports an archive
                      #   of reports (management command + dashboard upload);
                      #   triage is opt-in there regardless of auto_triage,
                      #   since a backlog is one NVD lookup + two LLM calls
@@ -367,6 +406,7 @@ The anti-pattern list is the primary feedback mechanism — not a side feature. 
 - **No Docker socket in web container.** Only the worker container accesses Docker for test execution and the security sandbox. The web container never spawns containers. `run_dual_tests` and `security_report_sandbox` both enqueue a `WorkerCommand` and return immediately — the worker-queue refactor that used to be described here as in flight has landed, and `views.py` no longer imports `threading` at all. Eight endpoints still do their work in-request rather than in the worker: `security_report_upload` (the whole zip import, one transaction — measured at 166ms end to end for a real 265-entry scanner archive, of which 43ms is the scan-archive expansion; bounded by the 8 MB upload cap), `security_archive_drop` (a bulk delete — 44ms for 143 rows), `security_archive_set_agent` (one bulk UPDATE relabelling an archive's reports, the drop's shape), `security_report_cve_check` (a synchronous NVD call), `security_report_export_csv` (a streaming read — `StreamingHttpResponse` over a `.iterator()`, so it never materialises the file), `security_report_import_csv` (one transaction over at most a few thousand rows, bounded by the same 8 MB upload cap), `security_report_fix` / `security_recheck_fixed` (the Cursor cloud-agent launches — one POST each; the run lives on Cursor's infra, and for the recheck the waiting is the `poll_security_rechecks` worker command), and `security_report_fix_refresh` (one API GET plus a `git ls-remote`). None spawns a container, so none needs the Docker socket, but the zip upload and the NVD call would be better as `WorkerCommand`s.
 - **Blame: run fresh, don't cache.** Run `git blame` on the base branch for changed files each time. No blame cache.
 - **The almost-ready queue never merges or approves on its own.** `scoring/merge_readiness.py` ranks; every forge write (the LGTM review, the "please rebase" comment, the merge) is a button the operator presses, and the merge button only exists where `merge_queue.enabled` already is. The queue's job is to be wrong in a way that teaches it: "not ready" always asks why, and the answer changes the next ranking (`MergeReadinessFeedback`, `CICheckHistory`). Don't add a signal here without deciding how the operator's disagreement with it gets recorded.
+- **The CI Failures queue never comments on its own.** `review/ci_failure.py` classifies and drafts; the comment goes out when the operator presses Post, after a live re-read of the PR (still open, same head, still red) — a draft can be hours old, and "your CI is failing" on a PR whose author just fixed it is worse than silence. The automatic half (`ci_failure.enabled`, off by default) only finds and classifies. It runs independently of the review gates and of merge readiness: a PR nobody reviewed or approved is exactly the one whose author is waiting to hear why CI failed. A remediation command in the comment comes from a rule (the project's, or the built-in table written against the project's own workflow file) or from the model under a prompt that forbids passing on commands the log asks for; when adding a rule, name only scripts that exist in the project and say what the tool's own output says. Disagreement is recorded the way the almost-ready queue records it: the dismissal reason, and `CICheckHistory` for "it's a flake" / "it's real".
 - **Intending to merge is a queue, not a flag.** `worker/merge_intent.py` reads each refreshed PR's reviews and comments and asks whether an approver (`merge_intent.approvers` in operator.yaml, defaulting to `github_username`) has already said yes — a formal APPROVED, a leading "LGTM", or a gated one ("looks good pending CI", "merging once tests pass"). The approver's latest signal wins, and CHANGES_REQUESTED or a withdrawing comment ("-1", "retracting my LGTM", "please hold off merging"; Magpie vote-tally's one-person-one-latest-vote rule) clears it. A DISMISSED review says nothing either way: GitHub does not say whether it was an approval or a changes request. A hit writes `PullRequest.merge_intent` (`approved` / `conditional`) plus who, when, the excerpt, and the head it was given against (`merge_intent_commit_sha`, re-baselined only on a *new* approval so a later push reads as "pushed since approval" rather than silently re-baselining), and routes the PR to the `intending-to-merge` queue ahead of everything but `wip`, sorted oldest approval first. The same read also fills `approval_count` (every reviewer's latest verdict) and, for queued PRs and the operator's own, `ci_status` — nothing wrote either before, so the merge queue's eligibility checklist was decorative. Both paths sync it: `_refresh_pull_request` — the project poll's refresh, which the own-PR scan's `author:`/`reviewed-by:`/`involves:` hits also go through (via `refresh_pull_request_by_number`), and therefore where approvals on PRs the listing never reached are found — and `ingest_single_pr`, the dashboard's on-demand lookup. A failed reviews read keeps the stored answer; a rate-limit window must not empty the queue. With `merge_readiness.enabled` (the default) the two queues share one reviews read, and `ci_status` comes from the readiness checks read rather than a second CI call; `approval_count` is this sync's (the forge's count, bots included).
 - **Difficulty is a model choice, not prompt text.** `config/model_routing.py` maps each LLM task (`judge`, `tone_guard`, `security_triage`, `check:<name>`, ...) to a tier (`fast` / `standard` / `reasoning` / custom) via `TASK_DEFAULT_TIERS` + `model_routing.tasks`, and each tier to a backend via `model_routing.tiers` (connection fields inherited from `llm_backends[0]`). A call site does `explicit feature backend or routed_backend(oc, task) or <its old default>`, or `with_routed_first` for fallthrough lists. `routed_backend` returns `None` when no tier is configured, so an operator.yaml without the block behaves exactly as before. The main review is not routed: it always runs every `llm_backends` entry. A new LLM consumer should name a task and add it to `TASK_DEFAULT_TIERS` rather than read `llm_backends[0]` directly. The worker probes tiers at boot (`_check_model_tiers`), disables a dead one so its tasks fall back, and logs the routing table; `show_config` prints the same table.
 - **The cycle polls; runners review.** `_run_cycle` polls every project on the main thread and queues each refreshed PR on a `ReviewPool` (`worker/review_pool.py`) of `worker_pool.review_concurrency` threads (default 10), each in its own checkout lane `review-<n>`; the backfill queues onto the same pool. While the runners work, the main thread's tick runs the 10-minute open-PR sync — which closes PRs that left the listing *and* ingests ones that appeared (`poller.sync_open_pull_requests`); new PRs join the back of the queue, the operator's own the front — and drains interactive commands. The **own/mentioned-PR scan** (`_scan_operator_prs`: `author:`, `reviewed-by:`, `involves:` searches) runs at the start of every cycle, before any project is polled, and again from the main thread's turns every `worker_pool.operator_scan_minutes` (default 10) — it used to run once, after the poll phase's reviews, which on Spark was hours in. A hit is refreshed only if the poll's own unchanged test (`_needs_refresh(..., partial=True)` — a search hit has no head or requested reviewers) says it moved, and then through the poll's refresh (`refresh_pull_request_by_number`), not the dashboard's lighter `ingest_single_pr`: blame-informed score, stale-marking on a push, `last_polled_at`. What it refreshed is queued for review — the operator's own at the front — unless this cycle already queued it. Per-PR *refreshes* (forge reads + blame) run `worker_pool.refresh_concurrency` (default 4) at a time via `core/concurrency.map_ordered` — in the poll, the mid-cycle sync and the scan — which yields in input order with at most N in flight, so the poll's consecutive-failure bail-out still stops spending API calls. `repo_manager.ensure_sha_fetched` holds a per-clone lock (concurrent `git fetch`es race on ref locks) and `cve_history` one per repo for its cold-cache scan. Within one PR, `run_enabled_checks` makes its LLM calls concurrently and then calibrates / tone-guards / persists serially in config order. Every OpenAI-compatible call takes a slot from `LLMBackendConfig.max_parallel_requests` (keyed on base_url + api_key_env, inherited by tiers), because llm.apache.org allows 4 in flight per key and 429s the fifth. A pool of 1 runs inline, which is also how the old serial behaviour comes back.
@@ -417,7 +457,7 @@ If any check fails, the commit or push is blocked and the agent must fix the iss
 
 When working on features, know which version they belong to:
 
-- **v1 (now):** PR ingestion, scoring, draft reviews, anti-patterns, dashboard, digest, test verification, workspace mode, Zombie Queue (closed-PR follow-up)
+- **v1 (now):** PR ingestion, scoring, draft reviews, anti-patterns, dashboard, digest, test verification, workspace mode, Zombie Queue (closed-PR follow-up), CI Failures queue (classify a red run, draft the fix for the author)
 - **v1.25:** Direct agent feedback channel (Claude Code / Codex session links)
 - **v1.5:** Community context search, JIRA, CodeRabbit, auto-posting, CLI triage
 - **v1.75:** Rejection predictor (sklearn), auto-suppress low-value findings

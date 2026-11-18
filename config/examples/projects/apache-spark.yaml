@@ -496,6 +496,42 @@ merge_readiness:
   ci_analysis_llm: false        # Layer 2: LLM reads each unexplained failure (flake vs real); opt-in
   # rebase_request_template: "Hi @{author}, ... {checks} ... `{base_branch}` ..."
 
+# CI Failures — the dashboard tab of PRs whose CI is red on their latest commit,
+# each with what failed, whose problem it looks like, and a drafted comment
+# telling the author what to do (review/ci_failure.py). Nothing is posted until
+# you press Post. Separate from merge_readiness: it needs no approval and no
+# green run, because it starts from red.
+#
+# `enabled` switches on the per-cycle pass only: find the failing PRs and
+# classify up to max_per_run of them. The tab's "Find failing PRs" button, the
+# button on a PR's page and `manage.py classify_ci_failures` work either way.
+# Spark's own failures (the lint job's steps, CI that never ran on the fork, a
+# conflict with master, golden files) are read by rule and cost no model call;
+# a model is asked only about what is left, usually a test failure.
+ci_failure:
+  enabled: true
+  profile: auto                 # auto: the built-in Spark rules, since the repo is "spark"
+  use_llm: true                 # ask a model about failures no rule explains
+  max_per_run: 10               # PRs classified per cycle / per button press
+  active_within_days: 14        # leave PRs idle longer than this alone (0 = no cut-off)
+  include_drafts: false
+  skip_committers: true         # committers can read their own CI
+  # skip_authors: ["dependabot[bot]"]
+  # Project rules are tried before the built-in table. job/step are globs
+  # ("a|b" for either), log is a regex over the check's output and log excerpt.
+  # rules:
+  #   - name: k8s-it-image-pull
+  #     job: "*Kubernetes Integration test*"
+  #     log: "ImagePullBackOff|ErrImagePull"
+  #     category: infra           # one of: ci-setup, merge-conflict, lint, license,
+  #                               #   dependency-manifest, binary-compat, protobuf, compile,
+  #                               #   test, golden-file, docs, infra, base-broken, unknown
+  #     cause: flake              # pr | setup | flake | pre-existing | unknown
+  #     summary: "`{name}` could not pull its test image."
+  #     remediation: "Re-run the failed jobs ({run_url}); nothing in the PR needs to change."
+  # comment_intro: "Hi @{author}, thanks for the PR! CI is failing on `{sha}`. ..."
+  # comment_outro: "Pushing to the PR branch re-runs CI. ..."
+
 # Merge queue — track and merge PRs meeting configurable criteria
 merge_queue:
   enabled: true

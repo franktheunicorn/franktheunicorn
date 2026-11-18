@@ -36,11 +36,13 @@ from django.utils.html import escape
 from django.views.decorators.http import require_POST
 
 from franktheunicorn.core.models import (
+    CI_FAILURES_QUEUE,
     ZOMBIE_QUEUE,
     AgentFeedback,
     AgentVibe,
     AntiPattern,
     CICheckHistory,
+    CIFailureAssessment,
     CostRecord,
     DependencyChange,
     EmailScanRecord,
@@ -97,6 +99,10 @@ QUEUE_TABS: list[dict[str, str]] = [
     {"key": ALMOST_READY_QUEUE, "label": "Almost Ready to Merge"},
     {"key": "intending-to-merge", "label": "Intending to Merge"},
     {"key": "backport", "label": "Backports"},
+    # Open PRs whose CI is red on their current head, each with a drafted
+    # comment for the author (review/ci_failure.py). Cuts across the routing
+    # queues like almost-ready does; index() attaches the per-PR panel.
+    {"key": CI_FAILURES_QUEUE, "label": "CI Failures"},
     {
         "key": SECURITY_FINDINGS_QUEUE,
         "label": "Security Findings",
@@ -185,6 +191,10 @@ def _queue_members_q(queue: str, readiness_off: Q | None = None) -> Q:
         if readiness_off is not None:
             q &= ~readiness_off
         return q
+    if queue == CI_FAILURES_QUEUE:
+        # Open, still red on the head the assessment describes, and not yet
+        # posted or dismissed — see CIFailureAssessment.queue_q.
+        return CIFailureAssessment.queue_q()
     if queue == SECURITY_FINDINGS_QUEUE:
         # Open PRs with at least one security-category line finding (the
         # ``security`` / ``security-context`` LLM checks). A subquery, not a
@@ -361,6 +371,32 @@ def index(request: HttpRequest) -> HttpResponse:
                 f"{project_row.full_name}: {line}" for line in learned_rules_summary(project_row)
             )
 
+    # The CI Failures tab carries its own per-PR panel too: what failed, whose
+    # problem it looks like, and the drafted comment with its buttons.
+    ci_failure_tab: dict[str, object] = {}
+    if queue == CI_FAILURES_QUEUE:
+        operator_username = _operator_username()
+        pr_ids = [pr.pk for pr in pr_list]
+        rows = {
+            row.pull_request_id: row
+            for row in CIFailureAssessment.objects.filter(pull_request_id__in=pr_ids)
+        }
+        classify_in_flight = set(
+            WorkerCommand.objects.filter(
+                command="classify_pr_ci",
+                status__in=in_flight_statuses(),
+                pull_request_id__in=pr_ids,
+            ).values_list("pull_request_id", flat=True)
+        )
+        for pr in pr_list:
+            pr.ci_failure_panel = _ci_failure_context(  # type: ignore[attr-defined]
+                pr,
+                rows.get(pr.pk),
+                operator_username,
+                in_flight=pr.pk in classify_in_flight,
+            )
+        ci_failure_tab = _ci_failure_tab_context()
+
     # Count PRs per queue for tab badges (respects the same project/type filters).
     # No state filter here: each tab adds its own, because the zombie tab's rows
     # are closed PRs and every other tab's are open ones.
@@ -416,6 +452,8 @@ def index(request: HttpRequest) -> HttpResponse:
             "learned_rules": learned_rules,
             "almost_ready_queue": ALMOST_READY_QUEUE,
             "security_findings_queue": SECURITY_FINDINGS_QUEUE,
+            "ci_failures_queue": CI_FAILURES_QUEUE,
+            "ci_failure_tab": ci_failure_tab,
         },
     )
 
@@ -443,6 +481,10 @@ def _queue_ordering(queue: str) -> tuple[str | OrderBy, ...]:
         # so this is also "most recently closed first", which is the order a
         # revival is cheap in. Interest scores are 0 on closed rows anyway.
         return ("-zombie_assessment__created_at", "-number")
+    if queue == CI_FAILURES_QUEUE:
+        # The ones with a draft to read first, most recently classified on top;
+        # then what is still waiting for the worker, by upstream activity.
+        return (F("ci_failure__classified_at").desc(nulls_last=True), "-github_updated_at")
     if queue == "intending-to-merge":
         # A follow-up list, not a triage list: the approval that has waited
         # longest is the one to act on first, whatever it scored.
@@ -785,6 +827,14 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
     # The zombie panel: present for any PR the scan put in the queue (or that
     # the operator asked to assess), whatever tab the PR is on now.
     zombie = ZombieAssessment.objects.filter(pull_request=pr).first()
+    # The CI-failure panel: whenever there is an assessment, and — so the
+    # Classify button is on offer — whenever CI is red and there is not one yet.
+    ci_failure_row = CIFailureAssessment.objects.filter(pull_request=pr).first()
+    ci_failure_panel = (
+        _ci_failure_context(pr, ci_failure_row, operator_config.github_username or "")
+        if ci_failure_row is not None or (pr.state == "open" and pr.ci_status == "fail")
+        else None
+    )
 
     return render(
         request,
@@ -792,6 +842,7 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
         {
             **_zombie_panel_context(pr, zombie),
             "pr": pr,
+            "ci_failure_panel": ci_failure_panel,
             "candidate": candidate,
             "drafts": drafts,
             "suppressed_drafts": suppressed_drafts,
@@ -911,6 +962,289 @@ def zombie_reassess(request: HttpRequest, pr_id: int) -> HttpResponse:
     else:
         note = "An assessment for this PR is already queued or running."
     return _render_zombie_panel(request, pr, note=note)
+
+
+# --- CI Failures queue (classify a red CI run, draft the fix for the author) ---
+
+
+def _ci_failure_context(
+    pr: PullRequest,
+    row: CIFailureAssessment | None,
+    operator_username: str,
+    *,
+    in_flight: bool | None = None,
+    note: str = "",
+    error: bool = False,
+    post_blocked: bool = False,
+    body: str | None = None,
+) -> dict[str, object]:
+    """Everything ``_ci_failure_panel.html`` renders for one PR.
+
+    ``row`` is None for a PR whose CI is red and that nobody has classified
+    yet: the panel is then just the offer to. ``in_flight`` is passed by the
+    list view (one query for the page) and looked up here otherwise, along
+    with the last failed command. ``body`` is what the operator had in the box
+    when a post was refused, so the re-rendered panel does not throw their
+    edit away.
+    """
+    from franktheunicorn.review.ci_failure import findings_from
+
+    per_pr_lookups = in_flight is None
+    if in_flight is None:
+        in_flight = WorkerCommand.objects.filter(
+            pull_request=pr, command="classify_pr_ci", status__in=in_flight_statuses()
+        ).exists()
+    last_failed = None
+    if per_pr_lookups and not in_flight and (row is None or not row.is_classified):
+        # The button's only feedback when the worker command itself blew up.
+        last = (
+            WorkerCommand.objects.filter(pull_request=pr, command="classify_pr_ci")
+            .order_by("-created_at")
+            .first()
+        )
+        last_failed = last if last is not None and last.status == "failed" else None
+    op = operator_username.lower()
+    return {
+        "row": row,
+        "findings": findings_from(row.failures) if row is not None else [],
+        "in_flight": in_flight,
+        "last_failed": last_failed,
+        "is_own": pr.is_operator_pr or (bool(op) and pr.author.lower() == op),
+        "is_current": row is not None and bool(row.head_sha) and row.head_sha == pr.head_sha,
+        "reason_choices": CIFailureAssessment.DISMISS_REASON_CHOICES,
+        "note": note,
+        "error": error,
+        "post_blocked": post_blocked,
+        "body": body if body is not None else (row.body if row is not None else ""),
+        # Keep the editor open when the response is about the draft in it.
+        "draft_open": body is not None,
+    }
+
+
+def _ci_failure_response(
+    request: HttpRequest,
+    pr: PullRequest,
+    *,
+    note: str = "",
+    error: bool = False,
+    post_blocked: bool = False,
+    body: str | None = None,
+) -> HttpResponse:
+    """Re-render the CI-failure panel after an action (htmx outerHTML swap)."""
+    row = CIFailureAssessment.objects.filter(pull_request=pr).first()
+    return render(
+        request,
+        "dashboard/_ci_failure_panel.html",
+        {
+            "pr": pr,
+            "cif": _ci_failure_context(
+                pr,
+                row,
+                _operator_username(),
+                note=note,
+                error=error,
+                post_blocked=post_blocked,
+                body=body,
+            ),
+        },
+    )
+
+
+def _ci_failure_tab_context() -> dict[str, object]:
+    """What the CI Failures tab says above its rows: which projects classify on
+    their own, what is in flight, and whether a model is there for the failures
+    no rule explains."""
+    from franktheunicorn.config.loader import get_operator_config
+    from franktheunicorn.review.ci_failure import tab_state
+
+    try:
+        state = tab_state(_project_configs_by_name().values(), get_operator_config())
+    except Exception:
+        logger.debug("Could not build the CI Failures tab header", exc_info=True)
+        return {}
+    return {
+        "auto_projects": state.auto_projects,
+        "in_flight": state.in_flight,
+        "backend_configured": state.backend_configured,
+    }
+
+
+@require_POST
+def ci_failure_scan(request: HttpRequest) -> HttpResponse:
+    """The "Find failing PRs" button: list the red PRs and queue their classification.
+
+    Database work in-request (a query and a handful of inserts per project);
+    the reading and the model call are worker commands at bulk priority. Runs
+    for every configured project whatever ``ci_failure.enabled`` says — that
+    flag is for the pass nobody asked for, and this one somebody just did.
+    """
+    from franktheunicorn.review.ci_failure import run_pass
+
+    back = f"{reverse('dashboard:index')}?queue={CI_FAILURES_QUEUE}"
+    results = run_pass(_project_configs_by_name().values(), only_enabled=False)
+    failing = sum(r.failing for r in results)
+    queued = sum(r.queued for r in results)
+    waiting = sum(r.waiting for r in results)
+    if not failing:
+        messages.info(
+            request,
+            "No open PR has failing CI on its current head, as far as the last poll saw. "
+            "(The poller reads check runs for projects with merge_readiness.enabled or "
+            "ci_failure.enabled; the automatic pass also leaves out drafts, committers' PRs "
+            "and PRs idle longer than ci_failure.active_within_days.)",
+        )
+        return redirect(back)
+    detail = "; ".join(r.summary() for r in results if r.failing)
+    if queued:
+        messages.success(
+            request,
+            f"Queued {queued} CI-failure classification(s) for the worker (bulk priority). "
+            f"Reload this tab in a few minutes. {detail}."
+            + (
+                f" {waiting} more wait for the next press or cycle "
+                "(ci_failure.max_per_run per project)."
+                if waiting
+                else ""
+            ),
+        )
+    else:
+        messages.info(request, f"Nothing new to classify. {detail}.")
+    return redirect(back)
+
+
+@require_POST
+def ci_failure_classify(request: HttpRequest, pr_id: int) -> HttpResponse:
+    """Queue (or re-queue) the classification of one PR's CI failure (htmx).
+
+    A press is a fresh question, so it clears an earlier answer's disposition
+    and the automatic pass's retry cap: the result should come back to the
+    queue, and "frank gave up after three tries" is not the operator's limit.
+    """
+    pr = get_object_or_404(PullRequest.objects.select_related("project"), pk=pr_id)
+    from franktheunicorn.review.ci_failure import failing_check_names
+    from franktheunicorn.security.queue import (
+        PRIORITY_INTERACTIVE,
+        queue_ci_failure_classification,
+    )
+
+    row, created = CIFailureAssessment.objects.get_or_create(
+        pull_request=pr,
+        defaults={"head_sha": pr.head_sha, "failing_checks": failing_check_names(pr)},
+    )
+    if not created:
+        row.status = "unclassified"
+        row.disposition = "pending"
+        row.dismiss_reason = ""
+        row.dismiss_note = ""
+        row.attempts = 0
+        row.last_error = ""
+        row.save()
+    if queue_ci_failure_classification(pr, priority=PRIORITY_INTERACTIVE):
+        note = "Classification queued at the front of the worker queue; reload in a minute."
+    else:
+        note = "A classification for this PR is already queued or running."
+    return _ci_failure_response(request, pr, note=note)
+
+
+@require_POST
+def ci_failure_post(request: HttpRequest, pr_id: int) -> HttpResponse:
+    """Post the drafted (or edited) CI-failure comment on the PR's conversation.
+
+    Checks the PR live first — still open, same head, CI still red — because
+    the draft can be hours old and "your CI is failing" on a PR whose author
+    just fixed it is worse than silence. ``force=1`` skips that check; the
+    refusal offers it.
+    """
+    pr = get_object_or_404(PullRequest.objects.select_related("project"), pk=pr_id)
+    row = CIFailureAssessment.objects.filter(pull_request=pr).first()
+    username = _operator_username()
+    # What was in the box. Absent (not blank) means the caller sent no editor
+    # at all, and the stored draft stands; blank means the operator emptied it.
+    submitted = request.POST.get("body")
+
+    def refuse(message: str, *, post_blocked: bool = False) -> HttpResponse:
+        # Hand the operator's text back with the refusal: re-rendering the
+        # stored draft here would silently discard an edit they just made.
+        return _ci_failure_response(
+            request, pr, note=message, error=True, post_blocked=post_blocked, body=submitted
+        )
+
+    if row is None or not row.is_classified:
+        return refuse("Nothing to post: this PR's CI failure has not been classified yet.")
+    if pr.is_operator_pr or (username and pr.author.lower() == username.lower()):
+        return refuse("This is your own PR; there is no author to tell.")
+    if row.disposition == "posted":
+        return refuse("Already posted for this commit.")
+    if row.head_sha != pr.head_sha:
+        return refuse(
+            "This draft is for an older commit; re-classify to see whether CI still fails."
+        )
+    body = (row.body if submitted is None else submitted).strip()
+    if not body:
+        return refuse("Nothing to post: the comment is empty.")
+
+    from franktheunicorn.backends.base import ReviewBody
+    from franktheunicorn.backends.mentions import escape_handles, normalize_allowlist
+    from franktheunicorn.review.ci_failure import post_blocker, record_posted
+
+    # The author is the one person this comment is for; anyone else named in
+    # it (by the model, or quoted from a log) is backticked unless allowlisted.
+    body = escape_handles(body, normalize_allowlist([pr.author, *_mention_allowlist()]))
+
+    client = _make_posting_client(pr)
+    if client is None:
+        return refuse("Cannot comment: no forge client/token configured.")
+    comment: object = None
+    try:
+        try:
+            if request.POST.get("force") != "1":
+                blocker = post_blocker(client, row)  # type: ignore[arg-type]
+                if blocker:
+                    return refuse(f"Not posted: {blocker}.", post_blocked=True)
+            try:
+                comment = client.create_issue_comment(  # type: ignore[attr-defined]
+                    pr.project.owner, pr.project.repo, pr.number, body
+                )
+            except NotImplementedError:
+                comment = client.create_review(  # type: ignore[attr-defined]
+                    pr.project.owner,
+                    pr.project.repo,
+                    pr.number,
+                    ReviewBody(event="COMMENT", body=body),
+                )
+        finally:
+            client.close()  # type: ignore[attr-defined]
+    except Exception:
+        logger.exception("CI-failure comment failed for PR #%d", pr.number)
+        return refuse("Comment failed (see web log).")
+    comment_id = comment.get("id") if isinstance(comment, dict) else None
+    record_posted(row, body, comment_id if isinstance(comment_id, int) else None)
+    return _ci_failure_response(request, pr, note=f"Posted on {pr.project} #{pr.number}.")
+
+
+@require_POST
+def ci_failure_dismiss(request: HttpRequest, pr_id: int) -> HttpResponse:
+    """ "Don't post this" (with why), or take that back.
+
+    The reason is the learning input: "it's a flake" and "it's real" are
+    recorded against the failed jobs, so the next red run of the same job is
+    read with that in hand.
+    """
+    pr = get_object_or_404(PullRequest.objects.select_related("project"), pk=pr_id)
+    row = get_object_or_404(CIFailureAssessment, pull_request=pr)
+    from franktheunicorn.review.ci_failure import record_dismissal, restore
+
+    if request.POST.get("restore") == "1":
+        restore(row)
+        return _ci_failure_response(request, pr, note="Back in the CI Failures queue.")
+    reason = request.POST.get("reason", "").strip() or "other"
+    if reason not in {code for code, _ in CIFailureAssessment.DISMISS_REASON_CHOICES}:
+        return _ci_failure_response(request, pr, note="Unknown reason.", error=True)
+    record_dismissal(row, reason, request.POST.get("note", "").strip())
+    note = "Dismissed for this commit; it comes back if the author pushes and CI fails again."
+    if reason in ("flake", "real"):
+        note += " Noted against the failed job(s) for next time."
+    return _ci_failure_response(request, pr, note=note)
 
 
 # --- Finding actions (htmx) ---

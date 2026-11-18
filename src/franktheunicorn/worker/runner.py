@@ -2612,6 +2612,12 @@ def _run_cycle_in(
     if operator_config is not None:
         _run_shepherding_pass(all_prs, pr_to_config, operator_config)
 
+    # CI Failures queue: find the PRs whose CI is red and queue their
+    # classification. Independent of the review gates above and of merge
+    # readiness — a PR nobody reviewed or approved is exactly the one whose
+    # author is waiting to be told why CI failed.
+    _run_ci_failure_pass(project_configs)
+
     _drain_worker_commands(operator_config, min_priority=PRIORITY_INTERACTIVE)
 
     # Security email ingestion.
@@ -3099,6 +3105,29 @@ def _backfill_unreviewed_prs(
             logger.exception("Error backfilling review for PR #%d", pr.number)
     if considered:
         logger.info("Backfill: %d PR(s) considered, %d reviewed.", considered, reviewed)
+
+
+def _run_ci_failure_pass(project_configs: Sequence[object]) -> None:
+    """Queue CI-failure classification for projects with ``ci_failure.enabled``.
+
+    Database work only: give each failing PR a row for its current head and
+    queue up to ``ci_failure.max_per_run`` of the unclassified ones at bulk
+    priority. The reading (the run's jobs, their logs, a model call for what no
+    rule explains) is the ``classify_pr_ci`` worker command, on the bulk pool,
+    so a project with two hundred red PRs does not hold up the poll.
+
+    A project that has not opted in is skipped without a line: nothing is
+    configured for it to do, and the tab says how to turn it on.
+    """
+    try:
+        from franktheunicorn.review.ci_failure import run_pass
+
+        results = run_pass(project_configs)
+    except Exception:
+        logger.exception("CI-failure pass failed")
+        return
+    if not results:
+        logger.debug("CI-failure pass: no project has ci_failure.enabled")
 
 
 def _run_shepherding_pass(

@@ -1459,6 +1459,169 @@ class MergeReadinessConfig(BaseModel):
         return v
 
 
+#: What kind of thing broke. The keys a rule or the model may answer with; the
+#: dashboard chip and the comment heading come from the label.
+CI_FAILURE_CATEGORIES: dict[str, str] = {
+    "ci-setup": "CI did not run (fork setup)",
+    "merge-conflict": "Branch conflicts with the base branch",
+    "lint": "Style / lint check",
+    "license": "License header check",
+    "dependency-manifest": "Dependency manifest out of date",
+    "binary-compat": "Binary compatibility check",
+    "protobuf": "Protobuf / generated code check",
+    "compile": "Build / compile error",
+    "test": "Test failure",
+    "golden-file": "Generated or golden file out of date",
+    "docs": "Documentation build",
+    "infra": "CI infrastructure problem",
+    "base-broken": "Already failing on the base branch",
+    "unknown": "Unclassified failure",
+}
+
+#: Whose problem it is, which is what decides what the comment asks for:
+#: ``pr`` — the author changes the PR; ``setup`` — the author fixes their fork or
+#: branch; ``flake`` — a re-run, no code change; ``pre-existing`` — not theirs,
+#: wait for the base branch; ``unknown`` — frank could not tell.
+CI_FAILURE_CAUSES: tuple[str, ...] = ("pr", "setup", "flake", "pre-existing", "unknown")
+
+DEFAULT_CI_FAILURE_INTRO = (
+    "Hi @{author}, thanks for the PR! CI is failing on the latest commit (`{sha}`). "
+    "Here is what I can see from the logs:"
+)
+DEFAULT_CI_FAILURE_OUTRO = (
+    "Pushing to the PR branch re-runs CI. If any of this looks wrong, or you get "
+    "stuck, say so here and I'll take another look."
+)
+
+
+class CIFailureRuleConfig(BaseModel):
+    """One project-specific "when this fails, tell the author that" rule.
+
+    The built-in table knows Apache Spark's jobs; this is how any other project
+    (or a Spark quirk the table missed) gets the same treatment without a model
+    call. ``job`` and ``step`` are case-insensitive globs against the failed
+    job (or check) name and its failed step (``a|b`` matches either); ``log``
+    is a regex searched in the check's title, summary and log excerpt. Every
+    field given must match.
+    Project rules are tried before the built-in ones.
+    """
+
+    name: str = ""
+    job: str = ""
+    step: str = ""
+    log: str = ""
+    category: str = "unknown"
+    cause: str = "pr"
+    # One sentence saying what failed, and what the author should do about it.
+    # Both go into the drafted comment as written.
+    summary: str = ""
+    remediation: str = ""
+
+    @model_validator(mode="after")
+    def _valid_rule(self) -> CIFailureRuleConfig:
+        if not (self.job or self.step or self.log):
+            msg = "ci_failure.rules: a rule needs at least one of job, step or log"
+            raise ValueError(msg)
+        if self.category not in CI_FAILURE_CATEGORIES:
+            msg = (
+                f"ci_failure.rules: unknown category {self.category!r}; "
+                f"one of {', '.join(CI_FAILURE_CATEGORIES)}"
+            )
+            raise ValueError(msg)
+        if self.cause not in CI_FAILURE_CAUSES:
+            msg = (
+                f"ci_failure.rules: unknown cause {self.cause!r}; "
+                f"one of {', '.join(CI_FAILURE_CAUSES)}"
+            )
+            raise ValueError(msg)
+        if self.log:
+            try:
+                re.compile(self.log)
+            except re.error as exc:
+                msg = f"ci_failure.rules: log pattern {self.log!r} is not a valid regex: {exc}"
+                raise ValueError(msg) from exc
+        if not self.remediation.strip():
+            msg = "ci_failure.rules: a rule needs a remediation (what to tell the author)"
+            raise ValueError(msg)
+        return self
+
+
+class CIFailureConfig(BaseModel):
+    """Classify a PR's CI failure and draft the fix for its author.
+
+    ``review/ci_failure.py``, the "CI Failures" dashboard tab. For an open PR
+    whose CI is red on its current head: read which job and step failed and
+    what the log said, decide what kind of failure it is and whose problem,
+    and draft one conversation comment telling the author what to do. Nothing
+    is posted until the operator presses the button.
+
+    Separate from ``merge_readiness`` on purpose. That queue's CI reading asks
+    "is this red run a flake, so the PR is mergeable anyway" and only for PRs
+    somebody already approved. This asks "what should the author do" for a PR
+    nobody may have looked at yet, so it does not wait on, or need, a green
+    run or an approval.
+
+    ``enabled`` gates the *automatic* pass only: each cycle, find the failing
+    PRs and classify up to ``max_per_run`` of them. Off by default, because
+    that pass spends forge calls (the run's jobs, a log per failed job) and,
+    for failures no rule explains, a model call per PR, with no operator
+    action in front of it. The per-PR "Classify CI failure" button and the
+    tab's "Find failing PRs" button are their own consent and work either way.
+    """
+
+    enabled: bool = False
+    # Which built-in rule table applies. ``auto`` uses the Apache Spark table
+    # for a repository named ``spark`` and the generic one otherwise.
+    profile: str = "auto"
+    # Ask a model about failures no rule explains (a test failure: is it this
+    # PR, or a flake?). Rule-explained failures never spend a call. False
+    # leaves those failures listed as unclassified in the draft.
+    use_llm: bool = True
+    # PRs classified per project per run (a cycle's pass, or one button press).
+    # The rest stay listed as unclassified and are taken most recently updated
+    # first next time.
+    max_per_run: int = 10
+    # Only PRs updated upstream within this many days. A PR that has been red
+    # since spring does not need a comment today. 0 disables the cut-off.
+    active_within_days: int = 14
+    include_drafts: bool = False
+    # Leave the project's ``committers`` out of the automatic pass: they can
+    # read their own CI. The per-PR button classifies anyone's.
+    skip_committers: bool = True
+    # Authors to leave out of the automatic pass (bots, mostly). Exact logins.
+    skip_authors: list[str] = Field(default_factory=list)
+    rules: list[CIFailureRuleConfig] = Field(default_factory=list)
+    # The comment's opening and closing lines. ``{author}``, ``{sha}`` (short)
+    # and ``{base_branch}`` are filled in. The per-failure sections between
+    # them come from the rules and the model.
+    comment_intro: str = DEFAULT_CI_FAILURE_INTRO
+    comment_outro: str = DEFAULT_CI_FAILURE_OUTRO
+
+    @field_validator("profile")
+    @classmethod
+    def profile_known(cls, v: str) -> str:
+        if v not in ("auto", "spark", "generic"):
+            msg = "ci_failure.profile must be one of: auto, spark, generic"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("max_per_run")
+    @classmethod
+    def max_per_run_positive(cls, v: int) -> int:
+        if v <= 0:
+            msg = "ci_failure.max_per_run must be positive"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("active_within_days")
+    @classmethod
+    def active_within_days_non_negative(cls, v: int) -> int:
+        if v < 0:
+            msg = "ci_failure.active_within_days must be >= 0 (0 disables)"
+            raise ValueError(msg)
+        return v
+
+
 class SupportedAgentConfig(BaseModel):
     """Config for a supported AI agent type in direct feedback."""
 
@@ -3339,6 +3502,10 @@ class ProjectConfig(BaseModel):
     # The "Almost Ready to Merge" queue: PRs that probably deserve an LGTM or a
     # merge. On by default (see MergeReadinessConfig).
     merge_readiness: MergeReadinessConfig = Field(default_factory=MergeReadinessConfig)
+    # The "CI Failures" queue: classify a red CI run and draft what to tell the
+    # author. The automatic pass is opt-in; the buttons are not (see
+    # CIFailureConfig).
+    ci_failure: CIFailureConfig = Field(default_factory=CIFailureConfig)
     # Shepherding pass over the operator's own PRs (draft replies to
     # reviewers, rebase/staleness alerts). v2 — opt-in per project.
     shepherding_enabled: bool = False

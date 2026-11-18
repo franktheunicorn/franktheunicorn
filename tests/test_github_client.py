@@ -879,6 +879,248 @@ class TestMergeReadinessEndpoints:
         assert sent == {"body": "please rebase"}
 
 
+class TestCommitCheckFailures:
+    """``get_commit_check_failures``: which job and step failed, and what its log said.
+
+    The Spark shape is the one that matters: apache/spark carries a single
+    ``Build`` check per PR that stands for a workflow run in the contributor's
+    fork (``.github/workflows/update_build_status.js``), so the jobs and logs
+    live in a different repository from the check.
+    """
+
+    API = "https://api.github.test"
+    RUNS = f"{API}/repos/apache/spark/commits/abc/check-runs?per_page=100&page=1"
+    STATUS = f"{API}/repos/apache/spark/commits/abc/status"
+    FORK_JOBS = f"{API}/repos/newbie/spark/actions/runs/4242/jobs?filter=latest&per_page=100&page=1"
+
+    @pytest.fixture
+    def client(self) -> GitHubClient:
+        c = GitHubClient(token="test-token", base_url=self.API)
+        yield c
+        c.close()
+
+    def _build_check(self, conclusion: str = "failure", **output: str) -> dict[str, object]:
+        return {
+            "id": 900,
+            "name": "Build",
+            "conclusion": conclusion,
+            "app": {"slug": "github-actions"},
+            "html_url": "https://github.com/apache/spark/runs/900",
+            "details_url": "https://github.com/newbie/spark/actions/runs/4242",
+            "output": {
+                "title": "Test results",
+                "summary": "[See test results](https://github.com/newbie/spark/actions/runs/4242)",
+                "text": '{"owner":"newbie","repo":"spark","run_id":4242}',
+                **output,
+            },
+        }
+
+    def test_a_mirrored_build_check_is_expanded_into_the_fork_runs_failed_jobs(
+        self, httpx_mock: HTTPXMock, client: GitHubClient
+    ) -> None:
+        httpx_mock.add_response(url=self.RUNS, json={"check_runs": [self._build_check()]})
+        httpx_mock.add_response(
+            url=self.FORK_JOBS,
+            json={
+                "jobs": [
+                    {"id": 1, "name": "Run / Check changes", "conclusion": "success"},
+                    {
+                        "id": 2,
+                        "name": "Run / Linters, licenses, and dependencies",
+                        "conclusion": "failure",
+                        "html_url": "https://github.com/newbie/spark/actions/runs/4242/job/2",
+                        "steps": [
+                            {"name": "License test", "conclusion": "success"},
+                            {"name": "Scala linter", "conclusion": "failure"},
+                            {"name": "Java linter", "conclusion": "skipped"},
+                        ],
+                    },
+                    {"id": 3, "name": "Run / Build modules: sql", "conclusion": "cancelled"},
+                ]
+            },
+        )
+        httpx_mock.add_response(
+            url=f"{self.API}/repos/newbie/spark/actions/jobs/2/logs",
+            text="2026-11-01T00:00:00.0000000Z [error] Foo.scala:9: line is too long",
+        )
+        httpx_mock.add_response(url=self.STATUS, json={"statuses": []})
+
+        failures = client.get_commit_check_failures("apache", "spark", "abc")
+        assert failures == [
+            {
+                "check": "Build",
+                "job": "Run / Linters, licenses, and dependencies",
+                "step": "Scala linter",
+                "conclusion": "failure",
+                "url": "https://github.com/newbie/spark/actions/runs/4242/job/2",
+                "title": "Test results",
+                "summary": "[See test results](https://github.com/newbie/spark/actions/runs/4242)",
+                "log": "[error] Foo.scala:9: line is too long",
+                "linked_run": "newbie/spark#4242",
+            }
+        ]
+        # The check run's own id is not a job id in apache/spark: no log is
+        # asked for there (httpx_mock would fail the test on an unmocked URL).
+
+    def test_setup_guidance_has_no_run_behind_it_to_read(
+        self, httpx_mock: HTTPXMock, client: GitHubClient
+    ) -> None:
+        check = {
+            "id": 901,
+            "name": "Build",
+            "conclusion": "action_required",
+            "app": {"slug": "github-actions"},
+            "html_url": "https://github.com/apache/spark/runs/901",
+            "output": {"title": "PR build setup requires attention", "summary": "Enable Actions"},
+        }
+        httpx_mock.add_response(url=self.RUNS, json={"check_runs": [check]})
+        httpx_mock.add_response(url=self.STATUS, json={"statuses": []})
+        failures = client.get_commit_check_failures("apache", "spark", "abc")
+        assert len(failures) == 1
+        assert failures[0]["conclusion"] == "action_required"
+        assert failures[0]["title"] == "PR build setup requires attention"
+        assert failures[0]["job"] == "" and failures[0]["log"] == ""
+
+    def test_an_unreadable_fork_run_falls_back_to_the_check_by_name(
+        self, httpx_mock: HTTPXMock, client: GitHubClient
+    ) -> None:
+        httpx_mock.add_response(url=self.RUNS, json={"check_runs": [self._build_check()]})
+        httpx_mock.add_response(url=self.FORK_JOBS, status_code=404)
+        httpx_mock.add_response(url=self.STATUS, json={"statuses": []})
+        failures = client.get_commit_check_failures("apache", "spark", "abc")
+        assert [(f["check"], f["job"], f["linked_run"]) for f in failures] == [
+            ("Build", "", "newbie/spark#4242")
+        ]
+
+    def test_a_run_that_was_only_cancelled_reports_its_cancelled_jobs(
+        self, httpx_mock: HTTPXMock, client: GitHubClient
+    ) -> None:
+        httpx_mock.add_response(
+            url=self.RUNS, json={"check_runs": [self._build_check("cancelled")]}
+        )
+        httpx_mock.add_response(
+            url=self.FORK_JOBS,
+            json={
+                "jobs": [{"id": 3, "name": "Run / Build modules: sql", "conclusion": "cancelled"}]
+            },
+        )
+        httpx_mock.add_response(
+            url=f"{self.API}/repos/newbie/spark/actions/jobs/3/logs", status_code=404
+        )
+        httpx_mock.add_response(url=self.STATUS, json={"statuses": []})
+        failures = client.get_commit_check_failures("apache", "spark", "abc")
+        assert [(f["job"], f["conclusion"], f["log"]) for f in failures] == [
+            ("Run / Build modules: sql", "cancelled", "")
+        ]
+
+    def test_an_ordinary_actions_check_is_its_own_job(
+        self, httpx_mock: HTTPXMock, client: GitHubClient
+    ) -> None:
+        """Same-repo checks: the check run id is the job id; no fork to follow."""
+        httpx_mock.add_response(
+            url=f"{self.API}/repos/org/repo/commits/abc/check-runs?per_page=100&page=1",
+            json={
+                "check_runs": [
+                    {
+                        "id": 11,
+                        "name": "lint",
+                        "conclusion": "failure",
+                        "app": {"slug": "github-actions"},
+                        "html_url": "https://github.com/org/repo/actions/runs/5/job/11",
+                        "details_url": "https://github.com/org/repo/actions/runs/5/job/11",
+                        "output": {"title": "Process completed with exit code 1"},
+                    },
+                    {"id": 12, "name": "tests", "conclusion": "success"},
+                    {
+                        "id": 13,
+                        "name": "coverage-bot",
+                        "conclusion": "failure",
+                        "app": {"slug": "codecov"},
+                        "output": {"summary": "coverage dropped"},
+                    },
+                ]
+            },
+        )
+        httpx_mock.add_response(
+            url=f"{self.API}/repos/org/repo/actions/jobs/11/logs", text="E501 line too long"
+        )
+        httpx_mock.add_response(
+            url=f"{self.API}/repos/org/repo/actions/jobs/11",
+            json={"steps": [{"name": "Run ruff", "conclusion": "failure"}]},
+        )
+        httpx_mock.add_response(
+            url=f"{self.API}/repos/org/repo/commits/abc/status",
+            json={
+                "statuses": [
+                    {
+                        "context": "jenkins/pr",
+                        "state": "failure",
+                        "description": "Build failed",
+                        "target_url": "https://ci.example/9",
+                    },
+                    {"context": "cla", "state": "success"},
+                ]
+            },
+        )
+        failures = client.get_commit_check_failures("org", "repo", "abc")
+        assert [(f["check"], f["step"], f["log"], f["linked_run"]) for f in failures] == [
+            ("lint", "Run ruff", "E501 line too long", ""),
+            ("coverage-bot", "", "", ""),
+            ("jenkins/pr", "", "", ""),
+        ]
+        assert failures[2]["summary"] == "Build failed"
+        assert failures[2]["url"] == "https://ci.example/9"
+
+    def test_unlistable_check_runs_raise_rather_than_read_as_nothing_failed(
+        self, httpx_mock: HTTPXMock, client: GitHubClient
+    ) -> None:
+        httpx_mock.add_response(url=self.RUNS, status_code=502)
+        with pytest.raises(httpx.HTTPStatusError):
+            client.get_commit_check_failures("apache", "spark", "abc")
+
+    def test_unreadable_statuses_keep_the_check_runs(
+        self, httpx_mock: HTTPXMock, client: GitHubClient
+    ) -> None:
+        httpx_mock.add_response(
+            url=self.RUNS,
+            json={"check_runs": [{"id": 5, "name": "app-check", "conclusion": "timed_out"}]},
+        )
+        httpx_mock.add_response(url=self.STATUS, status_code=500)
+        failures = client.get_commit_check_failures("apache", "spark", "abc")
+        assert [(f["check"], f["conclusion"]) for f in failures] == [("app-check", "timed_out")]
+
+    def test_check_outputs_follow_the_fork_run_too(
+        self, httpx_mock: HTTPXMock, client: GitHubClient
+    ) -> None:
+        """The flake/real analysis read "Test results" for every Spark PR."""
+        httpx_mock.add_response(url=self.RUNS, json={"check_runs": [self._build_check()]})
+        httpx_mock.add_response(
+            url=self.FORK_JOBS,
+            json={"jobs": [{"id": 2, "name": "Run / Build modules: sql", "conclusion": "failure"}]},
+        )
+        httpx_mock.add_response(
+            url=f"{self.API}/repos/newbie/spark/actions/jobs/2/logs",
+            text="[info] - join *** FAILED ***",
+        )
+        outputs = client.get_commit_check_outputs("apache", "spark", "abc")
+        assert set(outputs) == {"Build"}
+        assert "Log excerpt (Run / Build modules: sql):" in outputs["Build"]
+        assert "- join *** FAILED ***" in outputs["Build"]
+
+    def test_a_run_in_the_same_repo_is_not_a_linked_run(self) -> None:
+        from franktheunicorn.backends.github import _first_failed_step, _linked_run
+
+        same = {"details_url": "https://github.com/Apache/Spark/actions/runs/7/job/8"}
+        assert _linked_run(same, "apache", "spark") is None
+        fork = {"details_url": "https://github.com/newbie/spark/actions/runs/7"}
+        assert _linked_run(fork, "apache", "spark") == ("newbie", "spark", 7)
+        garbled = {"output": {"text": "{not json"}, "details_url": ""}
+        assert _linked_run(garbled, "apache", "spark") is None
+        assert _linked_run({"output": {"text": '{"run_id": "x"}'}}, "apache", "spark") is None
+        assert _first_failed_step(None) == ""
+        assert _first_failed_step([{"name": "a", "conclusion": "cancelled"}]) == "a"
+
+
 class TestListPullRequestsPage:
     @pytest.fixture
     def client(self) -> GitHubClient:

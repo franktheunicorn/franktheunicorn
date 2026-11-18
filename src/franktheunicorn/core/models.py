@@ -12,7 +12,7 @@ from decimal import Decimal
 
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
-from django.db.models import Q
+from django.db.models import F, Q
 from django.utils import timezone
 
 
@@ -69,6 +69,12 @@ class Project(models.Model):
 #: The queue key for closed-but-unmerged PRs with a still-open JIRA. A module
 #: constant so the dashboard, the scanner and the templates spell it once.
 ZOMBIE_QUEUE = "zombie"
+
+#: The "CI Failures" tab key. Not a ``PullRequest.queue`` value: like the
+#: almost-ready tab it cuts across the routing queues, filtering open PRs whose
+#: CI is red on the current head and that have a ``CIFailureAssessment`` nobody
+#: has answered yet (review/ci_failure.py).
+CI_FAILURES_QUEUE = "ci-failures"
 
 
 class PullRequest(models.Model):
@@ -590,6 +596,11 @@ class OperatorAction(models.Model):
         # Zombie Queue dispositions (review/zombie.py)
         ("zombie_dismiss", "Dismiss Zombie"),
         ("zombie_restore", "Restore Zombie"),
+        # CI Failures queue (review/ci_failure.py). The reason behind a
+        # dismissal lives on CIFailureAssessment; this is the audit trail.
+        ("post_ci_failure_comment", "Posted CI-Failure Comment"),
+        ("dismiss_ci_failure", "Dismissed CI Failure"),
+        ("restore_ci_failure", "Restored CI Failure"),
     ]
     action_type = models.CharField(max_length=50, choices=ACTION_CHOICES)
     review_draft = models.ForeignKey(
@@ -836,6 +847,145 @@ class CICheckHistory(models.Model):
 
     def __str__(self) -> str:
         return f"{self.check_name}: flaky={self.flaky_count} real={self.real_count}"
+
+
+class CIFailureAssessment(models.Model):
+    """Why one PR's CI is red, and the comment drafted for its author.
+
+    One row per PR (review/ci_failure.py), pinned to the head it describes:
+    ``head_sha``. A push that fails again re-pins the row and starts over; a
+    push (or a re-run) that goes green drops it out of the queue without anyone
+    touching it, because the queue filter reads the PR's live ``ci_status`` and
+    head. Created ``unclassified`` *before* anything is fetched or asked, the
+    way a ZombieAssessment is, so the CI Failures tab lists what was found even
+    when the run's budget is spent or no backend is configured.
+
+    ``failures`` is the classification: a list of root causes, not of jobs — a
+    compile error that fails nine jobs is one entry naming nine jobs. Each is
+    ``{"jobs": [...], "step", "category", "cause", "summary", "remediation",
+    "evidence", "source", "url"}`` with ``category`` / ``cause`` from
+    ``config.models.CI_FAILURE_CATEGORIES`` / ``CI_FAILURE_CAUSES`` and
+    ``source`` saying who decided: ``rule``, ``base``, ``history`` or ``llm``.
+
+    ``disposition`` is the operator's, never the machine's. ``posted`` and
+    ``dismissed`` both hide the row *for this head*; the dismissal reason is
+    kept because "it's a flake" and "it's real" are evidence about the job
+    (``CICheckHistory``), which is how the next classification of that job
+    gets better.
+    """
+
+    STATUS_CHOICES = [
+        ("unclassified", "Not yet classified"),
+        ("classified", "Classified"),
+        ("resolved", "CI no longer failing"),
+    ]
+
+    DISPOSITION_CHOICES = [
+        ("pending", "Pending"),
+        ("posted", "Posted"),
+        ("dismissed", "Dismissed"),
+    ]
+
+    DISMISS_REASON_CHOICES = [
+        ("flake", "It's a flake — nothing for the author to do"),
+        ("real", "It's a real failure, not a flake"),
+        ("wrong", "Wrong diagnosis"),
+        ("already-told", "The author already knows"),
+        ("not-worth", "Not worth a comment"),
+        ("other", "Other"),
+    ]
+
+    #: Attempts after which the automatic pass stops retrying a failing one.
+    MAX_ATTEMPTS = 3
+
+    pull_request = models.OneToOneField(
+        PullRequest, on_delete=models.CASCADE, related_name="ci_failure"
+    )
+    head_sha = models.CharField(max_length=64, blank=True, default="")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="unclassified")
+    # The check names that were red when the row was (re)pinned — what the tab
+    # shows before a classification exists.
+    failing_checks = models.JSONField(default=list, blank=True)
+    failures = models.JSONField(default=list, blank=True)
+    # Distinct categories across ``failures``, and the overall cause (one of
+    # CI_FAILURE_CAUSES, or "mixed"), denormalised for the row's chips.
+    categories = models.JSONField(default=list, blank=True)
+    cause = models.CharField(max_length=20, blank=True, default="")
+    summary = models.TextField(blank=True, default="")
+    # The drafted conversation comment, and the operator's rewrite of it when
+    # they edited before posting. ``body`` is the one that goes out.
+    comment_body = models.TextField(blank=True, default="")
+    edited_body = models.TextField(blank=True, default="")
+    # Active anti-patterns the draft matched (pattern text), shown as a warning
+    # next to the Post button rather than silently dropping the draft.
+    anti_pattern_hits = models.JSONField(default=list, blank=True)
+    backend_used = models.CharField(max_length=100, blank=True, default="")
+    attempts = models.IntegerField(default=0)
+    last_error = models.CharField(max_length=500, blank=True, default="")
+    classified_at = models.DateTimeField(null=True, blank=True)
+
+    disposition = models.CharField(
+        max_length=20, choices=DISPOSITION_CHOICES, default="pending", db_index=True
+    )
+    dismiss_reason = models.CharField(
+        max_length=20, choices=DISMISS_REASON_CHOICES, blank=True, default=""
+    )
+    dismiss_note = models.TextField(blank=True, default="")
+
+    # The last comment that went out for this PR, on whichever head. Kept across
+    # a re-pin so the tab can say "you commented on this PR's CI two days ago"
+    # before the operator does it again.
+    posted_at = models.DateTimeField(null=True, blank=True)
+    posted_sha = models.CharField(max_length=64, blank=True, default="")
+    forge_comment_id = models.BigIntegerField(null=True, blank=True)
+    post_count = models.IntegerField(default=0)
+
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    objects: models.Manager[CIFailureAssessment] = models.Manager()
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"CI failure on {self.pull_request} [{self.status}/{self.disposition}]"
+
+    @staticmethod
+    def queue_q() -> Q:
+        """A ``Q`` over ``PullRequest`` for the CI Failures tab's rows.
+
+        Open, still red on the head the row describes, and not yet answered.
+        Reading the PR's live ``ci_status`` and ``head_sha`` here (rather than
+        trusting the row) is what makes a green re-run or a push drop a PR out
+        of the queue with nothing having to notice and clean up.
+        """
+        return Q(
+            state="open",
+            ci_status="fail",
+            ci_failure__disposition="pending",
+            ci_failure__status__in=("unclassified", "classified"),
+            ci_failure__head_sha=F("head_sha"),
+        )
+
+    @property
+    def is_classified(self) -> bool:
+        return self.status == "classified"
+
+    @property
+    def gave_up(self) -> bool:
+        """Whether the automatic pass has stopped retrying this one."""
+        return self.status == "unclassified" and self.attempts >= self.MAX_ATTEMPTS
+
+    @property
+    def body(self) -> str:
+        """The comment as it would be posted: the operator's edit if there is one."""
+        return self.edited_body or self.comment_body
+
+    @property
+    def is_current(self) -> bool:
+        """Whether this row still describes the PR's head."""
+        return bool(self.head_sha) and self.head_sha == self.pull_request.head_sha
 
 
 class SecurityReport(models.Model):
@@ -2114,6 +2264,7 @@ class WorkerCommand(models.Model):
         ("scan_zombie_prs", "Sweep: closed-unmerged PRs whose JIRA is still open"),
         ("assess_zombie_pr", "Re-run the zombie assessment on one PR"),
         ("match_cves_to_reports", "Tentatively match pasted CVE ids to security reports"),
+        ("classify_pr_ci", "Classify a PR's CI failure and draft the fix for its author"),
     ]
 
     STATUS_CHOICES = [

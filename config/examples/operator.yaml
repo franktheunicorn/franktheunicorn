@@ -260,7 +260,7 @@ digest_enabled: false
 #   fast      — screens and rewrites: judge, tone_guard, worthiness_screen,
 #               mergeability_triage, check:pr-description, check:malicious-prompt
 #   standard  — reads a diff to find something: llm_check (all other checks),
-#               ci_analysis, shepherding. Unset = llm_backends[0].
+#               ci_analysis, ci_failure, shepherding. Unset = llm_backends[0].
 #   reasoning — verdicts someone acts on: security_triage, security_guidance,
 #               security_learning, zombie_assessment
 #

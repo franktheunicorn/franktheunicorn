@@ -60,6 +60,7 @@ TASK_DEFAULT_TIERS: dict[str, str] = {
     # Diff reading.
     LLM_CHECK_TASK: TIER_STANDARD,
     "ci_analysis": TIER_STANDARD,
+    "ci_failure": TIER_STANDARD,
     "shepherding": TIER_STANDARD,
     # Verdicts.
     "security_triage": TIER_REASONING,

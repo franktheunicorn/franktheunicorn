@@ -43,6 +43,17 @@ urlpatterns = [
     # Stats
     path("stats/", views.stats, name="stats"),
     path("project/<int:project_id>/wipe-prs/", views.project_wipe_prs, name="project_wipe_prs"),
+    # CI Failures queue: classify a red CI run and draft the fix for the author
+    # (review/ci_failure.py). The scan queues worker commands; the three per-PR
+    # endpoints swap the panel.
+    path("ci-failures/scan/", views.ci_failure_scan, name="ci_failure_scan"),
+    path(
+        "pr/<int:pr_id>/ci-failure/classify/",
+        views.ci_failure_classify,
+        name="ci_failure_classify",
+    ),
+    path("pr/<int:pr_id>/ci-failure/post/", views.ci_failure_post, name="ci_failure_post"),
+    path("pr/<int:pr_id>/ci-failure/dismiss/", views.ci_failure_dismiss, name="ci_failure_dismiss"),
     # Zombie Queue: closed-but-unmerged PRs whose JIRA is still open. The hunt
     # is a worker sweep (bulk priority); the two per-PR buttons live on the
     # detail page and swap the panel.
