@@ -115,14 +115,31 @@ class TestSearchPrsAuthoredBy:
             gitea.close()
 
 
+def _plan_everything(client: Any, pc: ProjectConfig, items: list[dict[str, Any]]) -> Any:
+    """Every hit needs a refresh — the scan's routing is under test, not the skip."""
+    from franktheunicorn.backends.poller import SearchHitPlan
+    from franktheunicorn.core.models import Project
+
+    project, _ = Project.objects.get_or_create(owner=pc.owner, repo=pc.repo)
+    return SearchHitPlan(project, [int(i["number"]) for i in items], [])
+
+
+def _refreshed(_client: Any, _project: Any, _pc: Any, number: int, *a: Any, **k: Any) -> Any:
+    return MagicMock(pk=number, number=number, state="open", is_operator_pr=False)
+
+
 @pytest.mark.django_db
 class TestScanOperatorPrs:
-    """Two searches per forge, deduped, own-PRs first."""
+    """Three searches per forge, deduped, own-PRs first, configured projects only."""
 
     _CONFIGS = [ProjectConfig(owner="apache", repo="spark")]
 
-    def _scan(self, clients: dict[str, Any], username: str = "holdenk") -> None:
-        runner._scan_operator_prs(clients, username, None, self._CONFIGS)
+    def _scan(
+        self, clients: dict[str, Any], username: str = "holdenk", **kwargs: Any
+    ) -> list[runner.OperatorScanHit]:
+        return runner._scan_operator_prs(
+            clients, username, kwargs.pop("operator_config", None), self._CONFIGS, **kwargs
+        )
 
     def _client(
         self,
@@ -136,15 +153,46 @@ class TestScanOperatorPrs:
         client.search_prs_involving.return_value = involved
         return client
 
-    def test_both_searches_run(self) -> None:
-        client = self._client([_item("apache", "spark", 1)], [_item("apache", "spark", 2)])
+    @staticmethod
+    def _patched(refresh: Any = _refreshed) -> Any:
+        from contextlib import ExitStack
 
-        with patch("franktheunicorn.backends.poller.ingest_single_pr") as ingest:
-            self._scan({"github": client})
+        stack = ExitStack()
+        stack.enter_context(
+            patch("franktheunicorn.backends.poller.plan_search_hit_refresh", _plan_everything)
+        )
+        mock = stack.enter_context(
+            patch(
+                "franktheunicorn.backends.poller.refresh_pull_request_by_number",
+                side_effect=refresh,
+            )
+        )
+        return stack, mock
+
+    def _run(self, clients: dict[str, Any], **kwargs: Any) -> tuple[Any, list[Any]]:
+        stack, refresh = self._patched(kwargs.pop("refresh", _refreshed))
+        with stack:
+            hits = self._scan(clients, **kwargs)
+        return refresh, hits
+
+    @staticmethod
+    def _numbers(refresh: Any) -> list[int]:
+        return [call.args[3] for call in refresh.call_args_list]
+
+    def test_all_three_searches_run(self) -> None:
+        client = self._client(
+            [_item("apache", "spark", 1)],
+            [_item("apache", "spark", 2)],
+            reviewed=[_item("apache", "spark", 3)],
+        )
+
+        refresh, hits = self._run({"github": client})
 
         client.search_prs_authored_by.assert_called_once_with("holdenk")
+        client.search_prs_reviewed_by.assert_called_once_with("holdenk")
         client.search_prs_involving.assert_called_once_with("holdenk")
-        assert {call.args[2] for call in ingest.call_args_list} == {1, 2}
+        assert set(self._numbers(refresh)) == {1, 2, 3}
+        assert all(hit.refreshed for hit in hits)
 
     def test_the_searches_run_in_cost_of_missing_order(self) -> None:
         """A failure part-way through leaves the earlier sets landed, so: own PRs,
@@ -155,98 +203,226 @@ class TestScanOperatorPrs:
             reviewed=[_item("apache", "spark", 5)],
         )
 
-        with patch("franktheunicorn.backends.poller.ingest_single_pr") as ingest:
-            self._scan({"github": client})
+        refresh, hits = self._run({"github": client})
 
-        assert [call.args[2] for call in ingest.call_args_list] == [9, 5, 3]
+        assert self._numbers(refresh) == [9, 5, 3]
+        assert [hit.label for hit in hits] == ["authored", "reviewed", "involved"]
 
-    def test_reviewed_by_is_searched(self) -> None:
-        """GitHub's own `is:open is:pr reviewed-by:@me`. Not covered by
-        `involves:` — an approve-only review need not make you a commenter."""
-        client = self._client([], [], reviewed=[_item("apache", "spark", 5)])
-
-        with patch("franktheunicorn.backends.poller.ingest_single_pr") as ingest:
-            self._scan({"github": client})
-
-        client.search_prs_reviewed_by.assert_called_once_with("holdenk")
-        assert [call.args[2] for call in ingest.call_args_list] == [5]
-
-    def test_a_pr_in_both_results_is_ingested_once(self) -> None:
-        """Each ingest is a detail fetch plus a files fetch."""
+    def test_a_pr_in_several_results_is_refreshed_once(self) -> None:
         both = [_item("apache", "spark", 42)]
-        client = self._client(both, list(both))
+        client = self._client(both, list(both), reviewed=list(both))
 
-        with patch("franktheunicorn.backends.poller.ingest_single_pr") as ingest:
-            self._scan({"github": client})
+        refresh, hits = self._run({"github": client})
 
-        assert ingest.call_count == 1
+        assert refresh.call_count == 1
+        assert [hit.label for hit in hits] == ["authored"], "labelled by its first search"
 
     def test_a_forge_without_the_search_is_skipped(self) -> None:
         bare = MagicMock(spec=[])  # no search methods at all
 
-        with patch("franktheunicorn.backends.poller.ingest_single_pr") as ingest:
-            self._scan({"gitea": bare})
+        refresh, hits = self._run({"github": bare})
 
-        assert ingest.call_count == 0
+        assert refresh.call_count == 0
+        assert hits == []
 
-    def test_one_failed_ingest_does_not_stop_the_rest(self, caplog: Any) -> None:
-        client = self._client(
-            [_item("apache", "spark", 1), _item("apache", "spark", 2)],
-            [],
-        )
+    def test_one_failed_refresh_does_not_stop_the_rest(self, caplog: Any) -> None:
+        client = self._client([_item("apache", "spark", 1), _item("apache", "spark", 2)], [])
 
-        with (
-            patch(
-                "franktheunicorn.backends.poller.ingest_single_pr",
-                side_effect=[RuntimeError("boom"), None],
-            ) as ingest,
-            caplog.at_level(logging.INFO),
-        ):
-            self._scan({"github": client})
+        def boom_on_one(*args: Any, **kwargs: Any) -> Any:
+            if args[3] == 1:
+                msg = "boom"
+                raise RuntimeError(msg)
+            return _refreshed(*args, **kwargs)
 
-        assert ingest.call_count == 2
-        # WARNING, not DEBUG: a PR that failed to ingest is a PR the operator
-        # will not see in the dashboard this cycle.
+        with caplog.at_level(logging.INFO):
+            refresh, hits = self._run({"github": client}, refresh=boom_on_one)
+
+        assert refresh.call_count == 2
+        assert [hit.pr.number for hit in hits] == [2]
+        # WARNING, not DEBUG: a PR that failed to refresh is stale in the dashboard.
         assert any(r.levelno >= logging.WARNING for r in caplog.records)
+        assert "1 failed" in caplog.text
 
-    def test_a_plain_issue_is_not_ingested_as_a_pr(self) -> None:
+    def test_a_plain_issue_is_not_refreshed_as_a_pr(self) -> None:
         issue = {"number": 5, "repository_url": "https://api.github.test/repos/a/b"}
         client = self._client([issue], [])
 
-        with patch("franktheunicorn.backends.poller.ingest_single_pr") as ingest:
-            self._scan({"github": client})
+        refresh, _ = self._run({"github": client})
 
-        assert ingest.call_count == 0
+        assert refresh.call_count == 0
 
-    def test_a_search_that_raises_does_not_stop_the_other(self) -> None:
+    def test_a_search_that_raises_warns_and_does_not_stop_the_others(self, caplog: Any) -> None:
         client = MagicMock()
         client.search_prs_authored_by.side_effect = RuntimeError("throttled")
+        client.search_prs_reviewed_by.return_value = []
         client.search_prs_involving.return_value = [_item("apache", "spark", 4)]
 
-        with patch("franktheunicorn.backends.poller.ingest_single_pr") as ingest:
-            self._scan({"github": client})
+        with caplog.at_level(logging.INFO):
+            refresh, _ = self._run({"github": client})
 
-        assert [call.args[2] for call in ingest.call_args_list] == [4]
+        assert self._numbers(refresh) == [4]
+        # A failed search is a set of PRs that silently stops refreshing.
+        assert any(
+            r.levelno == logging.WARNING and "Authored PR search failed" in r.getMessage()
+            for r in caplog.records
+        )
 
-    def test_a_hit_in_an_unconfigured_repo_is_not_ingested(self) -> None:
+    def test_a_hit_in_an_unconfigured_repo_is_not_refreshed(self) -> None:
         """GitHub's search is account-wide; YAML is the allow-list."""
         client = self._client(
             [_item("holdenk", "some-fork", 9), _item("apache", "spark", 1)],
             [_item("random-org", "drive-by", 3)],
         )
 
-        with patch("franktheunicorn.backends.poller.ingest_single_pr") as ingest:
-            self._scan({"github": client})
+        refresh, _ = self._run({"github": client})
 
-        assert [call.args[:3] for call in ingest.call_args_list] == [("apache", "spark", 1)]
+        assert self._numbers(refresh) == [1]
 
     def test_yaml_owner_repo_match_is_case_insensitive(self) -> None:
         client = self._client([_item("Apache", "Spark", 1)], [])
 
-        with patch("franktheunicorn.backends.poller.ingest_single_pr") as ingest:
-            self._scan({"github": client})
+        refresh, hits = self._run({"github": client})
 
-        assert [call.args[:3] for call in ingest.call_args_list] == [("Apache", "Spark", 1)]
+        assert self._numbers(refresh) == [1]
+        assert hits[0].pc.full_name == "apache/spark", "the config's casing, not the hit's"
+
+    def test_a_hit_on_another_forge_than_the_project_is_skipped(self) -> None:
+        """A same-named repo on a different forge is not the configured project."""
+        client = self._client([_item("apache", "spark", 1)], [])
+
+        refresh, _ = self._run({"gitea": client})
+
+        assert refresh.call_count == 0
+
+    def test_refreshes_run_concurrently_at_refresh_concurrency(self) -> None:
+        import threading
+
+        client = self._client([_item("apache", "spark", n) for n in range(1, 9)], [])
+        barrier = threading.Barrier(4, timeout=5)
+
+        def wait_for_three_others(*args: Any, **kwargs: Any) -> Any:
+            if args[3] <= 4:
+                barrier.wait()  # times out unless four refreshes run at once
+            return _refreshed(*args, **kwargs)
+
+        oc = OperatorConfig(github_username="holdenk", worker_pool={"refresh_concurrency": 4})
+        _, hits = self._run({"github": client}, refresh=wait_for_three_others, operator_config=oc)
+
+        assert [hit.pr.number for hit in hits] == list(range(1, 9)), "still in search order"
+
+    def test_end_to_end_an_unchanged_pr_is_not_fetched_twice(self, tmp_path: Any) -> None:
+        """The real planner and refresh: the second scan finds nothing moved."""
+        from tests.data_access.github.test_poller_search_refresh import _DetailClient, _search_hit
+
+        client = _DetailClient(tmp_path, [])
+        client.search_prs_authored_by = lambda _u: [_search_hit()]  # type: ignore[method-assign]
+        configs = [ProjectConfig(owner="apache", repo="spark", poll_refresh_hours=24)]
+
+        first = runner._scan_operator_prs({"github": client}, "holdenk", None, configs)
+        PullRequest.objects.filter(number=99).update(score_breakdown={"stub": 1})
+        second = runner._scan_operator_prs({"github": client}, "holdenk", None, configs)
+
+        assert client.detail_calls == [99]
+        assert [hit.refreshed for hit in first] == [True]
+        assert [(hit.pr.number, hit.refreshed) for hit in second] == [(99, False)]
+
+
+@pytest.mark.django_db
+class TestOperatorScanInTheCycle:
+    """It runs first, queues what it refreshed, and comes back mid-cycle when due."""
+
+    @staticmethod
+    def _hit(number: int, *, own: bool, refreshed: bool = True, state: str = "open") -> Any:
+        pr = MagicMock(pk=number, number=number, state=state, is_operator_pr=own)
+        return runner.OperatorScanHit(
+            pr, ProjectConfig(owner="apache", repo="spark"), MagicMock(), "authored", refreshed
+        )
+
+    def _cycle(self, hits: list[Any], **pool: Any) -> tuple[MagicMock, list[tuple[Any, bool]]]:
+        from franktheunicorn.worker.review_pool import ReviewPool
+
+        submitted: list[tuple[Any, bool]] = []
+
+        def record(_self: Any, item: Any, *, front: bool = False) -> None:
+            submitted.append((item, front))
+
+        oc = OperatorConfig(github_username="holdenk", worker_pool=pool)
+        with (
+            patch.object(runner, "_scan_operator_prs", return_value=hits) as scan,
+            patch.object(ReviewPool, "submit", record),
+            patch.object(runner, "_run_shepherding_pass"),
+            patch.object(runner, "_fetch_dependency_changelogs_for_cycle"),
+            patch.object(runner, "_backfill_unreviewed_prs"),
+            patch.object(runner, "_drain_worker_commands"),
+        ):
+            runner._run_cycle({}, [], "holdenk", oc)
+        return scan, submitted
+
+    def test_your_refreshed_pr_goes_to_the_front_and_the_rest_to_the_back(self) -> None:
+        scan, submitted = self._cycle(
+            [
+                self._hit(1, own=True),
+                self._hit(2, own=False),
+                self._hit(3, own=True, refreshed=False),  # unchanged: nothing to review
+                self._hit(4, own=True, state="closed"),  # closed since the search
+            ]
+        )
+
+        assert scan.call_count == 1, "once at the start; not due again this soon"
+        assert [(item.pr.number, front) for item, front in submitted] == [(1, True), (2, False)]
+
+    def test_when_due_it_scans_again_mid_cycle_without_double_queueing(self) -> None:
+        scan, submitted = self._cycle([self._hit(1, own=True)], operator_scan_minutes=0)
+
+        assert scan.call_count >= 2, "the main thread's turns re-scan when due"
+        assert [item.pr.number for item, _ in submitted] == [1], "one PR, one review"
+
+    def test_the_poll_does_not_requeue_what_the_scan_queued(self) -> None:
+        """The scan runs first now; a PR it queued that the poll also refreshes
+        must not get a second runner, and the later passes see it once."""
+        from franktheunicorn.worker.review_pool import ReviewPool
+
+        own = self._hit(1, own=True)
+        polled_copy = MagicMock(pk=1, number=1, state="open", is_operator_pr=True)
+        submitted: list[Any] = []
+        oc = OperatorConfig(github_username="holdenk")
+        pc = ProjectConfig(owner="apache", repo="spark")
+
+        def record(_self: Any, item: Any, *, front: bool = False) -> None:
+            submitted.append(item)
+
+        with (
+            patch.object(runner, "_scan_operator_prs", return_value=[own]),
+            patch.object(ReviewPool, "submit", record),
+            patch("franktheunicorn.backends.poller.poll_project", return_value=[polled_copy]),
+            patch("franktheunicorn.worker.repo_manager.ensure_repo", return_value=None),
+            patch.object(runner, "_maybe_refresh_repo_health"),
+            patch.object(runner, "_run_shepherding_pass") as shepherd,
+            patch.object(runner, "_fetch_dependency_changelogs_for_cycle"),
+            patch.object(runner, "_backfill_unreviewed_prs"),
+            patch.object(runner, "_drain_worker_commands"),
+        ):
+            runner._run_cycle({"github": MagicMock()}, [pc], "holdenk", oc)
+
+        assert [item.pr.number for item in submitted] == [1]
+        assert shepherd.call_args.args[0] == [polled_copy], "once, the poll's fresher copy"
+
+    def test_without_a_username_nothing_is_scanned(self) -> None:
+        with patch.object(runner, "_scan_operator_prs") as scan:
+            runner._run_cycle({}, [], "", OperatorConfig())
+
+        scan.assert_not_called()
+
+
+class TestOperatorScanDue:
+    def test_claims_the_slot_then_waits_out_the_interval(self) -> None:
+        oc = OperatorConfig(worker_pool={"operator_scan_minutes": 10})
+        runner._last_operator_scan = float("-inf")
+        try:
+            assert runner._operator_scan_due(oc) is True
+            assert runner._operator_scan_due(oc) is False
+        finally:
+            runner._last_operator_scan = float("-inf")
 
 
 class TestCycleSummary:
