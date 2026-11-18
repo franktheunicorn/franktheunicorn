@@ -117,6 +117,11 @@
 {% include "dashboard/_merge_candidate.html" with cand=candidate %}
 {% endif %}
 
+{% if ci_failure_panel %}
+<h3 style="margin-top: 1.5rem;">CI Failure</h3>
+{% include "dashboard/_ci_failure_panel.html" with cif=ci_failure_panel %}
+{% endif %}
+
 <div style="margin-bottom: 0.75rem; margin-top: 1.5rem; display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: flex-start;">
     <div>
         <button class="action-btn"
@@ -189,6 +194,24 @@
         <span id="analyze-ci-spinner" class="htmx-indicator run-agents-spinner" aria-label="Starting..."></span>
         <div id="analyze-ci-result"></div>
     </div>
+    {% if not ci_failure_panel and pr.state == "open" %}
+    {# No panel above: frank has not seen a red run on this commit (CI unknown, #}
+    {# pending, or green as of the last poll). The worker re-reads the checks, so #}
+    {# this is the way in when the stored state is behind. The response is the #}
+    {# panel itself, which then carries its own buttons. #}
+    <div>
+        <button class="action-btn"
+                hx-post="{% url 'dashboard:ci_failure_classify' pr.pk %}"
+                hx-target="#classify-ci-result"
+                hx-swap="innerHTML"
+                hx-indicator="#classify-ci-spinner"
+                title="Re-read this commit's checks; if something failed, say what and draft a comment telling the author what to do. Nothing is posted.">
+            Classify CI Failure
+        </button>
+        <span id="classify-ci-spinner" class="htmx-indicator run-agents-spinner" aria-label="Starting..."></span>
+        <div id="classify-ci-result"></div>
+    </div>
+    {% endif %}
 </div>
 
 {% if agent_run_summary %}

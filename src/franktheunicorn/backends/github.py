@@ -9,8 +9,10 @@ format internally, so callers can target any forge uniformly.
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import os
+import re
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -30,8 +32,60 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-#: Actions job logs fetched per ``get_commit_check_outputs`` call (one request each).
+#: Actions job logs fetched per ``get_commit_check_outputs`` /
+#: ``get_commit_check_failures`` call (one request each).
 _MAX_JOB_LOGS = 8
+
+#: Failed jobs reported per linked workflow run (``_failed_run_jobs``).
+_MAX_FAILED_JOBS = 12
+
+#: ``https://github.com/<owner>/<repo>/actions/runs/<id>`` — a workflow run's page.
+_ACTIONS_RUN_URL = re.compile(r"github\.com/([^/\s]+)/([^/\s]+)/actions/runs/(\d+)")
+
+
+def _linked_run(run: dict[str, Any], owner: str, repo: str) -> tuple[str, str, int] | None:
+    """The workflow run *in another repository* that a check run stands for.
+
+    Apache Spark runs a PR's tests in the contributor's fork and mirrors the
+    result onto the PR as one ``Build`` check, with the fork run named in the
+    check's ``output.text`` as ``{"owner", "repo", "run_id"}`` and linked from
+    ``details_url``. A check whose run is in *this* repository is not linked:
+    its own id is already the job id.
+    """
+    out = run.get("output")
+    text = out.get("text") if isinstance(out, dict) else None
+    if isinstance(text, str) and text.lstrip().startswith("{"):
+        try:
+            ref = json.loads(text)
+        except ValueError:
+            ref = None
+        if isinstance(ref, dict):
+            run_id = ref.get("run_id")
+            ref_owner, ref_repo = ref.get("owner"), ref.get("repo")
+            if (
+                isinstance(ref_owner, str)
+                and isinstance(ref_repo, str)
+                and isinstance(run_id, int | str)
+                and str(run_id).isdigit()
+            ):
+                return ref_owner, ref_repo, int(run_id)
+    match = _ACTIONS_RUN_URL.search(str(run.get("details_url") or ""))
+    if match is None:
+        return None
+    if (match.group(1).lower(), match.group(2).lower()) == (owner.lower(), repo.lower()):
+        return None
+    return match.group(1), match.group(2), int(match.group(3))
+
+
+def _first_failed_step(steps: object) -> str:
+    """The first failed step's name from an Actions job's ``steps``, or ``""``."""
+    if not isinstance(steps, list):
+        return ""
+    for wanted in (("failure",), ("timed_out", "cancelled")):
+        for step in steps:
+            if isinstance(step, dict) and step.get("conclusion") in wanted:
+                return str(step.get("name") or "")
+    return ""
 
 
 class GitHubClient(ForgeClient):
@@ -499,7 +553,21 @@ class GitHubClient(ForgeClient):
                 text = f"{title}\n{summary}".strip()
                 app = run.get("app")
                 slug = app.get("slug") if isinstance(app, dict) else None
-                if slug == "github-actions" and run.get("id") and logs_fetched < _MAX_JOB_LOGS:
+                linked = _linked_run(run, owner, repo)
+                if linked is not None:
+                    # The check mirrors a run in another repository (Spark's
+                    # ``Build``): its own output is a link, and its id is not a
+                    # job id here. The failed jobs of that run carry the logs.
+                    for job in self._failed_run_jobs(*linked):
+                        if logs_fetched >= _MAX_JOB_LOGS:
+                            break
+                        logs_fetched += 1
+                        log = self._actions_job_log(linked[0], linked[1], int(job["id"]))
+                        if log:
+                            text = (
+                                f"{text}\n\nLog excerpt ({job['name']}):\n{excerpt_log(log)}"
+                            ).strip()
+                elif slug == "github-actions" and run.get("id") and logs_fetched < _MAX_JOB_LOGS:
                     logs_fetched += 1
                     log = self._actions_job_log(owner, repo, int(run["id"]))
                     if log:
@@ -509,6 +577,206 @@ class GitHubClient(ForgeClient):
             if len(runs) < 100:
                 break
         return outputs
+
+    def get_commit_check_failures(self, owner: str, repo: str, sha: str) -> list[dict[str, Any]]:
+        """What failed on ``sha``: one entry per failed *job*, with its log excerpt.
+
+        ``get_commit_checks`` says a check is red; this says which job and step
+        inside it, and what the log said. Each entry is ``{"check", "job",
+        "step", "conclusion", "url", "title", "summary", "log", "linked_run"}``:
+        ``check`` is the name on the PR, ``job`` the failed job when the check
+        stands for a whole workflow run (else ``""``), ``step`` the first failed
+        step when the forge reports steps, ``log`` an excerpt
+        (:func:`~franktheunicorn.scoring.ci_analysis.excerpt_log`) or ``""``.
+
+        The case this exists for is Apache Spark, where a PR's tests run in the
+        *contributor's fork* and apache/spark carries one mirror check, ``Build``,
+        whose output is a link and whose ``output.text`` is ``{"owner", "repo",
+        "run_id"}`` naming the fork's run (``.github/workflows/
+        update_build_status.js``). Reading that check alone says "Build failed";
+        the fork run's jobs say "Linters, licenses, and dependencies failed at
+        Scala linter". ``linked_run`` is ``"owner/repo#run_id"`` for those.
+
+        A failing check that cannot be expanded (no linked run, the jobs call
+        failed, a commit status) is still returned, by name, so the caller can
+        say that it failed even when it cannot say why. At most ``_MAX_JOB_LOGS``
+        logs per call. Raises when the check runs themselves cannot be listed:
+        "nothing failed" and "could not look" must not read the same.
+        """
+        from franktheunicorn.scoring.ci_analysis import excerpt_log
+        from franktheunicorn.scoring.merge_readiness import FAILED_CONCLUSIONS
+
+        failures: list[dict[str, Any]] = []
+        logs_fetched = 0
+
+        def entry(run: dict[str, Any], **extra: Any) -> dict[str, Any]:
+            out = run.get("output")
+            out = out if isinstance(out, dict) else {}
+            base: dict[str, Any] = {
+                "check": run["name"],
+                "job": "",
+                "step": "",
+                "conclusion": str(run.get("conclusion") or ""),
+                "url": str(run.get("html_url") or run.get("details_url") or ""),
+                "title": str(out.get("title") or ""),
+                "summary": str(out.get("summary") or ""),
+                "log": "",
+                "linked_run": "",
+            }
+            base.update(extra)
+            return base
+
+        runs_url = f"/repos/{owner}/{repo}/commits/{sha}/check-runs"
+        for page in range(1, 11):
+            response = self._get(runs_url, params={"per_page": 100, "page": page})
+            response.raise_for_status()
+            payload = response.json()
+            runs = payload.get("check_runs", []) if isinstance(payload, dict) else []
+            for run in runs:
+                if not isinstance(run, dict) or not isinstance(run.get("name"), str):
+                    continue
+                if run.get("conclusion") not in FAILED_CONCLUSIONS:
+                    continue
+                linked = _linked_run(run, owner, repo)
+                # ``action_required`` on a mirror check is setup guidance, not a
+                # run that failed: there are no jobs behind it to read.
+                jobs = (
+                    self._failed_run_jobs(*linked)
+                    if linked is not None and run.get("conclusion") != "action_required"
+                    else []
+                )
+                if linked is not None and jobs:
+                    for job in jobs:
+                        log = ""
+                        if logs_fetched < _MAX_JOB_LOGS:
+                            logs_fetched += 1
+                            log = self._actions_job_log(linked[0], linked[1], int(job["id"]))
+                        failures.append(
+                            entry(
+                                run,
+                                job=job["name"],
+                                step=job["step"],
+                                conclusion=job["conclusion"],
+                                url=job["url"] or str(run.get("details_url") or ""),
+                                log=excerpt_log(log) if log else "",
+                                linked_run=f"{linked[0]}/{linked[1]}#{linked[2]}",
+                            )
+                        )
+                    continue
+                app = run.get("app")
+                slug = app.get("slug") if isinstance(app, dict) else None
+                log = ""
+                step = ""
+                # A job never concludes ``action_required``; a check that does
+                # was written through the Checks API (Spark's setup guidance)
+                # and its id is not a job id, so there is no log to ask for.
+                if (
+                    linked is None
+                    and slug == "github-actions"
+                    and run.get("id")
+                    and run.get("conclusion") != "action_required"
+                    and logs_fetched < _MAX_JOB_LOGS
+                ):
+                    logs_fetched += 1
+                    log = self._actions_job_log(owner, repo, int(run["id"]))
+                    step = self._actions_job_failed_step(owner, repo, int(run["id"]))
+                failures.append(
+                    entry(
+                        run,
+                        step=step,
+                        log=excerpt_log(log) if log else "",
+                        linked_run=f"{linked[0]}/{linked[1]}#{linked[2]}" if linked else "",
+                    )
+                )
+            if len(runs) < 100:
+                break
+
+        # Commit statuses (Jenkins and friends): a name, a one-line description
+        # and a link. Best-effort — the check runs above are already an answer.
+        try:
+            status_resp = self._get(f"/repos/{owner}/{repo}/commits/{sha}/status")
+            status_resp.raise_for_status()
+            status_payload = status_resp.json()
+        except Exception:
+            logger.debug("Could not fetch commit statuses for %s/%s@%s", owner, repo, sha[:12])
+            return failures
+        statuses = status_payload.get("statuses", []) if isinstance(status_payload, dict) else []
+        for item in statuses:
+            if not isinstance(item, dict) or not isinstance(item.get("context"), str):
+                continue
+            if item.get("state") not in ("failure", "error"):
+                continue
+            failures.append(
+                {
+                    "check": item["context"],
+                    "job": "",
+                    "step": "",
+                    "conclusion": "failure",
+                    "url": str(item.get("target_url") or ""),
+                    "title": "",
+                    "summary": str(item.get("description") or ""),
+                    "log": "",
+                    "linked_run": "",
+                }
+            )
+        return failures
+
+    def _failed_run_jobs(self, owner: str, repo: str, run_id: int) -> list[dict[str, Any]]:
+        """The failed jobs of one Actions run: ``[{"id", "name", "step", "conclusion", "url"}]``.
+
+        ``filter=latest`` so a re-run's attempt replaces the one it retried.
+        Failed and timed-out jobs first; a run that was only cancelled reports
+        its cancelled jobs instead, so "somebody stopped it" is still an answer.
+        Best-effort: any failure is an empty list, and the caller falls back to
+        the check by name. Capped — a broken build fails every job in the matrix
+        with the same error, and a dozen of them say it as well as forty.
+        """
+        failed: list[dict[str, Any]] = []
+        cancelled: list[dict[str, Any]] = []
+        url = f"/repos/{owner}/{repo}/actions/runs/{run_id}/jobs"
+        for page in range(1, 4):
+            try:
+                response = self._get(
+                    url, params={"filter": "latest", "per_page": 100, "page": page}
+                )
+            except Exception:
+                logger.debug("Could not list jobs for %s/%s run %d", owner, repo, run_id)
+                break
+            if response.status_code != 200:
+                logger.debug(
+                    "No jobs for %s/%s run %d (HTTP %d)", owner, repo, run_id, response.status_code
+                )
+                break
+            payload = response.json()
+            jobs = payload.get("jobs", []) if isinstance(payload, dict) else []
+            for job in jobs:
+                if not isinstance(job, dict) or not job.get("id"):
+                    continue
+                conclusion = str(job.get("conclusion") or "")
+                if conclusion not in ("failure", "timed_out", "cancelled"):
+                    continue
+                row = {
+                    "id": int(job["id"]),
+                    "name": str(job.get("name") or ""),
+                    "step": _first_failed_step(job.get("steps")),
+                    "conclusion": conclusion,
+                    "url": str(job.get("html_url") or ""),
+                }
+                (cancelled if conclusion == "cancelled" else failed).append(row)
+            if len(jobs) < 100:
+                break
+        return (failed or cancelled)[:_MAX_FAILED_JOBS]
+
+    def _actions_job_failed_step(self, owner: str, repo: str, job_id: int) -> str:
+        """The name of the first failed step of an Actions job, or ``""``."""
+        try:
+            resp = self._get(f"/repos/{owner}/{repo}/actions/jobs/{job_id}")
+        except Exception:
+            return ""
+        if resp.status_code != 200:
+            return ""
+        payload = resp.json()
+        return _first_failed_step(payload.get("steps") if isinstance(payload, dict) else None)
 
     def _actions_job_log(self, owner: str, repo: str, job_id: int) -> str:
         """An Actions job's log text, or ``""`` when it can't be had.
