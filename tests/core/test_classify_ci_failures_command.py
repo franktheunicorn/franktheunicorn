@@ -26,7 +26,7 @@ SPARK = ProjectConfig(owner="apache", repo="spark")
 @pytest.fixture(autouse=True)
 def _configs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(f"{_CMD}.load_project_configs", lambda _dir: [SPARK])
-    monkeypatch.setattr(f"{_CMD}.get_operator_config", lambda: OperatorConfig())
+    monkeypatch.setattr(f"{_CMD}.get_operator_config", OperatorConfig)
     monkeypatch.setattr(f"{_CMD}.resolve_backend", lambda oc: None)
 
 
