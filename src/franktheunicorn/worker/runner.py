@@ -2962,18 +2962,30 @@ def _scan_operator_prs(
     return result
 
 
-#: Last time a running cycle scanned for the operator's PRs (monotonic seconds).
-_last_operator_scan = float("-inf")
+@dataclass
+class _ScanClock:
+    """When a running cycle last scanned for the operator's PRs (monotonic seconds).
+
+    An object rather than a rebound module global: the cycle's main thread is the
+    only writer, and tests reset it with ``reset()``.
+    """
+
+    last: float = float("-inf")
+
+    def reset(self) -> None:
+        self.last = float("-inf")
+
+
+_operator_scan_clock = _ScanClock()
 
 
 def _operator_scan_due(operator_config: OperatorConfig | None) -> bool:
     """Whether the mid-cycle operator scan's interval has lapsed; claims it if so."""
-    global _last_operator_scan
     minutes = operator_config.worker_pool.operator_scan_minutes if operator_config else 10
     now = time.monotonic()
-    if now - _last_operator_scan < max(0, minutes) * 60:
+    if now - _operator_scan_clock.last < max(0, minutes) * 60:
         return False
-    _last_operator_scan = now
+    _operator_scan_clock.last = now
     return True
 
 

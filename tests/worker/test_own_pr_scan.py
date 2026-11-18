@@ -417,12 +417,12 @@ class TestOperatorScanInTheCycle:
 class TestOperatorScanDue:
     def test_claims_the_slot_then_waits_out_the_interval(self) -> None:
         oc = OperatorConfig(worker_pool={"operator_scan_minutes": 10})
-        runner._last_operator_scan = float("-inf")
+        runner._operator_scan_clock.reset()
         try:
             assert runner._operator_scan_due(oc) is True
             assert runner._operator_scan_due(oc) is False
         finally:
-            runner._last_operator_scan = float("-inf")
+            runner._operator_scan_clock.reset()
 
 
 class TestCycleSummary:
