@@ -9,8 +9,9 @@ and stores results in the database. Works with any ``ForgeClient``
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -74,6 +75,9 @@ _KNOWN_FIELDS = (
     "merge_readiness_verdict",
     "rebase_requested_sha",
     "ci_status",
+    "is_mentioned",
+    "merge_intent",
+    "author",
     *_LISTING_FIELDS,
 )
 
@@ -331,7 +335,59 @@ def poll_project(
     return results
 
 
+#: (project pk, PR number) of every refresh running right now, on any thread.
+#: The watcher runs beside the cycle and skips a PR the poll or the operator
+#: scan is already refreshing: two refreshes of one row at once both spend the
+#: per-PR reads and race on the final save.
+_refreshes_in_flight: set[tuple[int, int]] = set()
+_refreshes_lock = threading.Lock()
+
+
+def refresh_in_progress(project: Project, pr_number: int) -> bool:
+    """Whether some thread is refreshing *pr_number* right now."""
+    with _refreshes_lock:
+        return (project.pk, pr_number) in _refreshes_in_flight
+
+
 def _refresh_pull_request(
+    client: ForgeClient,
+    project: Project,
+    project_config: ProjectConfig,
+    pr_data: dict[str, Any],
+    operator_username: str,
+    repo_path: Path | None,
+    *,
+    merge_intent: MergeIntentConfig | None = None,
+    pr_detail: dict[str, Any] | None = None,
+) -> PullRequest:
+    """``_refresh_one_pull_request``, registered in ``_refreshes_in_flight`` while it runs.
+
+    Advisory: a refresh that finds the PR already registered still runs (the
+    poll must not drop a PR from its cycle); it is the watcher that checks
+    :func:`refresh_in_progress` first and stands aside.
+    """
+    key = (project.pk, int(pr_data["number"]))
+    with _refreshes_lock:
+        owned = key not in _refreshes_in_flight
+        _refreshes_in_flight.add(key)
+    try:
+        return _refresh_one_pull_request(
+            client,
+            project,
+            project_config,
+            pr_data,
+            operator_username,
+            repo_path,
+            merge_intent=merge_intent,
+            pr_detail=pr_detail,
+        )
+    finally:
+        if owned:
+            with _refreshes_lock:
+                _refreshes_in_flight.discard(key)
+
+
+def _refresh_one_pull_request(
     client: ForgeClient,
     project: Project,
     project_config: ProjectConfig,
@@ -1068,6 +1124,216 @@ def sync_open_pull_requests(
             new_prs.append(outcome.result)
     _reroute_pull_requests(new_prs, operator_username, project_config)
     return closed, new_prs
+
+
+@dataclass
+class RecentSync:
+    """What one changed-since listing did for a project (see :func:`sync_recent_pull_requests`)."""
+
+    #: Rows the listing showed closed or merged upstream, now closed here.
+    closed: int = 0
+    #: PRs seen for the first time (or reopened), ingested, newest first.
+    new: list[PullRequest] = field(default_factory=list)
+    #: Known open PRs a watched user is involved in that moved, refreshed.
+    refreshed: list[PullRequest] = field(default_factory=list)
+    #: Moved PRs nobody watched is involved in: left to the cycle's poll.
+    deferred: int = 0
+    #: Moved PRs another thread was refreshing at that moment.
+    in_flight: int = 0
+    #: The newest ``updated_at`` the listing carried — the next watermark.
+    newest: datetime | None = None
+    #: False when more changed than one check reads (``UpdatedPullRequests``).
+    complete: bool = True
+
+
+def _is_watched_involvement(
+    pr_data: dict[str, Any], known: Mapping[str, object] | None, watched: frozenset[str]
+) -> bool:
+    """Whether a moved PR is one somebody watched is waiting on.
+
+    From the listing (free): authored by, review requested of, or assigned to a
+    watched user. From the stored row: the operator's own, already mentioned,
+    already approved or a merge candidate, or a PR we asked to rebase. A mention
+    in a fresh comment is not visible in either — that is the notifications'
+    and the search's job.
+    """
+    author = str((pr_data.get("user") or {}).get("login", "")).lower()
+    if author in watched:
+        return True
+    for key in ("requested_reviewers", "assignees"):
+        for person in pr_data.get(key) or []:
+            if str(person.get("login", "")).lower() in watched:
+                return True
+    if known is None:
+        return False
+    return bool(
+        known.get("is_operator_pr")
+        or known.get("is_mentioned")
+        or known.get("merge_intent")
+        or known.get("rebase_requested_sha")
+        or known.get("merge_readiness_verdict") in LISTED_VERDICTS
+    )
+
+
+def _close_from_listing(project: Project, closed_items: Sequence[dict[str, Any]]) -> int:
+    """Close the open rows the listing says are closed, keeping when they merged.
+
+    Positive evidence, unlike ``_close_missing_pull_requests``'s inference from
+    absence — so it works on a repo past the listing cap and records
+    ``merged_at``, which the absence path never could.
+    """
+    closed = 0
+    for pr_data in closed_items:
+        fields: dict[str, Any] = {"state": "closed", "updated_at": timezone.now()}
+        merged_at = _parse_github_datetime(pr_data.get("merged_at"))
+        if merged_at is not None:
+            fields["merged_at"] = merged_at
+        closed += PullRequest.objects.filter(
+            project=project, number=pr_data["number"], state="open"
+        ).update(**fields)
+    return closed
+
+
+def sync_recent_pull_requests(
+    project_config: ProjectConfig,
+    client: ForgeClient,
+    operator_username: str,
+    since: datetime | None,
+    *,
+    watched_users: Sequence[str] = (),
+    repo_path: Path | None = None,
+    merge_intent: MergeIntentConfig | None = None,
+    concurrency: int = 1,
+    max_refreshes: int = MAX_MID_CYCLE_NEW_PRS,
+) -> RecentSync:
+    """Act on what changed in a project since *since*: the watcher's one listing.
+
+    New (or reopened) PRs are ingested, closed and merged ones closed, and moved
+    PRs a watched user is involved in refreshed — at most *max_refreshes* of
+    those two together, newest first. Anything else that moved is counted as
+    deferred and left to the cycle's poll: on Spark, refreshing every PR the
+    moment a bot comments on it would spend most of the hourly quota.
+
+    A project with no row yet is left to the regular poll, as the mid-cycle
+    sync does: its whole backlog belongs to a full poll, not to a one-page check.
+    """
+    result = RecentSync()
+    project = Project.objects.filter(
+        owner=project_config.owner, repo=project_config.repo, enabled=True
+    ).first()
+    if project is None:
+        return result
+    listing = client.list_pull_requests_updated_since(
+        project_config.owner, project_config.repo, since
+    )
+    result.complete = listing.complete
+    stamps = [
+        stamp
+        for stamp in (_parse_github_datetime(i.get("updated_at")) for i in listing.items)
+        if stamp is not None
+    ]
+    result.newest = max(stamps, default=None)
+
+    items = [i for i in listing.items if i.get("number")]
+    result.closed = _close_from_listing(project, [i for i in items if i.get("state") != "open"])
+
+    open_items = [i for i in items if i.get("state") == "open"]
+    known = _known_rows(project, [i["number"] for i in open_items])
+    watched = frozenset(u.lower() for u in [operator_username, *watched_users] if u)
+    new_numbers: set[int] = set()
+    to_refresh: list[dict[str, Any]] = []
+    for pr_data in open_items:
+        row = known.get(pr_data["number"])
+        is_new = row is None or row.get("state") != "open"
+        if not is_new and not _needs_refresh(row, pr_data, project_config.poll_refresh_hours):
+            continue
+        if not is_new and not _is_watched_involvement(pr_data, row, watched):
+            result.deferred += 1
+            continue
+        if refresh_in_progress(project, pr_data["number"]):
+            result.in_flight += 1
+            continue
+        if is_new:
+            new_numbers.add(pr_data["number"])
+        to_refresh.append(pr_data)
+    if len(to_refresh) > max_refreshes:
+        logger.info(
+            "%s: %d moved PR(s) to refresh; refreshing the newest %d now, the rest wait for "
+            "the poll (watch.max_refreshes_per_check)",
+            project.full_name,
+            len(to_refresh),
+            max_refreshes,
+        )
+        result.deferred += len(to_refresh) - max_refreshes
+        to_refresh = to_refresh[:max_refreshes]
+
+    def refresh(pr_data: dict[str, Any]) -> PullRequest:
+        try:
+            return _refresh_pull_request(
+                client,
+                project,
+                project_config,
+                pr_data,
+                operator_username,
+                repo_path,
+                merge_intent=merge_intent,
+            )
+        except Exception:
+            _rewind_refresh_marker(project, pr_data["number"], known.get(pr_data["number"]))
+            raise
+
+    done: list[PullRequest] = []
+    for outcome in map_ordered(refresh, to_refresh, concurrency, name="watch"):
+        if outcome.error is not None:
+            logger.warning(
+                "Could not refresh PR #%d for %s from the watcher; the poll will retry it",
+                outcome.item["number"],
+                project.full_name,
+                exc_info=outcome.error,
+            )
+            continue
+        assert outcome.result is not None
+        done.append(outcome.result)
+    _reroute_pull_requests(done, operator_username, project_config)
+    result.new = [pr for pr in done if pr.number in new_numbers]
+    result.refreshed = [pr for pr in done if pr.number not in new_numbers]
+    return result
+
+
+def refresh_notified_pull_request(
+    client: ForgeClient,
+    project_config: ProjectConfig,
+    pr_number: int,
+    operator_username: str,
+    *,
+    repo_path: Path | None = None,
+    merge_intent: MergeIntentConfig | None = None,
+) -> PullRequest | None:
+    """Refresh a PR a notification pointed at; None when there was nothing to do.
+
+    Reads the detail first. A closed PR closes its row (with ``merged_at``) and
+    is not ingested if we never had it — a notification about a merged PR in a
+    configured project is not a reason to start tracking it.
+    """
+    project = _project_row(project_config)
+    if refresh_in_progress(project, pr_number):
+        return None
+    detail = client.get_pull_request(project_config.owner, project_config.repo, pr_number)
+    if detail.get("state") != "open" or detail.get("merged_at"):
+        _close_from_listing(project, [{**detail, "number": pr_number}])
+        return None
+    pr = _refresh_pull_request(
+        client,
+        project,
+        project_config,
+        detail,
+        operator_username,
+        repo_path,
+        merge_intent=merge_intent,
+        pr_detail=detail,
+    )
+    _reroute_pull_requests([pr], operator_username, project_config)
+    return pr
 
 
 @dataclass

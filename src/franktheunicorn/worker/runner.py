@@ -24,7 +24,7 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Callable, Generator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import FrameType
 from typing import TYPE_CHECKING, Any
@@ -43,6 +43,7 @@ if TYPE_CHECKING:
         OperatorConfig,
         ProjectConfig,
         SnowflakeReviewConfig,
+        WatchedUserConfig,
     )
     from franktheunicorn.core.models import PullRequest, ReviewDraft
     from franktheunicorn.data_access.github.diff_fetcher import DiffFetcher
@@ -51,6 +52,7 @@ if TYPE_CHECKING:
     from franktheunicorn.review.prior_comments import PriorComment
     from franktheunicorn.review.snowflake_review import SnowflakeFinding
     from franktheunicorn.worker.review_pool import ReviewItem, ReviewPool
+    from franktheunicorn.worker.watcher import Watcher
 
     #: The finding lists the per-tool ``run_review`` callables return. Three
     #: independent dataclasses — no shared base — so the union is the honest
@@ -317,6 +319,10 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
         pool_concurrency - 1,
     )
 
+    global _watcher
+    stop_watcher = threading.Event()
+    watcher_thread = _start_watcher(clients, operator_config, stop_watcher)
+
     try:
         while True:
             # A cycle failure (e.g. transient "database is locked" from the
@@ -417,6 +423,10 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
             # own checkout lane (a git worktree); a run abandoned mid-flight leaves
             # the worktree behind, but it is rebuilt on demand by the next pool
             # thread that needs it.
+            stop_watcher.set()
+            if watcher_thread is not None:
+                watcher_thread.join(timeout=BULK_POOL_SHUTDOWN_SECONDS)
+            _watcher = None
             stop_pool.set()
             for t in pool_threads:
                 t.join(timeout=BULK_POOL_SHUTDOWN_SECONDS)
@@ -435,6 +445,66 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
                 logger.debug("Error closing forge client", exc_info=True)
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         lock_fd.close()
+
+
+#: The running watcher (``worker/watcher.py``), when ``watch.interval_seconds`` is
+#: on. Module-level because the cycle and the operator scan read it and are
+#: called from places that don't carry the worker's state.
+_watcher: Watcher | None = None
+
+
+def _start_watcher(
+    clients: Mapping[str, object],
+    operator_config: OperatorConfig,
+    stop: threading.Event,
+) -> threading.Thread | None:
+    """Start the watcher thread, or say why there isn't one."""
+    global _watcher
+    from django.conf import settings
+
+    from franktheunicorn.config.loader import load_project_configs
+    from franktheunicorn.worker.watcher import Watcher
+
+    interval = operator_config.watch.interval_seconds
+    if interval <= 0:
+        logger.info(
+            "Watcher off (watch.interval_seconds: 0): new, closed and involved-in PRs are "
+            "found by the cycle's poll, its 10-minute open-PR sync and the operator scan."
+        )
+        return None
+    if not clients:
+        return None
+
+    def client_for_token(entry: WatchedUserConfig) -> ForgeClient | None:
+        from franktheunicorn.backends.github import GitHubClient
+        from franktheunicorn.config.resolver import get_forge_entry
+        from franktheunicorn.data_access.base import GITHUB_API_BASE
+
+        try:
+            forge = get_forge_entry(operator_config, entry.forge)
+        except KeyError:
+            return None
+        if forge.type != "github":
+            return None
+        # No shared rate limiter: it tracks the *polling* token's quota from
+        # response headers, and this token's headers would overwrite them.
+        return GitHubClient(token=entry.token, base_url=forge.base_url or GITHUB_API_BASE)
+
+    _watcher = Watcher(
+        clients,
+        operator_config,
+        load_projects=lambda: load_project_configs(settings.FRANK_PROJECTS_DIR),
+        clone_path=lambda pc: _clone_path(pc, None),
+        client_for_token=client_for_token,
+    )
+    thread = threading.Thread(target=_watcher.run, args=(stop,), name="watcher", daemon=True)
+    thread.start()
+    logger.info(
+        "Watcher started: every %ds, new/closed PRs and changes to PRs you are involved in "
+        "(watch.interval_seconds).",
+        interval,
+    )
+    return thread
 
 
 def _mask_key(key: str) -> str:
@@ -2140,6 +2210,10 @@ def _reap_closed_prs_if_due(
         if not isinstance(pc, ProjectConfig) or not pc.enabled or pc.forge not in clients:
             continue
         client = clients[pc.forge]
+        if _watcher is not None and _watcher.covers(client):
+            # The watcher asks this forge what changed every minute; a full
+            # re-listing here would only re-download what it already saw.
+            continue
         try:
             if operator_username:
                 closed, prs = sync_open_pull_requests(
@@ -2429,17 +2503,25 @@ def _run_cycle_in(
         )
 
     def operator_scan(*, force: bool = False) -> None:
-        # Own/reviewed/mentioned PRs: at the start of the cycle and then every
-        # operator_scan_minutes from the main thread's turns. It used to run once,
-        # after the poll phase's reviews — hours into a Spark cycle.
+        # Own/reviewed/mentioned PRs: at the start of the cycle and then, per
+        # watched user, every operator_scan_minutes (search users) or
+        # watch.search_backstop_minutes (users read through notifications) from
+        # the main thread's turns.
         nonlocal refreshed_prs
-        if not operator_username or not (force or _operator_scan_due(operator_config)):
+        take_watcher_handoffs()
+        if not operator_username:
             return
-        if force:
-            _operator_scan_due(operator_config)  # restart the interval from here
+        users = _search_users_due(operator_config, operator_username, force=force)
+        if not users:
+            return
         try:
             found = _scan_operator_prs(
-                clients, operator_username, operator_config, project_configs, repo_paths=repo_paths
+                clients,
+                operator_username,
+                operator_config,
+                project_configs,
+                repo_paths=repo_paths,
+                users=users,
             )
         except Exception:
             logger.exception("Own/involved PR scan failed")
@@ -2471,6 +2553,26 @@ def _run_cycle_in(
                 queued_front + queued_back,
                 queued_front,
                 queued_back,
+            )
+
+    def take_watcher_handoffs() -> None:
+        # PRs the watcher thread ingested or refreshed since the last turn. It
+        # has already written them to the database; queueing them for review is
+        # the cycle's, since the pool and its dedup belong to this thread.
+        watcher = _watcher
+        if watcher is None:
+            return
+        for handoff in watcher.drain_for_review():
+            pr = handoff.pr
+            if pr.pk not in pr_to_config:
+                all_prs.append(pr)
+                pr_to_config[pr.pk] = handoff.pc
+            if pr.pk in reviewed_pks:
+                continue
+            reviewed_pks.add(pr.pk)
+            pool.submit(
+                ReviewItem(pr, handoff.pc, handoff.client, _clone_path(handoff.pc, repo_paths)),
+                front=handoff.own,
             )
 
     def mid_cycle_tick() -> None:
@@ -2771,8 +2873,12 @@ def _scan_operator_prs(
     project_configs: Sequence[object] | None = None,
     *,
     repo_paths: Mapping[str, Path | None] | None = None,
+    users: Sequence[str] | None = None,
 ) -> list[OperatorScanHit]:
     """Find the operator's own open PRs, the ones they reviewed, and the rest; refresh the moved.
+
+    *users* are the logins to search for (``watch.users``, whichever are due);
+    None is the operator alone. Routing stays the operator's either way.
 
     Three searches per forge, not one. ``search_prs_authored_by`` asks for the
     operator's own PRs by name, ``search_prs_reviewed_by`` for the ones they have
@@ -2832,13 +2938,18 @@ def _scan_operator_prs(
     skipped_unconfigured = 0
     hits: dict[tuple[str, str], list[tuple[str, dict[str, Any]]]] = {}
     configs: dict[tuple[str, str], ProjectConfig] = {}
+    searches = [
+        (user, label, method)
+        for user in (users if users is not None else [operator_username])
+        for label, method in _OPERATOR_SEARCHES
+    ]
     for forge_name, client in clients.items():
-        for label, method in _OPERATOR_SEARCHES:
+        for user, label, method in searches:
             finder = getattr(client, method, None)
             if finder is None:
                 continue
             try:
-                items = finder(operator_username)
+                items = finder(user)
             except Exception:
                 # WARNING: a failed search is a set of PRs that silently stops
                 # refreshing, which is the complaint this scan exists to answer.
@@ -2951,7 +3062,7 @@ def _scan_operator_prs(
     logger.info(
         "Own/involved PR scan for %s: %d distinct PR(s) found (%s); %d refreshed, "
         "%d unchanged, %d failed, %d skipped (not a configured project).",
-        operator_username or "(username not set)",
+        ", ".join(users) if users else (operator_username or "(username not set)"),
         len(seen),
         ", ".join(f"{label} {found.get(label, 0)}" for label, _ in _OPERATOR_SEARCHES),
         len(to_refresh) - failed,
@@ -2964,29 +3075,52 @@ def _scan_operator_prs(
 
 @dataclass
 class _ScanClock:
-    """When a running cycle last scanned for the operator's PRs (monotonic seconds).
+    """When a running cycle last searched for each watched user (monotonic seconds).
 
     An object rather than a rebound module global: the cycle's main thread is the
     only writer, and tests reset it with ``reset()``.
     """
 
-    last: float = float("-inf")
+    last: dict[str, float] = field(default_factory=dict)
 
     def reset(self) -> None:
-        self.last = float("-inf")
+        self.last.clear()
 
 
 _operator_scan_clock = _ScanClock()
 
 
-def _operator_scan_due(operator_config: OperatorConfig | None) -> bool:
-    """Whether the mid-cycle operator scan's interval has lapsed; claims it if so."""
-    minutes = operator_config.worker_pool.operator_scan_minutes if operator_config else 10
+def _search_users_due(
+    operator_config: OperatorConfig | None, operator_username: str, *, force: bool
+) -> list[str]:
+    """The watched users whose searches are due now; claims them.
+
+    A user the watcher reads through notifications is searched every
+    ``watch.search_backstop_minutes`` — notifications say what moved, the
+    searches say what the whole set is. Everyone else every
+    ``worker_pool.operator_scan_minutes``. *force* (the start of a cycle) is
+    every user.
+    """
+    from franktheunicorn.config.models import WatchConfig
+
+    watch = operator_config.watch if operator_config else WatchConfig()
+    scan_minutes = operator_config.worker_pool.operator_scan_minutes if operator_config else 10
+    watcher = _watcher
     now = time.monotonic()
-    if now - _operator_scan_clock.last < max(0, minutes) * 60:
-        return False
-    _operator_scan_clock.last = now
-    return True
+    due: list[str] = []
+    for entry in watch.users_for(operator_username):
+        by_notifications = watcher is not None and watcher.reads_notifications(
+            entry.forge, entry.user
+        )
+        minutes = watch.search_backstop_minutes if by_notifications else scan_minutes
+        key = entry.user.lower()
+        if not force and now - _operator_scan_clock.last.get(key, float("-inf")) < (
+            max(0, minutes) * 60
+        ):
+            continue
+        _operator_scan_clock.last[key] = now
+        due.append(entry.user)
+    return due
 
 
 #: Reviews the backfill will start in one cycle.

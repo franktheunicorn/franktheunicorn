@@ -105,6 +105,34 @@ poll_interval_seconds: 300
 #   refresh_concurrency: 4
 #   operator_scan_minutes: 10
 
+# --- Watching for change ---
+# A thread beside the poll cycle that, every interval_seconds, asks each
+# project's forge "what changed since I last asked?" — one request, and a free
+# 304 when nothing did. New PRs are ingested, closed/merged ones dropped, and
+# changes to PRs a watched user is involved in refreshed, within about a
+# minute instead of at the cycle's next turn. interval_seconds: 0 turns it off.
+#
+# users: whose involvement (mentions, review requests, replies on their own
+# PRs) to watch, and how. source: notifications reads that account's GitHub
+# notifications every interval — fast and nearly free, but only for the token
+# owner's own inbox, and GitHub refuses it to fine-grained PATs and app tokens:
+# give it a classic PAT (notifications or repo scope) belonging to that user.
+# source: search runs the author:/reviewed-by:/involves: searches every
+# worker_pool.operator_scan_minutes, for any user and any token. auto (the
+# default) uses notifications when the token can and belongs to the user,
+# otherwise search. Users read through notifications still get the searches
+# every search_backstop_minutes. With no users listed, you are watched, auto.
+# watch:
+#   interval_seconds: 60
+#   search_backstop_minutes: 60
+#   max_refreshes_per_check: 20
+#   users:
+#     - user: ""                 # empty = github_username
+#       source: notifications
+#       token: "${GITHUB_NOTIFICATIONS_TOKEN}"   # classic PAT, that user's
+#     - user: some-co-maintainer
+#       source: search
+
 # Log level for the worker (CRITICAL/ERROR/WARNING/INFO/DEBUG/NOTSET).
 # Override at the command line with `make worker-debug`, the runner's
 # `--log-level=DEBUG` flag, or the FRANK_LOG_LEVEL env var.
