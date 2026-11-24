@@ -1219,6 +1219,7 @@ def sync_recent_pull_requests(
     merge_intent: MergeIntentConfig | None = None,
     concurrency: int = 1,
     max_refreshes: int = MAX_MID_CYCLE_NEW_PRS,
+    max_pages: int = 10,
 ) -> RecentSync:
     """Act on what changed in a project since *since*: the watcher's one listing.
 
@@ -1238,7 +1239,7 @@ def sync_recent_pull_requests(
     if project is None:
         return result
     listing = client.list_pull_requests_updated_since(
-        project_config.owner, project_config.repo, since
+        project_config.owner, project_config.repo, since, max_pages=max_pages
     )
     result.complete = listing.complete
     stamps = [
@@ -1258,7 +1259,9 @@ def sync_recent_pull_requests(
     to_refresh: list[dict[str, Any]] = []
     for pr_data in open_items:
         row = known.get(pr_data["number"])
-        is_new = row is None or row.get("state") != "open"
+        # No base_sha: a row whose first refresh died after the upsert. Finishing
+        # it is cheap and rare; the moved-test below would call it unchanged.
+        is_new = row is None or row.get("state") != "open" or not row.get("base_sha")
         if not is_new and not _needs_refresh(
             row, pr_data, project_config.poll_refresh_hours, timer=False
         ):

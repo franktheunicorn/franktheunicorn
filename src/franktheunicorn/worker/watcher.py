@@ -37,10 +37,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import httpx
 from django.db import connection
 from django.utils import timezone
 
 from franktheunicorn.backends.base import ForgeClient, NotificationsUnavailableError
+from franktheunicorn.backends.github import _is_rate_limit_response
+from franktheunicorn.backends.poller import RecentSync
 from franktheunicorn.config.models import (
     OperatorConfig,
     ProjectConfig,
@@ -66,6 +69,11 @@ NOTIFICATION_LOOKBACK = timedelta(minutes=15)
 #: notification that can never be refreshed (a PR the polling token can't read)
 #: must not hold the watermark back and log a traceback every minute forever.
 MAX_NOTIFICATION_RETRIES = 3
+
+#: Pages (of 30 PRs) a normal check walks, and a catch-up walk after a normal
+#: one fell short of the watermark — ~300 and ~1200 moved PRs.
+NORMAL_PAGES = 10
+CATCH_UP_PAGES = 40
 
 
 @dataclass
@@ -231,8 +239,6 @@ class Watcher:
             logger.info(msg, *args)
 
     def _check_projects(self, project_configs: Sequence[ProjectConfig]) -> None:
-        from franktheunicorn.backends.poller import sync_recent_pull_requests
-
         watched = [w.user for w in self._users or []]
         for pc in project_configs:
             client = self._clients[pc.forge]
@@ -258,17 +264,7 @@ class Watcher:
                 self._establish_watermark(pc, client)
                 continue
             try:
-                result = sync_recent_pull_requests(
-                    pc,
-                    client,
-                    self._oc.github_username,
-                    since,
-                    watched_users=watched,
-                    repo_path=self._clone_path(pc),
-                    merge_intent=self._oc.merge_intent,
-                    concurrency=max(1, self._oc.worker_pool.refresh_concurrency),
-                    max_refreshes=self.config.max_refreshes_per_check,
-                )
+                result = self._sync_project(pc, client, since, watched)
             except Exception:
                 self._set_covered(pc, False)
                 self._say_once(
@@ -283,16 +279,9 @@ class Watcher:
             self._cleared((pc.full_name, "failing"), "Watcher reading %s again", pc.full_name)
             if result.resume_from is not None:
                 self._watermarks[pc.full_name] = max(since, result.resume_from - WATERMARK_OVERLAP)
-            # Incomplete: what the walk never reached is the cycle's, and so is the
-            # project until a check reads everything that moved again.
+            # Still incomplete after the deep walk and the re-listing: hand the
+            # project back to the cycle until a check reads everything again.
             self._set_covered(pc, result.complete)
-            if not result.complete:
-                logger.info(
-                    "%s: more PRs moved since %s than one check reads; the cycle's "
-                    "re-listing covers it until a check catches up",
-                    pc.full_name,
-                    since.isoformat(timespec="seconds"),
-                )
             if result.closed or result.new or result.refreshed:
                 logger.info(
                     "Watcher %s: %d new%s, %d closed/merged, %d involved PR(s) refreshed, "
@@ -307,6 +296,82 @@ class Watcher:
             for pr in [*result.new, *result.refreshed]:
                 if pr.state == "open":
                     self._hand_off(pr, pc, client)
+
+    def _sync_project(
+        self, pc: ProjectConfig, client: ForgeClient, since: datetime, watched: list[str]
+    ) -> RecentSync:
+        """One check of *pc*, catching up when more moved than a check reads.
+
+        An incomplete walk (more than ~300 PRs moved since the watermark — after
+        an outage, say) is walked again at once, deeper. If even that doesn't
+        reach the watermark, the full open-PR re-listing runs here and now — it
+        closes what left the listing and ingests the newest new PRs — rather than
+        waiting for a cycle turn that may be hours off. Either way the watermark
+        then moves to the newest seen, so the next check is a normal one.
+        """
+        from franktheunicorn.backends.poller import (
+            sync_open_pull_requests,
+            sync_recent_pull_requests,
+        )
+
+        def sync(max_pages: int) -> RecentSync:
+            return sync_recent_pull_requests(
+                pc,
+                client,
+                self._oc.github_username,
+                since,
+                watched_users=watched,
+                repo_path=self._clone_path(pc),
+                merge_intent=self._oc.merge_intent,
+                concurrency=max(1, self._oc.worker_pool.refresh_concurrency),
+                max_refreshes=self.config.max_refreshes_per_check,
+                max_pages=max_pages,
+            )
+
+        result = sync(NORMAL_PAGES)
+        if result.complete:
+            return result
+        logger.info(
+            "%s: more PRs moved since %s than one check reads; walking deeper",
+            pc.full_name,
+            since.isoformat(timespec="seconds"),
+        )
+        deep = sync(CATCH_UP_PAGES)
+        merged = _merge(result, deep)
+        if deep.complete:
+            return merged
+        try:
+            closed, new = sync_open_pull_requests(
+                pc,
+                client,
+                self._oc.github_username,
+                repo_path=self._clone_path(pc),
+                merge_intent=self._oc.merge_intent,
+                concurrency=max(1, self._oc.worker_pool.refresh_concurrency),
+            )
+        except Exception:
+            logger.warning(
+                "%s: the catch-up re-listing failed too; the cycle covers it until a "
+                "check reads everything again",
+                pc.full_name,
+                exc_info=True,
+            )
+            # Keep the watermark where it was: the next check tries to catch up
+            # again instead of stepping past what it never read.
+            merged.resume_from = None
+            return merged
+        logger.info(
+            "%s: caught up from a full re-listing (%d closed, %d new)",
+            pc.full_name,
+            closed,
+            len(new),
+        )
+        known = {pr.pk for pr in merged.new}
+        merged.new.extend(pr for pr in new if pr.pk not in known)
+        merged.closed += closed
+        merged.complete = True
+        merged.resume_from = merged.newest
+        return merged
 
     def _establish_watermark(self, pc: ProjectConfig, client: ForgeClient) -> None:
         """First sight of a project: note where "now" is, act on nothing.
@@ -398,6 +463,16 @@ class Watcher:
             else:
                 polling = self._clients.get(watch.forge)
                 client = polling if isinstance(polling, ForgeClient) else None
+                if client is not None and getattr(client, "authenticated", True) is False:
+                    say(
+                        "Watching %s by search: forge %r has no token, and notifications "
+                        "need one (a classic PAT of %s's, in watch.users[].token)",
+                        watch.user,
+                        watch.forge,
+                        watch.user,
+                    )
+                    watch.mode = "search"
+                    return
         if client is None:
             say(
                 "Watching %s by search: no %s client to read notifications with (forge %r)",
@@ -429,6 +504,18 @@ class Watcher:
         # token's inbox as somebody else's would watch the wrong person.
         try:
             login = str(client.get_authenticated_user().get("login", ""))
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in (401, 403) and not _is_rate_limit_response(exc.response):
+                # Refused, not unavailable: a dead token, or an app token that has
+                # no user. Retrying a minute from now gets the same answer.
+                give_up(
+                    f"GET /user was refused (HTTP {exc.response.status_code}): the token is "
+                    f"invalid or has no user (an app token), and notifications need a "
+                    f"classic PAT of {watch.user}'s"
+                )
+            else:
+                not_yet("could not tell whose token this is (GET /user failed)")
+            return
         except Exception:
             not_yet("could not tell whose token this is (GET /user failed)")
             return
@@ -608,6 +695,21 @@ class Watcher:
             }
         if acted:
             logger.info("Notifications for %s: refreshed %s", watch.user, ", ".join(acted))
+
+
+def _merge(first: RecentSync, second: RecentSync) -> RecentSync:
+    """Two walks from the same watermark: the second saw at least what the first did."""
+    seen = {pr.pk for pr in [*second.new, *second.refreshed]}
+    return RecentSync(
+        closed=first.closed + second.closed,
+        new=[*second.new, *(pr for pr in first.new if pr.pk not in seen)],
+        refreshed=[*second.refreshed, *(pr for pr in first.refreshed if pr.pk not in seen)],
+        deferred=second.deferred,
+        in_flight=second.in_flight,
+        newest=max((s for s in (first.newest, second.newest) if s is not None), default=None),
+        resume_from=second.resume_from,
+        complete=second.complete,
+    )
 
 
 def _refreshed_since(pc: ProjectConfig, number: int, stamp: datetime) -> bool:

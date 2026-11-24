@@ -481,7 +481,7 @@ def _start_watcher(
         from franktheunicorn.data_access.base import GITHUB_API_BASE
 
         try:
-            forge = get_forge_entry(operator_config, entry.forge)
+            forge = get_forge_entry(operator_config, entry.notifications_forge)
         except KeyError:
             return None
         if forge.type != "github":

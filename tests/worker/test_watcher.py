@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
 from franktheunicorn.backends.base import (
@@ -163,6 +164,49 @@ class TestResolveUsers:
         watcher.tick()
         assert not watcher.reads_notifications("github", "holdenk")
 
+    @staticmethod
+    def _refused(status: int, remaining: str = "4999") -> httpx.HTTPStatusError:
+        request = httpx.Request("GET", "https://api.github.test/user")
+        response = httpx.Response(
+            status,
+            json={"message": "Resource not accessible by integration"},
+            headers={"X-RateLimit-Remaining": remaining},
+            request=request,
+        )
+        return httpx.HTTPStatusError("refused", request=request, response=response)
+
+    @pytest.mark.parametrize("status", [401, 403])
+    def test_a_refused_whoami_is_definitive_not_retried(self, status: int) -> None:
+        """An app token or a dead one: asking every minute gets the same answer."""
+        client = _client()
+        client.get_authenticated_user.side_effect = self._refused(status)
+        watcher = _watcher(client, projects=[])
+        watcher.tick()
+        watcher.tick()
+        assert client.get_authenticated_user.call_count == 1
+        assert not watcher.reads_notifications("github", "holdenk")
+
+    def test_a_rate_limited_whoami_is_retried(self) -> None:
+        client = _client()
+        client.get_authenticated_user.side_effect = [
+            self._refused(403, remaining="0"),
+            {"login": "holdenk"},
+        ]
+        watcher = _watcher(client, projects=[])
+        watcher.tick()
+        watcher.tick()
+        assert watcher.reads_notifications("github", "holdenk")
+
+    def test_an_unauthenticated_polling_client_is_not_probed(self) -> None:
+        """No token: every probe would cost a request from the 60-an-hour quota."""
+        client = _client()
+        client.authenticated = False
+        watcher = _watcher(client, projects=[])
+        watcher.tick()
+        watcher.tick()
+        client.get_authenticated_user.assert_not_called()
+        assert not watcher.reads_notifications("github", "holdenk")
+
     def test_a_failed_whoami_is_retried_too(self) -> None:
         client = _client()
         client.get_authenticated_user.side_effect = [RuntimeError("502"), {"login": "holdenk"}]
@@ -229,15 +273,62 @@ class TestProjects:
             watcher.tick()
         assert watcher._watermarks["apache/spark"] == T0 + timedelta(minutes=28)
 
-    def test_a_truncated_walk_hands_the_project_back_to_the_cycle(self) -> None:
+    def test_an_incomplete_walk_walks_deeper_at_once(self) -> None:
         watcher = _watcher(users=[{"source": "search"}])
         watcher._watermarks["apache/spark"] = T0
-        watcher._covered.add("apache/spark")
+        later = T0 + timedelta(hours=1)
         with patch(
             "franktheunicorn.backends.poller.sync_recent_pull_requests",
-            return_value=RecentSync(newest=T0, resume_from=T0, complete=False),
+            side_effect=[
+                RecentSync(new=[_pr(5)], newest=later, resume_from=later, complete=False),
+                RecentSync(new=[_pr(5), _pr(4)], newest=later, resume_from=later),
+            ],
+        ) as sync:
+            watcher.tick()
+        assert [c.kwargs["max_pages"] for c in sync.call_args_list] == [10, 40]
+        assert sorted(h.pr.number for h in watcher.drain_for_review()) == [4, 5]
+        assert watcher.covers(SPARK)
+        assert watcher._watermarks["apache/spark"] == later - WATERMARK_OVERLAP
+
+    def test_a_walk_too_deep_to_finish_falls_back_to_a_full_relisting(self) -> None:
+        """Rather than waiting for a cycle turn that may be hours off."""
+        watcher = _watcher(users=[{"source": "search"}])
+        watcher._watermarks["apache/spark"] = T0
+        later = T0 + timedelta(hours=1)
+        short = RecentSync(newest=later, resume_from=later, complete=False)
+        with (
+            patch(
+                "franktheunicorn.backends.poller.sync_recent_pull_requests",
+                side_effect=[short, short],
+            ),
+            patch(
+                "franktheunicorn.backends.poller.sync_open_pull_requests",
+                return_value=(3, [_pr(9)]),
+            ) as relist,
         ):
             watcher.tick()
+        relist.assert_called_once()
+        assert [h.pr.number for h in watcher.drain_for_review()] == [9]
+        assert watcher.covers(SPARK)
+        assert watcher._watermarks["apache/spark"] == later - WATERMARK_OVERLAP
+
+    def test_a_failed_catch_up_keeps_the_watermark_to_try_again(self) -> None:
+        watcher = _watcher(users=[{"source": "search"}])
+        watcher._watermarks["apache/spark"] = T0
+        later = T0 + timedelta(hours=1)
+        short = RecentSync(newest=later, resume_from=later, complete=False)
+        with (
+            patch(
+                "franktheunicorn.backends.poller.sync_recent_pull_requests",
+                side_effect=[short, short],
+            ),
+            patch(
+                "franktheunicorn.backends.poller.sync_open_pull_requests",
+                side_effect=RuntimeError("502"),
+            ),
+        ):
+            watcher.tick()
+        assert watcher._watermarks["apache/spark"] == T0
         assert not watcher.covers(SPARK)
 
     def test_a_failing_project_goes_back_to_the_cycle_and_says_so_once(self, caplog: Any) -> None:
@@ -563,6 +654,34 @@ class TestRunnerWiring:
             thread.join(timeout=5)
             assert not thread.is_alive()
             assert isinstance(runner._watcher, Watcher)
+
+    @pytest.mark.django_db
+    def test_a_users_own_token_needs_no_forge_setting(self) -> None:
+        """forge: "" (the default) reads notifications from the forge named github."""
+        from franktheunicorn.backends.github import GitHubClient
+        from franktheunicorn.config.models import WatchedUserConfig
+
+        stop = threading.Event()
+        stop.set()
+        oc = OperatorConfig(
+            github_username="holdenk",
+            forges=[{"name": "github", "type": "github", "token": "polling"}],
+        )
+        with (
+            patch("franktheunicorn.config.loader.load_project_configs", return_value=[]),
+            patch.object(runner, "_watcher", None),
+        ):
+            thread = runner._start_watcher({"github": _client()}, oc, stop)
+            assert thread is not None
+            thread.join(timeout=5)
+            watcher = runner._watcher
+            assert watcher is not None
+            factory = watcher._client_for_token
+            assert factory is not None
+            client = factory(WatchedUserConfig(token="mine"))
+        assert isinstance(client, GitHubClient)
+        assert client.authenticated
+        client.close()
 
     def test_the_mid_cycle_relisting_leaves_watched_forges_alone(self) -> None:
         covered = _client()

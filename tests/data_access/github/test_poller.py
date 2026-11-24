@@ -2023,6 +2023,20 @@ class TestSyncRecentPullRequests:
         assert [pr.number for pr in result.new] == [1]
         assert PullRequest.objects.get(number=1).state == "open"
 
+    def test_a_row_whose_first_refresh_died_is_finished(self, tmp_path: Path) -> None:
+        """No base_sha: the upsert landed and the rest didn't. The moved-test
+        would call it unchanged forever; it is finished like a new PR."""
+        from franktheunicorn.backends.poller import sync_recent_pull_requests
+
+        client = self._polled(tmp_path, 1)
+        PullRequest.objects.filter(number=1).update(base_sha="")
+        client.changed = [_listed_pr(1)]
+
+        result = sync_recent_pull_requests(self._config(), client, "holdenk", _SINCE)
+
+        assert [pr.number for pr in result.new] == [1]
+        assert PullRequest.objects.get(number=1).base_sha
+
     def test_refreshes_are_capped_and_the_rest_deferred(self, tmp_path: Path) -> None:
         from franktheunicorn.backends.poller import sync_recent_pull_requests
 
