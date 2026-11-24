@@ -330,6 +330,38 @@ class TestProjects:
             watcher.tick()
         assert watcher._watermarks["apache/spark"] == T0
         assert not watcher.covers(SPARK)
+        with patch("franktheunicorn.backends.poller.sync_recent_pull_requests") as again:
+            watcher.tick()
+        again.assert_not_called()  # backs off instead of re-walking 40 pages a minute
+        watcher._catch_up_after.clear()
+        with patch(
+            "franktheunicorn.backends.poller.sync_recent_pull_requests",
+            return_value=RecentSync(newest=later, resume_from=later),
+        ) as retried:
+            watcher.tick()
+        retried.assert_called_once()
+        assert watcher.covers(SPARK)
+
+    def test_the_catch_up_keeps_the_deep_walks_resume_point(self) -> None:
+        watcher = _watcher(users=[{"source": "search"}])
+        watcher._watermarks["apache/spark"] = T0
+        later = T0 + timedelta(hours=2)
+        cut = T0 + timedelta(hours=1)
+        with (
+            patch(
+                "franktheunicorn.backends.poller.sync_recent_pull_requests",
+                side_effect=[
+                    RecentSync(newest=later, resume_from=later, complete=False),
+                    RecentSync(newest=later, resume_from=cut, complete=False),
+                ],
+            ),
+            patch(
+                "franktheunicorn.backends.poller.sync_open_pull_requests",
+                return_value=(0, []),
+            ),
+        ):
+            watcher.tick()
+        assert watcher._watermarks["apache/spark"] == cut - WATERMARK_OVERLAP
 
     def test_a_failing_project_goes_back_to_the_cycle_and_says_so_once(self, caplog: Any) -> None:
         watcher = _watcher(users=[{"source": "search"}])

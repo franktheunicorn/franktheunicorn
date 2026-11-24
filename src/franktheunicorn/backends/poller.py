@@ -1259,9 +1259,15 @@ def sync_recent_pull_requests(
     to_refresh: list[dict[str, Any]] = []
     for pr_data in open_items:
         row = known.get(pr_data["number"])
-        # No base_sha: a row whose first refresh died after the upsert. Finishing
-        # it is cheap and rare; the moved-test below would call it unchanged.
-        is_new = row is None or row.get("state") != "open" or not row.get("base_sha")
+        # A row whose first refresh died after the upsert: no base_sha and never
+        # polled. Finishing it is cheap and rare; the moved-test below would call
+        # it unchanged. (A polled row with no base_sha is one whose detail read
+        # keeps failing — that is the cycle's to retry, not every check's.)
+        is_new = (
+            row is None
+            or row.get("state") != "open"
+            or (not row.get("base_sha") and not row.get("last_polled_at"))
+        )
         if not is_new and not _needs_refresh(
             row, pr_data, project_config.poll_refresh_hours, timer=False
         ):

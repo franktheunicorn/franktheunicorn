@@ -2029,13 +2029,26 @@ class TestSyncRecentPullRequests:
         from franktheunicorn.backends.poller import sync_recent_pull_requests
 
         client = self._polled(tmp_path, 1)
-        PullRequest.objects.filter(number=1).update(base_sha="")
+        PullRequest.objects.filter(number=1).update(base_sha="", last_polled_at=None)
         client.changed = [_listed_pr(1)]
 
         result = sync_recent_pull_requests(self._config(), client, "holdenk", _SINCE)
 
         assert [pr.number for pr in result.new] == [1]
         assert PullRequest.objects.get(number=1).base_sha
+
+    def test_a_polled_row_without_base_sha_is_left_to_the_cycle(self, tmp_path: Path) -> None:
+        """Its detail read keeps failing; re-refreshing it every minute from the
+        overlap would only fail again."""
+        from franktheunicorn.backends.poller import sync_recent_pull_requests
+
+        client = self._polled(tmp_path, 1)
+        PullRequest.objects.filter(number=1).update(base_sha="", last_polled_at=timezone.now())
+        client.changed = [_listed_pr(1)]
+
+        result = sync_recent_pull_requests(self._config(), client, "holdenk", _SINCE)
+
+        assert (result.new, client.detail_calls) == ([], [])
 
     def test_refreshes_are_capped_and_the_rest_deferred(self, tmp_path: Path) -> None:
         from franktheunicorn.backends.poller import sync_recent_pull_requests

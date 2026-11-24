@@ -75,6 +75,9 @@ MAX_NOTIFICATION_RETRIES = 3
 NORMAL_PAGES = 10
 CATCH_UP_PAGES = 40
 
+#: How long after a failed catch-up the project is left to the cycle.
+CATCH_UP_BACKOFF_SECONDS = 600.0
+
 
 @dataclass
 class ReviewHandoff:
@@ -139,6 +142,8 @@ class Watcher:
         self._watermarks: dict[str, datetime] = {}
         #: Projects whose last check succeeded and was complete.
         self._covered: set[str] = set()
+        #: Project → monotonic time before which a failed catch-up isn't retried.
+        self._catch_up_after: dict[str, float] = {}
         #: Projects already told about (unauthenticated, failing), to say it once.
         self._said: set[tuple[str, str]] = set()
         self._users: list[UserWatch] | None = None
@@ -263,6 +268,8 @@ class Watcher:
             if since is None:
                 self._establish_watermark(pc, client)
                 continue
+            if time.monotonic() < self._catch_up_after.get(pc.full_name, 0.0):
+                continue  # a catch-up failed recently; the cycle has it meanwhile
             try:
                 result = self._sync_project(pc, client, since, watched)
             except Exception:
@@ -356,9 +363,12 @@ class Watcher:
                 pc.full_name,
                 exc_info=True,
             )
-            # Keep the watermark where it was: the next check tries to catch up
-            # again instead of stepping past what it never read.
+            # Keep the watermark where it was so a later check tries to catch up
+            # again instead of stepping past what it never read — but not every
+            # minute: pages 11-40 shift as PRs move, so each attempt is ~30 paid
+            # requests. The cycle's re-listing covers the project meanwhile.
             merged.resume_from = None
+            self._catch_up_after[pc.full_name] = time.monotonic() + CATCH_UP_BACKOFF_SECONDS
             return merged
         logger.info(
             "%s: caught up from a full re-listing (%d closed, %d new)",
@@ -370,7 +380,10 @@ class Watcher:
         merged.new.extend(pr for pr in new if pr.pk not in known)
         merged.closed += closed
         merged.complete = True
-        merged.resume_from = merged.newest
+        # The re-listing only closes and ingests: involved PRs the deep walk's
+        # refresh cap cut off still need its resume point.
+        stamps = [t for t in (merged.newest, deep.resume_from) if t is not None]
+        merged.resume_from = min(stamps, default=None)
         return merged
 
     def _establish_watermark(self, pc: ProjectConfig, client: ForgeClient) -> None:
