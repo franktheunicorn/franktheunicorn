@@ -11,6 +11,7 @@ DEBUG-only, so a cycle that reviewed nothing looked like a cycle that never ran)
 from __future__ import annotations
 
 import logging
+import time
 from collections import Counter
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -414,15 +415,86 @@ class TestOperatorScanInTheCycle:
         scan.assert_not_called()
 
 
-class TestOperatorScanDue:
+class TestSearchUsersDue:
+    @pytest.fixture(autouse=True)
+    def _clock(self) -> Any:
+        runner._operator_scan_clock.reset()
+        yield
+        runner._operator_scan_clock.reset()
+
     def test_claims_the_slot_then_waits_out_the_interval(self) -> None:
         oc = OperatorConfig(worker_pool={"operator_scan_minutes": 10})
-        runner._operator_scan_clock.reset()
-        try:
-            assert runner._operator_scan_due(oc) is True
-            assert runner._operator_scan_due(oc) is False
-        finally:
-            runner._operator_scan_clock.reset()
+        assert runner._search_users_due(oc, "holdenk", force=False) == [("", "holdenk")]
+        assert runner._search_users_due(oc, "holdenk", force=False) == []
+
+    def test_force_is_every_user_even_inside_the_interval(self) -> None:
+        oc = OperatorConfig(watch={"users": [{}, {"user": "cloud-fan", "source": "search"}]})
+        runner._search_users_due(oc, "holdenk", force=False)
+        assert runner._search_users_due(oc, "holdenk", force=True) == [
+            ("", "holdenk"),
+            ("", "cloud-fan"),
+        ]
+
+    def test_each_user_has_its_own_clock(self) -> None:
+        oc = OperatorConfig(watch={"users": [{}, {"user": "cloud-fan"}]})
+        runner._operator_scan_clock.last["/holdenk"] = time.monotonic()
+        assert runner._search_users_due(oc, "holdenk", force=False) == [("", "cloud-fan")]
+
+    def test_a_users_forge_comes_along(self) -> None:
+        oc = OperatorConfig(watch={"users": [{"user": "someone", "forge": "codeberg"}]})
+        assert ("codeberg", "someone") in runner._search_users_due(oc, "holdenk", force=True)
+
+    def test_a_user_read_through_notifications_is_searched_on_the_backstop(self) -> None:
+        """Ten minutes is the search users' interval; a notifications user waits
+        out search_backstop_minutes instead."""
+        oc = OperatorConfig(
+            worker_pool={"operator_scan_minutes": 10},
+            watch={"search_backstop_minutes": 60, "users": [{}, {"user": "cloud-fan"}]},
+        )
+        eleven_minutes_ago = time.monotonic() - 11 * 60
+        runner._operator_scan_clock.last.update(
+            {"/holdenk": eleven_minutes_ago, "/cloud-fan": eleven_minutes_ago}
+        )
+        watcher = MagicMock()
+        watcher.reads_notifications.side_effect = lambda forge, user: user == "holdenk"
+        with patch.object(runner, "_watcher", watcher):
+            assert runner._search_users_due(oc, "holdenk", force=False) == [("", "cloud-fan")]
+
+    def test_no_username_and_no_users_is_nobody(self) -> None:
+        assert runner._search_users_due(OperatorConfig(), "", force=True) == []
+
+
+@pytest.mark.django_db
+class TestScanSearchesEachUser:
+    def test_every_due_user_is_searched_and_hits_are_deduplicated(self) -> None:
+        client = MagicMock(
+            spec=["search_prs_authored_by", "search_prs_reviewed_by", "search_prs_involving"]
+        )
+        client.search_prs_authored_by.return_value = [_item("apache", "spark", 1)]
+        client.search_prs_reviewed_by.return_value = []
+        client.search_prs_involving.return_value = [_item("apache", "spark", 1)]
+
+        with (
+            patch(
+                "franktheunicorn.backends.poller.plan_search_hit_refresh",
+                side_effect=_plan_everything,
+            ),
+            patch(
+                "franktheunicorn.backends.poller.refresh_pull_request_by_number",
+                side_effect=lambda *a, **k: MagicMock(number=a[3], state="open"),
+            ),
+        ):
+            hits = runner._scan_operator_prs(
+                {"github": client},
+                "holdenk",
+                OperatorConfig(github_username="holdenk"),
+                [ProjectConfig(owner="apache", repo="spark")],
+                users=[("", "holdenk"), ("", "cloud-fan"), ("codeberg", "elsewhere")],
+            )
+
+        searched = [c.args[0] for c in client.search_prs_authored_by.call_args_list]
+        assert searched == ["holdenk", "cloud-fan"], "codeberg's user is not searched here"
+        assert [h.pr.number for h in hits] == [1], "one PR, however many searches found it"
 
 
 class TestCycleSummary:

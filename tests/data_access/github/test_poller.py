@@ -1892,3 +1892,324 @@ class TestSyncOpenPullRequests:
         with patch.object(poller, "_refresh_pull_request", side_effect=flaky):
             _, new = sync_open_pull_requests(self._config(), client, "holdenk")
         assert [pr.number for pr in new] == [101]
+
+
+class _ChangedSinceClient(_CountingMockClient):
+    """A client that can answer "what changed since?" with a scripted listing."""
+
+    supports_updated_since = True
+
+    def __init__(self, tmp_path: Path, pr_list: list[dict[str, Any]]) -> None:
+        super().__init__(tmp_path, pr_list)
+        self.changed: list[dict[str, Any]] = []
+        self.complete = True
+        self.since_calls: list[datetime | None] = []
+
+    def list_pull_requests_updated_since(
+        self, owner: str, repo: str, since: datetime | None, *, max_pages: int = 10
+    ) -> Any:
+        from franktheunicorn.backends.base import UpdatedPullRequests
+
+        self.since_calls.append(since)
+        return UpdatedPullRequests(list(self.changed), self.complete)
+
+
+_LATER = "2026-04-02T10:00:00Z"
+_SINCE = datetime(2026, 4, 1, 12, 0, tzinfo=UTC)
+
+
+@pytest.mark.django_db
+class TestSyncRecentPullRequests:
+    """The watcher's one listing: new in, closed out, involved refreshed, the rest deferred."""
+
+    def _config(self) -> ProjectConfig:
+        return ProjectConfig(owner="apache", repo="spark")
+
+    def _polled(self, tmp_path: Path, *numbers: int) -> _ChangedSinceClient:
+        client = _ChangedSinceClient(tmp_path, [_listed_pr(n) for n in numbers])
+        poll_project(client, self._config(), operator_username="holdenk")
+        client.detail_calls.clear()
+        return client
+
+    def test_new_closed_and_merged_from_one_listing(self, tmp_path: Path) -> None:
+        from franktheunicorn.backends.poller import sync_recent_pull_requests
+
+        client = self._polled(tmp_path, 1, 2)
+        client.changed = [
+            _listed_pr(3, updated_at=_LATER),
+            _listed_pr(2, state="closed", updated_at=_LATER, merged_at="2026-04-02T09:59:00Z"),
+            _listed_pr(1, state="closed", updated_at=_LATER, merged_at=None),
+        ]
+
+        result = sync_recent_pull_requests(self._config(), client, "holdenk", _SINCE)
+
+        assert [pr.number for pr in result.new] == [3]
+        assert result.closed == 2
+        assert client.detail_calls == [3], "closing costs no per-PR reads"
+        merged = PullRequest.objects.get(number=2)
+        assert merged.state == "closed"
+        assert merged.merged_at == datetime(2026, 4, 2, 9, 59, tzinfo=UTC)
+        assert PullRequest.objects.get(number=1).merged_at is None
+        assert result.newest == datetime(2026, 4, 2, 10, 0, tzinfo=UTC)
+
+    def test_a_moved_pr_nobody_watched_is_in_waits_for_the_poll(self, tmp_path: Path) -> None:
+        from franktheunicorn.backends.poller import sync_recent_pull_requests
+
+        client = self._polled(tmp_path, 1)
+        client.changed = [_listed_pr(1, updated_at=_LATER, title="retitled")]
+
+        result = sync_recent_pull_requests(self._config(), client, "holdenk", _SINCE)
+
+        assert result.deferred == 1
+        assert result.refreshed == []
+        assert client.detail_calls == []
+
+    @pytest.mark.parametrize(
+        "involvement",
+        [
+            {"requested_reviewers": [{"login": "HoldenK"}]},
+            {"assignees": [{"login": "holdenk"}]},
+            {"user": {"login": "holdenk"}},
+            {"user": {"login": "cloud-fan"}},  # a watched co-maintainer
+        ],
+    )
+    def test_a_moved_pr_a_watched_user_is_in_is_refreshed_now(
+        self, tmp_path: Path, involvement: dict[str, Any]
+    ) -> None:
+        from franktheunicorn.backends.poller import sync_recent_pull_requests
+
+        client = self._polled(tmp_path, 1)
+        client.changed = [_listed_pr(1, updated_at=_LATER) | involvement]
+
+        result = sync_recent_pull_requests(
+            self._config(), client, "holdenk", _SINCE, watched_users=["cloud-fan"]
+        )
+
+        assert [pr.number for pr in result.refreshed] == [1]
+        assert result.new == []
+        assert client.detail_calls == [1]
+
+    def test_the_stored_row_can_say_it_is_involved(self, tmp_path: Path) -> None:
+        """A mention found earlier is on the row, not in the listing."""
+        from franktheunicorn.backends.poller import sync_recent_pull_requests
+
+        client = self._polled(tmp_path, 1)
+        PullRequest.objects.filter(number=1).update(is_mentioned=True)
+        client.changed = [_listed_pr(1, updated_at=_LATER)]
+
+        result = sync_recent_pull_requests(self._config(), client, "holdenk", _SINCE)
+
+        assert [pr.number for pr in result.refreshed] == [1]
+
+    def test_an_unchanged_pr_in_the_overlap_costs_nothing(self, tmp_path: Path) -> None:
+        from franktheunicorn.backends.poller import sync_recent_pull_requests
+
+        client = self._polled(tmp_path, 1)
+        client.changed = [_listed_pr(1, user={"login": "holdenk"})]
+
+        result = sync_recent_pull_requests(self._config(), client, "holdenk", _SINCE)
+
+        assert (result.refreshed, result.deferred, client.detail_calls) == ([], 0, [])
+
+    def test_a_reopened_pr_is_new_again(self, tmp_path: Path) -> None:
+        from franktheunicorn.backends.poller import sync_recent_pull_requests
+
+        client = self._polled(tmp_path, 1)
+        PullRequest.objects.filter(number=1).update(state="closed")
+        client.changed = [_listed_pr(1, updated_at=_LATER)]
+
+        result = sync_recent_pull_requests(self._config(), client, "holdenk", _SINCE)
+
+        assert [pr.number for pr in result.new] == [1]
+        assert PullRequest.objects.get(number=1).state == "open"
+
+    def test_a_row_whose_first_refresh_died_is_finished(self, tmp_path: Path) -> None:
+        """No base_sha: the upsert landed and the rest didn't. The moved-test
+        would call it unchanged forever; it is finished like a new PR."""
+        from franktheunicorn.backends.poller import sync_recent_pull_requests
+
+        client = self._polled(tmp_path, 1)
+        PullRequest.objects.filter(number=1).update(base_sha="", last_polled_at=None)
+        client.changed = [_listed_pr(1)]
+
+        result = sync_recent_pull_requests(self._config(), client, "holdenk", _SINCE)
+
+        assert [pr.number for pr in result.new] == [1]
+        assert PullRequest.objects.get(number=1).base_sha
+
+    def test_a_polled_row_without_base_sha_is_left_to_the_cycle(self, tmp_path: Path) -> None:
+        """Its detail read keeps failing; re-refreshing it every minute from the
+        overlap would only fail again."""
+        from franktheunicorn.backends.poller import sync_recent_pull_requests
+
+        client = self._polled(tmp_path, 1)
+        PullRequest.objects.filter(number=1).update(base_sha="", last_polled_at=timezone.now())
+        client.changed = [_listed_pr(1)]
+
+        result = sync_recent_pull_requests(self._config(), client, "holdenk", _SINCE)
+
+        assert (result.new, client.detail_calls) == ([], [])
+
+    def test_refreshes_are_capped_and_the_rest_deferred(self, tmp_path: Path) -> None:
+        from franktheunicorn.backends.poller import sync_recent_pull_requests
+
+        client = self._polled(tmp_path, 1)
+        client.changed = [_listed_pr(n, updated_at=_LATER) for n in (10, 9, 8)]
+
+        result = sync_recent_pull_requests(
+            self._config(), client, "holdenk", _SINCE, max_refreshes=2
+        )
+
+        assert [pr.number for pr in result.new] == [10, 9]
+        assert result.deferred == 1
+        assert result.resume_from == result.newest, "same stamp: nothing older to come back to"
+
+    def test_a_cut_resumes_from_the_newest_pr_it_cut_off(self, tmp_path: Path) -> None:
+        """Otherwise the watermark jumps past them and they wait for the poll."""
+        from franktheunicorn.backends.poller import sync_recent_pull_requests
+
+        client = self._polled(tmp_path, 1)
+        client.changed = [
+            _listed_pr(10, updated_at="2026-04-02T10:00:00Z"),
+            _listed_pr(9, updated_at="2026-04-02T09:00:00Z"),
+            _listed_pr(8, updated_at="2026-04-02T08:00:00Z"),
+        ]
+
+        result = sync_recent_pull_requests(
+            self._config(), client, "holdenk", _SINCE, max_refreshes=1
+        )
+
+        assert result.newest == datetime(2026, 4, 2, 10, 0, tzinfo=UTC)
+        assert result.resume_from == datetime(2026, 4, 2, 9, 0, tzinfo=UTC)
+
+    def test_no_refresh_timer_even_at_zero_hours(self, tmp_path: Path) -> None:
+        """poll_refresh_hours: 0 means "always" to the poll; to the watcher, which
+        re-reads a two-minute overlap every minute, it would mean "every minute"."""
+        from franktheunicorn.backends.poller import sync_recent_pull_requests
+
+        config = ProjectConfig(owner="apache", repo="spark", poll_refresh_hours=0)
+        client = _ChangedSinceClient(tmp_path, [_listed_pr(1, user={"login": "holdenk"})])
+        poll_project(client, config, operator_username="holdenk")
+        client.detail_calls.clear()
+        client.changed = [_listed_pr(1, user={"login": "holdenk"})]
+
+        result = sync_recent_pull_requests(config, client, "holdenk", _SINCE)
+
+        assert (result.refreshed, client.detail_calls) == ([], [])
+
+    def test_a_pr_another_thread_is_refreshing_is_left_alone(self, tmp_path: Path) -> None:
+        from franktheunicorn.backends import poller
+
+        client = self._polled(tmp_path, 1)
+        project = Project.objects.get(owner="apache", repo="spark")
+        client.changed = [_listed_pr(5, updated_at=_LATER)]
+
+        poller._refreshes_in_flight.add((project.pk, 5))
+        try:
+            result = poller.sync_recent_pull_requests(self._config(), client, "holdenk", _SINCE)
+        finally:
+            poller._refreshes_in_flight.discard((project.pk, 5))
+
+        assert result.in_flight == 1
+        assert client.detail_calls == []
+
+    def test_a_refresh_registers_itself_while_it_runs(self, tmp_path: Path) -> None:
+        from franktheunicorn.backends import poller
+
+        client = self._polled(tmp_path, 1)
+        project = Project.objects.get(owner="apache", repo="spark")
+        seen: list[bool] = []
+        real = client.get_pull_request
+
+        def detail(owner: str, repo: str, number: int) -> dict[str, Any]:
+            seen.append(poller.refresh_in_progress(project, number))
+            return real(owner, repo, number)
+
+        client.get_pull_request = detail  # type: ignore[method-assign]
+        client.changed = [_listed_pr(6, updated_at=_LATER)]
+        poller.sync_recent_pull_requests(self._config(), client, "holdenk", _SINCE)
+
+        assert seen == [True]
+        assert not poller.refresh_in_progress(project, 6)
+
+    def test_a_failed_refresh_is_left_for_the_poll(self, tmp_path: Path) -> None:
+        from franktheunicorn.backends import poller
+
+        client = self._polled(tmp_path, 1)
+        client.changed = [_listed_pr(7, updated_at=_LATER)]
+        with patch.object(poller, "_refresh_one_pull_request", side_effect=RuntimeError("x")):
+            result = poller.sync_recent_pull_requests(self._config(), client, "holdenk", _SINCE)
+
+        assert result.new == []
+
+    def test_unknown_project_is_left_to_the_regular_poll(self, tmp_path: Path) -> None:
+        from franktheunicorn.backends.poller import sync_recent_pull_requests
+
+        client = _ChangedSinceClient(tmp_path, [])
+        result = sync_recent_pull_requests(self._config(), client, "holdenk", _SINCE)
+
+        assert result.newest is None
+        assert client.since_calls == []
+
+
+@pytest.mark.django_db
+class TestRefreshNotifiedPullRequest:
+    def _config(self) -> ProjectConfig:
+        return ProjectConfig(owner="apache", repo="spark")
+
+    def test_an_open_pr_is_refreshed(self, tmp_path: Path) -> None:
+        from franktheunicorn.backends.poller import refresh_notified_pull_request
+
+        client = _CountingMockClient(tmp_path, [])
+        client.get_pull_request = lambda o, r, n: (
+            _listed_pr(n)
+            | _same_repo_detail()
+            | {  # type: ignore[method-assign]
+                "number": n,
+                "state": "open",
+            }
+        )
+
+        pr = refresh_notified_pull_request(client, self._config(), 12, "holdenk")
+
+        assert pr is not None and pr.number == 12
+        assert PullRequest.objects.get(number=12).last_polled_at is not None
+
+    def test_a_merged_pr_closes_its_row(self, tmp_path: Path) -> None:
+        from franktheunicorn.backends.poller import refresh_notified_pull_request
+
+        client = _CountingMockClient(tmp_path, [_listed_pr(12)])
+        poll_project(client, self._config(), operator_username="holdenk")
+        client.get_pull_request = lambda o, r, n: {  # type: ignore[method-assign]
+            "state": "closed",
+            "merged_at": "2026-04-02T09:00:00Z",
+        }
+
+        assert refresh_notified_pull_request(client, self._config(), 12, "holdenk") is None
+        row = PullRequest.objects.get(number=12)
+        assert row.state == "closed"
+        assert row.merged_at is not None
+
+    def test_a_pr_being_refreshed_elsewhere_raises_rather_than_counting_as_done(
+        self, tmp_path: Path
+    ) -> None:
+        from franktheunicorn.backends import poller
+
+        client = _CountingMockClient(tmp_path, [])
+        project = Project.objects.create(owner="apache", repo="spark")
+        poller._refreshes_in_flight.add((project.pk, 12))
+        try:
+            with pytest.raises(poller.RefreshInProgressError):
+                poller.refresh_notified_pull_request(client, self._config(), 12, "holdenk")
+        finally:
+            poller._refreshes_in_flight.discard((project.pk, 12))
+        assert client.detail_calls == []
+
+    def test_a_closed_pr_we_never_had_is_not_ingested(self, tmp_path: Path) -> None:
+        from franktheunicorn.backends.poller import refresh_notified_pull_request
+
+        client = _CountingMockClient(tmp_path, [])
+        client.get_pull_request = lambda o, r, n: {"state": "closed"}  # type: ignore[method-assign]
+
+        assert refresh_notified_pull_request(client, self._config(), 12, "holdenk") is None
+        assert not PullRequest.objects.filter(number=12).exists()

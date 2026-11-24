@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,48 @@ class ReviewBody:
     event: str = "COMMENT"
     body: str = ""
     comments: list[ReviewComment] = field(default_factory=list)
+
+
+@dataclass
+class UpdatedPullRequests:
+    """PRs of any state that changed since a watermark, most recent first.
+
+    ``complete`` is False when the walk stopped at its page limit before
+    reaching the watermark: more changed than one call is allowed to read, and
+    the rest is left to the cycle's full poll.
+    """
+
+    items: list[dict[str, Any]]
+    complete: bool
+
+
+@dataclass
+class NotificationPage:
+    """The token owner's PR notifications since a watermark.
+
+    ``poll_interval`` is the forge's own ``X-Poll-Interval`` (seconds), which it
+    asks clients to respect; 0 when it said nothing.
+    """
+
+    items: list[dict[str, Any]]
+    poll_interval: int = 0
+    #: False when more arrived than one read takes: the oldest are not in
+    #: ``items``, and the caller should say what covers them instead.
+    complete: bool = True
+
+
+class NotificationsUnavailableError(Exception):
+    """The token cannot read notifications — not a transient failure.
+
+    GitHub refuses ``/notifications`` to fine-grained personal access tokens and
+    to GitHub App tokens, and a classic token needs the ``notifications`` (or
+    ``repo``) scope. Retrying every minute would change nothing, so callers
+    fall back to searching and say so once.
+    """
+
+    def __init__(self, status: int, message: str = "") -> None:
+        self.status = status
+        super().__init__(f"HTTP {status}: {message}" if message else f"HTTP {status}")
 
 
 class ForgeClient(ABC):
@@ -104,6 +147,34 @@ class ForgeClient(ABC):
         raise NotImplementedError(
             f"{type(self).__name__} does not support list_pull_requests_page()"
         )
+
+    #: True when :meth:`list_pull_requests_updated_since` is implemented. The
+    #: watcher reads it to pick a project up; the mid-cycle full-listing sync
+    #: covers the projects whose forge can't answer "what changed since?".
+    supports_updated_since: bool = False
+
+    def list_pull_requests_updated_since(
+        self, owner: str, repo: str, since: datetime | None, *, max_pages: int = 10
+    ) -> UpdatedPullRequests:
+        """Open, closed and merged PRs whose ``updated_at`` is at or after *since*.
+
+        Most recently updated first. A PR being opened, closed, merged, pushed to,
+        relabelled or commented on all move its ``updated_at``, so this one
+        listing answers all of "what's new", "what closed" and "what moved" — in
+        one call when little did. ``since=None`` reads only the first page.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support list_pull_requests_updated_since()"
+        )
+
+    def list_notifications(self, since: datetime | None) -> NotificationPage:
+        """The authenticated user's pull-request notifications updated since *since*.
+
+        Read-only: listing does not mark anything read, so the operator's inbox
+        is left as they had it. Raises :class:`NotificationsUnavailableError`
+        when the token can't read notifications at all.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support list_notifications()")
 
     @abstractmethod
     def get_pull_request(self, owner: str, repo: str, pr_number: int) -> dict[str, Any]:

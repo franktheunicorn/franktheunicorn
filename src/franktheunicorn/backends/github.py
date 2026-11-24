@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -21,10 +22,14 @@ from bs4 import BeautifulSoup
 from franktheunicorn.backends.base import (
     MAX_LISTED_PULL_REQUESTS,
     ForgeClient,
+    NotificationPage,
+    NotificationsUnavailableError,
     ReviewBody,
     ReviewComment,
+    UpdatedPullRequests,
     infer_username,
 )
+from franktheunicorn.backends.conditional_cache import CachedReply, ConditionalCache, cache_key
 from franktheunicorn.data_access.base import GITHUB_API_BASE, GITHUB_WEB_BASE
 
 if TYPE_CHECKING:
@@ -136,18 +141,65 @@ class GitHubClient(ForgeClient):
             headers=headers,
             timeout=30.0,
         )
+        self._conditional = ConditionalCache()
+        #: Whether requests carry a token. A 304 is free only for an authenticated
+        #: request, so a watcher polling every minute without one would spend the
+        #: whole 60-an-hour unauthenticated quota on a single project.
+        self.authenticated = bool(token)
 
     def _get(self, url: str, **kwargs: Any) -> httpx.Response:
-        """GET with rate-limit pacing and quota tracking.
+        """GET with rate-limit pacing, quota tracking and conditional requests.
 
         Reads go through here; writes (create_review, delete) are low-volume
         and go direct.
+
+        Every read sends back the ``ETag`` of the last ``200`` for the same URL,
+        query and media type. GitHub answers ``304`` when nothing changed, and a
+        304 does not count against the primary rate limit; the caller gets the
+        cached body as an ordinary ``200`` and cannot tell the difference.
         """
         if self._rate_limiter is not None and self._pace_requests:
             self._rate_limiter.acquire()
-        response = self._client.get(url, **kwargs)
+        headers: dict[str, str] = dict(kwargs.pop("headers", None) or {})
+        key = cache_key(
+            url,
+            kwargs.get("params"),
+            headers.get("Accept", "") or self._client.headers.get("Accept", ""),
+        )
+        cached = self._conditional.get(key)
+        if cached is not None:
+            headers["If-None-Match"] = cached.etag
+        response = self._client.get(url, headers=headers or None, **kwargs)
         if self._rate_limiter is not None:
             self._rate_limiter.update_from_headers(response.headers)
+        if response.status_code == 304 and cached is not None:
+            self._conditional.record_hit()
+            return httpx.Response(
+                200,
+                headers=list(cached.headers),
+                content=cached.content,
+                request=response.request,
+                extensions={"frank_not_modified": True},
+            )
+        etag = response.headers.get("etag")
+        # isinstance, not truthiness: a test double's headers answer anything.
+        if response.status_code == 200 and isinstance(etag, str) and etag:
+            self._conditional.put(
+                key,
+                CachedReply(
+                    etag=etag,
+                    content=response.content,
+                    headers=tuple(
+                        (k, v)
+                        for k, v in response.headers.items()
+                        # The body is stored decoded; these described the wire form.
+                        if k.lower()
+                        not in ("content-encoding", "content-length", "transfer-encoding")
+                    ),
+                ),
+            )
+        elif cached is not None:
+            self._conditional.discard(key)
         return response
 
     def list_pull_requests(
@@ -211,6 +263,74 @@ class GitHubClient(ForgeClient):
         response.raise_for_status()
         data: list[dict[str, Any]] = response.json()
         return data
+
+    supports_updated_since = True
+
+    #: PRs per page of the changed-since listing. Small on purpose: the first page
+    #: is the one re-asked every minute, a PR object is ~20 KB, and in a quiet
+    #: minute the answer is a free 304 whatever the page size.
+    _UPDATED_PAGE = 30
+
+    def list_pull_requests_updated_since(
+        self, owner: str, repo: str, since: datetime | None, *, max_pages: int = 10
+    ) -> UpdatedPullRequests:
+        """``state=all``, newest ``updated_at`` first, until one is older than *since*.
+
+        The first page's URL is the same every time until something changes,
+        so the conditional-request cache turns a quiet minute into a 304.
+        """
+        items: list[dict[str, Any]] = []
+        for page in range(1, max_pages + 1):
+            data = self.list_pull_requests_page(
+                owner, repo, state="all", page=page, per_page=self._UPDATED_PAGE, sort="updated"
+            )
+            for pr_data in data:
+                updated = parse_github_timestamp(pr_data.get("updated_at"))
+                if since is not None and updated is not None and updated < since:
+                    return UpdatedPullRequests(items, complete=True)
+                items.append(pr_data)
+            if since is None or len(data) < self._UPDATED_PAGE:
+                return UpdatedPullRequests(items, complete=True)
+        return UpdatedPullRequests(items, complete=False)
+
+    #: Notifications per page, and the most pages one check reads.
+    _NOTIFICATION_PAGE = 50
+    _NOTIFICATION_PAGES = 10
+
+    def list_notifications(self, since: datetime | None) -> NotificationPage:
+        """``GET /notifications?all=true&participating=true``, pull requests only.
+
+        ``all=true`` so a notification the operator already read on github.com
+        still counts — reading it there doesn't mean frank has seen it.
+        ``participating=true`` is the "you were mentioned, asked, assigned, or
+        are in the thread" subset, not every watched repository's traffic.
+        """
+        params: dict[str, str | int] = {
+            "all": "true",
+            "participating": "true",
+            "per_page": self._NOTIFICATION_PAGE,
+        }
+        if since is not None:
+            params["since"] = since.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        items: list[dict[str, Any]] = []
+        poll_interval = 0
+        complete = False
+        for page in range(1, self._NOTIFICATION_PAGES + 1):
+            response = self._get("/notifications", params={**params, "page": page})
+            if response.status_code in (401, 403, 404) and not _is_rate_limit_response(response):
+                message = ""
+                with contextlib.suppress(Exception):
+                    message = str(response.json().get("message", ""))
+                raise NotificationsUnavailableError(response.status_code, message)
+            response.raise_for_status()
+            with contextlib.suppress(ValueError):
+                poll_interval = int(response.headers.get("x-poll-interval", "0") or 0)
+            data: list[dict[str, Any]] = response.json()
+            items.extend(n for n in data if (n.get("subject") or {}).get("type") == "PullRequest")
+            if len(data) < self._NOTIFICATION_PAGE:
+                complete = True
+                break
+        return NotificationPage(items, poll_interval, complete)
 
     def get_pull_request(self, owner: str, repo: str, pr_number: int) -> dict[str, Any]:
         """Fetch a single PR detail (includes mergeable status)."""
@@ -938,6 +1058,17 @@ _STATUS_STATE_TO_CONCLUSION: dict[str, str] = {
     "failure": "failure",
     "error": "failure",
 }
+
+
+def parse_github_timestamp(value: object) -> datetime | None:
+    """``2026-11-24T10:00:00Z`` → an aware datetime; None for anything else."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
 def _is_rate_limit_response(response: httpx.Response) -> bool:

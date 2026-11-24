@@ -2777,6 +2777,106 @@ class WorkerPoolConfig(BaseModel):
     operator_scan_minutes: int = 10
 
 
+class WatchedUserConfig(BaseModel):
+    """One account whose involvement the worker keeps fresh, and how.
+
+    ``source`` picks how activity that involves *user* is found:
+
+    - ``notifications``: read that account's GitHub notifications (mentions,
+      review requests, assignments, replies on their PRs) every
+      ``watch.interval_seconds``. Fast and nearly free, but the notifications
+      API only ever shows the *token owner's* inbox, and GitHub refuses it to
+      fine-grained personal access tokens and GitHub App tokens — so ``token``
+      must be a classic PAT (``notifications`` or ``repo`` scope) belonging to
+      *user*. The search below still runs, every ``search_backstop_minutes``.
+    - ``search``: the issue searches (``author:``, ``reviewed-by:``,
+      ``involves:``) every ``worker_pool.operator_scan_minutes``. Works with any
+      token, for any user, but lags GitHub's search index.
+    - ``auto``: notifications if the token can read them and belongs to *user*,
+      otherwise search; which one it settled on is logged once at startup.
+
+    Queues and routing ("Your PRs", "Mentioned") stay the operator's
+    (``github_username``) whoever is watched: watching another account keeps
+    the PRs *it* is involved in refreshed, not routed as if they were yours.
+    """
+
+    #: GitHub login. Empty means the operator (``github_username``).
+    user: str = ""
+    source: Literal["auto", "notifications", "search"] = "auto"
+    #: For notifications: a classic PAT belonging to *user*, normally
+    #: ``${SOME_ENV_VAR}``. Empty uses the forge's polling token, which is only
+    #: right when that token is *user*'s own.
+    token: str = ""
+    #: Which ``forges:`` entry this account lives on. Empty: searched on every
+    #: forge, and notifications read from the one named ``github``.
+    forge: str = ""
+
+    @property
+    def notifications_forge(self) -> str:
+        return self.forge or "github"
+
+
+class WatchConfig(BaseModel):
+    """The worker's watcher thread: new, closed and involved-in PRs within a minute.
+
+    Runs beside the poll cycle rather than in its turns. A cycle used to be the
+    only thing that looked for change, and a Spark cycle runs for hours: a PR
+    opened, closed, or that mentioned you could wait most of a day (or ten
+    minutes, between the cycle's own turns). Every ``interval_seconds`` the
+    watcher asks each project's forge what changed since it last asked — one
+    request, and a free 304 when nothing did — then ingests new PRs, closes
+    merged and closed ones, refreshes changes to PRs a watched user is involved
+    in, and reads the notifications of each ``source: notifications`` user.
+    Other changes are left to the cycle's poll, as before: on Spark a full
+    refresh of everything that moves would spend most of the hourly API quota.
+    """
+
+    #: Seconds between checks. 0 turns the watcher off and leaves change
+    #: detection to the cycle (the mid-cycle open-PR sync and operator scan).
+    interval_seconds: int = 60
+    #: Accounts to watch. The operator is always watched (``source: auto``
+    #: unless listed here with another source): listing a co-maintainer must not
+    #: quietly stop the searches the "Your PRs" queue is built on.
+    users: list[WatchedUserConfig] = Field(default_factory=list)
+    #: For a user read through notifications, how often the searches still run
+    #: — they are what find the *whole* set (notifications only say what moved),
+    #: and a push to a PR you reviewed raises no notification at all. The same
+    #: as ``worker_pool.operator_scan_minutes`` by default, so notifications are
+    #: speed on top of the searches rather than a replacement for them; raise it
+    #: once you trust them.
+    search_backstop_minutes: int = 10
+    #: Changed PRs one check refreshes per project; the rest wait for the poll.
+    max_refreshes_per_check: int = 20
+
+    @field_validator("interval_seconds", "search_backstop_minutes", "max_refreshes_per_check")
+    @classmethod
+    def not_negative(cls, v: int) -> int:
+        if v < 0:
+            msg = "watch intervals and limits must not be negative"
+            raise ValueError(msg)
+        return v
+
+    def users_for(self, operator_username: str) -> list[WatchedUserConfig]:
+        """The configured users with the operator filled in and always present,
+        deduplicated by (forge, login); the operator first."""
+        operator = operator_username.strip().lower()
+        configured = list(self.users)
+        if operator and not any(
+            (u.user.strip() or operator).lower() == operator for u in configured
+        ):
+            configured.insert(0, WatchedUserConfig())
+        seen: set[tuple[str, str]] = set()
+        resolved: list[WatchedUserConfig] = []
+        for entry in configured:
+            login = (entry.user or operator_username).strip()
+            if not login or (entry.forge, login.lower()) in seen:
+                continue
+            seen.add((entry.forge, login.lower()))
+            resolved.append(entry.model_copy(update={"user": login}))
+        resolved.sort(key=lambda u: u.user.lower() != operator)
+        return resolved
+
+
 class OperatorConfig(BaseModel):
     """Top-level operator config loaded from operator.yaml."""
 
@@ -2819,6 +2919,7 @@ class OperatorConfig(BaseModel):
     fine_tuning: FineTuningConfig = Field(default_factory=FineTuningConfig)
     security_triage: SecurityTriageConfig = Field(default_factory=SecurityTriageConfig)
     worker_pool: WorkerPoolConfig = Field(default_factory=WorkerPoolConfig)
+    watch: WatchConfig = Field(default_factory=WatchConfig)
     zombie_queue: ZombieQueueConfig = Field(default_factory=ZombieQueueConfig)
     mergeability_triage: MergeabilityTriageConfig = Field(default_factory=MergeabilityTriageConfig)
     review_worthiness: ReviewWorthinessConfig = Field(default_factory=ReviewWorthinessConfig)
