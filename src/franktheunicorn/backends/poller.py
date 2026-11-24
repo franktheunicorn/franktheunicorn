@@ -741,6 +741,7 @@ def _needs_refresh(
     refresh_hours: int,
     *,
     partial: bool = False,
+    timer: bool = True,
 ) -> bool:
     """Decide whether *pr_data* is worth spending per-PR API calls on.
 
@@ -752,13 +753,20 @@ def _needs_refresh(
     *partial* is for a payload that carries only some of the listing's fields —
     a search hit has no head and no requested reviewers — and compares only the
     fields it has, rather than reading every absent one as a change.
+
+    ``timer=False`` asks only "did it move?": no refresh timer, no
+    finishing of degraded rows, and ``refresh_hours <= 0`` doesn't mean
+    "always". The watcher re-reads a two-minute overlap every minute; with
+    either of those on, the last PR to move in a quiet repo would be refreshed
+    every minute until something newer did — and an empty ``score_breakdown``,
+    which reads as degraded, is also just a PR no scoring signal fired on.
     """
-    if refresh_hours <= 0 or known is None:
+    if known is None or (timer and refresh_hours <= 0):
         return True
 
     # A degraded row from an earlier scrape fallback or interrupted cycle:
-    # finish the job.
-    if not known.get("base_sha") or not known.get("score_breakdown"):
+    # finish the job. (The cycle's job, not the watcher's.)
+    if timer and (not known.get("base_sha") or not known.get("score_breakdown")):
         return True
 
     upstream_updated = _parse_github_datetime(pr_data.get("updated_at"))
@@ -781,6 +789,8 @@ def _needs_refresh(
     # operator's own PRs get a much shorter one — shepherding and the merge
     # queue are built on pr.mergeable, and they're a handful of rows, not the
     # whole repo.
+    if not timer:
+        return False
     last_polled = known.get("last_polled_at")
     if not isinstance(last_polled, datetime):
         return True
@@ -1140,8 +1150,12 @@ class RecentSync:
     deferred: int = 0
     #: Moved PRs another thread was refreshing at that moment.
     in_flight: int = 0
-    #: The newest ``updated_at`` the listing carried — the next watermark.
+    #: The newest ``updated_at`` the listing carried.
     newest: datetime | None = None
+    #: Where the next check should start: ``newest``, unless the refresh cap cut
+    #: PRs off, in which case the newest of those — so they are read again rather
+    #: than skipped past.
+    resume_from: datetime | None = None
     #: False when more changed than one check reads (``UpdatedPullRequests``).
     complete: bool = True
 
@@ -1232,7 +1246,7 @@ def sync_recent_pull_requests(
         for stamp in (_parse_github_datetime(i.get("updated_at")) for i in listing.items)
         if stamp is not None
     ]
-    result.newest = max(stamps, default=None)
+    result.newest = result.resume_from = max(stamps, default=None)
 
     items = [i for i in listing.items if i.get("number")]
     result.closed = _close_from_listing(project, [i for i in items if i.get("state") != "open"])
@@ -1245,7 +1259,9 @@ def sync_recent_pull_requests(
     for pr_data in open_items:
         row = known.get(pr_data["number"])
         is_new = row is None or row.get("state") != "open"
-        if not is_new and not _needs_refresh(row, pr_data, project_config.poll_refresh_hours):
+        if not is_new and not _needs_refresh(
+            row, pr_data, project_config.poll_refresh_hours, timer=False
+        ):
             continue
         if not is_new and not _is_watched_involvement(pr_data, row, watched):
             result.deferred += 1
@@ -1265,6 +1281,9 @@ def sync_recent_pull_requests(
             max_refreshes,
         )
         result.deferred += len(to_refresh) - max_refreshes
+        cut_from = _parse_github_datetime(to_refresh[max_refreshes].get("updated_at"))
+        if cut_from is not None and result.resume_from is not None:
+            result.resume_from = min(result.resume_from, cut_from)
         to_refresh = to_refresh[:max_refreshes]
 
     def refresh(pr_data: dict[str, Any]) -> PullRequest:
@@ -1300,6 +1319,14 @@ def sync_recent_pull_requests(
     return result
 
 
+class RefreshInProgressError(Exception):
+    """Another thread is refreshing this PR right now; ask again shortly.
+
+    Not "done": that refresh may have read the comments before the activity a
+    notification is about, so the notification must be retried, not dropped.
+    """
+
+
 def refresh_notified_pull_request(
     client: ForgeClient,
     project_config: ProjectConfig,
@@ -1311,13 +1338,15 @@ def refresh_notified_pull_request(
 ) -> PullRequest | None:
     """Refresh a PR a notification pointed at; None when there was nothing to do.
 
+    Raises :class:`RefreshInProgressError` when another thread is refreshing it.
+
     Reads the detail first. A closed PR closes its row (with ``merged_at``) and
     is not ingested if we never had it — a notification about a merged PR in a
     configured project is not a reason to start tracking it.
     """
     project = _project_row(project_config)
     if refresh_in_progress(project, pr_number):
-        return None
+        raise RefreshInProgressError(f"{project.full_name}#{pr_number}")
     detail = client.get_pull_request(project_config.owner, project_config.repo, pr_number)
     if detail.get("state") != "open" or detail.get("merged_at"):
         _close_from_listing(project, [{**detail, "number": pr_number}])

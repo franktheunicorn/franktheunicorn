@@ -69,6 +69,14 @@ class TestWatchConfig:
             ("holdenk", "notifications")
         ]
 
+    def test_listing_a_co_maintainer_still_watches_the_operator_first(self) -> None:
+        """Otherwise the searches "Your PRs" is built on quietly stop."""
+        watch = WatchConfig(users=[{"user": "cloud-fan", "source": "search"}])
+        assert [(u.user, u.source) for u in watch.users_for("holdenk")] == [
+            ("holdenk", "auto"),
+            ("cloud-fan", "search"),
+        ]
+
     def test_without_an_operator_a_blank_user_is_dropped(self) -> None:
         assert WatchConfig().users_for("") == []
 
@@ -122,10 +130,17 @@ class TestResolveUsers:
         watcher.tick()
         assert not watcher.reads_notifications("github", "holdenk")
 
-    def test_a_transient_probe_failure_keeps_notifications(self) -> None:
+    def test_a_transient_probe_failure_is_retried_next_check(self) -> None:
+        """A network blip at startup must not cost notifications until a restart."""
         client = _client()
-        client.list_notifications.side_effect = [TimeoutError("slow"), NotificationPage([], 60)]
-        watcher = _watcher(client)
+        client.list_notifications.side_effect = [
+            TimeoutError("slow"),
+            NotificationPage([], 60),
+            NotificationPage([], 60),
+        ]
+        watcher = _watcher(client, projects=[])
+        watcher.tick()
+        assert not watcher.reads_notifications("github", "holdenk"), "searched meanwhile"
         watcher.tick()
         assert watcher.reads_notifications("github", "holdenk")
 
@@ -148,12 +163,14 @@ class TestResolveUsers:
         watcher.tick()
         assert not watcher.reads_notifications("github", "holdenk")
 
-    def test_a_failed_whoami_falls_back(self) -> None:
+    def test_a_failed_whoami_is_retried_too(self) -> None:
         client = _client()
-        client.get_authenticated_user.side_effect = RuntimeError("401")
-        watcher = _watcher(client)
+        client.get_authenticated_user.side_effect = [RuntimeError("502"), {"login": "holdenk"}]
+        watcher = _watcher(client, projects=[])
         watcher.tick()
         assert not watcher.reads_notifications("github", "holdenk")
+        watcher.tick()
+        assert watcher.reads_notifications("github", "holdenk")
 
 
 @pytest.mark.django_db
@@ -174,6 +191,7 @@ class TestProjects:
             new=[_pr(5, own=True)],
             refreshed=[_pr(6), _pr(7, state="closed")],
             newest=T0 + timedelta(minutes=10),
+            resume_from=T0 + timedelta(minutes=10),
         )
         with patch(
             "franktheunicorn.backends.poller.sync_recent_pull_requests", return_value=result
@@ -192,27 +210,85 @@ class TestProjects:
         watcher._watermarks["apache/spark"] = T0
         with patch(
             "franktheunicorn.backends.poller.sync_recent_pull_requests",
-            return_value=RecentSync(newest=T0, complete=False),
+            return_value=RecentSync(newest=T0, resume_from=T0),
         ):
             watcher.tick()
         assert watcher._watermarks["apache/spark"] == T0
+        assert watcher.covers(SPARK)
 
-    def test_a_failed_check_keeps_the_watermark(self) -> None:
+    def test_the_watermark_resumes_where_the_sync_says(self) -> None:
+        """A refresh cap that cut PRs off must not be skipped past."""
         watcher = _watcher(users=[{"source": "search"}])
         watcher._watermarks["apache/spark"] = T0
         with patch(
             "franktheunicorn.backends.poller.sync_recent_pull_requests",
-            side_effect=RuntimeError("502"),
+            return_value=RecentSync(
+                newest=T0 + timedelta(hours=1), resume_from=T0 + timedelta(minutes=30)
+            ),
         ):
             watcher.tick()
+        assert watcher._watermarks["apache/spark"] == T0 + timedelta(minutes=28)
+
+    def test_a_truncated_walk_hands_the_project_back_to_the_cycle(self) -> None:
+        watcher = _watcher(users=[{"source": "search"}])
+        watcher._watermarks["apache/spark"] = T0
+        watcher._covered.add("apache/spark")
+        with patch(
+            "franktheunicorn.backends.poller.sync_recent_pull_requests",
+            return_value=RecentSync(newest=T0, resume_from=T0, complete=False),
+        ):
+            watcher.tick()
+        assert not watcher.covers(SPARK)
+
+    def test_a_failing_project_goes_back_to_the_cycle_and_says_so_once(self, caplog: Any) -> None:
+        watcher = _watcher(users=[{"source": "search"}])
+        watcher._watermarks["apache/spark"] = T0
+        watcher._covered.add("apache/spark")
+        with (
+            caplog.at_level(logging.INFO),
+            patch(
+                "franktheunicorn.backends.poller.sync_recent_pull_requests",
+                side_effect=[RuntimeError("401"), RuntimeError("401"), RecentSync()],
+            ),
+        ):
+            watcher.tick()
+            assert not watcher.covers(SPARK)
+            watcher.tick()
+            watcher.tick()
         assert watcher._watermarks["apache/spark"] == T0
+        assert watcher.covers(SPARK), "covered again once a check succeeds"
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "reading apache/spark again" in caplog.text
+
+    def test_a_failed_first_listing_is_a_warning_not_silence(self, caplog: Any) -> None:
+        client = _client()
+        client.list_pull_requests_updated_since.side_effect = RuntimeError("401")
+        watcher = _watcher(client, users=[{"source": "search"}])
+        with caplog.at_level(logging.WARNING):
+            watcher.tick()
+        assert "could not list apache/spark" in caplog.text
+        assert not watcher.covers(SPARK)
+
+    def test_without_a_token_the_project_is_left_to_the_cycle(self, caplog: Any) -> None:
+        """A 304 is free only when authenticated; unauthenticated, a check a
+        minute is the whole quota."""
+        client = _client()
+        client.authenticated = False
+        watcher = _watcher(client, users=[{"source": "search"}])
+        with caplog.at_level(logging.INFO):
+            watcher.tick()
+            watcher.tick()
+        client.list_pull_requests_updated_since.assert_not_called()
+        assert not watcher.covers(SPARK)
+        assert caplog.text.count("has no token") == 1
 
     def test_a_forge_that_cannot_answer_is_left_to_the_cycle(self) -> None:
         client = _client(updated_since=False)
         watcher = _watcher(client, users=[{"source": "search"}])
         watcher.tick()
         client.list_pull_requests_updated_since.assert_not_called()
-        assert not watcher.covers(client)
+        assert not watcher.covers(SPARK)
 
     def test_disabled_and_unknown_forge_projects_are_skipped(self) -> None:
         client = _client()
@@ -346,6 +422,56 @@ class TestNotifications:
         notified = self._tick(watcher, lambda *a, **k: _pr(42))
         assert [c.args[2] for c in notified.call_args_list] == [42]
 
+    def test_a_refresh_that_always_fails_is_given_up_on(self, caplog: Any) -> None:
+        """Holding the watermark for a PR the token can't read would re-read the
+        same pages and log a traceback every minute forever."""
+        from franktheunicorn.worker.watcher import MAX_NOTIFICATION_RETRIES
+
+        client = _client()
+        watcher = self._ready(client)
+        client.list_notifications.return_value = NotificationPage([_notification(42)], 60)
+
+        def boom(*a: Any, **k: Any) -> Any:
+            msg = "404"
+            raise RuntimeError(msg)
+
+        with caplog.at_level(logging.WARNING):
+            calls = sum(
+                self._tick(watcher, boom).call_count for _ in range(MAX_NOTIFICATION_RETRIES + 2)
+            )
+        assert calls == MAX_NOTIFICATION_RETRIES
+        assert "Giving up on apache/spark#42" in caplog.text
+        stamp = parse_github_timestamp(
+            client.list_notifications.return_value.items[0]["updated_at"]
+        )
+        assert watcher._users[0].since == stamp  # type: ignore[index]
+
+    def test_a_pr_being_refreshed_elsewhere_is_asked_about_again(self) -> None:
+        """That refresh may have read the comments before the mention landed."""
+        from franktheunicorn.backends.poller import RefreshInProgressError
+
+        client = _client()
+        watcher = self._ready(client)
+        client.list_notifications.return_value = NotificationPage([_notification(42)], 60)
+
+        def busy(*a: Any, **k: Any) -> Any:
+            raise RefreshInProgressError("apache/spark#42")
+
+        self._tick(watcher, busy)
+        notified = self._tick(watcher, lambda *a, **k: _pr(42))
+        assert [c.args[2] for c in notified.call_args_list] == [42]
+        assert watcher._users[0].failures == {}  # type: ignore[index]
+
+    def test_an_incomplete_read_says_what_covers_the_rest(self, caplog: Any) -> None:
+        client = _client()
+        watcher = self._ready(client)
+        client.list_notifications.return_value = NotificationPage([_notification(42)], 60, False)
+
+        with caplog.at_level(logging.INFO):
+            self._tick(watcher, lambda *a, **k: _pr(42))
+
+        assert "left to the searches" in caplog.text
+
     def test_a_closed_pr_is_not_handed_off(self) -> None:
         client = _client()
         watcher = self._ready(client)
@@ -378,14 +504,22 @@ class TestNotifications:
         assert not watcher.reads_notifications("github", "holdenk")
         assert "watching by search" in caplog.text
 
-    def test_a_transient_failure_just_waits(self) -> None:
+    def test_a_transient_failure_warns_once_and_says_when_it_recovers(self, caplog: Any) -> None:
         client = _client()
         watcher = self._ready(client)
-        client.list_notifications.side_effect = TimeoutError("slow")
+        client.list_notifications.side_effect = [
+            TimeoutError("slow"),
+            TimeoutError("slow"),
+            NotificationPage([], 60),
+        ]
 
-        self._tick(watcher, lambda *a, **k: None)
+        with caplog.at_level(logging.INFO):
+            for _ in range(3):
+                self._tick(watcher, lambda *a, **k: None)
 
         assert watcher.reads_notifications("github", "holdenk")
+        assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+        assert "being read again" in caplog.text
 
 
 class TestRunLoop:
@@ -433,7 +567,7 @@ class TestRunnerWiring:
     def test_the_mid_cycle_relisting_leaves_watched_forges_alone(self) -> None:
         covered = _client()
         watcher = MagicMock()
-        watcher.covers.side_effect = lambda client: client is covered
+        watcher.covers.side_effect = lambda pc: pc is SPARK
         runner._last_closed_reap = float("-inf")
         with (
             patch.object(runner, "_watcher", watcher),

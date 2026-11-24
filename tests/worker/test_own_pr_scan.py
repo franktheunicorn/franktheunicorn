@@ -424,18 +424,25 @@ class TestSearchUsersDue:
 
     def test_claims_the_slot_then_waits_out_the_interval(self) -> None:
         oc = OperatorConfig(worker_pool={"operator_scan_minutes": 10})
-        assert runner._search_users_due(oc, "holdenk", force=False) == ["holdenk"]
+        assert runner._search_users_due(oc, "holdenk", force=False) == [("", "holdenk")]
         assert runner._search_users_due(oc, "holdenk", force=False) == []
 
     def test_force_is_every_user_even_inside_the_interval(self) -> None:
         oc = OperatorConfig(watch={"users": [{}, {"user": "cloud-fan", "source": "search"}]})
         runner._search_users_due(oc, "holdenk", force=False)
-        assert runner._search_users_due(oc, "holdenk", force=True) == ["holdenk", "cloud-fan"]
+        assert runner._search_users_due(oc, "holdenk", force=True) == [
+            ("", "holdenk"),
+            ("", "cloud-fan"),
+        ]
 
     def test_each_user_has_its_own_clock(self) -> None:
         oc = OperatorConfig(watch={"users": [{}, {"user": "cloud-fan"}]})
-        runner._operator_scan_clock.last["holdenk"] = time.monotonic()
-        assert runner._search_users_due(oc, "holdenk", force=False) == ["cloud-fan"]
+        runner._operator_scan_clock.last["/holdenk"] = time.monotonic()
+        assert runner._search_users_due(oc, "holdenk", force=False) == [("", "cloud-fan")]
+
+    def test_a_users_forge_comes_along(self) -> None:
+        oc = OperatorConfig(watch={"users": [{"user": "someone", "forge": "codeberg"}]})
+        assert ("codeberg", "someone") in runner._search_users_due(oc, "holdenk", force=True)
 
     def test_a_user_read_through_notifications_is_searched_on_the_backstop(self) -> None:
         """Ten minutes is the search users' interval; a notifications user waits
@@ -446,12 +453,12 @@ class TestSearchUsersDue:
         )
         eleven_minutes_ago = time.monotonic() - 11 * 60
         runner._operator_scan_clock.last.update(
-            {"holdenk": eleven_minutes_ago, "cloud-fan": eleven_minutes_ago}
+            {"/holdenk": eleven_minutes_ago, "/cloud-fan": eleven_minutes_ago}
         )
         watcher = MagicMock()
         watcher.reads_notifications.side_effect = lambda forge, user: user == "holdenk"
         with patch.object(runner, "_watcher", watcher):
-            assert runner._search_users_due(oc, "holdenk", force=False) == ["cloud-fan"]
+            assert runner._search_users_due(oc, "holdenk", force=False) == [("", "cloud-fan")]
 
     def test_no_username_and_no_users_is_nobody(self) -> None:
         assert runner._search_users_due(OperatorConfig(), "", force=True) == []
@@ -482,11 +489,11 @@ class TestScanSearchesEachUser:
                 "holdenk",
                 OperatorConfig(github_username="holdenk"),
                 [ProjectConfig(owner="apache", repo="spark")],
-                users=["holdenk", "cloud-fan"],
+                users=[("", "holdenk"), ("", "cloud-fan"), ("codeberg", "elsewhere")],
             )
 
         searched = [c.args[0] for c in client.search_prs_authored_by.call_args_list]
-        assert searched == ["holdenk", "cloud-fan"]
+        assert searched == ["holdenk", "cloud-fan"], "codeberg's user is not searched here"
         assert [h.pr.number for h in hits] == [1], "one PR, however many searches found it"
 
 

@@ -142,6 +142,10 @@ class GitHubClient(ForgeClient):
             timeout=30.0,
         )
         self._conditional = ConditionalCache()
+        #: Whether requests carry a token. A 304 is free only for an authenticated
+        #: request, so a watcher polling every minute without one would spend the
+        #: whole 60-an-hour unauthenticated quota on a single project.
+        self.authenticated = bool(token)
 
     def _get(self, url: str, **kwargs: Any) -> httpx.Response:
         """GET with rate-limit pacing, quota tracking and conditional requests.
@@ -291,7 +295,7 @@ class GitHubClient(ForgeClient):
 
     #: Notifications per page, and the most pages one check reads.
     _NOTIFICATION_PAGE = 50
-    _NOTIFICATION_PAGES = 4
+    _NOTIFICATION_PAGES = 10
 
     def list_notifications(self, since: datetime | None) -> NotificationPage:
         """``GET /notifications?all=true&participating=true``, pull requests only.
@@ -310,6 +314,7 @@ class GitHubClient(ForgeClient):
             params["since"] = since.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         items: list[dict[str, Any]] = []
         poll_interval = 0
+        complete = False
         for page in range(1, self._NOTIFICATION_PAGES + 1):
             response = self._get("/notifications", params={**params, "page": page})
             if response.status_code in (401, 403, 404) and not _is_rate_limit_response(response):
@@ -323,8 +328,9 @@ class GitHubClient(ForgeClient):
             data: list[dict[str, Any]] = response.json()
             items.extend(n for n in data if (n.get("subject") or {}).get("type") == "PullRequest")
             if len(data) < self._NOTIFICATION_PAGE:
+                complete = True
                 break
-        return NotificationPage(items, poll_interval)
+        return NotificationPage(items, poll_interval, complete)
 
     def get_pull_request(self, owner: str, repo: str, pr_number: int) -> dict[str, Any]:
         """Fetch a single PR detail (includes mergeable status)."""

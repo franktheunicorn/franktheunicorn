@@ -77,6 +77,9 @@ class NotificationPage:
 
     items: list[dict[str, Any]]
     poll_interval: int = 0
+    #: False when more arrived than one read takes: the oldest are not in
+    #: ``items``, and the caller should say what covers them instead.
+    complete: bool = True
 
 
 class NotificationsUnavailableError(Exception):

@@ -121,10 +121,15 @@ poll_interval_seconds: 300
 # worker_pool.operator_scan_minutes, for any user and any token. auto (the
 # default) uses notifications when the token can and belongs to the user,
 # otherwise search. Users read through notifications still get the searches
-# every search_backstop_minutes. With no users listed, you are watched, auto.
+# every search_backstop_minutes (default 10, the same as the search users: a
+# push to a PR you reviewed raises no notification; raise it once you trust
+# them). You are always watched (auto) unless you list yourself; forge: picks
+# which forges entry a user is on (empty = searched everywhere, notifications
+# from the forge named github). Without a token the watcher leaves projects to
+# the cycle: a 304 is only free when authenticated.
 # watch:
 #   interval_seconds: 60
-#   search_backstop_minutes: 60
+#   search_backstop_minutes: 10
 #   max_refreshes_per_check: 20
 #   users:
 #     - user: ""                 # empty = github_username

@@ -2035,6 +2035,40 @@ class TestSyncRecentPullRequests:
 
         assert [pr.number for pr in result.new] == [10, 9]
         assert result.deferred == 1
+        assert result.resume_from == result.newest, "same stamp: nothing older to come back to"
+
+    def test_a_cut_resumes_from_the_newest_pr_it_cut_off(self, tmp_path: Path) -> None:
+        """Otherwise the watermark jumps past them and they wait for the poll."""
+        from franktheunicorn.backends.poller import sync_recent_pull_requests
+
+        client = self._polled(tmp_path, 1)
+        client.changed = [
+            _listed_pr(10, updated_at="2026-04-02T10:00:00Z"),
+            _listed_pr(9, updated_at="2026-04-02T09:00:00Z"),
+            _listed_pr(8, updated_at="2026-04-02T08:00:00Z"),
+        ]
+
+        result = sync_recent_pull_requests(
+            self._config(), client, "holdenk", _SINCE, max_refreshes=1
+        )
+
+        assert result.newest == datetime(2026, 4, 2, 10, 0, tzinfo=UTC)
+        assert result.resume_from == datetime(2026, 4, 2, 9, 0, tzinfo=UTC)
+
+    def test_no_refresh_timer_even_at_zero_hours(self, tmp_path: Path) -> None:
+        """poll_refresh_hours: 0 means "always" to the poll; to the watcher, which
+        re-reads a two-minute overlap every minute, it would mean "every minute"."""
+        from franktheunicorn.backends.poller import sync_recent_pull_requests
+
+        config = ProjectConfig(owner="apache", repo="spark", poll_refresh_hours=0)
+        client = _ChangedSinceClient(tmp_path, [_listed_pr(1, user={"login": "holdenk"})])
+        poll_project(client, config, operator_username="holdenk")
+        client.detail_calls.clear()
+        client.changed = [_listed_pr(1, user={"login": "holdenk"})]
+
+        result = sync_recent_pull_requests(config, client, "holdenk", _SINCE)
+
+        assert (result.refreshed, client.detail_calls) == ([], [])
 
     def test_a_pr_another_thread_is_refreshing_is_left_alone(self, tmp_path: Path) -> None:
         from franktheunicorn.backends import poller
@@ -2128,6 +2162,21 @@ class TestRefreshNotifiedPullRequest:
         row = PullRequest.objects.get(number=12)
         assert row.state == "closed"
         assert row.merged_at is not None
+
+    def test_a_pr_being_refreshed_elsewhere_raises_rather_than_counting_as_done(
+        self, tmp_path: Path
+    ) -> None:
+        from franktheunicorn.backends import poller
+
+        client = _CountingMockClient(tmp_path, [])
+        project = Project.objects.create(owner="apache", repo="spark")
+        poller._refreshes_in_flight.add((project.pk, 12))
+        try:
+            with pytest.raises(poller.RefreshInProgressError):
+                poller.refresh_notified_pull_request(client, self._config(), 12, "holdenk")
+        finally:
+            poller._refreshes_in_flight.discard((project.pk, 12))
+        assert client.detail_calls == []
 
     def test_a_closed_pr_we_never_had_is_not_ingested(self, tmp_path: Path) -> None:
         from franktheunicorn.backends.poller import refresh_notified_pull_request

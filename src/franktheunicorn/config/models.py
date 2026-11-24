@@ -2807,8 +2807,13 @@ class WatchedUserConfig(BaseModel):
     #: ``${SOME_ENV_VAR}``. Empty uses the forge's polling token, which is only
     #: right when that token is *user*'s own.
     token: str = ""
-    #: Which ``forges:`` entry this account lives on.
-    forge: str = "github"
+    #: Which ``forges:`` entry this account lives on. Empty: searched on every
+    #: forge, and notifications read from the one named ``github``.
+    forge: str = ""
+
+    @property
+    def notifications_forge(self) -> str:
+        return self.forge or "github"
 
 
 class WatchConfig(BaseModel):
@@ -2829,11 +2834,17 @@ class WatchConfig(BaseModel):
     #: Seconds between checks. 0 turns the watcher off and leaves change
     #: detection to the cycle (the mid-cycle open-PR sync and operator scan).
     interval_seconds: int = 60
-    #: Accounts to watch. Empty watches the operator, ``source: auto``.
+    #: Accounts to watch. The operator is always watched (``source: auto``
+    #: unless listed here with another source): listing a co-maintainer must not
+    #: quietly stop the searches the "Your PRs" queue is built on.
     users: list[WatchedUserConfig] = Field(default_factory=list)
     #: For a user read through notifications, how often the searches still run
-    #: — they are what find the *whole* set (notifications only say what moved).
-    search_backstop_minutes: int = 60
+    #: — they are what find the *whole* set (notifications only say what moved),
+    #: and a push to a PR you reviewed raises no notification at all. The same
+    #: as ``worker_pool.operator_scan_minutes`` by default, so notifications are
+    #: speed on top of the searches rather than a replacement for them; raise it
+    #: once you trust them.
+    search_backstop_minutes: int = 10
     #: Changed PRs one check refreshes per project; the rest wait for the poll.
     max_refreshes_per_check: int = 20
 
@@ -2846,8 +2857,14 @@ class WatchConfig(BaseModel):
         return v
 
     def users_for(self, operator_username: str) -> list[WatchedUserConfig]:
-        """The configured users with the operator filled in, deduplicated by login."""
-        configured = self.users or [WatchedUserConfig()]
+        """The configured users with the operator filled in and always present,
+        deduplicated by (forge, login); the operator first."""
+        operator = operator_username.strip().lower()
+        configured = list(self.users)
+        if operator and not any(
+            (u.user.strip() or operator).lower() == operator for u in configured
+        ):
+            configured.insert(0, WatchedUserConfig())
         seen: set[tuple[str, str]] = set()
         resolved: list[WatchedUserConfig] = []
         for entry in configured:
@@ -2856,6 +2873,7 @@ class WatchConfig(BaseModel):
                 continue
             seen.add((entry.forge, login.lower()))
             resolved.append(entry.model_copy(update={"user": login}))
+        resolved.sort(key=lambda u: u.user.lower() != operator)
         return resolved
 
 

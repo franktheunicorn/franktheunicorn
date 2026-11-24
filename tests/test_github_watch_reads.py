@@ -97,6 +97,18 @@ class TestConditionalRequests:
         assert cache.get("big") is None
 
 
+def test_a_client_knows_whether_it_has_a_token() -> None:
+    """The watcher reads this: a 304 is free only for an authenticated request."""
+    with_token = GitHubClient(token="t", base_url=BASE)
+    without = GitHubClient(token="", base_url=BASE)
+    try:
+        assert with_token.authenticated is True
+        assert without.authenticated is False
+    finally:
+        with_token.close()
+        without.close()
+
+
 class TestUpdatedSince:
     def test_stops_at_the_first_pr_older_than_the_watermark(
         self, httpx_mock: HTTPXMock, client: GitHubClient
@@ -187,6 +199,22 @@ class TestNotifications:
         assert params["participating"] == "true"
         assert params["since"] == "2026-11-24T10:00:00Z"
         assert httpx_mock.get_requests()[0].method == "GET", "never marks anything read"
+
+    def test_a_burst_bigger_than_one_read_says_it_is_incomplete(
+        self, httpx_mock: HTTPXMock, client: GitHubClient
+    ) -> None:
+        full = [_notification(str(n)) for n in range(client._NOTIFICATION_PAGE)]
+        for _ in range(client._NOTIFICATION_PAGES):
+            httpx_mock.add_response(json=full)
+
+        page = client.list_notifications(None)
+
+        assert not page.complete
+        assert len(httpx_mock.get_requests()) == client._NOTIFICATION_PAGES
+
+    def test_a_short_page_is_complete(self, httpx_mock: HTTPXMock, client: GitHubClient) -> None:
+        httpx_mock.add_response(json=[_notification("1")])
+        assert client.list_notifications(None).complete
 
     def test_a_fine_grained_token_is_unavailable_not_transient(
         self, httpx_mock: HTTPXMock, client: GitHubClient

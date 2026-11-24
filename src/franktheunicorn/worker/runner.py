@@ -2210,9 +2210,10 @@ def _reap_closed_prs_if_due(
         if not isinstance(pc, ProjectConfig) or not pc.enabled or pc.forge not in clients:
             continue
         client = clients[pc.forge]
-        if _watcher is not None and _watcher.covers(client):
-            # The watcher asks this forge what changed every minute; a full
-            # re-listing here would only re-download what it already saw.
+        if _watcher is not None and _watcher.covers(pc):
+            # The watcher read this project's changes within the last minute; a
+            # full re-listing here would only re-download what it already saw.
+            # It stops covering a project whose checks fail or fall behind.
             continue
         try:
             if operator_username:
@@ -2873,12 +2874,13 @@ def _scan_operator_prs(
     project_configs: Sequence[object] | None = None,
     *,
     repo_paths: Mapping[str, Path | None] | None = None,
-    users: Sequence[str] | None = None,
+    users: Sequence[tuple[str, str]] | None = None,
 ) -> list[OperatorScanHit]:
     """Find the operator's own open PRs, the ones they reviewed, and the rest; refresh the moved.
 
-    *users* are the logins to search for (``watch.users``, whichever are due);
-    None is the operator alone. Routing stays the operator's either way.
+    *users* are the ``(forge, login)`` pairs to search for (``watch.users``,
+    whichever are due); an empty forge searches every forge, and None is the
+    operator on every forge. Routing stays the operator's either way.
 
     Three searches per forge, not one. ``search_prs_authored_by`` asks for the
     operator's own PRs by name, ``search_prs_reviewed_by`` for the ones they have
@@ -2938,12 +2940,14 @@ def _scan_operator_prs(
     skipped_unconfigured = 0
     hits: dict[tuple[str, str], list[tuple[str, dict[str, Any]]]] = {}
     configs: dict[tuple[str, str], ProjectConfig] = {}
-    searches = [
-        (user, label, method)
-        for user in (users if users is not None else [operator_username])
-        for label, method in _OPERATOR_SEARCHES
-    ]
+    wanted = list(users) if users is not None else [("", operator_username)]
     for forge_name, client in clients.items():
+        searches = [
+            (user, label, method)
+            for user_forge, user in wanted
+            if user_forge in ("", forge_name)
+            for label, method in _OPERATOR_SEARCHES
+        ]
         for user, label, method in searches:
             finder = getattr(client, method, None)
             if finder is None:
@@ -3062,7 +3066,9 @@ def _scan_operator_prs(
     logger.info(
         "Own/involved PR scan for %s: %d distinct PR(s) found (%s); %d refreshed, "
         "%d unchanged, %d failed, %d skipped (not a configured project).",
-        ", ".join(users) if users else (operator_username or "(username not set)"),
+        ", ".join(user for _, user in users)
+        if users
+        else (operator_username or "(username not set)"),
         len(seen),
         ", ".join(f"{label} {found.get(label, 0)}" for label, _ in _OPERATOR_SEARCHES),
         len(to_refresh) - failed,
@@ -3092,14 +3098,14 @@ _operator_scan_clock = _ScanClock()
 
 def _search_users_due(
     operator_config: OperatorConfig | None, operator_username: str, *, force: bool
-) -> list[str]:
+) -> list[tuple[str, str]]:
     """The watched users whose searches are due now; claims them.
 
     A user the watcher reads through notifications is searched every
     ``watch.search_backstop_minutes`` — notifications say what moved, the
     searches say what the whole set is. Everyone else every
     ``worker_pool.operator_scan_minutes``. *force* (the start of a cycle) is
-    every user.
+    every user. Returns ``(forge, login)``; an empty forge is every forge.
     """
     from franktheunicorn.config.models import WatchConfig
 
@@ -3107,19 +3113,19 @@ def _search_users_due(
     scan_minutes = operator_config.worker_pool.operator_scan_minutes if operator_config else 10
     watcher = _watcher
     now = time.monotonic()
-    due: list[str] = []
+    due: list[tuple[str, str]] = []
     for entry in watch.users_for(operator_username):
         by_notifications = watcher is not None and watcher.reads_notifications(
-            entry.forge, entry.user
+            entry.notifications_forge, entry.user
         )
         minutes = watch.search_backstop_minutes if by_notifications else scan_minutes
-        key = entry.user.lower()
+        key = f"{entry.forge}/{entry.user.lower()}"
         if not force and now - _operator_scan_clock.last.get(key, float("-inf")) < (
             max(0, minutes) * 60
         ):
             continue
         _operator_scan_clock.last[key] = now
-        due.append(entry.user)
+        due.append((entry.forge, entry.user))
     return due
 
 
