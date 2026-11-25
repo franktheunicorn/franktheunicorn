@@ -273,6 +273,11 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
     seed_triage_backend_health(operator_config)
     _check_agent_cli_reviewers(operator_config)
     _check_ssh_configs(operator_config)
+    # Who the committers are, once per boot: write access to each project's
+    # committer_repos (worker/committers.py). A failure keeps the stored list.
+    from franktheunicorn.worker.committers import sync_committers_at_boot
+
+    sync_committers_at_boot(clients, project_configs)
 
     signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
     # Hangup too, so closing the terminal runs the same shutdown, including

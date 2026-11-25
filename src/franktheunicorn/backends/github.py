@@ -953,6 +953,52 @@ class GitHubClient(ForgeClient):
             all_logins.extend(entry["login"] for entry in data if entry.get("login"))
         return all_logins
 
+    def list_repo_collaborators(self, owner: str, repo: str, permission: str = "push") -> list[str]:
+        """Everyone with *permission* or better on the repo, however they got it.
+
+        ``affiliation=all`` counts access through a team and org ownership
+        too, which is how ASF grants committers write access (and why the
+        org's owners appear as well). GitHub answers only a token that itself
+        has write access: anyone else gets 403, and a private repo the token
+        cannot see is 404. Paginated to 2000 logins.
+        """
+        url = f"/repos/{owner}/{repo}/collaborators"
+        logins: list[str] = []
+        for page in range(1, 21):
+            response = self._get(
+                url,
+                params={
+                    "affiliation": "all",
+                    "permission": permission,
+                    "per_page": 100,
+                    "page": page,
+                },
+            )
+            response.raise_for_status()
+            data: list[dict[str, Any]] = response.json()
+            logins.extend(str(e["login"]) for e in data if isinstance(e, dict) and e.get("login"))
+            if len(data) < 100:
+                break
+        return logins
+
+    def list_team_members(self, org: str, team_slug: str) -> list[str]:
+        """Members of ``org/team_slug``, child teams included, paginated to 2000.
+
+        GitHub shows a team only to the org's members (a secret one only to
+        its own members), and a classic token needs ``read:org``; anyone
+        else gets 404 or 403.
+        """
+        url = f"/orgs/{org}/teams/{team_slug}/members"
+        logins: list[str] = []
+        for page in range(1, 21):
+            response = self._get(url, params={"per_page": 100, "page": page})
+            response.raise_for_status()
+            data: list[dict[str, Any]] = response.json()
+            logins.extend(str(e["login"]) for e in data if isinstance(e, dict) and e.get("login"))
+            if len(data) < 100:
+                break
+        return logins
+
     def get_authenticated_user(self) -> dict[str, Any]:
         """Fetch the authenticated user's profile (GET /user)."""
         response = self._get("/user")

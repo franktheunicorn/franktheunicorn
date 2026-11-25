@@ -296,9 +296,9 @@ def score_pull_request_from_model(
     if hasattr(pr, "mergeable"):
         pr_dict["mergeable"] = pr.mergeable
 
-    committers: list[str] = []
-    if hasattr(project_config, "committers"):
-        committers = project_config.committers
+    from franktheunicorn.core.committers import committers_for_pr
+
+    committers = committers_for_pr(project_config, pr)
 
     config_dict: dict[str, object] = {
         # Scopes the awaiting-maintainer signal's team mentions to this org.

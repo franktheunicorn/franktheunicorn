@@ -71,7 +71,10 @@ def interest_reason(pr: PullRequest, pc: ProjectConfig, operator_username: str) 
     if operator_username and _should_auto_review(pr, operator_username):
         return "you are involved"
     author = (pr.author or "").lower()
-    if author in {a.lower() for a in [*pc.frequent_contributors, *pc.committers]}:
+    from franktheunicorn.core.committers import committers_for_pr
+
+    followed = [*pc.frequent_contributors, *committers_for_pr(pc, pr)]
+    if author in {a.lower() for a in followed}:
         return f"{pr.author} is a contributor you follow"
     if any(path_matches(f, wp) for f in pr.changed_files or [] for wp in pc.watched_paths):
         return "it touches watched_paths"

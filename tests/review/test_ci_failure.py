@@ -740,6 +740,14 @@ class TestCandidates:
         _red_pr(ProjectFactory(owner="apache", repo="other"), number=9)
         assert [pr.pk for pr in candidate_prs(spark, pc)] == [wanted.pk]
 
+    def test_committers_read_at_boot_are_skipped_too(self, spark: Project) -> None:
+        spark.committers_cache = ["cloud-fan"]
+        spark.save()
+        wanted = _red_pr(spark, number=1)
+        _red_pr(spark, number=2, author="Cloud-Fan")
+        pc = ProjectConfig(owner="apache", repo="spark")
+        assert [pr.pk for pr in candidate_prs(spark, pc)] == [wanted.pk]
+
     def test_the_knobs_widen_it(self, spark: Project) -> None:
         pc = ProjectConfig(
             owner="apache",

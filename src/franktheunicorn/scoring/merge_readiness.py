@@ -1116,6 +1116,8 @@ def build_readiness_input(
     if pr.github_updated_at is not None:
         days = (datetime.now(tz=UTC) - pr.github_updated_at).total_seconds() / 86400
     known = list(pr.project.contributors_cache or []) + list(project_config.frequent_contributors)
+    from franktheunicorn.core.committers import committers_for_pr
+
     review_states = pr.review_states if isinstance(pr.review_states, dict) else {}
     return ReadinessInput(
         author=pr.author,
@@ -1129,7 +1131,7 @@ def build_readiness_input(
         labels=[str(lbl) for lbl in (pr.labels or [])],
         review_states={str(k): dict(v) for k, v in review_states.items() if isinstance(v, dict)},
         head_sha=pr.head_sha,
-        committers=list(project_config.committers),
+        committers=committers_for_pr(project_config, pr),
         known_contributors=known,
         is_new_contributor=pr.is_new_contributor,
         open_findings=open_findings,

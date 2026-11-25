@@ -376,118 +376,21 @@ frequent_contributors:
   - "HyukjinKwon"
   - "viirya"
 
-# Spark committers' GitHub logins (https://spark.apache.org/committers.html).
-# The dashboard shows an approval from one of these in bold with a trailing
-# "*" (an apache org member who isn't listed here is bold without the star);
-# triage, merge-readiness and the CI-failure pass also read this list.
-# Built 2026-11 by matching each committer's name against the "Authored-by:" /
-# "Closes #N from <login>/" trailers of apache/spark's merge commits; two
-# logins for one person where both have merged PRs (uros-db/uros-b,
-# xinrong-meng/xinrong-databricks, jose-torres/joseph-torres). Not listed:
-# committers from the 2010-2012 AMPLab era with no merged GitHub PR to read a
-# login from (Mosharaf Chowdhury, Jason Dai, Thomas Dudziak, Shane Huang,
-# Ryan LeCompte, Sean McNamara, Charles Reiss, Andrew Xia). Re-check against
-# the committers page when someone is voted in.
-committers:
-  - "aarondav"
-  - "allisonwang-db"
-  - "andrewor14"
-  - "andyk"
-  - "anishshri-db"
-  - "ankurdave"
-  - "aokolnychyi"
-  - "attilapiros"
-  - "beliefer"
-  - "brkyvz"
-  - "BryanCutler"
-  - "cloud-fan"
-  - "davies"
-  - "dbtsai"
-  - "dilipbiswal"
-  - "dongjoon-hyun"
-  - "dtenedor"
-  - "erikerlandson"
-  - "felixcheung"
-  - "foxish"
-  - "gaborgsomogyi"
-  - "gaogaotiantian"
-  - "gatorsmile"
-  - "gengliangwang"
-  - "grundprinzip"
-  - "haoyuan"
-  - "harsha2010"
-  - "HeartSaVioR"
-  - "holdenk"
-  - "huaxingao"
-  - "hvanhovell"
-  - "HyukjinKwon"
-  - "itholic"
-  - "jegonzal"
-  - "jerryshao"
-  - "jiangxb1987"
-  - "jkbradley"
-  - "jose-torres"
-  - "joseph-torres"
-  - "JoshRosen"
-  - "kayousterhout"
-  - "kiszk"
-  - "koeninger"
-  - "liancheng"
-  - "liyinan926"
-  - "LuciferYang"
-  - "markhamstra"
-  - "marmbrus"
-  - "maropu"
-  - "mateiz"
-  - "MaxGekk"
-  - "mccheah"
-  - "mengxr"
-  - "MLnick"
-  - "mridulm"
-  - "nchammas"
-  - "Ngone51"
-  - "pan3793"
-  - "panbingkun"
-  - "peter-toth"
-  - "pwendell"
-  - "rdblue"
-  - "revans2"
-  - "rxin"
-  - "sameeragarwal"
-  - "sarutak"
-  - "ScrapCodes"
-  - "sethah"
-  - "shaneknapp"
-  - "shivaram"
-  - "squito"
-  - "srowen"
-  - "sryza"
-  - "stephenh"
-  - "sunchao"
-  - "szehon-ho"
-  - "tdas"
-  - "tejasapatil"
-  - "tgravescs"
-  - "ueshin"
-  - "ulysses-you"
-  - "uros-b"
-  - "uros-db"
-  - "vanzin"
-  - "viirya"
-  - "wangyum"
-  - "WeichenXu123"
-  - "wzhfy"
-  - "xinrong-databricks"
-  - "xinrong-meng"
-  - "xuanyuanking"
-  - "yanboliang"
-  - "yaooqinn"
-  - "yhuai"
-  - "Yicong-Huang"
-  - "Yikun"
-  - "zero323"
-  - "zhengruifeng"
-  - "zsxwing"
+# Who the committers are, read from GitHub once at worker boot. The
+# dashboard shows a committer's approval in bold with a trailing "*" (an
+# apache org member who isn't one is bold without the star); triage,
+# merge-readiness and the CI-failure pass's skip_committers read the same
+# list. The team is the precise source and needs an apache member's token
+# (classic tokens: read:org); the team's URL works here too.
+committer_teams:
+  - "apache/spark-committers"
+# Read only if no team above could be: everyone with write access. Needs a
+# token with write access, and also counts ASF's org owners (infra).
+committer_repos:
+  - "apache/spark"
+  # - "apache/spark-private"   # or a private repo only committers can see
+# Anyone the forge can't tell you about, by hand (unioned with the above).
+committers: []
 
 enabled: true
 

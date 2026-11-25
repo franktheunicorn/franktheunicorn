@@ -127,3 +127,13 @@ class TestMergeIntentApprover:
         with patch("franktheunicorn.config.loader.load_project_configs", return_value=[config]):
             html = client.get("/merge-queue/").content.decode()
         assert "holdenk</strong>*" in html
+
+
+@pytest.mark.django_db
+def test_committer_read_at_boot_gets_the_star(client: Client, project: Project) -> None:
+    project.committers_cache = ["asf-member"]
+    project.save()
+    _approved_pr(project, merge_intent_by="asf-member")
+    with patch(f"{_VIEWS}._project_configs_by_name", return_value={}):
+        html = client.get("/?queue=intending-to-merge").content.decode()
+    assert "asf-member</strong>*" in html

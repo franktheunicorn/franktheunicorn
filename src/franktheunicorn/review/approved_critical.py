@@ -40,10 +40,11 @@ def update_approved_critical(pr: PullRequest, pc: ProjectConfig) -> bool:
     """
     from django.utils import timezone
 
+    from franktheunicorn.core.committers import committers_for_pr
     from franktheunicorn.core.models import PullRequest as PullRequestModel
     from franktheunicorn.core.models import ReviewDraft
 
-    committers = {c.lower() for c in pc.committers}
+    committers = {c.lower() for c in committers_for_pr(pc, pr)}
     flagged = False
     detail: dict[str, object] = {}
     if committers:

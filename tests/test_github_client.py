@@ -218,6 +218,41 @@ class TestGitHubClient:
             client.list_contributors("org", "repo")
 
 
+class TestListRepoCollaborators:
+    @pytest.fixture
+    def client(self) -> GitHubClient:
+        c = GitHubClient(token="test-token", base_url="https://api.github.test")
+        yield c
+        c.close()
+
+    def _url(self, page: int) -> str:
+        return (
+            "https://api.github.test/repos/apache/spark/collaborators"
+            f"?affiliation=all&permission=push&per_page=100&page={page}"
+        )
+
+    def test_paginates_until_a_short_page(
+        self, httpx_mock: HTTPXMock, client: GitHubClient
+    ) -> None:
+        httpx_mock.add_response(url=self._url(1), json=[{"login": f"user{i}"} for i in range(100)])
+        httpx_mock.add_response(url=self._url(2), json=[{"login": "holdenk"}, {"id": 3}])
+        logins = client.list_repo_collaborators("apache", "spark")
+        assert len(logins) == 101
+        assert logins[-1] == "holdenk"
+
+    def test_403_propagates(self, httpx_mock: HTTPXMock, client: GitHubClient) -> None:
+        httpx_mock.add_response(url=self._url(1), status_code=403)
+        with pytest.raises(httpx.HTTPStatusError):
+            client.list_repo_collaborators("apache", "spark")
+
+    def test_team_members(self, httpx_mock: HTTPXMock, client: GitHubClient) -> None:
+        httpx_mock.add_response(
+            url="https://api.github.test/orgs/apache/teams/spark-committers/members?per_page=100&page=1",
+            json=[{"login": "holdenk"}, {"login": "cloud-fan"}],
+        )
+        assert client.list_team_members("apache", "spark-committers") == ["holdenk", "cloud-fan"]
+
+
 class TestListPullRequestsAuthFallback:
     """list_pull_requests falls back to scrape on 401/403 and logs suggestions."""
 

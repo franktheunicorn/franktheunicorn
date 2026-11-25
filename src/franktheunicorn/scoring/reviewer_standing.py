@@ -4,10 +4,11 @@ The dashboard marks an approval by its weight. An org member's name is bold;
 a project committer's is bold with a trailing ``*``. Two sources, cheapest
 first:
 
-* ``ProjectConfig.committers`` — the operator's list of forge logins. It is
-  authoritative for "committer" because the forge does not know: on GitHub
-  every ASF committer is a MEMBER of ``apache``, whichever project they
-  commit to.
+* The project's committers (core.committers.project_committers): the
+  config's hand list plus everyone with write access to its
+  ``committer_repos``, read at worker boot. Membership of the org cannot
+  stand in for it: on GitHub every ASF committer is a MEMBER of ``apache``,
+  whichever project they commit to.
 * GitHub's ``author_association`` on the review or comment, stored on the row
   (``review_states[login]["author_association"]``,
   ``merge_intent_by_association``). ``MEMBER`` / ``OWNER`` means the

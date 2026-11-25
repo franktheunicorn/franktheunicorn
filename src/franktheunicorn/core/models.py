@@ -34,6 +34,13 @@ class Project(models.Model):
     repo_health_analyzed_at = models.DateTimeField(null=True, blank=True)
     contributors_cache = models.JSONField(default=list, blank=True)
     contributors_cache_status = models.CharField(max_length=20, blank=True, default="unknown")
+    #: Committers read off the forge at worker boot: everyone with write
+    #: access to the project config's ``committer_repos``
+    #: (worker/committers.py). Unioned with the config's own ``committers``
+    #: by core.committers.project_committers. A failed read keeps the last
+    #: list; committers_cache_at says when it was taken.
+    committers_cache = models.JSONField(default=list, blank=True)
+    committers_cache_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
 

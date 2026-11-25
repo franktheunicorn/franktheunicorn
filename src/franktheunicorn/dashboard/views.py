@@ -35,6 +35,7 @@ from django.utils import timezone
 from django.utils.html import escape
 from django.views.decorators.http import require_POST
 
+from franktheunicorn.core.committers import committers_for_pr
 from franktheunicorn.core.models import (
     CI_FAILURES_QUEUE,
     ZOMBIE_QUEUE,
@@ -1842,19 +1843,13 @@ def _project_configs_by_name() -> dict[str, ProjectConfig]:
     return {f"{c.owner}/{c.repo}".lower(): c for c in configs}
 
 
-def _committers_of(project_config: object) -> list[str]:
-    """``project_config.committers``, or nothing for a missing/stand-in config."""
-    raw = getattr(project_config, "committers", None)
-    return [str(c) for c in raw] if isinstance(raw, list) else []
-
-
 def _merge_intent_reviewer(pr: PullRequest, project_config: object) -> Reviewer | None:
     """Who set ``pr``'s merge intent, with their standing on the project."""
     return merge_intent_reviewer(
         pr.merge_intent_by,
         pr.merge_intent_by_association,
         pr.review_states,
-        _committers_of(project_config),
+        committers_for_pr(project_config, pr),
     )
 
 
@@ -1946,7 +1941,7 @@ def _merge_candidate_context(
         return [str(x) for x in raw] if isinstance(raw, list) else []
 
     ci_reasons_raw = ci.get("reasons")
-    committers = _committers_of(project_config)
+    committers = committers_for_pr(project_config, pr)
     return {
         "verdict": pr.merge_readiness_verdict,
         "score": pr.merge_readiness_score,
