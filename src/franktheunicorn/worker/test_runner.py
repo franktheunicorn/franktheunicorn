@@ -173,7 +173,12 @@ def _is_trusted_author(pr: PullRequest, project_config: ProjectConfig) -> bool:
         return False
     if pr.is_operator_pr:
         return True
-    trusted = {u.lower() for u in project_config.committers + project_config.frequent_contributors}
+    from franktheunicorn.core.committers import committers_for_pr
+
+    trusted = {
+        u.lower()
+        for u in committers_for_pr(project_config, pr) + project_config.frequent_contributors
+    }
     return author in trusted
 
 

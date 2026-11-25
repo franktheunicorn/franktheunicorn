@@ -261,6 +261,24 @@ class ForgeClient(ABC):
         GitHub and Gitea ignore it.
         """
 
+    def list_repo_collaborators(self, owner: str, repo: str, permission: str = "push") -> list[str]:
+        """Logins with at least *permission* on the repository.
+
+        Read once at worker boot to learn a project's committers
+        (``ProjectConfig.committer_repos``). Forges without the call inherit
+        this and raise ``NotImplementedError``; errors from a forge that has
+        it propagate, so the caller can keep the last list it stored.
+        """
+        raise NotImplementedError(f"{type(self).__name__} cannot list repository collaborators")
+
+    def list_team_members(self, org: str, team_slug: str) -> list[str]:
+        """Logins in the org's team *team_slug* (``ProjectConfig.committer_teams``).
+
+        Same contract as ``list_repo_collaborators``: ``NotImplementedError``
+        where the forge has no teams, errors propagate otherwise.
+        """
+        raise NotImplementedError(f"{type(self).__name__} cannot list team members")
+
     @abstractmethod
     def list_contributors(self, owner: str, repo: str) -> list[str]:
         """Return login names of contributors to the repository.

@@ -15,6 +15,7 @@ from pydantic import (
     ConfigDict,
     Field,
     PrivateAttr,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -1585,8 +1586,9 @@ class CIFailureConfig(BaseModel):
     # since spring does not need a comment today. 0 disables the cut-off.
     active_within_days: int = 14
     include_drafts: bool = False
-    # Leave the project's ``committers`` out of the automatic pass: they can
-    # read their own CI. The per-PR button classifies anyone's.
+    # Leave the project's committers (the config's list plus committer_repos)
+    # out of the automatic pass: they can read their own CI. The per-PR button
+    # classifies anyone's.
     skip_committers: bool = True
     # Authors to leave out of the automatic pass (bots, mostly). Exact logins.
     skip_authors: list[str] = Field(default_factory=list)
@@ -3425,7 +3427,26 @@ class ProjectConfig(BaseModel):
     watch_keywords: list[str] = Field(default_factory=list)
     collaborator_scores: dict[str, float | None] = Field(default_factory=dict)
     ai_agents: list[str] = Field(default_factory=list)
+    #: Forge logins of the project's committers (case-insensitive), by hand.
+    #: Usually left empty in favour of ``committer_repos``; the two are
+    #: unioned (core.committers.project_committers). Read by triage, merge
+    #: readiness, the CI-failure pass and the approved-critical flag, and by
+    #: the dashboard, which shows a committer's approval as bold with a
+    #: trailing ``*`` (an org member's is bold alone, from the forge's
+    #: ``author_association``; see scoring/reviewer_standing.py).
     committers: list[str] = Field(default_factory=list)
+    #: ``org/team-slug`` entries (or the team's github.com URL) whose members
+    #: are this project's committers — ``apache/spark-committers``. Read once
+    #: at worker boot (worker/committers.py) and stored on the Project row.
+    #: Needs an org member's token (classic: ``read:org``). The precise
+    #: source: repo write access also counts the org's owners.
+    committer_teams: list[str] = Field(default_factory=list)
+    #: ``owner/repo`` entries whose write-access holders are this project's
+    #: committers — ``apache/spark`` itself, or a private repo only committers
+    #: can see. Read at boot only when no ``committer_teams`` entry could be
+    #: (or none is set). Needs a token with write access to each repo; one the
+    #: token cannot read is logged at WARNING and the rest still count.
+    committer_repos: list[str] = Field(default_factory=list)
     cve_files: list[str] = Field(default_factory=list)
     #: The PMC this project maps to at the ASF CVE process service
     #: (cveprocess.apache.org) — the ``pmc`` form field when allocating a CVE
@@ -3624,6 +3645,27 @@ class ProjectConfig(BaseModel):
 
     # Differential test runner (§9). Disabled by default; see docs/test-runner.md.
     tests: TestExecutionConfig = Field(default_factory=TestExecutionConfig)
+
+    @field_validator("committer_repos", "committer_teams")
+    @classmethod
+    def committer_sources_are_pairs(cls, v: list[str], info: ValidationInfo) -> list[str]:
+        cleaned: list[str] = []
+        for raw in v:
+            entry = (raw or "").strip()
+            if not entry:
+                continue
+            # The team page's URL pastes as-is: github.com/orgs/<org>/teams/<slug>.
+            team_url = re.match(r"^(?:https?://)?github\.com/orgs/([^/]+)/teams/([^/]+)/?$", entry)
+            if team_url and info.field_name == "committer_teams":
+                entry = f"{team_url.group(1)}/{team_url.group(2)}"
+            entry = entry.strip("/")
+            first, _, second = entry.partition("/")
+            if not first or not second or "/" in second:
+                shape = "org/team-slug" if info.field_name == "committer_teams" else "owner/repo"
+                msg = f"{info.field_name} entry {raw!r} is not {shape}"
+                raise ValueError(msg)
+            cleaned.append(entry)
+        return cleaned
 
     @field_validator("release_tag_pattern")
     @classmethod

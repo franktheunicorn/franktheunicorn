@@ -164,6 +164,8 @@ class MergeIntent:
     #: ``review`` or ``comment``.
     source: str = ""
     by: str = ""
+    #: GitHub's ``author_association`` for ``by`` on that review/comment.
+    by_association: str = ""
     excerpt: str = ""
     #: The commit the approval was against when the forge says (review
     #: ``commit_id``); empty for a conversation comment.
@@ -183,6 +185,7 @@ class _Signal:
     state: str
     body: str
     commit_sha: str
+    association: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -191,6 +194,10 @@ def _login(obj: dict[str, Any]) -> str:
     if isinstance(user, dict):
         return str(user.get("login", "") or "")
     return ""
+
+
+def _association(obj: dict[str, Any]) -> str:
+    return str(obj.get("author_association", "") or "").upper()[:32]
 
 
 def _parse_when(raw: object) -> datetime | None:
@@ -313,6 +320,7 @@ def _signals(
                 state=state,
                 body=str(review.get("body", "") or ""),
                 commit_sha=str(review.get("commit_id", "") or ""),
+                association=_association(review),
             )
         )
         order += 1
@@ -326,6 +334,7 @@ def _signals(
                 state="",
                 body=str(comment.get("body", "") or ""),
                 commit_sha="",
+                association=_association(comment),
             )
         )
         order += 1
@@ -380,6 +389,7 @@ def detect_merge_intent(
             at=signal.at,
             source=signal.source,
             by=signal.by,
+            by_association=signal.association,
             excerpt=_excerpt(signal.body, match),
             commit_sha=signal.commit_sha,
         )
@@ -426,6 +436,7 @@ def apply_merge_intent(pr: PullRequest, intent: MergeIntent) -> list[str]:
     _set("merge_intent_at", intent.at)
     _set("merge_intent_source", intent.source)
     _set("merge_intent_by", intent.by)
+    _set("merge_intent_by_association", intent.by_association)
     _set("merge_intent_excerpt", intent.excerpt)
     if not intent.is_set:
         _set("merge_intent_commit_sha", "")
@@ -441,6 +452,7 @@ MERGE_INTENT_FIELDS: tuple[str, ...] = (
     "merge_intent_at",
     "merge_intent_source",
     "merge_intent_by",
+    "merge_intent_by_association",
     "merge_intent_excerpt",
     "merge_intent_commit_sha",
 )

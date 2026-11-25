@@ -376,6 +376,22 @@ frequent_contributors:
   - "HyukjinKwon"
   - "viirya"
 
+# Who the committers are, read from GitHub once at worker boot. The
+# dashboard shows a committer's approval in bold with a trailing "*" (an
+# apache org member who isn't one is bold without the star); triage,
+# merge-readiness and the CI-failure pass's skip_committers read the same
+# list. The team is the precise source and needs an apache member's token
+# (classic tokens: read:org); the team's URL works here too.
+committer_teams:
+  - "apache/spark-committers"
+# Read only if no team above could be: everyone with write access. Needs a
+# token with write access, and also counts ASF's org owners (infra).
+committer_repos:
+  - "apache/spark"
+  # - "apache/spark-private"   # or a private repo only committers can see
+# Anyone the forge can't tell you about, by hand (unioned with the above).
+committers: []
+
 enabled: true
 
 # --- Alert mode (enabled by default for this project) ---

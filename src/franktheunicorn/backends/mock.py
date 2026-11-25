@@ -170,6 +170,23 @@ class MockForgeClient(ForgeClient):
             return [entry["login"] for entry in data if entry.get("login")]
         return []
 
+    def list_repo_collaborators(self, owner: str, repo: str, permission: str = "push") -> list[str]:
+        """Load collaborators from fixture or return an empty list."""
+        del permission
+        fixture_path = self._fixtures_dir / f"{owner}_{repo}_collaborators.json"
+        if fixture_path.exists():
+            data = _load_json_fixture(fixture_path)
+            return [entry["login"] for entry in data if entry.get("login")]
+        return []
+
+    def list_team_members(self, org: str, team_slug: str) -> list[str]:
+        """Load team members from fixture or return an empty list."""
+        fixture_path = self._fixtures_dir / f"{org}_team_{team_slug}_members.json"
+        if fixture_path.exists():
+            data = _load_json_fixture(fixture_path)
+            return [entry["login"] for entry in data if entry.get("login")]
+        return []
+
     def get_authenticated_user(self) -> dict[str, Any]:
         """Return a mock authenticated user."""
         return {"login": "mock-user", "id": 0, "type": "User"}

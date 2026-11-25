@@ -1311,7 +1311,9 @@ def candidate_prs(project: Project, project_config: ProjectConfig) -> list[PullR
         prs = prs.filter(github_updated_at__gte=cutoff)
     skip = {a.lower() for a in cfg.skip_authors}
     if cfg.skip_committers:
-        skip |= {c.lower() for c in project_config.committers}
+        from franktheunicorn.core.committers import project_committers
+
+        skip |= {c.lower() for c in project_committers(project_config, project)}
     ordered = prs.select_related("project").order_by(F("github_updated_at").desc(nulls_last=True))
     return [pr for pr in ordered if pr.author.lower() not in skip]
 

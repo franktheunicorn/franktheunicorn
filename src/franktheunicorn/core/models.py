@@ -34,6 +34,13 @@ class Project(models.Model):
     repo_health_analyzed_at = models.DateTimeField(null=True, blank=True)
     contributors_cache = models.JSONField(default=list, blank=True)
     contributors_cache_status = models.CharField(max_length=20, blank=True, default="unknown")
+    #: Committers read off the forge at worker boot: everyone with write
+    #: access to the project config's ``committer_repos``
+    #: (worker/committers.py). Unioned with the config's own ``committers``
+    #: by core.committers.project_committers. A failed read keeps the last
+    #: list; committers_cache_at says when it was taken.
+    committers_cache = models.JSONField(default=list, blank=True)
+    committers_cache_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -197,7 +204,9 @@ class PullRequest(models.Model):
     #
     # review_states: the latest non-comment review per reviewer —
     # ``login -> {"state": "APPROVED"|"CHANGES_REQUESTED", "commit_id": sha,
-    # "submitted_at": iso}``. The PR author and ``[bot]`` accounts are left out,
+    # "submitted_at": iso, "author_association": "MEMBER"|...}`` (the last is
+    # GitHub's word for the reviewer's standing in the repo's org, blank on
+    # other forges and on rows written before it was kept). The PR author and ``[bot]`` accounts are left out,
     # and a DISMISSED review removes the entry. approval_count above is derived
     # from this; it existed before and nothing ever wrote it.
     review_states = models.JSONField(default=dict, blank=True)
@@ -281,6 +290,10 @@ class PullRequest(models.Model):
     merge_intent_at = models.DateTimeField(null=True, blank=True)
     merge_intent_source = models.CharField(max_length=20, blank=True, default="")
     merge_intent_by = models.CharField(max_length=255, blank=True, default="")
+    #: GitHub's ``author_association`` on the review/comment that set the
+    #: intent (MEMBER, OWNER, COLLABORATOR, ...): whether the approver is in
+    #: the repo's org, for the dashboard's bold-for-members marker.
+    merge_intent_by_association = models.CharField(max_length=32, blank=True, default="")
     merge_intent_excerpt = models.CharField(max_length=500, blank=True, default="")
     merge_intent_commit_sha = models.CharField(max_length=64, blank=True, default="")
 

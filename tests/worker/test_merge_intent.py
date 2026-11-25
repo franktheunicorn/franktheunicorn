@@ -202,6 +202,12 @@ class TestDetectMergeIntent:
         assert intent.commit_sha == "feed"
         assert intent.at == datetime(2026, 10, 1, 10, tzinfo=UTC)
 
+    def test_carries_the_approvers_association(self) -> None:
+        review = {**_review("holdenk", "APPROVED"), "author_association": "MEMBER"}
+        assert detect_merge_intent([review], [], ["holdenk"]).by_association == "MEMBER"
+        comment = {**_comment("holdenk", "LGTM"), "author_association": "contributor"}
+        assert detect_merge_intent([], [comment], ["holdenk"]).by_association == "CONTRIBUTOR"
+
     def test_formal_approval_with_gate_in_body_is_conditional(self) -> None:
         intent = detect_merge_intent(
             [_review("holdenk", "APPROVED", "LGTM pending CI")], [], ["holdenk"]
@@ -469,6 +475,17 @@ class TestApplyMergeIntent:
             "merge_intent_excerpt",
             "merge_intent_commit_sha",
         }
+
+    def test_sets_the_approvers_association(self) -> None:
+        pr = PullRequestFactory(head_sha="head1")
+        intent = MergeIntent(
+            kind=INTENT_APPROVED, source="review", by="holdenk", by_association="MEMBER"
+        )
+        changed = apply_merge_intent(pr, intent)
+        assert pr.merge_intent_by_association == "MEMBER"
+        assert "merge_intent_by_association" in changed
+        apply_merge_intent(pr, MergeIntent())
+        assert pr.merge_intent_by_association == ""
 
     def test_comment_baselines_on_current_head(self) -> None:
         pr = PullRequestFactory(head_sha="head1")

@@ -464,9 +464,31 @@ class TestNormalizeReviews:
         ]
         states = normalize_reviews(raw, author="alice")
         assert states == {
-            "bob": {"state": "APPROVED", "commit_id": "3", "submitted_at": "t"},
-            "dave": {"state": "CHANGES_REQUESTED", "commit_id": "3", "submitted_at": ""},
+            "bob": {
+                "state": "APPROVED",
+                "commit_id": "3",
+                "submitted_at": "t",
+                "author_association": "",
+            },
+            "dave": {
+                "state": "CHANGES_REQUESTED",
+                "commit_id": "3",
+                "submitted_at": "",
+                "author_association": "",
+            },
         }
+
+    def test_normalize_reviews_keeps_author_association(self) -> None:
+        raw = [
+            {
+                "user": {"login": "bob"},
+                "state": "APPROVED",
+                "commit_id": "3",
+                "author_association": "member",
+            },
+        ]
+        states = normalize_reviews(raw, author="alice")
+        assert states["bob"]["author_association"] == "MEMBER"
 
 
 class TestFeatureHelpers:

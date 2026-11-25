@@ -36,3 +36,37 @@ def get_item(mapping: object, key: object) -> object:
     if isinstance(mapping, dict):
         return mapping.get(key)
     return None
+
+
+@register.filter(name="reviewer")
+def reviewer(value: object) -> str:
+    """Render a reviewer login with its standing on the project.
+
+    ``{{ r|reviewer }}`` where ``r`` is a ``scoring.reviewer_standing.Reviewer``:
+    bold for an org member, bold with a trailing ``*`` for a committer, plain
+    otherwise. A bare string renders plain, so a caller that has no standing
+    to hand still shows the name.
+    """
+    from django.utils.html import format_html
+
+    from franktheunicorn.scoring.reviewer_standing import Reviewer
+
+    if isinstance(value, Reviewer):
+        if value.is_committer:
+            return format_html(
+                '<strong class="reviewer reviewer-committer" '
+                'title="{} is a committer on this project">{}</strong>*',
+                value.login,
+                value.login,
+            )
+        if value.is_member:
+            return format_html(
+                '<strong class="reviewer reviewer-member" '
+                'title="{} is a member of the org">{}</strong>',
+                value.login,
+                value.login,
+            )
+        return format_html('<span class="reviewer">{}</span>', value.login)
+    if value is None or value == "":
+        return ""
+    return format_html('<span class="reviewer">{}</span>', str(value))
