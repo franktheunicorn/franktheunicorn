@@ -520,10 +520,8 @@ def gather(
     try:
         raw_checks = client.get_commit_checks(owner, repo, sha)
     except NotImplementedError:
-        raw_checks = []
         facts.setup_checks = stored_setup_checks(pr)
     except Exception as exc:
-        raw_checks = []
         facts.setup_checks = stored_setup_checks(pr)
         notes.append(f"could not re-read the checks ({type(exc).__name__}); used stored ones")
     else:
@@ -574,7 +572,9 @@ def gather(
             )
             facts.fork_read = True
         except NotImplementedError:
-            pass
+            # A forge that cannot list a fork's workflows: fork_read stays False,
+            # and the diagnosis falls back to the generic "no run" advice.
+            logger.debug("%s cannot read fork workflows", type(client).__name__)
         except Exception as exc:
             notes.append(f"could not read the fork {facts.fork} ({type(exc).__name__})")
         has_build = any(
