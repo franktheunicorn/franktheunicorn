@@ -1622,6 +1622,54 @@ class CIFailureConfig(BaseModel):
         return v
 
 
+DEFAULT_FORK_SETUP_INTRO = (
+    "Hi @{author}, thanks for the PR! CI has not run on the latest commit (`{sha}`) yet, "
+    "and it looks like the fix is a settings change rather than a code change:"
+)
+DEFAULT_FORK_SETUP_OUTRO = (
+    "If something here doesn't match what you see, say so and I'll take another look."
+)
+
+
+class ForkSetupConfig(BaseModel):
+    """Find PRs whose CI never ran because of how the fork is set up.
+
+    ``review/fork_setup.py``, the "Fork Setup" dashboard tab. Two kinds of
+    PR land there: one whose head carries an ``action_required`` check (on
+    Apache Spark, the ``Build`` check's "PR build setup requires attention"
+    guidance: Actions off on the fork, a PR from the fork's ``master``, a
+    branch too old to have the build workflow), and one whose workflow runs
+    on the upstream repository are waiting for a maintainer to approve them.
+    The first gets a drafted comment for the author naming the exact setting;
+    the second gets an "Approve workflows" button. Both are buttons.
+
+    ``enabled`` gates only the automatic detection pass, and defaults on: it
+    is a handful of forge reads per new candidate and one listing per project
+    per cycle, no model, and nothing it finds reaches GitHub without a press.
+    """
+
+    enabled: bool = True
+    # Candidate PRs diagnosed per project per run (a cycle's pass, or a press).
+    max_per_run: int = 20
+    # The fork-side workflow that builds a PR, as a repo path. Empty means the
+    # profile's default: ``.github/workflows/build_main.yml`` for Apache Spark
+    # (``ci_failure.profile``), none otherwise — without one, the diagnosis
+    # quotes the check's own guidance rather than reading the fork.
+    build_workflow: str = ""
+    # The comment's opening and closing lines; ``{author}``, ``{sha}`` (short)
+    # and ``{base_branch}`` are filled in.
+    comment_intro: str = DEFAULT_FORK_SETUP_INTRO
+    comment_outro: str = DEFAULT_FORK_SETUP_OUTRO
+
+    @field_validator("max_per_run")
+    @classmethod
+    def max_per_run_positive(cls, v: int) -> int:
+        if v <= 0:
+            msg = "fork_setup.max_per_run must be positive"
+            raise ValueError(msg)
+        return v
+
+
 class SupportedAgentConfig(BaseModel):
     """Config for a supported AI agent type in direct feedback."""
 
@@ -3607,6 +3655,10 @@ class ProjectConfig(BaseModel):
     # author. The automatic pass is opt-in; the buttons are not (see
     # CIFailureConfig).
     ci_failure: CIFailureConfig = Field(default_factory=CIFailureConfig)
+    # The "Fork Setup" queue: PRs whose CI never ran because the author's fork
+    # needs a settings change, or whose upstream workflow runs wait for a
+    # maintainer's approval (see ForkSetupConfig).
+    fork_setup: ForkSetupConfig = Field(default_factory=ForkSetupConfig)
     # Shepherding pass over the operator's own PRs (draft replies to
     # reviewers, rebase/staleness alerts). v2 — opt-in per project.
     shepherding_enabled: bool = False

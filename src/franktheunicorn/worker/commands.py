@@ -35,6 +35,10 @@ Commands supported:
   project's closed-but-unmerged PRs, newest first, kept when the JIRA is still
   open and assessed by the model. Bounded per run, resumes from a cursor.
 - ``assess_zombie_pr``: the per-PR re-run of that assessment.
+- ``scan_fork_setup``: find open PRs whose CI never ran because of the author's
+  fork (an ``action_required`` check) or that wait for a maintainer to approve
+  their workflow runs, and diagnose them by reading the fork. Forge reads only.
+- ``diagnose_fork_setup``: the per-PR re-check of that diagnosis.
 """
 
 from __future__ import annotations
@@ -119,6 +123,8 @@ _COMMAND_COST_TIER: dict[str, int] = {
     "check_fix_landed": 0,
     "check_fixes_landed": 0,
     "check_cve_fixes_landed": 0,
+    "diagnose_fork_setup": 0,
+    "scan_fork_setup": 0,
     # Tier 1 — quick LLM or bounded container.
     "run_security_triage": 1,
     "run_security_sandbox": 1,
@@ -421,6 +427,8 @@ def _dispatch(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
         "assess_zombie_pr": _assess_zombie_pr,
         "analyze_pr_ci": _analyze_pr_ci,
         "classify_pr_ci": _classify_pr_ci,
+        "diagnose_fork_setup": _diagnose_fork_setup,
+        "scan_fork_setup": _scan_fork_setup,
         "match_cves_to_reports": _match_cves_to_reports,
         "scan_introduced_cves": _scan_introduced_cves,
         "scan_security_variants": _scan_security_variants,
@@ -1083,6 +1091,36 @@ def _classify_pr_ci(cmd: WorkerCommand, operator_config: OperatorConfig) -> None
     from franktheunicorn.review.ci_failure import classify_pr
 
     cmd.log = classify_pr(cmd.pull_request, operator_config)
+
+
+def _diagnose_fork_setup(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
+    """Read one PR's fork and say why its CI never ran (review/fork_setup.py)."""
+    if cmd.pull_request is None:
+        msg = "diagnose_fork_setup requires a pull_request target"
+        raise ValueError(msg)
+
+    from franktheunicorn.review.fork_setup import diagnose_pr
+
+    cmd.log = diagnose_pr(cmd.pull_request, operator_config)
+
+
+def _scan_fork_setup(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:
+    """The Fork Setup sweep: projects with ``fork_setup.enabled``, or every one on a press."""
+    from django.conf import settings
+
+    from franktheunicorn.config.loader import load_project_configs
+    from franktheunicorn.review.fork_setup import scan
+
+    every = bool((cmd.kwargs or {}).get("every_project"))
+    configs = load_project_configs(getattr(settings, "FRANK_PROJECTS_DIR", ""))
+    results = scan(configs, operator_config, every_project=every)
+    if not results:
+        cmd.log = "fork setup: no project to sweep" + (
+            "" if every else " (none sets fork_setup.enabled and has a forge client)"
+        )
+        logger.info(cmd.log)
+        return
+    cmd.log = "\n".join(r.summary() for r in results)
 
 
 def _match_cves_to_reports(cmd: WorkerCommand, operator_config: OperatorConfig) -> None:

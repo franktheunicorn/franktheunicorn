@@ -76,6 +76,12 @@ ZOMBIE_QUEUE = "zombie"
 #: has answered yet (review/ci_failure.py).
 CI_FAILURES_QUEUE = "ci-failures"
 
+#: The "Fork Setup" tab key: open PRs whose CI never ran because of how the
+#: author's fork is set up, or whose upstream workflow runs wait for a
+#: maintainer's approval (review/fork_setup.py). Not a ``PullRequest.queue``
+#: value either; filtered on a ``ForkSetupAssessment`` for the current head.
+FORK_SETUP_QUEUE = "fork-setup"
+
 
 class PullRequest(models.Model):
     """A pull request ingested from GitHub."""
@@ -601,6 +607,10 @@ class OperatorAction(models.Model):
         ("post_ci_failure_comment", "Posted CI-Failure Comment"),
         ("dismiss_ci_failure", "Dismissed CI Failure"),
         ("restore_ci_failure", "Restored CI Failure"),
+        ("post_fork_setup_comment", "Posted Fork-Setup Comment"),
+        ("dismiss_fork_setup", "Dismissed Fork Setup"),
+        ("restore_fork_setup", "Restored Fork Setup"),
+        ("approve_fork_workflows", "Approved Fork Workflow Runs"),
     ]
     action_type = models.CharField(max_length=50, choices=ACTION_CHOICES)
     review_draft = models.ForeignKey(
@@ -955,17 +965,22 @@ class CIFailureAssessment(models.Model):
     def queue_q() -> Q:
         """A ``Q`` over ``PullRequest`` for the CI Failures tab's rows.
 
-        Open, still red on the head the row describes, and not yet answered.
-        Reading the PR's live ``ci_status`` and ``head_sha`` here (rather than
+        Open, still red on the head the row describes, not yet answered, and
+        not a fork-setup problem (:meth:`ForkSetupAssessment.covers_q`). Reading the PR's live ``ci_status`` and ``head_sha`` here (rather than
         trusting the row) is what makes a green re-run or a push drop a PR out
         of the queue with nothing having to notice and clean up.
         """
-        return Q(
-            state="open",
-            ci_status="fail",
-            ci_failure__disposition="pending",
-            ci_failure__status__in=("unclassified", "classified"),
-            ci_failure__head_sha=F("head_sha"),
+        # A PR whose red check is fork-setup guidance (nothing ran, so there is
+        # no log to explain) lives in the Fork Setup tab instead.
+        return (
+            Q(
+                state="open",
+                ci_status="fail",
+                ci_failure__disposition="pending",
+                ci_failure__status__in=("unclassified", "classified"),
+                ci_failure__head_sha=F("head_sha"),
+            )
+            & ~ForkSetupAssessment.covers_q()
         )
 
     @property
@@ -985,6 +1000,154 @@ class CIFailureAssessment(models.Model):
     @property
     def is_current(self) -> bool:
         """Whether this row still describes the PR's head."""
+        return bool(self.head_sha) and self.head_sha == self.pull_request.head_sha
+
+
+class ForkSetupAssessment(models.Model):
+    """Why one PR's CI never ran, and what the author (or a maintainer) has to change.
+
+    One row per PR (review/fork_setup.py), pinned to ``head_sha`` like a
+    CIFailureAssessment. Not a CI failure: nothing failed, nothing ran. On
+    Apache Spark a PR's tests run in the contributor's fork and the PR carries
+    a ``Build`` check mirroring that run; when there is no usable run, the
+    check is ``action_required`` guidance instead ("PR build setup requires
+    attention"), and the fix is a setting on the fork, not a change to the code.
+    The other half is upstream: workflow runs from a first-time contributor's
+    fork wait for a maintainer to approve them.
+
+    ``problems`` is the diagnosis: ``[{"kind", "who", "summary", "remediation",
+    "evidence", "url"}]`` with ``kind`` from ``review.fork_setup.KINDS`` and
+    ``who`` one of ``author`` / ``maintainer`` / ``none`` (``none``: the run
+    exists and the mirror check just has not caught up). ``needs_author`` and
+    ``needs_maintainer`` are denormalised from it for the queue filter, and
+    ``needs_author`` is also what keeps the PR out of the CI Failures tab: a
+    comment telling the author to read a log that does not exist helps nobody.
+
+    ``disposition`` is the operator's. Approving the waiting runs is its own
+    action and clears ``needs_maintainer`` without touching the disposition.
+    """
+
+    STATUS_CHOICES = [
+        ("unchecked", "Not yet checked"),
+        ("diagnosed", "Diagnosed"),
+        ("resolved", "Nothing to do"),
+    ]
+
+    DISPOSITION_CHOICES = [
+        ("pending", "Pending"),
+        ("posted", "Posted"),
+        ("dismissed", "Dismissed"),
+    ]
+
+    DISMISS_REASON_CHOICES = [
+        ("fixed", "The author already fixed it"),
+        ("already-told", "The author already knows"),
+        ("wrong", "Wrong diagnosis"),
+        ("not-worth", "Not worth a comment"),
+        ("other", "Other"),
+    ]
+
+    #: Attempts after which the automatic pass stops retrying a failing one.
+    MAX_ATTEMPTS = 3
+
+    pull_request = models.OneToOneField(
+        PullRequest, on_delete=models.CASCADE, related_name="fork_setup"
+    )
+    head_sha = models.CharField(max_length=64, blank=True, default="")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="unchecked")
+    problems = models.JSONField(default=list, blank=True)
+    kinds = models.JSONField(default=list, blank=True)
+    needs_author = models.BooleanField(default=False)
+    needs_maintainer = models.BooleanField(default=False)
+    # Where the PR comes from: ``owner/repo`` of the fork ("" when it was
+    # deleted) — what every link in the draft points at.
+    fork_full_name = models.CharField(max_length=255, blank=True, default="")
+    # Upstream workflow runs for this head awaiting approval:
+    # ``[{"id", "name", "path", "url", "created_at", "on_base"}]``. ``on_base``
+    # is False when the workflow file is not on the base branch, i.e. it comes
+    # from the PR's own branch — the one to read before approving.
+    awaiting_runs = models.JSONField(default=list, blank=True)
+    comment_body = models.TextField(blank=True, default="")
+    edited_body = models.TextField(blank=True, default="")
+    anti_pattern_hits = models.JSONField(default=list, blank=True)
+    attempts = models.IntegerField(default=0)
+    last_error = models.CharField(max_length=500, blank=True, default="")
+    checked_at = models.DateTimeField(null=True, blank=True)
+
+    disposition = models.CharField(
+        max_length=20, choices=DISPOSITION_CHOICES, default="pending", db_index=True
+    )
+    dismiss_reason = models.CharField(
+        max_length=20, choices=DISMISS_REASON_CHOICES, blank=True, default=""
+    )
+    dismiss_note = models.TextField(blank=True, default="")
+
+    # Kept across a re-pin, so the panel can say "you already told them" the
+    # next time the same author's fork is the problem.
+    posted_at = models.DateTimeField(null=True, blank=True)
+    posted_sha = models.CharField(max_length=64, blank=True, default="")
+    forge_comment_id = models.BigIntegerField(null=True, blank=True)
+    post_count = models.IntegerField(default=0)
+    approved_at = models.DateTimeField(null=True, blank=True)
+    approved_run_ids = models.JSONField(default=list, blank=True)
+
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    objects: models.Manager[ForkSetupAssessment] = models.Manager()
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"Fork setup on {self.pull_request} [{self.status}/{self.disposition}]"
+
+    @staticmethod
+    def queue_q() -> Q:
+        """A ``Q`` over ``PullRequest`` for the Fork Setup tab's rows.
+
+        Open, diagnosed on the PR's current head, and something still to do:
+        a comment nobody has posted or dismissed, or runs nobody has approved.
+        A push moves ``head_sha`` and drops the row with nothing to clean up.
+        """
+        current = Q(
+            state="open",
+            fork_setup__status="diagnosed",
+            fork_setup__head_sha=F("head_sha"),
+        )
+        return current & (
+            Q(fork_setup__needs_author=True, fork_setup__disposition="pending")
+            | Q(fork_setup__needs_maintainer=True)
+        )
+
+    @staticmethod
+    def covers_q() -> Q:
+        """PRs whose red CI is a fork-setup problem for the author, on this head.
+
+        The CI Failures tab leaves these out: there is no log to explain, and
+        the Fork Setup draft says the specific thing to change.
+        """
+        return Q(
+            fork_setup__status="diagnosed",
+            fork_setup__needs_author=True,
+            fork_setup__head_sha=F("head_sha"),
+        )
+
+    @property
+    def is_diagnosed(self) -> bool:
+        return self.status == "diagnosed"
+
+    @property
+    def gave_up(self) -> bool:
+        return self.status == "unchecked" and self.attempts >= self.MAX_ATTEMPTS
+
+    @property
+    def body(self) -> str:
+        """The comment as it would be posted: the operator's edit if there is one."""
+        return self.edited_body or self.comment_body
+
+    @property
+    def is_current(self) -> bool:
         return bool(self.head_sha) and self.head_sha == self.pull_request.head_sha
 
 
@@ -2265,6 +2428,8 @@ class WorkerCommand(models.Model):
         ("assess_zombie_pr", "Re-run the zombie assessment on one PR"),
         ("match_cves_to_reports", "Tentatively match pasted CVE ids to security reports"),
         ("classify_pr_ci", "Classify a PR's CI failure and draft the fix for its author"),
+        ("diagnose_fork_setup", "Read a PR's fork and say why its CI never ran"),
+        ("scan_fork_setup", "Sweep: find PRs whose CI never ran because of fork setup"),
     ]
 
     STATUS_CHOICES = [

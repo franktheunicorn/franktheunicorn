@@ -54,6 +54,14 @@ urlpatterns = [
     ),
     path("pr/<int:pr_id>/ci-failure/post/", views.ci_failure_post, name="ci_failure_post"),
     path("pr/<int:pr_id>/ci-failure/dismiss/", views.ci_failure_dismiss, name="ci_failure_dismiss"),
+    # Fork Setup queue (review/fork_setup.py): PRs whose CI never ran. The scan
+    # and the per-PR check queue worker commands; post and approve are forge
+    # writes behind a live re-read.
+    path("fork-setup/scan/", views.fork_setup_scan, name="fork_setup_scan"),
+    path("pr/<int:pr_id>/fork-setup/check/", views.fork_setup_check, name="fork_setup_check"),
+    path("pr/<int:pr_id>/fork-setup/post/", views.fork_setup_post, name="fork_setup_post"),
+    path("pr/<int:pr_id>/fork-setup/approve/", views.fork_setup_approve, name="fork_setup_approve"),
+    path("pr/<int:pr_id>/fork-setup/dismiss/", views.fork_setup_dismiss, name="fork_setup_dismiss"),
     # Zombie Queue: closed-but-unmerged PRs whose JIRA is still open. The hunt
     # is a worker sweep (bulk priority); the two per-PR buttons live on the
     # detail page and swap the panel.

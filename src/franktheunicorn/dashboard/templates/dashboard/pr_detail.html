@@ -122,6 +122,11 @@
 {% include "dashboard/_ci_failure_panel.html" with cif=ci_failure_panel %}
 {% endif %}
 
+{% if fork_setup_panel %}
+<h3 style="margin-top: 1.5rem;">Fork Setup</h3>
+{% include "dashboard/_fork_setup_panel.html" with fs=fork_setup_panel %}
+{% endif %}
+
 <div style="margin-bottom: 0.75rem; margin-top: 1.5rem; display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: flex-start;">
     <div>
         <button class="action-btn"

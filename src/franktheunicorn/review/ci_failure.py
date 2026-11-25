@@ -59,7 +59,12 @@ from django.db.models import F, QuerySet
 from django.utils import timezone
 
 from franktheunicorn.config.models import CI_FAILURE_CATEGORIES, CI_FAILURE_CAUSES
-from franktheunicorn.core.models import CIFailureAssessment, PullRequest, WorkerCommand
+from franktheunicorn.core.models import (
+    CIFailureAssessment,
+    ForkSetupAssessment,
+    PullRequest,
+    WorkerCommand,
+)
 from franktheunicorn.core.untrusted import UNTRUSTED_CONTENT_RULE, fence, fence_note, fresh_nonce
 
 if TYPE_CHECKING:
@@ -1304,6 +1309,9 @@ def candidate_prs(project: Project, project_config: ProjectConfig) -> list[PullR
     prs = PullRequest.objects.filter(
         project=project, state="open", ci_status="fail", ci_checks_sha=F("head_sha")
     ).exclude(head_sha="")
+    # CI that never ran because of the fork's setup is the Fork Setup tab's
+    # (review/fork_setup.py): nothing failed, so there is nothing to classify.
+    prs = prs.exclude(ForkSetupAssessment.covers_q())
     if not cfg.include_drafts:
         prs = prs.filter(is_draft=False).exclude(PullRequest.queue_filter("wip"))
     if cfg.active_within_days:

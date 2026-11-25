@@ -532,6 +532,23 @@ ci_failure:
   # comment_intro: "Hi @{author}, thanks for the PR! CI is failing on `{sha}`. ..."
   # comment_outro: "Pushing to the PR branch re-runs CI. ..."
 
+# Fork Setup queue — PRs whose CI never ran (review/fork_setup.py). Spark runs a
+# PR's tests in the contributor's fork and mirrors the run onto the PR as the
+# `Build` check; with no usable run, that check is "PR build setup requires
+# attention" guidance. frank reads the fork (workflow state, branch, its runs
+# for the head, whether the branch has build_main.yml) to say which setting it
+# is, and drafts the comment. Upstream runs awaiting a maintainer's approval
+# get an "Approve workflows" button. Nothing goes to GitHub without a press.
+#
+# `enabled` switches on the per-cycle sweep only (forge reads, no model); the
+# tab's "Find PRs that need setup" button works either way.
+fork_setup:
+  enabled: true
+  max_per_run: 20               # candidate PRs diagnosed per sweep
+  # build_workflow: .github/workflows/build_main.yml   # the Spark profile's default
+  # comment_intro: "Hi @{author}, thanks for the PR! CI has not run on `{sha}` yet ..."
+  # comment_outro: "If something here doesn't match what you see, say so ..."
+
 # Merge queue — track and merge PRs meeting configurable criteria
 merge_queue:
   enabled: true
