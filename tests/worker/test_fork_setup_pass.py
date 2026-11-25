@@ -13,7 +13,7 @@ from franktheunicorn.core.models import WorkerCommand
 from franktheunicorn.review.fork_setup import ScanResult
 from franktheunicorn.worker.commands import _COMMAND_COST_TIER, process_pending_commands
 from franktheunicorn.worker.runner import _run_fork_setup_pass
-from tests.factories import PullRequestFactory
+from tests.factories import PullRequestFactory, WorkerCommandFactory
 
 SPARK = ProjectConfig(owner="apache", repo="spark")
 
@@ -45,7 +45,7 @@ class TestPass:
 class TestCommands:
     def test_diagnose_dispatches(self) -> None:
         pr = PullRequestFactory()
-        cmd = WorkerCommand.objects.create(command="diagnose_fork_setup", pull_request=pr)
+        cmd = WorkerCommandFactory(command="diagnose_fork_setup", pull_request=pr)
         operator_config = MagicMock()
         with patch(
             "franktheunicorn.review.fork_setup.diagnose_pr", return_value="PR #1: no-run"
@@ -56,7 +56,7 @@ class TestCommands:
         assert diagnose_pr.call_args[0] == (pr, operator_config)
 
     def test_diagnose_requires_a_pr(self) -> None:
-        cmd = WorkerCommand.objects.create(command="diagnose_fork_setup")
+        cmd = WorkerCommandFactory(command="diagnose_fork_setup")
         process_pending_commands(MagicMock())
         cmd.refresh_from_db()
         assert cmd.status == "failed"
@@ -64,7 +64,7 @@ class TestCommands:
 
     @pytest.mark.parametrize("kwargs", [{}, {"every_project": True}])
     def test_scan_dispatches_with_the_scope(self, kwargs: dict[str, Any]) -> None:
-        cmd = WorkerCommand.objects.create(command="scan_fork_setup", kwargs=kwargs)
+        cmd = WorkerCommandFactory(command="scan_fork_setup", kwargs=kwargs)
         with (
             patch("franktheunicorn.config.loader.load_project_configs", return_value=[SPARK]),
             patch(
@@ -79,7 +79,7 @@ class TestCommands:
         assert scan.call_args.kwargs == {"every_project": bool(kwargs)}
 
     def test_scan_with_nothing_to_sweep_says_why(self, caplog: pytest.LogCaptureFixture) -> None:
-        cmd = WorkerCommand.objects.create(command="scan_fork_setup")
+        cmd = WorkerCommandFactory(command="scan_fork_setup")
         with (
             caplog.at_level(logging.INFO),
             patch("franktheunicorn.review.fork_setup.scan", return_value=[]),

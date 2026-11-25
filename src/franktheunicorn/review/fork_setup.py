@@ -165,6 +165,8 @@ class Facts:
     fork_deleted: bool = False
     jira: str = ""
     setup_checks: list[SetupCheck] = field(default_factory=list)
+    #: Failing checks on the head that are *not* setup guidance (a test, a lint).
+    other_failures: list[str] = field(default_factory=list)
     awaiting_runs: list[dict[str, Any]] = field(default_factory=list)
     fork_read: bool = False
     workflows: list[dict[str, Any]] | None = None
@@ -458,6 +460,15 @@ def _setup_checks(raw_checks: Iterable[Mapping[str, Any]]) -> list[SetupCheck]:
     ]
 
 
+def _other_failures(raw_checks: Iterable[Mapping[str, Any]]) -> list[str]:
+    """Names of the failing checks that are not ``action_required`` guidance."""
+    from franktheunicorn.scoring.merge_readiness import parse_checks
+
+    return [
+        c.name for c in parse_checks(raw_checks) if c.failed and c.conclusion != "action_required"
+    ]
+
+
 def stored_setup_checks(pr: PullRequest) -> list[SetupCheck]:
     """``action_required`` checks from the PR's stored checks for its current head."""
     from franktheunicorn.scoring.merge_readiness import current_checks
@@ -517,15 +528,17 @@ def gather(
     )
     notes: list[str] = []
 
+    from franktheunicorn.scoring.merge_readiness import current_checks
+
     try:
         raw_checks = client.get_commit_checks(owner, repo, sha)
     except NotImplementedError:
-        facts.setup_checks = stored_setup_checks(pr)
+        raw_checks = current_checks(pr)
     except Exception as exc:
-        facts.setup_checks = stored_setup_checks(pr)
+        raw_checks = current_checks(pr)
         notes.append(f"could not re-read the checks ({type(exc).__name__}); used stored ones")
-    else:
-        facts.setup_checks = _setup_checks(raw_checks)
+    facts.setup_checks = _setup_checks(raw_checks)
+    facts.other_failures = _other_failures(raw_checks)
     if facts.setup_checks and not build_workflow:
         # No fork-side workflow to read: the check's own words are the diagnosis.
         try:
@@ -630,6 +643,7 @@ def _reset(row: ForkSetupAssessment, pr: PullRequest) -> None:
     row.kinds = []
     row.needs_author = False
     row.needs_maintainer = False
+    row.covers_ci_failure = False
     row.awaiting_runs = []
     row.comment_body = ""
     row.edited_body = ""
@@ -694,6 +708,7 @@ def check(
     row.kinds = [p.kind for p in problems]
     row.needs_author = any(p.who == "author" for p in problems)
     row.needs_maintainer = any(p.who == "maintainer" for p in problems)
+    row.covers_ci_failure = row.needs_author and not facts.other_failures
     body = compose_comment(
         problems,
         author=pr.author,
@@ -761,6 +776,22 @@ class ScanResult:
         return f"{line} ({self.note})" if self.note else line
 
 
+def _evidence_moved(row: ForkSetupAssessment, pr: PullRequest, *, waiting: bool | None) -> bool:
+    """Whether this sweep's evidence disagrees with *row*'s diagnosis of the same head.
+
+    Each side is compared on its own: *waiting* (``None`` when the runs could not
+    be listed, so no opinion) against ``needs_maintainer``, and whether a setup
+    check is stored for the head against whether the row diagnosed one at all
+    (an author problem, or a build that exists and just is not linked yet).
+    """
+    if waiting is not None and waiting != row.needs_maintainer:
+        return True
+    if pr.ci_checks_sha != pr.head_sha:
+        return False
+    diagnosed_setup = any(kind != "awaiting-approval" for kind in row.kinds)
+    return bool(stored_setup_checks(pr)) != diagnosed_setup
+
+
 def scan_project(
     project: Project, project_config: ProjectConfig, client: ForgeClient
 ) -> ScanResult:
@@ -817,6 +848,15 @@ def scan_project(
         elif row.head_sha != pr.head_sha or row.status == "resolved":
             _reset(row, pr)
             row.save()
+        elif row.status == "diagnosed" and _evidence_moved(
+            row, pr, waiting=pr.head_sha in awaiting_by_sha if listed else None
+        ):
+            # Same head, but one side changed since the diagnosis: a run now
+            # waits for approval (or no longer does), or the setup check came
+            # or went. Read it again; the disposition stands.
+            row.status = "unchecked"
+            row.attempts = 0
+            row.save(update_fields=["status", "attempts", "updated_at"])
         row.pull_request = pr
         if row.status == "unchecked" and row.attempts < ForkSetupAssessment.MAX_ATTEMPTS:
             to_check.append(row)
@@ -834,6 +874,7 @@ def scan_project(
             changed.append("needs_maintainer")
         if row.needs_author and pr.ci_checks_sha == pr.head_sha and not stored_setup_checks(pr):
             row.needs_author = False
+            row.covers_ci_failure = False
             changed.append("needs_author")
         if changed:
             if not row.needs_author and not row.needs_maintainer:
@@ -995,9 +1036,10 @@ def post_blocker(client: ForgeClient, row: ForkSetupAssessment) -> str:
         return f"could not read the PR's current checks ({type(exc).__name__})"
     if raw and not _setup_checks(raw):
         row.needs_author = False
+        row.covers_ci_failure = False
         if not row.needs_maintainer:
             row.status = "resolved"
-        row.save(update_fields=["needs_author", "status", "updated_at"])
+        row.save(update_fields=["needs_author", "covers_ci_failure", "status", "updated_at"])
         return "no check on this commit needs setup any more (the build has been linked)"
     return ""
 

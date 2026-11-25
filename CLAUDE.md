@@ -134,9 +134,14 @@ src/franktheunicorn/
                      #   the base branch — one that isn't came from the PR, which
                      #   is what to read before approving. One ForkSetupAssessment
                      #   per PR pinned to head_sha; needs_author /
-                     #   needs_maintainer drive the tab (queue_q) and needs_author
-                     #   is ForkSetupAssessment.covers_q, which the CI Failures
-                     #   queue and its candidate pass exclude — no log to explain.
+                     #   needs_maintainer drive the tab (queue_q), and a sweep
+                     #   re-reads a diagnosed row when either side's evidence
+                     #   moves (a run starts or stops waiting, the setup check
+                     #   comes or goes). covers_ci_failure — an author problem
+                     #   and no other red check — is ForkSetupAssessment.covers_q,
+                     #   which the CI Failures queue and its candidate pass
+                     #   exclude: no log to explain. A setup check beside a
+                     #   failing test leaves the PR in both tabs.
                      #   Forge reads only, no model, so fork_setup.enabled (the
                      #   per-cycle scan_fork_setup sweep) defaults on; the tab
                      #   button sweeps every project. Post re-reads live (open,

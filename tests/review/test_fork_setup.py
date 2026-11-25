@@ -308,6 +308,20 @@ def _setup_pr(project: Project, **kwargs: Any) -> PullRequest:
     return PullRequestFactory(**defaults)
 
 
+def _fresh(pr: PullRequest) -> ForkSetupAssessment:
+    """A row the sweep has just found: pinned to the head, nothing read yet."""
+    return ForkSetupAssessmentFactory(
+        pull_request=pr,
+        status="unchecked",
+        problems=[],
+        kinds=[],
+        needs_author=False,
+        covers_ci_failure=False,
+        fork_full_name="",
+        comment_body="",
+    )
+
+
 def _forge(**kwargs: Any) -> MagicMock:
     """A forge whose PR comes from newbie/spark, with Actions never enabled there."""
     forge = MagicMock()
@@ -333,7 +347,7 @@ def _forge(**kwargs: Any) -> MagicMock:
 @pytest.mark.django_db
 class TestCheck:
     def test_diagnoses_and_drafts_from_the_fork(self, project: Project) -> None:
-        row = ForkSetupAssessment.objects.create(pull_request=_setup_pr(project), head_sha="head1")
+        row = _fresh(_setup_pr(project))
         forge = _forge()
         outcome = fork_setup.check(row, SPARK, forge)
         row.refresh_from_db()
@@ -350,12 +364,23 @@ class TestCheck:
             "apache", "spark", head_sha="head1"
         )
 
+    def test_another_failing_check_keeps_the_pr_in_ci_failures(self, project: Project) -> None:
+        checks = [*SETUP, {"name": "Tests", "status": "completed", "conclusion": "failure"}]
+        row = _fresh(_setup_pr(project, ci_checks=checks))
+        fork_setup.check(row, SPARK, _forge(checks=checks))
+        row.refresh_from_db()
+        assert row.needs_author
+        assert not row.covers_ci_failure
+        # Setup alone covers it.
+        alone = _fresh(_setup_pr(project, number=2))
+        fork_setup.check(alone, SPARK, _forge())
+        alone.refresh_from_db()
+        assert alone.covers_ci_failure
+
     def test_runs_awaiting_approval_are_checked_against_the_base_branch(
         self, project: Project
     ) -> None:
-        row = ForkSetupAssessment.objects.create(
-            pull_request=_setup_pr(project, ci_checks=GREEN, ci_status="pass"), head_sha="head1"
-        )
+        row = _fresh(_setup_pr(project, ci_checks=GREEN, ci_status="pass"))
         forge = _forge(
             checks=GREEN,
             awaiting=[
@@ -376,7 +401,7 @@ class TestCheck:
 
     def test_generic_project_quotes_the_check(self, db: Any) -> None:
         project = ProjectFactory(owner="acme", repo="widget")
-        row = ForkSetupAssessment.objects.create(pull_request=_setup_pr(project), head_sha="head1")
+        row = _fresh(_setup_pr(project))
         forge = _forge()
         forge.get_commit_check_failures.return_value = [
             {"check": "Build", "conclusion": "action_required", "title": "Do X", "summary": "how"}
@@ -388,13 +413,13 @@ class TestCheck:
         forge.list_repo_workflows.assert_not_called()
 
     def test_closed_pr_is_resolved(self, project: Project) -> None:
-        row = ForkSetupAssessment.objects.create(pull_request=_setup_pr(project), head_sha="head1")
+        row = _fresh(_setup_pr(project))
         fork_setup.check(row, SPARK, _forge(detail={"state": "closed"}))
         row.refresh_from_db()
         assert row.status == "resolved"
 
     def test_a_head_the_poller_has_not_seen_waits(self, project: Project) -> None:
-        row = ForkSetupAssessment.objects.create(pull_request=_setup_pr(project), head_sha="head1")
+        row = _fresh(_setup_pr(project))
         detail = {"state": "open", "head": {"sha": "head2", "repo": {"full_name": "n/s"}}}
         fork_setup.check(row, SPARK, _forge(detail=detail))
         row.refresh_from_db()
@@ -402,7 +427,7 @@ class TestCheck:
         assert "head1 -> head2" in row.last_error
 
     def test_unreadable_pr_is_an_attempt_with_a_reason(self, project: Project) -> None:
-        row = ForkSetupAssessment.objects.create(pull_request=_setup_pr(project), head_sha="head1")
+        row = _fresh(_setup_pr(project))
         forge = _forge()
         forge.get_pull_request.side_effect = RuntimeError("boom")
         fork_setup.check(row, SPARK, forge)
@@ -411,7 +436,7 @@ class TestCheck:
         assert "boom" in row.last_error
 
     def test_best_effort_reads_degrade_with_a_note(self, project: Project) -> None:
-        row = ForkSetupAssessment.objects.create(pull_request=_setup_pr(project), head_sha="head1")
+        row = _fresh(_setup_pr(project))
         forge = _forge()
         forge.get_commit_checks.side_effect = RuntimeError("checks down")
         forge.list_runs_awaiting_approval.side_effect = RuntimeError("runs down")
@@ -425,7 +450,7 @@ class TestCheck:
         assert "could not read the fork newbie/spark" in row.last_error
 
     def test_branch_without_the_workflow(self, project: Project) -> None:
-        row = ForkSetupAssessment.objects.create(pull_request=_setup_pr(project), head_sha="head1")
+        row = _fresh(_setup_pr(project))
         forge = _forge(
             workflows=[{"path": SPARK_BUILD_WORKFLOW, "state": "active"}], file_exists=False
         )
@@ -435,7 +460,7 @@ class TestCheck:
         forge.file_exists.assert_called_once_with("newbie", "spark", SPARK_BUILD_WORKFLOW, "head1")
 
     def test_deleted_fork(self, project: Project) -> None:
-        row = ForkSetupAssessment.objects.create(pull_request=_setup_pr(project), head_sha="head1")
+        row = _fresh(_setup_pr(project))
         detail = {"state": "open", "head": {"sha": "head1", "ref": "x", "repo": None}}
         fork_setup.check(row, SPARK, _forge(detail=detail))
         row.refresh_from_db()
@@ -526,6 +551,37 @@ class TestScanProject:
         result = scan_project(project, SPARK, forge)
         assert result.diagnosed == 0
         forge.get_pull_request.assert_not_called()
+
+    def test_a_run_that_starts_waiting_later_is_picked_up(self, project: Project) -> None:
+        row = ForkSetupAssessmentFactory(pull_request=_setup_pr(project))
+        forge = _forge(awaiting=[{"id": 8, "name": "CI", "path": "p", "head_sha": "head1"}])
+        result = scan_project(project, SPARK, forge)
+        row.refresh_from_db()
+        assert result.diagnosed == 1
+        assert row.needs_author and row.needs_maintainer
+        assert row.kinds == ["awaiting-approval", "actions-not-enabled"]
+
+    def test_an_approval_given_elsewhere_while_the_author_side_stays(
+        self, project: Project
+    ) -> None:
+        row = ForkSetupAssessmentFactory(
+            pull_request=_setup_pr(project),
+            needs_maintainer=True,
+            kinds=["awaiting-approval", "actions-not-enabled"],
+            disposition="posted",
+        )
+        scan_project(project, SPARK, _forge())
+        row.refresh_from_db()
+        assert not row.needs_maintainer and row.needs_author
+        assert row.kinds == ["actions-not-enabled"]
+        # Re-reading does not take back what the operator already did.
+        assert row.disposition == "posted"
+
+    def test_an_unlisted_sweep_has_no_opinion_on_approvals(self, project: Project) -> None:
+        ForkSetupAssessmentFactory(pull_request=_setup_pr(project), needs_maintainer=True)
+        forge = _forge()
+        forge.list_runs_awaiting_approval.side_effect = RuntimeError("down")
+        assert scan_project(project, SPARK, forge).diagnosed == 0
 
     def test_an_approval_given_on_github_clears_the_row(self, project: Project) -> None:
         pr = _setup_pr(project, ci_checks=GREEN, ci_status="pass")
@@ -691,9 +747,12 @@ class TestQueueFilters:
         CIFailureAssessmentFactory(pull_request=stale)
         ForkSetupAssessmentFactory(pull_request=stale, head_sha="older")
         plain = CIFailureAssessmentFactory(pull_request=_setup_pr(project, number=3))
+        mixed = _setup_pr(project, number=4)
+        CIFailureAssessmentFactory(pull_request=mixed)
+        ForkSetupAssessmentFactory(pull_request=mixed, covers_ci_failure=False)
         members = set(
             PullRequest.objects.filter(CIFailureAssessment.queue_q()).values_list("pk", flat=True)
         )
-        assert members == {stale.pk, plain.pull_request_id}
+        assert members == {stale.pk, plain.pull_request_id, mixed.pk}
         candidates = {pr.pk for pr in ci_failure.candidate_prs(project, SPARK)}
         assert covered.pk not in candidates and stale.pk in candidates

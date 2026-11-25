@@ -1020,8 +1020,9 @@ class ForkSetupAssessment(models.Model):
     ``who`` one of ``author`` / ``maintainer`` / ``none`` (``none``: the run
     exists and the mirror check just has not caught up). ``needs_author`` and
     ``needs_maintainer`` are denormalised from it for the queue filter, and
-    ``needs_author`` is also what keeps the PR out of the CI Failures tab: a
-    comment telling the author to read a log that does not exist helps nobody.
+    ``covers_ci_failure`` (a setup problem, and no other red check) is what
+    keeps the PR out of the CI Failures tab: a comment telling the author to
+    read a log that does not exist helps nobody.
 
     ``disposition`` is the operator's. Approving the waiting runs is its own
     action and clears ``needs_maintainer`` without touching the disposition.
@@ -1059,6 +1060,10 @@ class ForkSetupAssessment(models.Model):
     kinds = models.JSONField(default=list, blank=True)
     needs_author = models.BooleanField(default=False)
     needs_maintainer = models.BooleanField(default=False)
+    # The author's setup problem is the *only* red on the head: every failing
+    # check is setup guidance. Only then does the PR leave the CI Failures
+    # tab — a PR with a CLA check to sign and a failing test has a log to read.
+    covers_ci_failure = models.BooleanField(default=False)
     # Where the PR comes from: ``owner/repo`` of the fork ("" when it was
     # deleted) — what every link in the draft points at.
     fork_full_name = models.CharField(max_length=255, blank=True, default="")
@@ -1122,14 +1127,16 @@ class ForkSetupAssessment(models.Model):
 
     @staticmethod
     def covers_q() -> Q:
-        """PRs whose red CI is a fork-setup problem for the author, on this head.
+        """PRs whose red CI is entirely a fork-setup problem for the author, on this head.
 
         The CI Failures tab leaves these out: there is no log to explain, and
-        the Fork Setup draft says the specific thing to change.
+        the Fork Setup draft says the specific thing to change. A PR with any
+        other failing check stays there too (``covers_ci_failure`` is False).
         """
         return Q(
             fork_setup__status="diagnosed",
             fork_setup__needs_author=True,
+            fork_setup__covers_ci_failure=True,
             fork_setup__head_sha=F("head_sha"),
         )
 

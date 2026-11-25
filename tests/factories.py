@@ -529,6 +529,7 @@ class ForkSetupAssessmentFactory(factory.django.DjangoModelFactory):  # type: ig
     kinds = factory.LazyFunction(lambda: ["actions-not-enabled"])
     needs_author = True
     needs_maintainer = False
+    covers_ci_failure = True
     comment_body = "Hi @newbie, please enable GitHub Actions on your fork."
     disposition = "pending"
 
