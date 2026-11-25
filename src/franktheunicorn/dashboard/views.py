@@ -38,6 +38,7 @@ from django.views.decorators.http import require_POST
 from franktheunicorn.core.committers import committers_for_pr
 from franktheunicorn.core.models import (
     CI_FAILURES_QUEUE,
+    FORK_SETUP_QUEUE,
     ZOMBIE_QUEUE,
     AgentFeedback,
     AgentVibe,
@@ -47,6 +48,7 @@ from franktheunicorn.core.models import (
     CostRecord,
     DependencyChange,
     EmailScanRecord,
+    ForkSetupAssessment,
     HardeningIdea,
     IntroducedBug,
     MergeReadinessFeedback,
@@ -105,6 +107,10 @@ QUEUE_TABS: list[dict[str, str]] = [
     # comment for the author (review/ci_failure.py). Cuts across the routing
     # queues like almost-ready does; index() attaches the per-PR panel.
     {"key": CI_FAILURES_QUEUE, "label": "CI Failures"},
+    # Open PRs whose CI never ran: the author's fork needs a setting changed
+    # (Actions off, a PR from fork master, a branch too old for the build
+    # workflow), or upstream runs wait for a maintainer (review/fork_setup.py).
+    {"key": FORK_SETUP_QUEUE, "label": "Fork Setup"},
     {
         "key": SECURITY_FINDINGS_QUEUE,
         "label": "Security Findings",
@@ -197,6 +203,10 @@ def _queue_members_q(queue: str, readiness_off: Q | None = None) -> Q:
         # Open, still red on the head the assessment describes, and not yet
         # posted or dismissed — see CIFailureAssessment.queue_q.
         return CIFailureAssessment.queue_q()
+    if queue == FORK_SETUP_QUEUE:
+        # Diagnosed on the current head, with a comment or an approval still
+        # to do — see ForkSetupAssessment.queue_q.
+        return ForkSetupAssessment.queue_q()
     if queue == SECURITY_FINDINGS_QUEUE:
         # Open PRs with at least one security-category line finding (the
         # ``security`` / ``security-context`` LLM checks). A subquery, not a
@@ -405,6 +415,28 @@ def index(request: HttpRequest) -> HttpResponse:
             )
         ci_failure_tab = _ci_failure_tab_context()
 
+    # The Fork Setup tab: the diagnosis, the drafted comment, the approval button.
+    fork_setup_tab: dict[str, object] = {}
+    if queue == FORK_SETUP_QUEUE:
+        operator_username = _operator_username()
+        pr_ids = [pr.pk for pr in pr_list]
+        fs_rows = {
+            row.pull_request_id: row
+            for row in ForkSetupAssessment.objects.filter(pull_request_id__in=pr_ids)
+        }
+        fs_in_flight = set(
+            WorkerCommand.objects.filter(
+                command="diagnose_fork_setup",
+                status__in=in_flight_statuses(),
+                pull_request_id__in=pr_ids,
+            ).values_list("pull_request_id", flat=True)
+        )
+        for pr in pr_list:
+            pr.fork_setup_panel = _fork_setup_context(  # type: ignore[attr-defined]
+                pr, fs_rows.get(pr.pk), operator_username, in_flight=pr.pk in fs_in_flight
+            )
+        fork_setup_tab = _fork_setup_tab_context()
+
     # Count PRs per queue for tab badges (respects the same project/type filters).
     # No state filter here: each tab adds its own, because the zombie tab's rows
     # are closed PRs and every other tab's are open ones.
@@ -462,6 +494,8 @@ def index(request: HttpRequest) -> HttpResponse:
             "security_findings_queue": SECURITY_FINDINGS_QUEUE,
             "ci_failures_queue": CI_FAILURES_QUEUE,
             "ci_failure_tab": ci_failure_tab,
+            "fork_setup_queue": FORK_SETUP_QUEUE,
+            "fork_setup_tab": fork_setup_tab,
         },
     )
 
@@ -493,6 +527,14 @@ def _queue_ordering(queue: str) -> tuple[str | OrderBy, ...]:
         # The ones with a draft to read first, most recently classified on top;
         # then what is still waiting for the worker, by upstream activity.
         return (F("ci_failure__classified_at").desc(nulls_last=True), "-github_updated_at")
+    if queue == FORK_SETUP_QUEUE:
+        # The approvals first (one press unblocks a PR), then the drafts, newest
+        # diagnosis on top.
+        return (
+            "-fork_setup__needs_maintainer",
+            F("fork_setup__checked_at").desc(nulls_last=True),
+            "-github_updated_at",
+        )
     if queue == "intending-to-merge":
         # A follow-up list, not a triage list: the approval that has waited
         # longest is the one to act on first, whatever it scored.
@@ -843,6 +885,15 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
         if ci_failure_row is not None or (pr.state == "open" and pr.ci_status == "fail")
         else None
     )
+    # The fork-setup panel: whenever there is a diagnosis (the CI-failure panel
+    # already offers "Classify" for any red PR; a setup check is red too).
+    fork_setup_row = ForkSetupAssessment.objects.filter(pull_request=pr).first()
+    fork_setup_panel = (
+        _fork_setup_context(pr, fork_setup_row, operator_config.github_username or "")
+        if fork_setup_row is not None
+        or (pr.state == "open" and pr.ci_status == "fail" and _has_setup_check(pr))
+        else None
+    )
 
     return render(
         request,
@@ -851,6 +902,7 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
             **_zombie_panel_context(pr, zombie),
             "pr": pr,
             "ci_failure_panel": ci_failure_panel,
+            "fork_setup_panel": fork_setup_panel,
             "candidate": candidate,
             "merge_intent_reviewer": _merge_intent_reviewer(pr, project_config),
             "drafts": drafts,
@@ -1254,6 +1306,269 @@ def ci_failure_dismiss(request: HttpRequest, pr_id: int) -> HttpResponse:
     if reason in ("flake", "real"):
         note += " Noted against the failed job(s) for next time."
     return _ci_failure_response(request, pr, note=note)
+
+
+# --- Fork Setup queue (CI never ran: the fork needs a setting, or runs await approval) ---
+
+
+def _has_setup_check(pr: PullRequest) -> bool:
+    from franktheunicorn.review.fork_setup import stored_setup_checks
+
+    return bool(stored_setup_checks(pr))
+
+
+def _fork_setup_context(
+    pr: PullRequest,
+    row: ForkSetupAssessment | None,
+    operator_username: str,
+    *,
+    in_flight: bool | None = None,
+    note: str = "",
+    error: bool = False,
+    post_blocked: bool = False,
+    body: str | None = None,
+) -> dict[str, object]:
+    """Everything ``_fork_setup_panel.html`` renders for one PR."""
+    from franktheunicorn.review.fork_setup import problems_from, touched_workflows
+
+    if in_flight is None:
+        in_flight = WorkerCommand.objects.filter(
+            pull_request=pr, command="diagnose_fork_setup", status__in=in_flight_statuses()
+        ).exists()
+    op = operator_username.lower()
+    problems = problems_from(row.problems) if row is not None else []
+    return {
+        "row": row,
+        "author_problems": [p for p in problems if p.who == "author"],
+        "maintainer_problems": [p for p in problems if p.who == "maintainer"],
+        "other_problems": [p for p in problems if p.who == "none"],
+        "in_flight": in_flight,
+        "is_own": pr.is_operator_pr or (bool(op) and pr.author.lower() == op),
+        "is_current": row is not None and row.is_current,
+        "touched_workflows": touched_workflows(pr),
+        "off_base_runs": [
+            r for r in (row.awaiting_runs if row is not None else []) if r.get("on_base") is False
+        ],
+        "reason_choices": ForkSetupAssessment.DISMISS_REASON_CHOICES,
+        "note": note,
+        "error": error,
+        "post_blocked": post_blocked,
+        "body": body if body is not None else (row.body if row is not None else ""),
+        "draft_open": body is not None,
+    }
+
+
+def _fork_setup_response(
+    request: HttpRequest,
+    pr: PullRequest,
+    *,
+    note: str = "",
+    error: bool = False,
+    post_blocked: bool = False,
+    body: str | None = None,
+) -> HttpResponse:
+    """Re-render the fork-setup panel after an action (htmx outerHTML swap)."""
+    row = ForkSetupAssessment.objects.filter(pull_request=pr).first()
+    return render(
+        request,
+        "dashboard/_fork_setup_panel.html",
+        {
+            "pr": pr,
+            "fs": _fork_setup_context(
+                pr,
+                row,
+                _operator_username(),
+                note=note,
+                error=error,
+                post_blocked=post_blocked,
+                body=body,
+            ),
+        },
+    )
+
+
+def _fork_setup_tab_context() -> dict[str, object]:
+    from franktheunicorn.review.fork_setup import tab_state
+
+    try:
+        state = tab_state(_project_configs_by_name().values())
+    except Exception:
+        logger.debug("Could not build the Fork Setup tab header", exc_info=True)
+        return {}
+    return {
+        "auto_projects": state.auto_projects,
+        "in_flight": state.in_flight,
+        "last_scan": state.last_scan,
+    }
+
+
+@require_POST
+def fork_setup_scan(request: HttpRequest) -> HttpResponse:
+    """The "Find PRs that need setup" button: queue the sweep for every project."""
+    from franktheunicorn.security.queue import PRIORITY_INTERACTIVE, queue_fork_setup_scan
+
+    back = f"{reverse('dashboard:index')}?queue={FORK_SETUP_QUEUE}"
+    # Interactive: a sweep is a listing per project and a few reads per new
+    # candidate — seconds, not the hours a security sweep takes.
+    if queue_fork_setup_scan(priority=PRIORITY_INTERACTIVE, every_project=True):
+        messages.success(
+            request,
+            "Queued the fork-setup sweep: frank lists the runs awaiting approval and reads "
+            "the fork of every PR with a setup check. Reload this tab in a minute.",
+        )
+    else:
+        messages.info(request, "A fork-setup sweep is already queued or running.")
+    return redirect(back)
+
+
+@require_POST
+def fork_setup_check(request: HttpRequest, pr_id: int) -> HttpResponse:
+    """Queue (or re-queue) the diagnosis of one PR (htmx). A press is a fresh question."""
+    pr = get_object_or_404(PullRequest.objects.select_related("project"), pk=pr_id)
+    from franktheunicorn.security.queue import queue_fork_setup_diagnosis
+
+    row, created = ForkSetupAssessment.objects.get_or_create(
+        pull_request=pr, defaults={"head_sha": pr.head_sha}
+    )
+    if not created:
+        row.status = "unchecked"
+        row.disposition = "pending"
+        row.dismiss_reason = ""
+        row.dismiss_note = ""
+        row.attempts = 0
+        row.last_error = ""
+        row.save()
+    if queue_fork_setup_diagnosis(pr):
+        note = "Check queued at the front of the worker queue; reload in a minute."
+    else:
+        note = "A check for this PR is already queued or running."
+    return _fork_setup_response(request, pr, note=note)
+
+
+@require_POST
+def fork_setup_post(request: HttpRequest, pr_id: int) -> HttpResponse:
+    """Post the drafted (or edited) fork-setup comment, after a live re-read.
+
+    Still open, same head, and the setup check still there — an author who
+    fixed their fork has pushed, and "please enable Actions" on a PR that is
+    already building reads as not having looked. ``force=1`` skips the read.
+    """
+    pr = get_object_or_404(PullRequest.objects.select_related("project"), pk=pr_id)
+    row = ForkSetupAssessment.objects.filter(pull_request=pr).first()
+    username = _operator_username()
+    submitted = request.POST.get("body")
+
+    def refuse(message: str, *, post_blocked: bool = False) -> HttpResponse:
+        return _fork_setup_response(
+            request, pr, note=message, error=True, post_blocked=post_blocked, body=submitted
+        )
+
+    if row is None or not row.is_diagnosed or not row.needs_author:
+        return refuse("Nothing to post: there is no fork-setup problem for the author.")
+    if pr.is_operator_pr or (username and pr.author.lower() == username.lower()):
+        return refuse("This is your own PR; there is no author to tell.")
+    if row.disposition == "posted":
+        return refuse("Already posted for this commit.")
+    if row.head_sha != pr.head_sha:
+        return refuse("This draft is for an older commit; re-check it.")
+    body = (row.body if submitted is None else submitted).strip()
+    if not body:
+        return refuse("Nothing to post: the comment is empty.")
+
+    from franktheunicorn.backends.base import ReviewBody
+    from franktheunicorn.backends.mentions import escape_handles, normalize_allowlist
+    from franktheunicorn.review.fork_setup import post_blocker, record_posted
+
+    body = escape_handles(body, normalize_allowlist([pr.author, *_mention_allowlist()]))
+    client = _make_posting_client(pr)
+    if client is None:
+        return refuse("Cannot comment: no forge client/token configured.")
+    comment: object = None
+    try:
+        try:
+            if request.POST.get("force") != "1":
+                blocker = post_blocker(client, row)  # type: ignore[arg-type]
+                if blocker:
+                    # "Post anyway" only where it could: a build that has since
+                    # been linked leaves nothing for the comment to be about.
+                    return refuse(f"Not posted: {blocker}.", post_blocked=row.needs_author)
+            try:
+                comment = client.create_issue_comment(  # type: ignore[attr-defined]
+                    pr.project.owner, pr.project.repo, pr.number, body
+                )
+            except NotImplementedError:
+                comment = client.create_review(  # type: ignore[attr-defined]
+                    pr.project.owner,
+                    pr.project.repo,
+                    pr.number,
+                    ReviewBody(event="COMMENT", body=body),
+                )
+        finally:
+            client.close()  # type: ignore[attr-defined]
+    except Exception:
+        logger.exception("Fork-setup comment failed for PR #%d", pr.number)
+        return refuse("Comment failed (see web log).")
+    comment_id = comment.get("id") if isinstance(comment, dict) else None
+    record_posted(row, body, comment_id if isinstance(comment_id, int) else None)
+    return _fork_setup_response(request, pr, note=f"Posted on {pr.project} #{pr.number}.")
+
+
+@require_POST
+def fork_setup_approve(request: HttpRequest, pr_id: int) -> HttpResponse:
+    """Approve the upstream workflow runs waiting on this PR's head (a forge write).
+
+    Lists them live first and approves only what is still waiting for this
+    exact commit: a push since the check, or another maintainer's approval,
+    means nothing (or less) goes out.
+    """
+    pr = get_object_or_404(PullRequest.objects.select_related("project"), pk=pr_id)
+    row = get_object_or_404(ForkSetupAssessment, pull_request=pr)
+    if row.head_sha != pr.head_sha:
+        return _fork_setup_response(
+            request, pr, note="These runs are for an older commit; re-check it.", error=True
+        )
+    from franktheunicorn.review.fork_setup import approve
+
+    client = _make_posting_client(pr)
+    if client is None:
+        return _fork_setup_response(
+            request, pr, note="Cannot approve: no forge client/token configured.", error=True
+        )
+    try:
+        result = approve(client, row)  # type: ignore[arg-type]
+    except NotImplementedError:
+        return _fork_setup_response(
+            request, pr, note="This forge has no workflow-run approval.", error=True
+        )
+    except Exception:
+        logger.exception("Approving workflow runs failed for PR #%d", pr.number)
+        return _fork_setup_response(request, pr, note="Approval failed (see web log).", error=True)
+    finally:
+        client.close()  # type: ignore[attr-defined]
+    return _fork_setup_response(
+        request, pr, note=result.message(), error=bool(result.blocker or result.failed)
+    )
+
+
+@require_POST
+def fork_setup_dismiss(request: HttpRequest, pr_id: int) -> HttpResponse:
+    """ "Don't post this" (with why), or take that back."""
+    pr = get_object_or_404(PullRequest.objects.select_related("project"), pk=pr_id)
+    row = get_object_or_404(ForkSetupAssessment, pull_request=pr)
+    from franktheunicorn.review.fork_setup import record_dismissal, restore
+
+    if request.POST.get("restore") == "1":
+        restore(row)
+        return _fork_setup_response(request, pr, note="Back in the Fork Setup queue.")
+    reason = request.POST.get("reason", "").strip() or "other"
+    if reason not in {code for code, _ in ForkSetupAssessment.DISMISS_REASON_CHOICES}:
+        return _fork_setup_response(request, pr, note="Unknown reason.", error=True)
+    record_dismissal(row, reason, request.POST.get("note", "").strip())
+    return _fork_setup_response(
+        request,
+        pr,
+        note="Dismissed for this commit; it comes back if a new commit still needs setup.",
+    )
 
 
 # --- Finding actions (htmx) ---

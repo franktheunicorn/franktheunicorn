@@ -1200,3 +1200,167 @@ class TestListPullRequestsPage:
 
         with pytest.raises(NotImplementedError):
             MockForgeClient("/nonexistent").list_pull_requests_page("a", "b")
+
+
+class TestForkSetupReads:
+    """The reads (and the one write) behind the Fork Setup tab (review/fork_setup.py)."""
+
+    API = "https://api.github.test"
+
+    @pytest.fixture
+    def client(self) -> GitHubClient:
+        c = GitHubClient(token="test-token", base_url=self.API)
+        yield c
+        c.close()
+
+    def test_runs_awaiting_approval_keeps_only_fork_runs(
+        self, httpx_mock: HTTPXMock, client: GitHubClient
+    ) -> None:
+        httpx_mock.add_response(
+            url=(
+                f"{self.API}/repos/apache/spark/actions/runs"
+                "?status=action_required&per_page=100&head_sha=abc&page=1"
+            ),
+            json={
+                "workflow_runs": [
+                    {
+                        "id": 11,
+                        "name": "Labeler",
+                        "path": ".github/workflows/labeler.yml@refs/pull/1/merge",
+                        "event": "pull_request",
+                        "head_sha": "abc",
+                        "head_branch": "fix",
+                        "conclusion": "action_required",
+                        "head_repository": {"full_name": "newbie/spark"},
+                        "html_url": "https://github.com/apache/spark/actions/runs/11",
+                        "created_at": "2026-11-20T00:00:00Z",
+                    },
+                    # Upstream's own run: approval is a fork thing.
+                    {
+                        "id": 12,
+                        "conclusion": "action_required",
+                        "head_repository": {"full_name": "Apache/Spark"},
+                    },
+                    {"id": 13, "conclusion": "success", "head_repository": {"full_name": "x/y"}},
+                    "junk",
+                ]
+            },
+        )
+        runs = client.list_runs_awaiting_approval("apache", "spark", head_sha="abc")
+        assert runs == [
+            {
+                "id": 11,
+                "name": "Labeler",
+                "path": ".github/workflows/labeler.yml",
+                "event": "pull_request",
+                "head_sha": "abc",
+                "head_branch": "fix",
+                "head_repo": "newbie/spark",
+                "url": "https://github.com/apache/spark/actions/runs/11",
+                "created_at": "2026-11-20T00:00:00Z",
+            }
+        ]
+
+    def test_runs_awaiting_approval_raises_when_unlisted(
+        self, httpx_mock: HTTPXMock, client: GitHubClient
+    ) -> None:
+        httpx_mock.add_response(status_code=500)
+        with pytest.raises(httpx.HTTPStatusError):
+            client.list_runs_awaiting_approval("apache", "spark")
+
+    def test_approve_workflow_run(self, httpx_mock: HTTPXMock, client: GitHubClient) -> None:
+        httpx_mock.add_response(
+            method="POST",
+            url=f"{self.API}/repos/apache/spark/actions/runs/11/approve",
+            status_code=201,
+        )
+        client.approve_workflow_run("apache", "spark", 11)
+        httpx_mock.add_response(
+            method="POST",
+            url=f"{self.API}/repos/apache/spark/actions/runs/12/approve",
+            status_code=403,
+        )
+        with pytest.raises(httpx.HTTPStatusError):
+            client.approve_workflow_run("apache", "spark", 12)
+
+    def test_repo_workflows(self, httpx_mock: HTTPXMock, client: GitHubClient) -> None:
+        httpx_mock.add_response(
+            url=f"{self.API}/repos/newbie/spark/actions/workflows?per_page=100&page=1",
+            json={
+                "workflows": [
+                    {
+                        "path": ".github/workflows/build_main.yml",
+                        "name": "Build",
+                        "state": "disabled_fork",
+                        "html_url": "https://github.com/newbie/spark/actions/workflows/build_main.yml",
+                    },
+                    {"name": "no path"},
+                ]
+            },
+        )
+        assert client.list_repo_workflows("newbie", "spark") == [
+            {
+                "path": ".github/workflows/build_main.yml",
+                "name": "Build",
+                "state": "disabled_fork",
+                "url": "https://github.com/newbie/spark/actions/workflows/build_main.yml",
+            }
+        ]
+
+    def test_repo_workflows_refused_is_none(
+        self, httpx_mock: HTTPXMock, client: GitHubClient
+    ) -> None:
+        httpx_mock.add_response(status_code=404)
+        assert client.list_repo_workflows("newbie", "spark") is None
+
+    def test_runs_for_commit(self, httpx_mock: HTTPXMock, client: GitHubClient) -> None:
+        httpx_mock.add_response(
+            url=f"{self.API}/repos/newbie/spark/actions/runs?head_sha=abc&per_page=100",
+            json={
+                "workflow_runs": [
+                    {
+                        "id": 7,
+                        "name": "Build",
+                        "path": ".github/workflows/build_main.yml",
+                        "event": "push",
+                        "status": "completed",
+                        "conclusion": "skipped",
+                        "head_branch": "fix",
+                        "html_url": "https://github.com/newbie/spark/actions/runs/7",
+                    },
+                    {"name": "no id"},
+                ]
+            },
+        )
+        [run] = client.list_workflow_runs_for_commit("newbie", "spark", "abc")
+        assert (run["id"], run["conclusion"], run["branch"]) == (7, "skipped", "fix")
+        httpx_mock.add_response(
+            url=f"{self.API}/repos/newbie/gone/actions/runs?head_sha=abc&per_page=100",
+            status_code=404,
+        )
+        assert client.list_workflow_runs_for_commit("newbie", "gone", "abc") == []
+
+    def test_file_exists(self, httpx_mock: HTTPXMock, client: GitHubClient) -> None:
+        url = f"{self.API}/repos/newbie/spark/contents/.github/workflows/build_main.yml"
+        httpx_mock.add_response(url=f"{url}?ref=abc", json={"name": "build_main.yml"})
+        httpx_mock.add_response(url=f"{url}?ref=old", status_code=404)
+        httpx_mock.add_response(url=f"{url}?ref=err", status_code=500)
+        path = ".github/workflows/build_main.yml"
+        assert client.file_exists("newbie", "spark", path, "abc") is True
+        assert client.file_exists("newbie", "spark", path, "old") is False
+        with pytest.raises(httpx.HTTPStatusError):
+            client.file_exists("newbie", "spark", path, "err")
+
+    def test_base_defaults_are_not_implemented(self) -> None:
+        from franktheunicorn.backends.mock import MockForgeClient
+
+        forge = MockForgeClient("/nonexistent")
+        for call in (
+            lambda: forge.list_runs_awaiting_approval("a", "b"),
+            lambda: forge.approve_workflow_run("a", "b", 1),
+            lambda: forge.list_repo_workflows("a", "b"),
+            lambda: forge.list_workflow_runs_for_commit("a", "b", "s"),
+            lambda: forge.file_exists("a", "b", "p", "r"),
+        ):
+            with pytest.raises(NotImplementedError):
+                call()

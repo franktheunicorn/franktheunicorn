@@ -1,0 +1,159 @@
+{% load markdown_filters %}
+{% comment %}
+  One PR's fork-setup panel: why its CI never ran, whose move it is, the
+  drafted comment for the author, and the approval button for runs waiting
+  upstream. Rendered per row on the "Fork Setup" tab and on the PR detail
+  page. Every button swaps this whole panel (outerHTML), so the id is stable.
+  `fs` comes from views._fork_setup_context; `fs.row` is None for a PR with a
+  setup check that nobody has looked at yet.
+{% endcomment %}
+<div class="ci-failure fork-setup{% if fs.row.needs_maintainer %} fs-maintainer{% elif fs.row.needs_author %} fs-author{% endif %}" id="fork-setup-{{ pr.pk }}">
+  <div class="cif-head">
+    {% if not fs.row %}
+    <span class="cif-badge cif-unclassified">CI never ran</span>
+    <span class="muted">Not checked yet.</span>
+    {% elif not fs.row.is_diagnosed and fs.row.status == "unchecked" %}
+    <span class="cif-badge cif-unclassified" title="Found, not yet read">Not yet checked</span>
+    {% elif fs.row.status == "resolved" %}
+    <span class="cif-badge cif-resolved" title="Nothing left for anyone to do on this commit">Nothing to do</span>
+    {% else %}
+      {% if fs.row.needs_maintainer %}<span class="cif-badge fs-badge-maintainer" title="Workflow runs wait for someone with write access to approve them">Needs your approval</span>{% endif %}
+      {% if fs.row.needs_author %}<span class="cif-badge cif-setup" title="A setting on the author's fork has to change before CI can run">Author's fork setup</span>{% endif %}
+    {% endif %}
+    {% if fs.row %}
+      {% for kind in fs.row.kinds %}<span class="cif-chip">{{ kind }}</span>{% endfor %}
+      {% if fs.row.fork_full_name %}<a class="fainter" href="https://github.com/{{ fs.row.fork_full_name }}/actions" target="_blank" rel="noopener noreferrer" title="The fork's Actions tab">{{ fs.row.fork_full_name }} &nearr;</a>{% endif %}
+      {% if fs.row.head_sha %}<span class="fainter" title="The commit this describes">@ {{ fs.row.head_sha|slice:":7" }}</span>{% endif %}
+      {% if not fs.is_current %}<span class="warn-note" title="The PR's head has moved since this was written">for an older commit</span>{% endif %}
+      {% if fs.row.disposition == "posted" %}<span class="ok-note">&#10003; posted{% if fs.row.posted_at %} {{ fs.row.posted_at|timesince }} ago{% endif %}</span>
+      {% elif fs.row.disposition == "dismissed" %}<span class="neutral-chip cif-chip">dismissed{% if fs.row.dismiss_reason %}: {{ fs.row.get_dismiss_reason_display }}{% endif %}</span>
+      {% elif fs.row.posted_at %}<span class="warn-note" title="A fork-setup comment already went out on this PR, for commit {{ fs.row.posted_sha|slice:':7' }}">you told them {{ fs.row.posted_at|timesince }} ago</span>{% endif %}
+      {% if fs.row.approved_at %}<span class="ok-note" title="Runs you approved on this PR">approved runs {{ fs.row.approved_at|timesince }} ago</span>{% endif %}
+    {% endif %}
+  </div>
+
+  {% if fs.row.is_diagnosed or fs.row.status == "resolved" %}
+  <ol class="cif-findings">
+    {% for problem in fs.maintainer_problems %}
+    <li>
+      <strong>{{ problem.label }}</strong> <span class="muted">&mdash; yours</span>
+      {% if problem.url %}<a href="{{ problem.url }}" target="_blank" rel="noopener noreferrer">run &nearr;</a>{% endif %}
+      <div class="cif-summary">{{ problem.summary|render_markdown_inline }}</div>
+      {% if fs.row.awaiting_runs %}
+      <ul class="fs-runs">
+        {% for run in fs.row.awaiting_runs %}
+        <li>{% if run.url %}<a href="{{ run.url }}" target="_blank" rel="noopener noreferrer">{{ run.name|default:run.id }} &nearr;</a>{% else %}{{ run.name|default:run.id }}{% endif %}
+          <span class="fainter">{{ run.path }}</span>
+          {% if run.on_base is False %}<span class="error-note" title="This workflow file is not on the base branch: it comes from the PR's own branch">not on {{ pr.base_branch|default:"the base branch" }}</span>{% endif %}
+        </li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+      {% if fs.touched_workflows %}
+      <div class="warn-note cif-note">This PR changes workflow files: {{ fs.touched_workflows|join:", " }}. Approving runs them with this repository's runners &mdash; read them first.</div>
+      {% endif %}
+    </li>
+    {% endfor %}
+    {% for problem in fs.author_problems %}
+    <li>
+      <strong>{{ problem.label }}</strong> <span class="muted">&mdash; the author's</span>
+      {% if problem.url %}<a href="{{ problem.url }}" target="_blank" rel="noopener noreferrer">fork &nearr;</a>{% endif %}
+      <div class="cif-summary">{{ problem.summary|render_markdown_inline }}</div>
+      {% if problem.remediation %}<div class="cif-fix"><span class="muted">Fix:</span> {{ problem.remediation|render_markdown_inline }}</div>{% endif %}
+      {% if problem.evidence %}
+      <details class="cif-evidence">
+        <summary>what the check says</summary>
+        <pre>{{ problem.evidence }}</pre>
+      </details>
+      {% endif %}
+    </li>
+    {% endfor %}
+    {% for problem in fs.other_problems %}
+    <li>
+      <strong>{{ problem.label }}</strong> <span class="muted">&mdash; nobody's</span>
+      {% if problem.url %}<a href="{{ problem.url }}" target="_blank" rel="noopener noreferrer">run &nearr;</a>{% endif %}
+      <div class="cif-summary">{{ problem.summary|render_markdown_inline }}</div>
+    </li>
+    {% endfor %}
+  </ol>
+  {% if fs.row.anti_pattern_hits %}
+  <div class="warn-note cif-note">The draft matches {{ fs.row.anti_pattern_hits|length }} of your anti-pattern{{ fs.row.anti_pattern_hits|length|pluralize }}: {{ fs.row.anti_pattern_hits|join:"; "|truncatechars:200 }}</div>
+  {% endif %}
+  {% if fs.row.last_error %}<div class="muted cif-note">Note: {{ fs.row.last_error }}</div>{% endif %}
+
+  {% if fs.row.needs_author and fs.row.disposition == "pending" %}
+  <details class="cif-draft"{% if fs.draft_open %} open{% endif %}>
+    <summary class="action-btn">{% if fs.is_own %}Drafted note{% else %}Review &amp; post comment&hellip;{% endif %}</summary>
+    <form class="cif-draft-form"
+          hx-post="{% url 'dashboard:fork_setup_post' pr.pk %}"
+          hx-target="#fork-setup-{{ pr.pk }}" hx-swap="outerHTML"
+          {% if not fs.is_own %}hx-confirm="Post this comment on {{ pr.project }} #{{ pr.number }}?"{% endif %}>
+      {% csrf_token %}
+      <textarea name="body" id="fs-body-{{ pr.pk }}" rows="12" aria-label="Comment for the PR author">{{ fs.body }}</textarea>
+      {% if fs.is_own %}
+      <span class="mc-hint">Your own PR &mdash; nothing to post, but that is what your fork needs.</span>
+      {% elif not fs.is_current %}
+      <span class="mc-hint">Drafted for an older commit &mdash; re-check before posting.</span>
+      {% else %}
+      <button type="submit" class="action-btn post">Post comment</button>
+      <span class="mc-hint">Goes out as a conversation comment, after a live check that the setup problem is still there.</span>
+      {% endif %}
+    </form>
+  </details>
+  {% endif %}
+  {% elif fs.row %}
+  <div class="muted cif-note">
+    {% if fs.in_flight %}Queued for the worker &mdash; reload in a minute.
+    {% elif fs.row.gave_up %}Not checked: {{ fs.row.attempts }} attempts failed{% if fs.row.last_error %} ({{ fs.row.last_error }}){% endif %}. Re-check to try again.
+    {% elif fs.row.last_error %}{{ fs.row.last_error }}
+    {% else %}Waiting for the next sweep, or press Re-check.{% endif %}
+  </div>
+  {% endif %}
+
+  <div class="mc-actions">
+    {% if fs.row.needs_maintainer and fs.is_current %}
+    <button type="button" class="action-btn post"
+            hx-post="{% url 'dashboard:fork_setup_approve' pr.pk %}"
+            hx-target="#fork-setup-{{ pr.pk }}" hx-swap="outerHTML"
+            hx-confirm="Approve the waiting workflow runs on {{ pr.project }} #{{ pr.number }}?{% if fs.touched_workflows or fs.off_base_runs %} This PR brings its own workflow files.{% endif %}"
+            title="Lists the runs waiting on this commit live, then approves each (POST /actions/runs/{id}/approve)">Approve workflows</button>
+    {% endif %}
+    <button type="button" class="action-btn cif-classify"
+            hx-post="{% url 'dashboard:fork_setup_check' pr.pk %}"
+            hx-target="#fork-setup-{{ pr.pk }}" hx-swap="outerHTML"
+            {% if fs.in_flight %}disabled title="Already queued or running"{% else %}title="Read the PR's checks, the runs awaiting approval, and the fork's workflows and runs, and say why CI did not run"{% endif %}>{% if fs.row.is_diagnosed %}Re-check{% else %}Check fork setup{% endif %}</button>
+    <a class="action-btn" href="{{ pr.url }}" target="_blank" rel="noopener noreferrer">Open on forge &nearr;</a>
+    {% if fs.row and fs.row.disposition == "dismissed" %}
+    <button type="button" class="action-btn"
+            hx-post="{% url 'dashboard:fork_setup_dismiss' pr.pk %}" hx-vals='{"restore": "1"}'
+            hx-target="#fork-setup-{{ pr.pk }}" hx-swap="outerHTML">Restore</button>
+    {% elif fs.row and fs.row.needs_author and fs.row.disposition == "pending" %}
+    <details class="mc-dismiss">
+      <summary class="action-btn reject">Dismiss&hellip;</summary>
+      <form class="mc-dismiss-form"
+            hx-post="{% url 'dashboard:fork_setup_dismiss' pr.pk %}"
+            hx-target="#fork-setup-{{ pr.pk }}" hx-swap="outerHTML">
+        {% csrf_token %}
+        <select name="reason" aria-label="Why not post this?">
+          {% for code, label in fs.reason_choices %}
+          <option value="{{ code }}">{{ label }}</option>
+          {% endfor %}
+        </select>
+        <input type="text" name="note" maxlength="500" placeholder="why (optional; remembered)">
+        <button type="submit" class="action-btn reject">Dismiss</button>
+      </form>
+    </details>
+    {% endif %}
+  </div>
+  <div class="mc-result">
+    {% if fs.note %}<span class="{% if fs.error %}error-note{% else %}ok-note{% endif %}">{{ fs.note }}</span>{% endif %}
+    {% if fs.post_blocked %}
+    <button type="button" class="action-btn"
+            hx-post="{% url 'dashboard:fork_setup_post' pr.pk %}" hx-vals='{"force": "1"}'
+            hx-include="#fs-body-{{ pr.pk }}"
+            hx-target="#fork-setup-{{ pr.pk }}" hx-swap="outerHTML"
+            hx-confirm="Post anyway, without the live check?">Post anyway</button>
+    {% endif %}
+  </div>
+  {% if fs.row.checked_at %}<div class="mc-evaluated fainter">checked {{ fs.row.checked_at|timesince }} ago &middot; forge reads only, no model</div>{% endif %}
+</div>

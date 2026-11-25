@@ -438,6 +438,45 @@ def queue_ci_failure_classification(pr: PullRequest, *, priority: int = PRIORITY
     return False
 
 
+def queue_fork_setup_diagnosis(pr: PullRequest, *, priority: int = PRIORITY_INTERACTIVE) -> bool:
+    """Queue "why didn't this PR's CI run" (review/fork_setup.py) for one PR.
+
+    Interactive by default: the caller is the per-PR Re-check button. A row
+    already pending in the bulk lane is promoted rather than reported as queued.
+    """
+    command = "diagnose_fork_setup"
+    if queue_command(command, pull_request=pr, priority=priority):
+        return True
+    if priority > PRIORITY_BULK:
+        WorkerCommand.objects.filter(
+            command=command, pull_request=pr, status="pending", priority__lt=priority
+        ).update(priority=priority)
+    return False
+
+
+def queue_fork_setup_scan(*, priority: int = PRIORITY_BULK, every_project: bool = False) -> bool:
+    """Queue the Fork Setup sweep unless one already in flight covers it.
+
+    Targetless and bulk: a sweep is a runs listing per project and a handful of
+    fork reads per candidate. *every_project* is the tab's button — the press is
+    the consent, so it covers projects with ``fork_setup.enabled: false`` too; an
+    in-flight automatic sweep (only the enabled ones) does not cover that press.
+    """
+    command = "scan_fork_setup"
+    in_flight = WorkerCommand.objects.filter(command=command, status__in=_IN_FLIGHT_STATUSES)
+    for kwargs in in_flight.values_list("kwargs", flat=True):
+        if not every_project or (kwargs or {}).get("every_project"):
+            logger.info("%s already in flight", command)
+            return False
+    WorkerCommand.objects.create(
+        command=command,
+        priority=priority,
+        kwargs={"every_project": True} if every_project else {},
+    )
+    logger.info("Queued %s (priority %d, every project: %s)", command, priority, every_project)
+    return True
+
+
 def cancel_pending_for_reports(report_ids: list[int]) -> int:
     """Drop pending worker jobs for *report_ids* before the reports themselves go.
 

@@ -2725,6 +2725,7 @@ def _run_cycle_in(
     # readiness — a PR nobody reviewed or approved is exactly the one whose
     # author is waiting to be told why CI failed.
     _run_ci_failure_pass(project_configs)
+    _run_fork_setup_pass(project_configs)
 
     _drain_worker_commands(operator_config, min_priority=PRIORITY_INTERACTIVE)
 
@@ -3285,6 +3286,32 @@ def _run_ci_failure_pass(project_configs: Sequence[object]) -> None:
         return
     if not results:
         logger.debug("CI-failure pass: no project has ci_failure.enabled")
+
+
+def _run_fork_setup_pass(project_configs: Sequence[object]) -> None:
+    """Queue the Fork Setup sweep when any project has ``fork_setup.enabled``.
+
+    One targetless command at bulk priority; the reading (a runs listing per
+    project, a few fork reads per new candidate) happens in the worker command,
+    not on the poll's thread. Deduplicated: a sweep still in flight from the
+    last cycle is not queued again.
+    """
+    from franktheunicorn.config.models import ProjectConfig
+
+    enabled = [
+        pc
+        for pc in project_configs
+        if isinstance(pc, ProjectConfig) and pc.enabled and pc.fork_setup.enabled
+    ]
+    if not enabled:
+        logger.debug("Fork setup pass: no project has fork_setup.enabled")
+        return
+    try:
+        from franktheunicorn.security.queue import queue_fork_setup_scan
+
+        queue_fork_setup_scan()
+    except Exception:
+        logger.exception("Could not queue the fork setup sweep")
 
 
 def _run_shepherding_pass(

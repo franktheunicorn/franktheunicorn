@@ -811,6 +811,13 @@ thead th { border-bottom: 2px solid var(--border); }
 .cif-draft-form textarea { flex: 1 1 100%; width: 100%; box-sizing: border-box; font-family: inherit; font-size: 0.8rem; }
 .cif-toolbar .action-btn { font-size: 0.85rem; padding: 0.3rem 0.6rem; }
 .cif-classify:disabled { opacity: 0.6; cursor: default; }
+/* Fork Setup panel (_fork_setup_panel.html): the CI-failure panel's layout,
+   blue when it is the maintainer's move, red when it is the author's. */
+.ci-failure.fork-setup.fs-author { border-left-color: var(--red); }
+.ci-failure.fork-setup.fs-maintainer { border-left-color: var(--accent); }
+.fs-badge-maintainer { background: var(--code-bg); color: var(--accent); }
+.fs-runs { margin: 0.25rem 0 0; padding-left: 1.1rem; font-size: 0.8rem; }
+.fs-runs li { overflow-wrap: anywhere; }
 
 @media (max-width: 600px) {
     body { padding: 0.5rem; }

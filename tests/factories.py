@@ -24,6 +24,7 @@ from franktheunicorn.core.models import (
     CVEAPIToken,
     DependencyChange,
     EmailScanRecord,
+    ForkSetupAssessment,
     HardeningIdea,
     IntroducedBug,
     LLMBackendFallback,
@@ -486,6 +487,51 @@ class CIFailureAssessmentFactory(factory.django.DjangoModelFactory):  # type: ig
     categories = factory.LazyFunction(list)
     disposition = "pending"
     attempts = 0
+
+
+class ForkSetupAssessmentFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]
+    """Factory for ForkSetupAssessment: a PR whose ``Build`` check is setup guidance.
+
+    The PR is open with an ``action_required`` ``Build`` check stored for
+    ``head1``, and the row is diagnosed as "Actions not enabled on the fork",
+    with a draft — the state the Fork Setup tab lists.
+    """
+
+    class Meta:
+        model = ForkSetupAssessment
+
+    pull_request = factory.SubFactory(
+        PullRequestFactory,
+        author="newbie",
+        head_sha="head1",
+        head_branch="SPARK-1-fix",
+        ci_checks_sha="head1",
+        ci_status="fail",
+        ci_checks=factory.LazyFunction(
+            lambda: [{"name": "Build", "status": "completed", "conclusion": "action_required"}]
+        ),
+    )
+    head_sha = factory.LazyAttribute(lambda o: o.pull_request.head_sha)
+    status = "diagnosed"
+    fork_full_name = "newbie/spark"
+    problems = factory.LazyFunction(
+        lambda: [
+            {
+                "kind": "actions-not-enabled",
+                "who": "author",
+                "summary": "GitHub Actions is not enabled on your fork, `newbie/spark`.",
+                "remediation": "Open https://github.com/newbie/spark/actions and enable them.",
+                "evidence": "",
+                "url": "https://github.com/newbie/spark/actions",
+            }
+        ]
+    )
+    kinds = factory.LazyFunction(lambda: ["actions-not-enabled"])
+    needs_author = True
+    needs_maintainer = False
+    covers_ci_failure = True
+    comment_body = "Hi @newbie, please enable GitHub Actions on your fork."
+    disposition = "pending"
 
 
 class ZombieScanStateFactory(factory.django.DjangoModelFactory):  # type: ignore[misc]

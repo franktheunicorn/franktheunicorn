@@ -323,6 +323,54 @@ class ForgeClient(ABC):
             f"{type(self).__name__} does not support get_commit_check_failures()"
         )
 
+    # -- Fork setup (review/fork_setup.py) ---------------------------------
+    # Reads that say why a PR's CI never ran: the upstream runs waiting for a
+    # maintainer's approval, and the fork's own workflows and runs. All default
+    # to NotImplementedError; the Fork Setup tab then quotes the check's own
+    # guidance instead of reading the fork.
+
+    def list_runs_awaiting_approval(
+        self, owner: str, repo: str, head_sha: str = ""
+    ) -> list[dict[str, Any]]:
+        """Workflow runs on ``owner/repo`` from a fork, waiting for a maintainer.
+
+        Each is ``{"id", "name", "path", "event", "head_sha", "head_branch",
+        "head_repo", "url", "created_at"}``. ``head_sha`` narrows it to one
+        commit. Raises when the runs cannot be listed.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support list_runs_awaiting_approval()"
+        )
+
+    def approve_workflow_run(self, owner: str, repo: str, run_id: int) -> None:
+        """Approve one fork PR's workflow run (a forge write; a button press)."""
+        raise NotImplementedError(f"{type(self).__name__} does not support approve_workflow_run()")
+
+    def list_repo_workflows(self, owner: str, repo: str) -> list[dict[str, Any]] | None:
+        """``owner/repo``'s workflows as ``{"path", "name", "state", "url"}``.
+
+        ``state`` is the forge's (``active``, ``disabled_fork``,
+        ``disabled_manually``, ``disabled_inactivity``). ``None`` when the forge
+        refuses to say (403/404) — on a fork that usually means Actions are off.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support list_repo_workflows()")
+
+    def list_workflow_runs_for_commit(
+        self, owner: str, repo: str, sha: str
+    ) -> list[dict[str, Any]]:
+        """Workflow runs on ``owner/repo`` for commit ``sha``, newest first.
+
+        Each is ``{"id", "name", "path", "event", "status", "conclusion",
+        "branch", "url"}``. ``[]`` when the forge refuses to list them.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support list_workflow_runs_for_commit()"
+        )
+
+    def file_exists(self, owner: str, repo: str, path: str, ref: str) -> bool:
+        """Whether ``path`` exists in ``owner/repo`` at ``ref``. Raises if it can't tell."""
+        raise NotImplementedError(f"{type(self).__name__} does not support file_exists()")
+
     def create_issue_comment(
         self, owner: str, repo: str, issue_number: int, body: str
     ) -> dict[str, Any]:

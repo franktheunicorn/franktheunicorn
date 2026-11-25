@@ -917,6 +917,125 @@ class GitHubClient(ForgeClient):
             return ""
         return resp.text
 
+    # -- Fork setup -----------------------------------------------------------
+
+    def list_runs_awaiting_approval(
+        self, owner: str, repo: str, head_sha: str = ""
+    ) -> list[dict[str, Any]]:
+        """Fork PR runs on ``owner/repo`` that wait for a maintainer to approve them.
+
+        GitHub holds a ``pull_request`` run from a first-time contributor's fork
+        until someone with write access approves it; such a run reads
+        ``conclusion: action_required``, and the ``status`` filter matches
+        conclusions too. Only runs whose head repository is not ``owner/repo``
+        are kept: approval is a fork thing. Up to three pages.
+        """
+        params: dict[str, Any] = {"status": "action_required", "per_page": 100}
+        if head_sha:
+            params["head_sha"] = head_sha
+        upstream = f"{owner}/{repo}".lower()
+        found: list[dict[str, Any]] = []
+        for page in range(1, 4):
+            response = self._get(
+                f"/repos/{owner}/{repo}/actions/runs", params={**params, "page": page}
+            )
+            response.raise_for_status()
+            payload = response.json()
+            runs = payload.get("workflow_runs", []) if isinstance(payload, dict) else []
+            for run in runs:
+                if not isinstance(run, dict) or not isinstance(run.get("id"), int):
+                    continue
+                if run.get("conclusion") != "action_required":
+                    continue
+                head_repo = run.get("head_repository")
+                head_name = head_repo.get("full_name") if isinstance(head_repo, dict) else ""
+                if not isinstance(head_name, str) or head_name.lower() == upstream:
+                    continue
+                found.append(
+                    {
+                        "id": run["id"],
+                        "name": str(run.get("name") or ""),
+                        "path": str(run.get("path") or "").split("@", 1)[0],
+                        "event": str(run.get("event") or ""),
+                        "head_sha": str(run.get("head_sha") or ""),
+                        "head_branch": str(run.get("head_branch") or ""),
+                        "head_repo": head_name,
+                        "url": str(run.get("html_url") or ""),
+                        "created_at": str(run.get("created_at") or ""),
+                    }
+                )
+            if len(runs) < 100:
+                break
+        return found
+
+    def approve_workflow_run(self, owner: str, repo: str, run_id: int) -> None:
+        """``POST /repos/{owner}/{repo}/actions/runs/{run_id}/approve`` (201 on success)."""
+        response = self._client.post(f"/repos/{owner}/{repo}/actions/runs/{run_id}/approve")
+        response.raise_for_status()
+
+    def list_repo_workflows(self, owner: str, repo: str) -> list[dict[str, Any]] | None:
+        """The repository's workflows and their state; ``None`` on 403/404."""
+        workflows: list[dict[str, Any]] = []
+        for page in range(1, 4):
+            response = self._get(
+                f"/repos/{owner}/{repo}/actions/workflows",
+                params={"per_page": 100, "page": page},
+            )
+            if response.status_code in (403, 404) and not _is_rate_limit_response(response):
+                return None
+            response.raise_for_status()
+            payload = response.json()
+            items = payload.get("workflows", []) if isinstance(payload, dict) else []
+            for item in items:
+                if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+                    continue
+                workflows.append(
+                    {
+                        "path": item["path"],
+                        "name": str(item.get("name") or ""),
+                        "state": str(item.get("state") or ""),
+                        "url": str(item.get("html_url") or ""),
+                    }
+                )
+            if len(items) < 100:
+                break
+        return workflows
+
+    def list_workflow_runs_for_commit(
+        self, owner: str, repo: str, sha: str
+    ) -> list[dict[str, Any]]:
+        """Runs for ``sha`` (one page of 100, newest first); ``[]`` on 403/404."""
+        response = self._get(
+            f"/repos/{owner}/{repo}/actions/runs", params={"head_sha": sha, "per_page": 100}
+        )
+        if response.status_code in (403, 404) and not _is_rate_limit_response(response):
+            return []
+        response.raise_for_status()
+        payload = response.json()
+        runs = payload.get("workflow_runs", []) if isinstance(payload, dict) else []
+        return [
+            {
+                "id": run["id"],
+                "name": str(run.get("name") or ""),
+                "path": str(run.get("path") or "").split("@", 1)[0],
+                "event": str(run.get("event") or ""),
+                "status": str(run.get("status") or ""),
+                "conclusion": str(run.get("conclusion") or ""),
+                "branch": str(run.get("head_branch") or ""),
+                "url": str(run.get("html_url") or ""),
+            }
+            for run in runs
+            if isinstance(run, dict) and isinstance(run.get("id"), int)
+        ]
+
+    def file_exists(self, owner: str, repo: str, path: str, ref: str) -> bool:
+        """A contents read: 200 is yes, 404 is no, anything else raises."""
+        response = self._get(f"/repos/{owner}/{repo}/contents/{path}", params={"ref": ref})
+        if response.status_code == 404:
+            return False
+        response.raise_for_status()
+        return True
+
     def create_issue_comment(
         self, owner: str, repo: str, issue_number: int, body: str
     ) -> dict[str, Any]:
