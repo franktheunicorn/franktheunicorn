@@ -274,10 +274,14 @@ def run_worker(argv: Sequence[str] | None = None) -> None:
     _check_agent_cli_reviewers(operator_config)
     _check_ssh_configs(operator_config)
     # Who the committers are, once per boot: write access to each project's
-    # committer_repos (worker/committers.py). A failure keeps the stored list.
-    from franktheunicorn.worker.committers import sync_committers_at_boot
+    # committer_repos (worker/committers.py), on the forge's committers_token
+    # when one is set. A failure keeps the stored list.
+    from franktheunicorn.worker.committers import committer_clients, sync_committers_at_boot
 
-    sync_committers_at_boot(clients, project_configs)
+    sync_committers_at_boot(
+        clients if settings.FRANK_MOCK_MODE else committer_clients(operator_config, clients),
+        project_configs,
+    )
 
     signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
     # Hangup too, so closing the terminal runs the same shutdown, including

@@ -30,7 +30,7 @@ import httpx
 from django.utils import timezone
 
 from franktheunicorn.backends.base import ForgeClient
-from franktheunicorn.config.models import ProjectConfig
+from franktheunicorn.config.models import OperatorConfig, ProjectConfig
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +129,51 @@ def sync_project_committers(client: ForgeClient, project_config: ProjectConfig) 
     result.stored = True
     logger.info("%s: %d committer(s) from %s", name, len(result.logins), ", ".join(result.read))
     return result
+
+
+def committer_clients(
+    operator_config: OperatorConfig, clients: Mapping[str, ForgeClient]
+) -> dict[str, ForgeClient]:
+    """The clients to read committers with: the polling ones, except where a
+    forge entry sets ``committers_token`` — then a client on that token.
+
+    Team membership needs an org member's token and the collaborator list a
+    write-access one; the polling token is often an app/bot token that is
+    neither. A GitHub client built here gets no shared rate limiter: that
+    tracks the *polling* token's quota from response headers, and this token's
+    headers would overwrite it (the watcher's notification clients, same).
+    """
+    from franktheunicorn.backends import make_client
+    from franktheunicorn.config.resolver import get_forge_entry
+
+    out = dict(clients)
+    for name in clients:
+        try:
+            entry = get_forge_entry(operator_config, name)
+        except KeyError:
+            continue
+        if not entry.committers_token or entry.committers_token == entry.token:
+            continue
+        try:
+            if entry.type == "github":
+                from franktheunicorn.backends.github import GitHubClient
+                from franktheunicorn.data_access.base import GITHUB_API_BASE
+
+                out[name] = GitHubClient(
+                    token=entry.committers_token, base_url=entry.base_url or GITHUB_API_BASE
+                )
+            else:
+                out[name] = make_client(entry.model_copy(update={"token": entry.committers_token}))
+        except (NotImplementedError, ValueError) as exc:
+            logger.warning(
+                "forge %r: could not build a client on committers_token (%s); "
+                "reading committers with the polling token",
+                name,
+                exc,
+            )
+            continue
+        logger.info("forge %r: reading committers with committers_token", name)
+    return out
 
 
 def sync_committers_at_boot(

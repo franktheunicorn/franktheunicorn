@@ -180,3 +180,74 @@ def test_forges_without_the_calls_say_so() -> None:
         client.list_repo_collaborators("a", "b")
     with pytest.raises(NotImplementedError):
         client.list_team_members("a", "b")
+
+
+class TestCommitterClients:
+    def _oc(self, **kwargs: Any) -> Any:
+        from franktheunicorn.config.models import OperatorConfig
+
+        return OperatorConfig(github_token="poll", github_username="holdenk", **kwargs)
+
+    def test_no_committers_token_keeps_the_polling_client(self) -> None:
+        from franktheunicorn.worker.committers import committer_clients
+
+        polling = object()
+        out = committer_clients(self._oc(), {"github": polling})  # type: ignore[dict-item]
+        assert out["github"] is polling
+
+    def test_committers_token_gets_its_own_unlimited_client(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from franktheunicorn.backends.github import GitHubClient
+        from franktheunicorn.worker.committers import committer_clients
+
+        polling = object()
+        with caplog.at_level(logging.INFO):
+            out = committer_clients(
+                self._oc(github_committers_token="live"),
+                {"github": polling, "elsewhere": polling},  # type: ignore[dict-item]
+            )
+        client = out["github"]
+        assert isinstance(client, GitHubClient)
+        assert client is not polling
+        assert out["elsewhere"] is polling  # no forge entry by that name
+        assert "reading committers with committers_token" in caplog.text
+
+    def test_same_token_is_not_rebuilt(self) -> None:
+        from franktheunicorn.worker.committers import committer_clients
+
+        polling = object()
+        out = committer_clients(
+            self._oc(github_committers_token="poll"),
+            {"github": polling},  # type: ignore[dict-item]
+        )
+        assert out["github"] is polling
+
+    def test_non_github_forge_goes_through_make_client(
+        self, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from franktheunicorn.config.models import ForgeRegistryEntry, OperatorConfig
+        from franktheunicorn.worker.committers import committer_clients
+
+        def entry(name: str) -> ForgeRegistryEntry:
+            return ForgeRegistryEntry(
+                name=name,
+                type="gitlab",
+                base_url="https://gl.test",
+                token="p",
+                committers_token="c",
+            )
+
+        oc = OperatorConfig(forges=[entry("gl"), entry("bad")])
+        polling = object()
+        out = committer_clients(oc, {"gl": polling})  # type: ignore[dict-item]
+        assert out["gl"] is not polling
+
+        def refuse(*a: object, **k: object) -> None:
+            raise NotImplementedError("nope")
+
+        monkeypatch.setattr("franktheunicorn.backends.make_client", refuse)
+        with caplog.at_level(logging.WARNING):
+            out = committer_clients(oc, {"bad": polling})  # type: ignore[dict-item]
+        assert out["bad"] is polling
+        assert "could not build a client on committers_token" in caplog.text

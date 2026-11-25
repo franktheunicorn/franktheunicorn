@@ -24,6 +24,14 @@ github_token: "${FRANK_GITHUB_TOKEN}"
 # directly instead.
 # github_post_token: "${GITHUB_OAUTH_KEY}"
 
+# Optional separate token for the boot-time committer read (a project's
+# committer_teams / committer_repos). A team's members are visible only to an
+# org member's token (classic: read:org), and a repo's collaborator list only to
+# a write-access one — a polling app/bot token is usually neither, so point this
+# at your own. Leave unset to use github_token. Carried into the default github
+# forge entry's committers_token; a `forges:` entry can set it directly.
+# github_committers_token: "${GITHUB_OAUTH_KEY}"
+
 # Directory for persistent state (SQLite database, repos, etc.).
 # Leave empty to use the default (./data).
 # data_dir: ""

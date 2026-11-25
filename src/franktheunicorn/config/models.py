@@ -2606,6 +2606,12 @@ class ForgeRegistryEntry(BaseModel):
     #: — e.g. a high-rate-limit app token for polling and a personal OAuth
     #: token for comments so they post under the operator's identity.
     post_token: str = ""
+    #: Optional separate credential for the boot-time committer read
+    #: (``committer_teams`` / ``committer_repos``, worker/committers.py). Team
+    #: membership is visible only to an org member's token and the collaborator
+    #: list only to a write-access one, which a polling app/bot token usually
+    #: isn't — so point this at the operator's own token. Empty uses ``token``.
+    committers_token: str = ""
     username: str = ""
 
     @property
@@ -3004,6 +3010,10 @@ class OperatorConfig(BaseModel):
     #: so a single-GitHub operator can split polling from posting without
     #: writing a full ``forges:`` block. Use ``${ENV_VAR}`` for the value.
     github_post_token: str = ""
+    #: Optional separate credential for reading committer teams/repos at boot.
+    #: Empty falls back to ``github_token``. Carried into the synthesized
+    #: default ``github`` forge entry's ``committers_token``.
+    github_committers_token: str = ""
     email: EmailConfig = Field(default_factory=EmailConfig)
 
     # Multi-forge registry. Each entry is a named forge instance (a GitHub
@@ -3166,6 +3176,7 @@ class OperatorConfig(BaseModel):
                     base_url=_DEFAULT_FORGE_BASE_URLS["github"],
                     token=self.github_token,
                     post_token=self.github_post_token,
+                    committers_token=self.github_committers_token,
                     username=self.github_username,
                 )
             ]
