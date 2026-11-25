@@ -22,8 +22,8 @@
     {% if check.url %}<a class="mc-check" href="{{ check.url }}" target="_blank" rel="noopener noreferrer" title="{{ check.confidence }}% likely a flake">{{ check.name }}{% if cand.ci_status == "flaky" %} ({{ check.confidence }}% flake){% endif %}</a>
     {% else %}<span class="mc-check" title="{{ check.confidence }}% likely a flake">{{ check.name }}{% if cand.ci_status == "flaky" %} ({{ check.confidence }}% flake){% endif %}</span>{% endif %}
     {% endfor %}
-    {% if cand.approvers %}<span class="mc-approvals" title="Current approvals">&#10003; {{ cand.approvers|join:", " }}</span>{% endif %}
-    {% if cand.stale_approvers %}<span class="mc-approvals muted" title="Approved before the latest push">&#10003; {{ cand.stale_approvers|join:", " }} (pre-push)</span>{% endif %}
+    {% if cand.approver_tags %}<span class="mc-approvals" title="Current approvals (bold: org member; *: committer)">&#10003; {% for r in cand.approver_tags %}{{ r|reviewer }}{% if not forloop.last %}, {% endif %}{% endfor %}</span>{% endif %}
+    {% if cand.stale_approver_tags %}<span class="mc-approvals muted" title="Approved before the latest push (bold: org member; *: committer)">&#10003; {% for r in cand.stale_approver_tags %}{{ r|reviewer }}{% if not forloop.last %}, {% endif %}{% endfor %} (pre-push)</span>{% endif %}
     {% if cand.changes_requested_by %}<span class="mc-changes" title="Changes requested">&#10007; {{ cand.changes_requested_by|join:", " }}</span>{% endif %}
   </div>
   {% if cand.reasons %}

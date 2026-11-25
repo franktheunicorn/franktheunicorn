@@ -73,6 +73,7 @@ from franktheunicorn.scoring.merge_readiness import (
     refresh_merge_readiness,
     refresh_review_and_ci_state,
 )
+from franktheunicorn.scoring.reviewer_standing import Reviewer, merge_intent_reviewer, reviewers
 from franktheunicorn.security import agent_source
 from franktheunicorn.security.queue import SECURITY_EVAL_COMMANDS, in_flight_statuses
 
@@ -355,6 +356,12 @@ def index(request: HttpRequest) -> HttpResponse:
             pr.zombie = zombies.get(pr.pk)  # type: ignore[attr-defined]
             pr.run_in_flight = pr.pk in run_in_flight_pr_ids  # type: ignore[attr-defined]
             pr.security_findings_count = security_counts.get(pr.pk, 0)  # type: ignore[attr-defined]
+        if any(pr.merge_intent for pr in pr_list):
+            list_configs = _project_configs_by_name()
+            for pr in pr_list:
+                pr.merge_intent_reviewer = _merge_intent_reviewer(  # type: ignore[attr-defined]
+                    pr, list_configs.get(pr.project.full_name.lower())
+                )
 
     # The almost-ready tab carries its own per-PR panel (verdict, reasons,
     # buttons) and a header of what the queue has learned from past verdicts.
@@ -844,6 +851,7 @@ def pr_detail(request: HttpRequest, pr_id: int) -> HttpResponse:
             "pr": pr,
             "ci_failure_panel": ci_failure_panel,
             "candidate": candidate,
+            "merge_intent_reviewer": _merge_intent_reviewer(pr, project_config),
             "drafts": drafts,
             "suppressed_drafts": suppressed_drafts,
             "agent_vibes": agent_vibes,
@@ -1743,6 +1751,7 @@ def merge_queue_view(request: HttpRequest) -> HttpResponse:
                         "no_conflicts": eligibility.no_conflicts,
                         "details": eligibility.details,
                         "merge_command": merge_command,
+                        "merge_intent_reviewer": _merge_intent_reviewer(pr, pc),
                     }
                 )
         except Exception:
@@ -1833,6 +1842,22 @@ def _project_configs_by_name() -> dict[str, ProjectConfig]:
     return {f"{c.owner}/{c.repo}".lower(): c for c in configs}
 
 
+def _committers_of(project_config: object) -> list[str]:
+    """``project_config.committers``, or nothing for a missing/stand-in config."""
+    raw = getattr(project_config, "committers", None)
+    return [str(c) for c in raw] if isinstance(raw, list) else []
+
+
+def _merge_intent_reviewer(pr: PullRequest, project_config: object) -> Reviewer | None:
+    """Who set ``pr``'s merge intent, with their standing on the project."""
+    return merge_intent_reviewer(
+        pr.merge_intent_by,
+        pr.merge_intent_by_association,
+        pr.review_states,
+        _committers_of(project_config),
+    )
+
+
 def _project_config_or_default(pr: PullRequest) -> ProjectConfig:
     """The PR's project config, or a default one so the buttons still render.
 
@@ -1921,6 +1946,7 @@ def _merge_candidate_context(
         return [str(x) for x in raw] if isinstance(raw, list) else []
 
     ci_reasons_raw = ci.get("reasons")
+    committers = _committers_of(project_config)
     return {
         "verdict": pr.merge_readiness_verdict,
         "score": pr.merge_readiness_score,
@@ -1931,6 +1957,12 @@ def _merge_candidate_context(
         "failing_checks": failing_checks,
         "approvers": approvers,
         "stale_approvers": _str_list("stale_approvers"),
+        # The same logins with their standing (org member / committer), for
+        # the bold-and-star rendering; see scoring/reviewer_standing.py.
+        "approver_tags": reviewers(approvers, pr.review_states, committers),
+        "stale_approver_tags": reviewers(
+            _str_list("stale_approvers"), pr.review_states, committers
+        ),
         "changes_requested_by": _str_list("changes_requested_by"),
         "operator_approved": operator_approved,
         "is_own": is_own,

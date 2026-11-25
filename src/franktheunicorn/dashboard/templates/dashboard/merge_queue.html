@@ -1,4 +1,5 @@
 {% extends "dashboard/base.html" %}
+{% load score_filters %}
 {% block title %}Merge Queue — franktheunicorn{% endblock %}
 {% block content %}
 <h1>Merge Queue</h1>
@@ -29,6 +30,7 @@
       <td>
         {% if item.pr.merge_intent %}
         <span class="badge-intent {{ item.pr.merge_intent }}" title="{% if item.pr.merge_intent_excerpt %}&ldquo;{{ item.pr.merge_intent_excerpt }}&rdquo;{% endif %}">{% if item.pr.merge_intent == 'conditional' %}Approved pending CI{% else %}Approved{% endif %}</span>
+        {% if item.merge_intent_reviewer %}<br><small>by {{ item.merge_intent_reviewer|reviewer }}</small>{% endif %}
         {% if item.pr.merge_intent_at %}<br><small>{{ item.pr.merge_intent_at|timesince }} ago</small>{% endif %}
         {% if item.pr.moved_since_approval %}<br><small class="badge-conflict">Pushed since</small>{% endif %}
         {% elif item.pr.is_operator_pr %}

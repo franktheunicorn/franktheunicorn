@@ -3425,6 +3425,11 @@ class ProjectConfig(BaseModel):
     watch_keywords: list[str] = Field(default_factory=list)
     collaborator_scores: dict[str, float | None] = Field(default_factory=dict)
     ai_agents: list[str] = Field(default_factory=list)
+    #: Forge logins of the project's committers (case-insensitive). Read by
+    #: triage, merge readiness, the CI-failure pass and the approved-critical
+    #: flag, and by the dashboard, which shows a committer's approval as bold
+    #: with a trailing ``*`` (an org member's is bold alone, from the forge's
+    #: ``author_association``; see scoring/reviewer_standing.py).
     committers: list[str] = Field(default_factory=list)
     cve_files: list[str] = Field(default_factory=list)
     #: The PMC this project maps to at the ASF CVE process service

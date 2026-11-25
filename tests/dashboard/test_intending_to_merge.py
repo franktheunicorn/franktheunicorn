@@ -110,6 +110,7 @@ class TestDetailPage:
             queue="intending-to-merge",
             merge_intent="conditional",
             merge_intent_by="holdenk",
+            merge_intent_by_association="MEMBER",
             merge_intent_at=datetime(2026, 10, 1, tzinfo=UTC),
             merge_intent_source="comment",
             merge_intent_excerpt="Looks good pending CI.",
@@ -121,7 +122,8 @@ class TestDetailPage:
         html = client.get(f"/pr/{pr.pk}/").content.decode()
 
         assert "Approved pending CI" in html
-        assert "<strong>holdenk</strong>" in html
+        # An org member: bold (a committer would also get a trailing *).
+        assert "holdenk</strong>" in html
         assert "Looks good pending CI." in html
         assert 'class="badge-ci fail"' in html
         assert "Pushed since approval" in html

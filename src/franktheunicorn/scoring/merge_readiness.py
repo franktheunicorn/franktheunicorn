@@ -809,6 +809,7 @@ def normalize_reviews(
             "state": state,
             "commit_id": str(review.get("commit_id") or ""),
             "submitted_at": str(review.get("submitted_at") or ""),
+            "author_association": str(review.get("author_association") or "").upper()[:32],
         }
     return states
 
