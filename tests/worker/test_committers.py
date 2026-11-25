@@ -11,6 +11,7 @@ import pytest
 from franktheunicorn.config.models import ProjectConfig
 from franktheunicorn.core.models import Project
 from franktheunicorn.worker.committers import sync_committers_at_boot, sync_project_committers
+from tests.factories import ProjectFactory
 
 
 def _status_error(code: int) -> httpx.HTTPStatusError:
@@ -73,7 +74,7 @@ class TestSyncProjectCommitters:
         assert Project.objects.get(repo="spark").committers_cache == ["holdenk"]
 
     def test_nothing_readable_keeps_the_stored_list(self, caplog: pytest.LogCaptureFixture) -> None:
-        Project.objects.create(owner="apache", repo="spark", committers_cache=["holdenk"])
+        ProjectFactory(owner="apache", repo="spark", committers_cache=["holdenk"])
         client = _Client({"apache/spark": _status_error(403)})
         with caplog.at_level(logging.WARNING):
             result = sync_project_committers(client, _pc(committer_repos=["apache/spark"]))  # type: ignore[arg-type]
