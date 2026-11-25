@@ -1516,7 +1516,12 @@ class TestMergeReadinessInPoller:
 
         pr = PullRequest.objects.get(number=99)
         assert pr.review_states == {
-            "bob": {"state": "APPROVED", "commit_id": _HEAD_SHA, "submitted_at": ""}
+            "bob": {
+                "state": "APPROVED",
+                "commit_id": _HEAD_SHA,
+                "submitted_at": "",
+                "author_association": "",
+            }
         }
         assert pr.approval_count == 1
         assert pr.ci_status == "fail"
